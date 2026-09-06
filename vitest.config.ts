@@ -29,6 +29,9 @@ export default defineConfig({
       "@hoox/domain": fileURLToPath(
         new URL("./runtime-ts/packages/domain/src/index.ts", import.meta.url),
       ),
+      "@hoox/protocol/pi-model-catalog": fileURLToPath(
+        new URL("./runtime-ts/packages/protocol/src/pi-model-catalog.ts", import.meta.url),
+      ),
       "@hoox/protocol": fileURLToPath(
         new URL("./runtime-ts/packages/protocol/src/index.ts", import.meta.url),
       ),

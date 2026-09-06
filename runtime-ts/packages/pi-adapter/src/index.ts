@@ -3,7 +3,7 @@ export * from "./collapse-process-for-final-answer-tool.js";
 export * from "./deepseek-v4-model.js";
 export * from "./deepseek-v4-tokenizer.js";
 export * from "./deliver-file-tool.js";
-export * from "./empty-resource-loader.js";
+export * from "./openai-compatible-provider.js";
 export * from "./events.js";
 export {
   assertPiSessionCapabilityManifest,

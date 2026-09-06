@@ -1,12 +1,14 @@
 # ADR-0004：全 TypeScript、Pi 与 CubeSandbox 技术边界
 
-- 状态：已接受
+- 状态：部分已替代（Pi 内核装配）
 - 日期：2026-07-26
 
 > ADR-0040 细化 Windows 下的逻辑 cwd 与 Worker 边界；本记录保持当时的技术选型结论。
 - 决策者：项目架构审阅
 - 关联任务：M0-04、M0-05、M1-05、M5
-- 替代关系：无
+- 替代关系：Pi 内核装配由 [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) 部分替代；剩余边界见下方说明。
+
+> 部分替代关系：[20260906001531：Pi 内核收敛与共享模型目录](20260906001531-pi-kernel-and-shared-model-catalog.md)。全 TypeScript、Runtime 业务事实与工具授权所有权、受控 Sandbox 及可替换内核边界继续有效；AgentSession、Session Entry 关联和 EmptyResourceLoader 装配由新决策替代。平台、Sandbox 等主题仍按各自后续 ADR 的细化执行。
 
 ## 背景
 

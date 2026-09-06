@@ -26,7 +26,7 @@ import {
   fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createModels } from "@earendil-works/pi-ai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPgDurableObservationSession } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
@@ -659,301 +659,299 @@ describe("PostgreSQL stable blob 生命周期", () => {
     }
   });
 
-  it.runIf(process.platform === "linux")(
-    "durable dispatch 经真实 PG RunWorker、Faux Pi 与 S3 Observation 完成生产消费闭环",
-    async () => {
-      const label = `worker_vertical_${unique}`;
-      const actorUserId = userId(`blob_user_a_${unique}`);
-      const executionScope = {
-        tenantId: tenantId(scopeA.tenantId),
-        threadId: threadId(`thread_${label}`),
-        runId: runId(`run_${label}`),
-        rootRunId: runId(`run_${label}`),
-        workspaceId: `workspace_${label}` as never,
-      } satisfies ExecutionScope;
-      const initialProjection = Object.freeze({
-        schemaVersion: 2 as const,
-        checkpointId: "initial",
-        items: Object.freeze([]),
-      });
-      const inputText = "执行一次受控命令并交付生成文件后完成";
-      await withTenantTransaction(
-        runtimePool,
-        { tenantId: scopeA.tenantId, userId: actorUserId },
-        async (client) => {
-          await client.query(
-            `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+  it("durable dispatch 经真实 PG RunWorker、Faux Pi 与 S3 Observation 完成生产消费闭环", async () => {
+    const label = `worker_vertical_${unique}`;
+    const actorUserId = userId(`blob_user_a_${unique}`);
+    const executionScope = {
+      tenantId: tenantId(scopeA.tenantId),
+      threadId: threadId(`thread_${label}`),
+      runId: runId(`run_${label}`),
+      rootRunId: runId(`run_${label}`),
+      workspaceId: `workspace_${label}` as never,
+    } satisfies ExecutionScope;
+    const initialProjection = Object.freeze({
+      schemaVersion: 2 as const,
+      checkpointId: "initial",
+      items: Object.freeze([]),
+    });
+    const inputText = "执行一次受控命令并交付生成文件后完成";
+    await withTenantTransaction(
+      runtimePool,
+      { tenantId: scopeA.tenantId, userId: actorUserId },
+      async (client) => {
+        await client.query(
+          `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
              VALUES ($1,$2,$3,'Worker 纵向测试','active',clock_timestamp(),clock_timestamp())`,
-            [scopeA.tenantId, executionScope.threadId, actorUserId],
-          );
-          await client.query(
-            `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
+          [scopeA.tenantId, executionScope.threadId, actorUserId],
+        );
+        await client.query(
+          `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
              VALUES ($1,$2,$3,'queued',clock_timestamp(),clock_timestamp())`,
-            [scopeA.tenantId, executionScope.runId, executionScope.threadId],
-          );
-          await client.query(
-            `INSERT INTO workspaces(tenant_id,id,thread_id,created_at,updated_at)
+          [scopeA.tenantId, executionScope.runId, executionScope.threadId],
+        );
+        await client.query(
+          `INSERT INTO workspaces(tenant_id,id,thread_id,created_at,updated_at)
              VALUES ($1,$2,$3,clock_timestamp(),clock_timestamp())`,
-            [scopeA.tenantId, executionScope.workspaceId, executionScope.threadId],
-          );
-          await client.query(
-            `INSERT INTO run_execution_inputs(
+          [scopeA.tenantId, executionScope.workspaceId, executionScope.threadId],
+        );
+        await client.query(
+          `INSERT INTO run_execution_inputs(
                tenant_id,run_id,thread_id,workspace_id,root_run_id,input_text,
                initial_projection,initial_projection_digest)
              VALUES ($1,$2,$3,$4,$2,$5,$6::jsonb,$7)`,
-            [
-              scopeA.tenantId,
-              executionScope.runId,
-              executionScope.threadId,
-              executionScope.workspaceId,
-              inputText,
-              JSON.stringify(initialProjection),
-              rolloutProjectionDigest(initialProjection),
-            ],
-          );
-          await client.query(
-            `INSERT INTO run_dispatch_outbox(
+          [
+            scopeA.tenantId,
+            executionScope.runId,
+            executionScope.threadId,
+            executionScope.workspaceId,
+            inputText,
+            JSON.stringify(initialProjection),
+            rolloutProjectionDigest(initialProjection),
+          ],
+        );
+        await client.query(
+          `INSERT INTO run_dispatch_outbox(
                tenant_id,outbox_id,run_id,thread_id,workspace_id,root_run_id,input_digest,state)
              VALUES ($1,$2,$3,$4,$5,$3,$6,'ready')`,
-            [
-              scopeA.tenantId,
-              randomUUID(),
-              executionScope.runId,
-              executionScope.threadId,
-              executionScope.workspaceId,
-              createHash("sha256").update(inputText, "utf8").digest("hex"),
-            ],
-          );
-        },
-      );
+          [
+            scopeA.tenantId,
+            randomUUID(),
+            executionScope.runId,
+            executionScope.threadId,
+            executionScope.workspaceId,
+            createHash("sha256").update(inputText, "utf8").digest("hex"),
+          ],
+        );
+      },
+    );
 
-      const gateway = new FakeSandboxGateway();
-      let sandboxSequence = 0;
-      const upstream: SandboxSessionRegistryPort = {
-        acquire: async ({ signal }) => {
-          const sandbox = await gateway.create(
-            { templateId: "worker-vertical-template", ttlSeconds: 120 },
-            { signal },
-          );
-          await sandbox.writeFile("/workspace/vertical.txt", "vertical-deliver-file");
-          sandboxSequence += 1;
-          return {
-            outcome: "ready",
-            session: {
-              registryId: `registry-${label}-${sandboxSequence}`,
-              providerKey: "cube",
-              providerSandboxId: sandbox.id,
-              mode: "created",
-              sandbox,
-            },
-          };
-        },
-        settle: async ({ session, disposition }) => {
-          if (disposition === "pause") await session.sandbox.pause();
-          else await session.sandbox.kill({ ignoreNotFound: true });
-          return { outcome: "settled" };
-        },
-      };
-      const faux = fauxProvider({
-        api: `worker-vertical-${unique}`,
-        provider: `worker-vertical-${unique}`,
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        fauxAssistantMessage(
-          fauxToolCall("exec_command", { cmd: "printf vertical" }, { id: `call_exec_${label}` }),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage(
-          fauxToolCall(
-            "deliver_file",
-            { path: "/workspace/vertical.txt" },
-            { id: `call_deliver_${label}` },
-          ),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage("完成"),
-      ]);
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      modelRuntime.registerNativeProvider(faux.provider);
-      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const blobRepository = new PgBlobLifecycleRepository(runtimePool, {
-        objectPrefix: prefix,
-      });
-      const blobStore = createS3BlobStore(minioConfig(), blobRepository);
-      const durableObservation = createPgDurableObservationSession({
-        blobRepository,
-        blobs: blobStore,
-        rolloutRepository: new PgRuntimeRolloutRepository(runtimePool),
-        policy: { maxModelObservationBytes: 64 },
-      });
-      const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
-      const resourceBlobs = new DurableResourceBlobWriter(
-        blobRepository,
-        blobStore,
-        1024 * 1024,
-        createS3StableBlobGarbageCollector(minioConfig(), blobRepository),
-      );
-      const deliverFileTools = new DeliverFileToolRouterFactory({
-        source: {
-          read: async ({ binding, absolutePath }) => {
-            try {
-              const content = await binding.sandbox.sandbox.readFile(absolutePath);
-              return {
-                outcome: "found" as const,
-                relativePath: absolutePath.slice("/workspace/".length),
-                body: new TextEncoder().encode(content),
-              };
-            } catch {
-              return { outcome: "not_found" as const };
-            }
+    const gateway = new FakeSandboxGateway();
+    let sandboxSequence = 0;
+    const upstream: SandboxSessionRegistryPort = {
+      acquire: async ({ signal }) => {
+        const sandbox = await gateway.create(
+          { templateId: "worker-vertical-template", ttlSeconds: 120 },
+          { signal },
+        );
+        await sandbox.writeFile("/workspace/vertical.txt", "vertical-deliver-file");
+        sandboxSequence += 1;
+        return {
+          outcome: "ready",
+          session: {
+            registryId: `registry-${label}-${sandboxSequence}`,
+            providerKey: "cube",
+            providerSandboxId: sandbox.id,
+            mode: "created",
+            sandbox,
           },
-        },
-        publications: new SimpleArtifactDeliveryService(
-          new PgSimpleDeliveredFileRepository(runtimePool),
-          resourceBlobs,
+        };
+      },
+      settle: async ({ session, disposition }) => {
+        if (disposition === "pause") await session.sandbox.pause();
+        else await session.sandbox.kill({ ignoreNotFound: true });
+        return { outcome: "settled" };
+      },
+    };
+    const faux = fauxProvider({
+      api: `worker-vertical-${unique}`,
+      provider: `worker-vertical-${unique}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("exec_command", { cmd: "printf vertical" }, { id: `call_exec_${label}` }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(
+        fauxToolCall(
+          "deliver_file",
+          { path: "/workspace/vertical.txt" },
+          { id: `call_deliver_${label}` },
         ),
-        authorizationVerifier: artifactAuthorization.verifier,
-      });
-      const sessions = new PiWorkerSessionFactory(
-        faux.getModel(),
-        modelRuntime,
-        durableObservation.createRecorder,
-        artifactAuthorization.issuer,
-        durableObservation.prepare,
-        undefined,
-        deliverFileTools,
-      );
-      const sandboxes = new PgBackedSandboxSessionRegistry(runtimePool, upstream, 120);
-      const worker = new RunWorker(
-        {
-          persistence: new PgExecutionPersistence(runtimePool),
-          revisions: new FakeRevisionVerifier(),
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions,
-          cancellation: new FakeCancellationPort(),
-          artifacts: new FakeArtifactPublication(),
-          clock: new SystemWorkerClock(),
-          metrics: new FakeRecoveryMetrics(),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("完成"),
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
+    const blobRepository = new PgBlobLifecycleRepository(runtimePool, {
+      objectPrefix: prefix,
+    });
+    const blobStore = createS3BlobStore(minioConfig(), blobRepository);
+    const durableObservation = createPgDurableObservationSession({
+      blobRepository,
+      blobs: blobStore,
+      rolloutRepository: new PgRuntimeRolloutRepository(runtimePool),
+      policy: { maxModelObservationBytes: 64 },
+    });
+    const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
+    const resourceBlobs = new DurableResourceBlobWriter(
+      blobRepository,
+      blobStore,
+      1024 * 1024,
+      createS3StableBlobGarbageCollector(minioConfig(), blobRepository),
+    );
+    const deliverFileTools = new DeliverFileToolRouterFactory({
+      source: {
+        read: async ({ binding, absolutePath }) => {
+          try {
+            const content = await binding.sandbox.sandbox.readFile(absolutePath);
+            return {
+              outcome: "found" as const,
+              relativePath: absolutePath.slice("/workspace/".length),
+              body: new TextEncoder().encode(content),
+            };
+          } catch {
+            return { outcome: "not_found" as const };
+          }
         },
-        { workerId: `worker-${label}`, leaseDurationMs: 30_000, heartbeatMs: 10_000 },
-      );
-      const tenantAssignments = new PgWorkerTenantAssignments({
-        runtime: runtimePool,
-        coordinator: workerCoordinatorPool,
-      });
-      await tenantAssignments.wake(scopeA.tenantId);
-      const loop = new AgentWorkerPollingLoop(
-        tenantAssignments,
-        new PgRunDispatchOutbox(runtimePool),
-        worker,
-        {
-          workerId: `dispatcher-${label}`,
-          pollIntervalMs: 25,
-          tenantAssignmentLeaseMs: 30_000,
-          dispatchLeaseMs: 30_000,
-        },
-      );
-      loop.start();
-      try {
-        let status = "queued";
-        for (let index = 0; index < 200 && status !== "succeeded"; index += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 25));
-          status = await withTenantTransaction(
-            runtimePool,
-            { tenantId: scopeA.tenantId },
-            async (client) =>
-              String(
-                (
-                  await client.query<{ status: string }>(
-                    "SELECT status FROM runs WHERE tenant_id=$1 AND id=$2",
-                    [scopeA.tenantId, executionScope.runId],
-                  )
-                ).rows[0]?.status,
-              ),
-          );
-        }
-        expect(status).toBe("succeeded");
-      } finally {
-        await loop.close();
+      },
+      publications: new SimpleArtifactDeliveryService(
+        new PgSimpleDeliveredFileRepository(runtimePool),
+        resourceBlobs,
+      ),
+      authorizationVerifier: artifactAuthorization.verifier,
+    });
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      durableObservation.createRecorder,
+      artifactAuthorization.issuer,
+      durableObservation.prepare,
+      undefined,
+      deliverFileTools,
+    );
+    const sandboxes = new PgBackedSandboxSessionRegistry(runtimePool, upstream, 120);
+    const worker = new RunWorker(
+      {
+        persistence: new PgExecutionPersistence(runtimePool),
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new SystemWorkerClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: `worker-${label}`, leaseDurationMs: 30_000, heartbeatMs: 10_000 },
+    );
+    const tenantAssignments = new PgWorkerTenantAssignments({
+      runtime: runtimePool,
+      coordinator: workerCoordinatorPool,
+    });
+    await tenantAssignments.wake(scopeA.tenantId);
+    const loop = new AgentWorkerPollingLoop(
+      tenantAssignments,
+      new PgRunDispatchOutbox(runtimePool),
+      worker,
+      {
+        workerId: `dispatcher-${label}`,
+        pollIntervalMs: 25,
+        tenantAssignmentLeaseMs: 30_000,
+        dispatchLeaseMs: 30_000,
+      },
+    );
+    loop.start();
+    try {
+      let status = "queued";
+      for (let index = 0; index < 200 && status !== "succeeded"; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        status = await withTenantTransaction(
+          runtimePool,
+          { tenantId: scopeA.tenantId },
+          async (client) =>
+            String(
+              (
+                await client.query<{ status: string }>(
+                  "SELECT status FROM runs WHERE tenant_id=$1 AND id=$2",
+                  [scopeA.tenantId, executionScope.runId],
+                )
+              ).rows[0]?.status,
+            ),
+        );
       }
-      expect(faux.state.callCount).toBe(3);
-      const facts = await withTenantTransaction(
-        runtimePool,
-        { tenantId: scopeA.tenantId, userId: actorUserId },
-        async (client) =>
-          client.query<{
-            kind: string;
-            tool_name: string | null;
-            blob_reference_id: string | null;
-            blob_state: string | null;
-            blob_purpose: string | null;
-          }>(
-            `SELECT entry.kind,entry.body->>'toolName' AS tool_name,entry.blob_reference_id,
+      expect(status).toBe("succeeded");
+    } finally {
+      await loop.close();
+    }
+    expect(faux.state.callCount).toBe(3);
+    const facts = await withTenantTransaction(
+      runtimePool,
+      { tenantId: scopeA.tenantId, userId: actorUserId },
+      async (client) =>
+        client.query<{
+          kind: string;
+          tool_name: string | null;
+          blob_reference_id: string | null;
+          blob_state: string | null;
+          blob_purpose: string | null;
+        }>(
+          `SELECT entry.kind,entry.body->>'toolName' AS tool_name,entry.blob_reference_id,
                     reference.state AS blob_state,reference.purpose AS blob_purpose
                FROM runtime_rollout_entries entry
                LEFT JOIN blob_references reference
                  ON reference.tenant_id=entry.tenant_id
                 AND reference.reference_id=entry.blob_reference_id
               WHERE entry.tenant_id=$1 AND entry.run_id=$2 ORDER BY entry.sequence`,
-            [scopeA.tenantId, executionScope.runId],
-          ),
-      );
-      expect(facts.rows.map((row) => row.kind)).toEqual([
-        "tool_call",
-        "tool_result",
-        "tool_call",
-        "tool_result",
-      ]);
-      expect(facts.rows.map((row) => row.tool_name)).toEqual([
-        "exec_command",
-        "exec_command",
-        "deliver_file",
-        "deliver_file",
-      ]);
-      expect(facts.rows[3]).toMatchObject({ blob_state: "stable", blob_purpose: "trace" });
-      expect(facts.rows[3]?.blob_reference_id).toBeTypeOf("string");
+          [scopeA.tenantId, executionScope.runId],
+        ),
+    );
+    expect(facts.rows.map((row) => row.kind)).toEqual([
+      "tool_call",
+      "tool_result",
+      "tool_call",
+      "tool_result",
+    ]);
+    expect(facts.rows.map((row) => row.tool_name)).toEqual([
+      "exec_command",
+      "exec_command",
+      "deliver_file",
+      "deliver_file",
+    ]);
+    expect(facts.rows[3]).toMatchObject({ blob_state: "stable", blob_purpose: "trace" });
+    expect(facts.rows[3]?.blob_reference_id).toBeTypeOf("string");
 
-      const published = await withTenantTransaction(
-        runtimePool,
-        { tenantId: scopeA.tenantId, userId: actorUserId },
-        (client) =>
-          client.query<{ readonly artifact_id: string; readonly target: string }>(
-            `SELECT publication.id AS artifact_id,settlement.target
+    const published = await withTenantTransaction(
+      runtimePool,
+      { tenantId: scopeA.tenantId, userId: actorUserId },
+      (client) =>
+        client.query<{ readonly artifact_id: string; readonly target: string }>(
+          `SELECT publication.id AS artifact_id,settlement.target
                FROM artifact_publications publication
                JOIN artifact_publication_settlements settlement
                  ON settlement.tenant_id=publication.tenant_id
                 AND settlement.artifact_id=publication.id
               WHERE publication.tenant_id=$1 AND publication.run_id=$2`,
-            [scopeA.tenantId, executionScope.runId],
-          ),
-      );
-      expect(published.rows).toHaveLength(1);
-      expect(published.rows[0]?.target).toBe("published");
-      const artifactService = new ArtifactDeliveryService(
-        new PgArtifactDeliveryRepository(runtimePool, artifactAuthorization.verifier),
-        blobStore,
-        {
-          runtimeMode: "development",
-          allowInsecureHttpDownload: true,
-          defaultDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
-          maxDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
-          executionAuthorizationVerifier: artifactAuthorization.verifier,
-        },
-      );
-      const download = await artifactService.createDownload({
-        request: { tenantId: tenantId(scopeA.tenantId), userId: actorUserId },
-        artifactId: artifactId(String(published.rows[0]?.artifact_id)),
-      });
-      const response = await fetch(download.url);
-      expect(response.status).toBe(200);
-      expect(await response.text()).toBe("vertical-deliver-file");
-    },
-  );
+          [scopeA.tenantId, executionScope.runId],
+        ),
+    );
+    expect(published.rows).toHaveLength(1);
+    expect(published.rows[0]?.target).toBe("published");
+    const artifactService = new ArtifactDeliveryService(
+      new PgArtifactDeliveryRepository(runtimePool, artifactAuthorization.verifier),
+      blobStore,
+      {
+        runtimeMode: "development",
+        allowInsecureHttpDownload: true,
+        defaultDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
+        maxDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
+        executionAuthorizationVerifier: artifactAuthorization.verifier,
+      },
+    );
+    const download = await artifactService.createDownload({
+      request: { tenantId: tenantId(scopeA.tenantId), userId: actorUserId },
+      artifactId: artifactId(String(published.rows[0]?.artifact_id)),
+    });
+    const response = await fetch(download.url);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("vertical-deliver-file");
+  });
 
   it("真实 PG + MinIO 持久化 Trace 后追加 Rollout，并可在重启后幂等重放", async () => {
     const suffix = `observation_${unique}`;

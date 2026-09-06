@@ -57,6 +57,7 @@
     "test:cube:real": "corepack pnpm --filter @cubesandbox/sdk build && tsx runtime-ts/packages/sandbox/src/real-smoke.ts",
     "test:e2b:real": "tsx runtime-ts/packages/sandbox/src/e2b-real-smoke.ts",
     "test:pi-cube:real": "corepack pnpm build && tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts",
+    "test:pi-e2b:real": "corepack pnpm --filter @hoox/pi-adapter... build && node --env-file-if-exists=.env --import tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts --e2b",
     "test:pi-prompt:container": "node scripts/run-pi-prompt-container-gate.mjs",
     "test:integration:pg": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
     "build:m4-runtime-dependencies": "corepack pnpm --filter \"@hoox/api^...\" --filter \"@hoox/agent-worker^...\" --filter \"@hoox/scheduler^...\" build",
@@ -82,7 +83,6 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.82.1",
-    "@earendil-works/pi-coding-agent": "0.82.1",
     "typebox": "1.1.38"
   },
   "devDependencies": {

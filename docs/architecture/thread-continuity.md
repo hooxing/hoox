@@ -10,9 +10,11 @@ Run 只有成为队首后才能绑定 Context 与 Workspace 基线。完成、�
 
 ## Context 事实与压缩
 
-用户消息、Assistant 结果、工具事实和控制输入写入 Thread 级持久事实流。Canonical Context 根据当前可信配置从这些事实重建，Pi Session 内存不是恢复事实源。
+用户消息、Assistant 结果、工具事实和控制输入写入 Thread 级持久事实流。Canonical Context 根据当前可信配置从这些事实重建。`pi-adapter` 直接向 `pi-agent-core` 的 `Agent` 提供有序消息；内存消息不是恢复事实源，也不建立 Pi Session 文件、entry/leaf 或分支树。
 
 Runtime 在接近模型窗口时创建持久 compaction checkpoint。Checkpoint 保存可恢复的 replacement history，原始事实不因压缩删除；后续重建可以组合 checkpoint 和未压缩事实。若配置、摘要或事实不一致，恢复路径失败关闭，不能静默截断或猜测历史。
+
+Runtime 在完整 `turn_end` 后提交事实并准备下一轮历史，Provider 请求前重新复核预算、工具能力和可信模型绑定。Runtime 在请求前产生的预算、绑定或受控续轮拒绝按调用 generation 归属，内存消息和未消费 steer 回滚到该次调用的检查点，已经持久化的工具事实保留。底层 `agent_end` 不表示 Runtime 已空闲；回滚完成后才发出 `agent.settled`，`abort()` 等待它捕获的执行事务跨过同步屏障，在此之前不允许新 prompt 重入。
 
 ## Sandbox 与 Workspace
 
@@ -30,3 +32,5 @@ Web 的未发送文字草稿保存在当前标签页的 sessionStorage，按账�
 - 全局功能开关用于紧急回退，不删除 profile、anchor、checkpoint 或输入事实。
 
 当前行为由 `runtime-ts/packages/persistence`、`runtime-ts/apps/agent-worker`、`runtime-ts/apps/api` 和 `runtime-ts/apps/scheduler` 共同实现；关键取舍见 ADR-0063 至 ADR-0071。
+
+控制器不提供进程内 `followUp()` 队列；子 Agent 的 `followup_task` 仍由 Runtime 持久协作协议执行。事件契约保留历史 `queue.updated` 与 `compaction.forbidden` 成员供轨迹和协议读取，新内核不产生它们。内核适配与恢复边界见 [Pi 内核收敛决策](../decisions/20260906001531-pi-kernel-and-shared-model-catalog.md)。

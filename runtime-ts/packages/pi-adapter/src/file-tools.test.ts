@@ -9,7 +9,6 @@ type ToolExecute = (
   input: Record<string, unknown>,
   signal: AbortSignal | undefined,
   onUpdate: () => void,
-  context: never,
 ) => Promise<{
   content: Array<
     | { readonly type: "text"; readonly text: string }
@@ -181,7 +180,6 @@ describe("Sandbox 文件工具", () => {
       { path: "result.txt", content: "done" },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(operations).toEqual(["prepare", "authorize", "command", "write"]);
@@ -210,7 +208,6 @@ describe("Sandbox 文件工具", () => {
         prepared as Record<string, unknown>,
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("WRITE_INVALID_ARGUMENTS");
     expect(prepareSandboxTool).not.toHaveBeenCalled();
@@ -227,7 +224,6 @@ describe("Sandbox 文件工具", () => {
       { path: "docs/input.txt", offset: 2, limit: 1 },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(tested.executionMode).toBe("sequential");
@@ -268,7 +264,6 @@ describe("Sandbox 文件工具", () => {
       { path: "/workspace/large.txt" },
       undefined,
       () => undefined,
-      {} as never,
     );
     const output = textContent(result);
 
@@ -289,7 +284,6 @@ describe("Sandbox 文件工具", () => {
       { path: "/workspace/exact.txt" },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(textContent(result)).toBe(text);
@@ -309,11 +303,59 @@ describe("Sandbox 文件工具", () => {
       { path: "/workspace/bytes.txt" },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(textContent(result)).toContain("(50KB limit)");
     expect(result.details).toMatchObject({ truncated: true, truncated_by: "bytes" });
+  });
+
+  it.each([
+    { text: "", expected: "", truncated: false },
+    { text: "x".repeat(51_200), expected: "x".repeat(51_200), truncated: false },
+    {
+      text: `${"x".repeat(51_200)}\n`,
+      expected: `${"x".repeat(51_200)}\n\n[Showing lines 1-1 of 2. Use offset=2 to continue.]`,
+      truncated: true,
+      truncated_by: "lines",
+    },
+    {
+      text: `${"你".repeat(17_066)}\n😀`,
+      expected:
+        `${"你".repeat(17_066)}\n\n[Showing lines 1-1 of 2 (50KB limit). ` +
+        "Use offset=2 to continue.]",
+      truncated: true,
+      truncated_by: "bytes",
+    },
+    {
+      text: "你".repeat(17_067),
+      expected:
+        "[Line 1 exceeds the 50KB read limit. " +
+        "Use exec_command with a bounded byte-range command to inspect it.]",
+      truncated: true,
+      truncated_by: "bytes",
+    },
+  ])("read 保留字节边界与完整 UTF-8 行：用例 %#", async (input) => {
+    const tested = fixture("read", {
+      command: async () => base64Result(input.text.slice(0, 4_100)),
+      readFile: async () => input.text,
+    } as unknown as SandboxHandle);
+
+    const result = await tested.execute(
+      "call_read_boundary",
+      { path: "/workspace/boundary.txt" },
+      undefined,
+      () => undefined,
+    );
+
+    expect(textContent(result)).toBe(input.expected);
+    expect(result.details).toEqual({
+      path: "/workspace/boundary.txt",
+      start_line: 1,
+      end_line: 1,
+      total_lines: input.text.split("\n").length,
+      truncated: input.truncated,
+      ...(input.truncated_by === undefined ? {} : { truncated_by: input.truncated_by }),
+    });
   });
 
   it("read 把受支持的图片作为附件返回，不把 Base64 放进 details", async () => {
@@ -330,7 +372,6 @@ describe("Sandbox 文件工具", () => {
       { path: "/workspace/chart.png" },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(command).toHaveBeenCalledTimes(2);
@@ -360,7 +401,6 @@ describe("Sandbox 文件工具", () => {
       },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(writeFile).toHaveBeenCalledWith(
@@ -390,7 +430,6 @@ describe("Sandbox 文件工具", () => {
       },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(writeFile).toHaveBeenCalledWith(
@@ -416,7 +455,6 @@ describe("Sandbox 文件工具", () => {
         },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("EDIT_NO_CHANGE");
     expect(writeFile).not.toHaveBeenCalled();
@@ -463,7 +501,6 @@ describe("Sandbox 文件工具", () => {
         { path: "/workspace/source.txt", edits },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow(code);
     expect(writeFile).not.toHaveBeenCalled();
@@ -480,7 +517,6 @@ describe("Sandbox 文件工具", () => {
       { path: "reports/a'b.txt", content: "中文" },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(command).toHaveBeenCalledWith(
@@ -530,7 +566,6 @@ describe("Sandbox 文件工具", () => {
       { path: "/workspace/shared.txt", content: "first" },
       undefined,
       () => undefined,
-      {} as never,
     );
     await firstStarted;
     const second = tested.execute(
@@ -538,7 +573,6 @@ describe("Sandbox 文件工具", () => {
       { path: "/workspace/shared.txt", content: "second" },
       undefined,
       () => undefined,
-      {} as never,
     );
     await expect(second).rejects.toThrow('"code":"FILE_BUSY"');
     expect(tested.authorized.map((call) => call.callId)).toEqual(["call_write_first"]);
@@ -566,7 +600,6 @@ describe("Sandbox 文件工具", () => {
           prepared as Record<string, unknown>,
           undefined,
           () => undefined,
-          {} as never,
         ),
       ).rejects.toThrow(`${toolName.toUpperCase()}_INVALID_ARGUMENTS`);
       expect(tested.authorized).toEqual([]);
@@ -585,7 +618,6 @@ describe("Sandbox 文件工具", () => {
         { path: "/workspace/input.txt", offset: 1.5 },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("READ_INVALID_ARGUMENTS");
     expect(tested.authorized).toEqual([]);
@@ -605,7 +637,6 @@ describe("Sandbox 文件工具", () => {
         { path: "/workspace/input.txt" },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("READ_REJECTED");
     expect(command).not.toHaveBeenCalled();

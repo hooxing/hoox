@@ -34,7 +34,7 @@
       },
       {
         "name": "hoox:lockfile-sha256",
-        "value": "2a77fdd718189c936b97dc21a9077bd1b26052568e50c05fcd2730abd2742cb5"
+        "value": "b0de68c6444451f5bc5f1276afadda4171338fe63b5109ba2f38a9413c70e634"
       }
     ]
   },
@@ -1017,46 +1017,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40earendil-works/pi-coding-agent@0.82.1",
-      "name": "@earendil-works/pi-coding-agent",
-      "version": "0.82.1",
-      "purl": "pkg:npm/%40earendil-works/pi-coding-agent@0.82.1",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40earendil-works/pi-tui@0.82.1",
-      "name": "@earendil-works/pi-tui",
-      "version": "0.82.1",
-      "purl": "pkg:npm/%40earendil-works/pi-tui@0.82.1",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/%40fastify/ajv-compiler@4.0.5",
       "name": "@fastify/ajv-compiler",
       "version": "4.0.5",
@@ -1587,66 +1547,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40mariozechner/clipboard-linux-x64-gnu@0.3.9",
-      "name": "@mariozechner/clipboard-linux-x64-gnu",
-      "version": "0.3.9",
-      "purl": "pkg:npm/%40mariozechner/clipboard-linux-x64-gnu@0.3.9",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40mariozechner/clipboard-linux-x64-musl@0.3.9",
-      "name": "@mariozechner/clipboard-linux-x64-musl",
-      "version": "0.3.9",
-      "purl": "pkg:npm/%40mariozechner/clipboard-linux-x64-musl@0.3.9",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40mariozechner/clipboard@0.3.9",
-      "name": "@mariozechner/clipboard",
-      "version": "0.3.9",
-      "purl": "pkg:npm/%40mariozechner/clipboard@0.3.9",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/%40mistralai/mistralai@2.2.6",
       "name": "@mistralai/mistralai",
       "version": "2.2.6",
@@ -1935,26 +1835,6 @@
         {
           "license": {
             "id": "BSD-3-Clause"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40silvia-odwyer/photon-node@0.3.4",
-      "name": "@silvia-odwyer/photon-node",
-      "version": "0.3.4",
-      "purl": "pkg:npm/%40silvia-odwyer/photon-node@0.3.4",
-      "licenses": [
-        {
-          "license": {
-            "id": "Apache-2.0"
           }
         }
       ],
@@ -2607,26 +2487,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/cross-spawn@7.0.6",
-      "name": "cross-spawn",
-      "version": "7.0.6",
-      "purl": "pkg:npm/cross-spawn@7.0.6",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/data-uri-to-buffer@4.0.1",
       "name": "data-uri-to-buffer",
       "version": "4.0.1",
@@ -3067,26 +2927,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/get-east-asian-width@1.6.0",
-      "name": "get-east-asian-width",
-      "version": "1.6.0",
-      "purl": "pkg:npm/get-east-asian-width@1.6.0",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/glob@13.0.6",
       "name": "glob",
       "version": "13.0.6",
@@ -3135,66 +2975,6 @@
         {
           "license": {
             "id": "Apache-2.0"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/graceful-fs@4.2.11",
-      "name": "graceful-fs",
-      "version": "4.2.11",
-      "purl": "pkg:npm/graceful-fs@4.2.11",
-      "licenses": [
-        {
-          "license": {
-            "id": "ISC"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/highlight.js@10.7.3",
-      "name": "highlight.js",
-      "version": "10.7.3",
-      "purl": "pkg:npm/highlight.js@10.7.3",
-      "licenses": [
-        {
-          "license": {
-            "id": "BSD-3-Clause"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/hosted-git-info@9.0.3",
-      "name": "hosted-git-info",
-      "version": "9.0.3",
-      "purl": "pkg:npm/hosted-git-info@9.0.3",
-      "licenses": [
-        {
-          "license": {
-            "id": "ISC"
           }
         }
       ],
@@ -3271,46 +3051,6 @@
       "name": "ipaddr.js",
       "version": "2.4.0",
       "purl": "pkg:npm/ipaddr.js@2.4.0",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/isexe@2.0.0",
-      "name": "isexe",
-      "version": "2.0.0",
-      "purl": "pkg:npm/isexe@2.0.0",
-      "licenses": [
-        {
-          "license": {
-            "id": "ISC"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/jiti@2.7.0",
-      "name": "jiti",
-      "version": "2.7.0",
-      "purl": "pkg:npm/jiti@2.7.0",
       "licenses": [
         {
           "license": {
@@ -3535,26 +3275,6 @@
         {
           "license": {
             "id": "BlueOak-1.0.0"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/marked@18.0.5",
-      "name": "marked",
-      "version": "18.0.5",
-      "purl": "pkg:npm/marked@18.0.5",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
           }
         }
       ],
@@ -3831,26 +3551,6 @@
       "name": "partial-json",
       "version": "0.1.7",
       "purl": "pkg:npm/partial-json@0.1.7",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/path-key@3.1.1",
-      "name": "path-key",
-      "version": "3.1.1",
-      "purl": "pkg:npm/path-key@3.1.1",
       "licenses": [
         {
           "license": {
@@ -4247,26 +3947,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/proper-lockfile@4.1.2",
-      "name": "proper-lockfile",
-      "version": "4.1.2",
-      "purl": "pkg:npm/proper-lockfile@4.1.2",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/protobufjs@7.6.5",
       "name": "protobufjs",
       "version": "7.6.5",
@@ -4371,26 +4051,6 @@
       "name": "ret",
       "version": "0.5.0",
       "purl": "pkg:npm/ret@0.5.0",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/retry@0.12.0",
-      "name": "retry",
-      "version": "0.12.0",
-      "purl": "pkg:npm/retry@0.12.0",
       "licenses": [
         {
           "license": {
@@ -4615,66 +4275,6 @@
         {
           "license": {
             "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/shebang-command@2.0.0",
-      "name": "shebang-command",
-      "version": "2.0.0",
-      "purl": "pkg:npm/shebang-command@2.0.0",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/shebang-regex@3.0.0",
-      "name": "shebang-regex",
-      "version": "3.0.0",
-      "purl": "pkg:npm/shebang-regex@3.0.0",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/signal-exit@3.0.7",
-      "name": "signal-exit",
-      "version": "3.0.7",
-      "purl": "pkg:npm/signal-exit@3.0.7",
-      "licenses": [
-        {
-          "license": {
-            "id": "ISC"
           }
         }
       ],
@@ -4967,26 +4567,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/which@2.0.2",
-      "name": "which",
-      "version": "2.0.2",
-      "purl": "pkg:npm/which@2.0.2",
-      "licenses": [
-        {
-          "license": {
-            "id": "ISC"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/ws@8.21.1",
       "name": "ws",
       "version": "8.21.1",
@@ -5157,8 +4737,6 @@
         "pkg:npm/%40cubesandbox/sdk@0.3.0-cube.local.1",
         "pkg:npm/%40earendil-works/pi-agent-core@0.82.1",
         "pkg:npm/%40earendil-works/pi-ai@0.82.1",
-        "pkg:npm/%40earendil-works/pi-coding-agent@0.82.1",
-        "pkg:npm/%40earendil-works/pi-tui@0.82.1",
         "pkg:npm/%40fastify/ajv-compiler@4.0.5",
         "pkg:npm/%40fastify/error@4.2.0",
         "pkg:npm/%40fastify/fast-json-stringify-compiler@5.1.0",
@@ -5187,9 +4765,6 @@
         "pkg:npm/%40hoox/workspace@0.0.0",
         "pkg:npm/%40huggingface/tokenizers@0.1.3",
         "pkg:npm/%40isaacs/fs-minipass@4.0.1",
-        "pkg:npm/%40mariozechner/clipboard-linux-x64-gnu@0.3.9",
-        "pkg:npm/%40mariozechner/clipboard-linux-x64-musl@0.3.9",
-        "pkg:npm/%40mariozechner/clipboard@0.3.9",
         "pkg:npm/%40mistralai/mistralai@2.2.6",
         "pkg:npm/%40noble/ciphers@2.3.0",
         "pkg:npm/%40noble/hashes@2.3.0",
@@ -5205,7 +4780,6 @@
         "pkg:npm/%40protobufjs/path@1.1.2",
         "pkg:npm/%40protobufjs/pool@1.1.0",
         "pkg:npm/%40protobufjs/utf8@1.1.2",
-        "pkg:npm/%40silvia-odwyer/photon-node@0.3.4",
         "pkg:npm/%40sinclair/typebox@0.34.52",
         "pkg:npm/%40smithy/core@3.30.0",
         "pkg:npm/%40smithy/credential-provider-imds@4.4.14",
@@ -5238,7 +4812,6 @@
         "pkg:npm/chownr@3.0.0",
         "pkg:npm/compare-versions@6.1.1",
         "pkg:npm/cookie@1.1.1",
-        "pkg:npm/cross-spawn@7.0.6",
         "pkg:npm/data-uri-to-buffer@4.0.1",
         "pkg:npm/debug@4.4.3",
         "pkg:npm/defu@6.1.7",
@@ -5261,19 +4834,13 @@
         "pkg:npm/formdata-polyfill@4.0.10",
         "pkg:npm/gaxios@7.3.0",
         "pkg:npm/gcp-metadata@8.1.2",
-        "pkg:npm/get-east-asian-width@1.6.0",
         "pkg:npm/glob@13.0.6",
         "pkg:npm/google-auth-library@10.9.1",
         "pkg:npm/google-logging-utils@1.1.3",
-        "pkg:npm/graceful-fs@4.2.11",
-        "pkg:npm/highlight.js@10.7.3",
-        "pkg:npm/hosted-git-info@9.0.3",
         "pkg:npm/http-proxy-agent@7.0.2",
         "pkg:npm/https-proxy-agent@7.0.6",
         "pkg:npm/ignore@7.0.5",
         "pkg:npm/ipaddr.js@2.4.0",
-        "pkg:npm/isexe@2.0.0",
-        "pkg:npm/jiti@2.7.0",
         "pkg:npm/jose@6.2.10",
         "pkg:npm/json-bigint@1.0.0",
         "pkg:npm/json-schema-ref-resolver@3.0.0",
@@ -5285,7 +4852,6 @@
         "pkg:npm/light-my-request@6.6.0",
         "pkg:npm/long@5.3.2",
         "pkg:npm/lru-cache@11.5.2",
-        "pkg:npm/marked@18.0.5",
         "pkg:npm/minimatch@10.2.5",
         "pkg:npm/minipass@7.1.3",
         "pkg:npm/minizlib@3.1.0",
@@ -5300,7 +4866,6 @@
         "pkg:npm/openapi-typescript-helpers@0.0.15",
         "pkg:npm/p-retry@4.6.2",
         "pkg:npm/partial-json@0.1.7",
-        "pkg:npm/path-key@3.1.1",
         "pkg:npm/path-scurry@2.0.2",
         "pkg:npm/pg-cloudflare@1.4.0",
         "pkg:npm/pg-connection-string@2.14.0",
@@ -5320,14 +4885,12 @@
         "pkg:npm/postgres-interval@1.2.0",
         "pkg:npm/process-warning@4.0.1",
         "pkg:npm/process-warning@5.1.0",
-        "pkg:npm/proper-lockfile@4.1.2",
         "pkg:npm/protobufjs@7.6.5",
         "pkg:npm/quick-format-unescaped@4.0.4",
         "pkg:npm/real-require@0.2.0",
         "pkg:npm/real-require@1.0.0",
         "pkg:npm/require-from-string@2.0.2",
         "pkg:npm/ret@0.5.0",
-        "pkg:npm/retry@0.12.0",
         "pkg:npm/retry@0.13.1",
         "pkg:npm/reusify@1.1.0",
         "pkg:npm/rfdc@1.4.1",
@@ -5339,9 +4902,6 @@
         "pkg:npm/semver@7.8.0",
         "pkg:npm/set-cookie-parser@2.7.2",
         "pkg:npm/set-cookie-parser@3.1.2",
-        "pkg:npm/shebang-command@2.0.0",
-        "pkg:npm/shebang-regex@3.0.0",
-        "pkg:npm/signal-exit@3.0.7",
         "pkg:npm/sonic-boom@4.2.1",
         "pkg:npm/split2@4.2.0",
         "pkg:npm/tar@7.5.22",
@@ -5356,7 +4916,6 @@
         "pkg:npm/vscode-languageserver-textdocument@1.0.12",
         "pkg:npm/vscode-languageserver-types@3.18.0",
         "pkg:npm/web-streams-polyfill@3.3.3",
-        "pkg:npm/which@2.0.2",
         "pkg:npm/ws@8.21.1",
         "pkg:npm/xtend@4.0.2",
         "pkg:npm/yallist@5.0.0",

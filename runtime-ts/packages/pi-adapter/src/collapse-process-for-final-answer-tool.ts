@@ -1,5 +1,5 @@
 import type { ToolObservationResult } from "@hoox/context-policy";
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 
 const strict = { additionalProperties: false } as const;
@@ -21,7 +21,7 @@ export function createCollapseProcessForFinalAnswerPiTool(
     outcome: "succeeded",
   ) => Promise<ToolObservationResult>,
 ) {
-  return defineTool({
+  const tool: AgentTool<typeof CollapseProcessForFinalAnswerToolArgumentsSchema, unknown> = {
     name: "collapse_process_for_final_answer",
     label: "折叠过程并开始最终答复",
     description:
@@ -42,5 +42,6 @@ export function createCollapseProcessForFinalAnswerPiTool(
         details: {},
       };
     },
-  });
+  };
+  return tool;
 }

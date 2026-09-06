@@ -15,6 +15,8 @@
 | `automation_update` Schema | ADR-20260826164658 的双层定义和 ADR-20260826172009 的单一严格 Schema | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260828113059](20260828113059-automation-tool-schema-and-error-semantics.md) |
 | Demo 后台身份 | ADR-20260824222258 的 HTTP Basic 入口 | [Demo 持续部署](../operations/demo-cd.md) · [ADR-20260825145416](20260825145416-demo-admin-uses-hoox-session-gate.md) |
 | Skill 分发 | ADR-0097 的专有 development fixture | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260827174210](20260827174210-open-source-distribution-license-and-security-gates.md) |
+| 生产 SBOM | clipboard 原生变体规范化特例 | [生产就绪说明](../operations/production-readiness.md) · [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) |
+| Pi 内核与模型目录 | AgentSession/Session 树装配、前后端分别加载目录 | [Thread 连续上下文](../architecture/thread-continuity.md) · [仓库导览](../architecture/repository-map.md) · [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) |
 
 ## 完整历史目录
 
@@ -26,7 +28,7 @@
 | [ADR-0001：TypeScript 工程与质量基线](0001-typescript-engineering-baseline.md) | 已接受 | 2026-07-26 |
 | [ADR-0002：领域对象、所有权与不可变性](0002-domain-ownership-and-immutability.md) | 已接受 | 2026-07-26 |
 | [ADR-0003：PostgreSQL 与 S3/MinIO 持久化边界](0003-postgresql-and-object-storage.md) | 已接受 | 2026-07-26 |
-| [ADR-0004：全 TypeScript、Pi 与 CubeSandbox 技术边界](0004-typescript-pi-cubesandbox-boundary.md) | 已接受 | 2026-07-26 |
+| [ADR-0004：全 TypeScript、Pi 与 CubeSandbox 技术边界](0004-typescript-pi-cubesandbox-boundary.md) | 部分已替代（Pi 内核装配） | 2026-07-26 |
 | [ADR-0005：Thread Workspace、Resource 与 Artifact](0005-workspace-resource-artifact.md) | 已接受 | 2026-07-26 |
 | [ADR-0006：禁用 Pi 默认 Compaction 并使用自有 Context Policy](0006-runtime-context-policy.md) | 已接受 | 2026-07-26 |
 | [ADR-0007：首个可发布版本范围与后置能力](0007-first-release-scope.md) | 已接受 | 2026-07-26 |
@@ -54,7 +56,7 @@
 | [ADR-0029：可信 Prompt 分层与 Session 能力清单](0029-trusted-prompt-and-session-capability-manifest.md) | 已接受 | 2026-07-28 |
 | [ADR-0030：Runtime Rollout 与 Checkpoint 事实源](0030-runtime-rollout-checkpoint-fact-source.md) | 已接受 | 2026-07-28 |
 | [ADR-0031：Blob-backed Tool Observation 截断切片](0031-blob-backed-tool-observation.md) | 已接受 | 2026-07-28 |
-| [ADR-0032：Runtime Rollout 到 Pi 的恢复投影](0032-runtime-rollout-pi-recovery-projection.md) | 已接受 | 2026-07-28 |
+| [ADR-0032：Runtime Rollout 到 Pi 的恢复投影](0032-runtime-rollout-pi-recovery-projection.md) | 部分已替代（Pi 内存恢复目标） | 2026-07-28 |
 | [ADR-0033：waiting 与 SandboxSession 恢复安全边界](0033-waiting-sandbox-recovery.md) | 已接受 | 2026-07-28 |
 | [ADR-0034：M4 黑盒运行时依赖构建门禁](0034-m4-runtime-dependency-build-gate.md) | 已接受 | 2026-07-28 |
 | [ADR-0035：模型感知的 Context Budget](0035-model-aware-context-budget.md) | 部分已替代（未知模型默认计数） | 2026-07-28 |
@@ -62,7 +64,7 @@
 | [ADR-0037：waiting 恢复能力回执与只追加回退边界](0037-waiting-recovery-capability-and-append-only-rollback.md) | 已接受 | 2026-07-28 |
 | [ADR-0038：生产 Worker 的 Workspace 失败关闭边界](0038-production-worker-fail-closed-workspace-boundary.md) | 已接受 | 2026-07-28 |
 | [ADR-0039：本地 Agent 工作台与公开 API 边界](0039-web-local-agent-workbench.md) | 部分已替代 | 2026-07-28 |
-| [ADR-0040：开发 Worker 的 Windows 运行与模型就绪边界](0040-development-worker-windows-and-model-readiness.md) | 已接受 | 2026-07-28 |
+| [ADR-0040：开发 Worker 的 Windows 运行与模型就绪边界](0040-development-worker-windows-and-model-readiness.md) | 部分已替代（Pi 内核装配） | 2026-07-28 |
 | [ADR-0041：Worker 停机与工具拒绝的失败关闭边界](0041-worker-stop-and-tool-rejection-fail-closed.md) | 已接受 | 2026-07-28 |
 | [ADR-0042：本地 Web 体验的 Run 事件与 Artifact 读取契约](0042-local-web-experience-read-contract.md) | 部分已替代 | 2026-07-28 |
 | [ADR-0043：CubeSandbox 数据面缺省路由](0043-cubesandbox-proxy-default-routing.md) | 已接受 | 2026-07-28 |
@@ -171,7 +173,7 @@
 | [ADR-0145：Thread Sandbox 复用时 ResourceFS 数据面自检与单次冷恢复](0145-thread-sandbox-resourcefs-data-plane-recovery.md) | 已接受（试验版） | 2026-08-10 |
 | [ADR-0146：团队目录个人作用域与失效 Tenant 自愈](0146-team-directory-personal-scope-recovery.md) | 已接受（试验版） | 2026-08-10 |
 | [ADR-0147：团队协作使用独立数据库协调角色](0147-team-coordinator-database-role.md) | 已接受（试验版） | 2026-08-10 |
-| [ADR-0148：生产 SBOM 规范化宿主平台原生可选依赖](0148-production-sbom-platform-normalization.md) | 已接受 | 2026-08-10 |
+| [ADR-0148：生产 SBOM 规范化宿主平台原生可选依赖](0148-production-sbom-platform-normalization.md) | 已替代（clipboard 退出生产闭包） | 2026-08-10 |
 | [ADR-0149：区分 Sandbox 确定性不可用与结果未知，并执行开发数据面预检](0149-sandbox-create-unavailable-and-development-execution-probe.md) | 已接受 | 2026-08-11 |
 | [ADR-0150：Worker 心跳瞬时持久层故障有界重试](0150-heartbeat-transient-persistence-retry.md) | 已接受 | 2026-08-12 |
 | [ADR-0151：开发 Worker 启动前自编译应用入口](0151-development-worker-self-build.md) | 已接受 | 2026-08-12 |
@@ -232,8 +234,8 @@
 | [ADR-20260819165254：独立后台控制面与版本化运行配置](20260819165254-independent-admin-control-plane.md) | 部分已替代（进程边界与模型配置流程） | 2026-08-19 |
 | [ADR-20260820090402：Provider 拥有可启用的模型目录](20260820090402-provider-owned-model-catalog.md) | 部分已替代（管理页面多启用语义） | 2026-08-20 |
 | [无团队成员关系时隐藏团队操作](20260820092801-hide-team-controls-without-membership.md) | 已接受 | 2026-08-20 |
-| [ADR-20260820095113：Pi 模型目录为后台配置提供可覆盖的初始值](20260820095113-pi-catalog-seeds-admin-model-metadata.md) | 部分已替代（模型配置流程） | 2026-08-20 |
-| [ADR-20260820101805：浏览器内置 Pi 目录与后台配置服务独立降级](20260820101805-browser-bundled-pi-catalog-degrades-independently.md) | 部分已替代（模型配置流程） | 2026-08-20 |
+| [ADR-20260820095113：Pi 模型目录为后台配置提供可覆盖的初始值](20260820095113-pi-catalog-seeds-admin-model-metadata.md) | 部分已替代（模型配置流程与目录加载位置） | 2026-08-20 |
+| [ADR-20260820101805：浏览器内置 Pi 目录与后台配置服务独立降级](20260820101805-browser-bundled-pi-catalog-degrades-independently.md) | 部分已替代（模型配置流程与目录加载位置） | 2026-08-20 |
 | [ADR-20260820153000：项目采用 Apache License 2.0 并建立公开文档分层](20260820153000-open-source-license-and-documentation-boundary.md) | 已接受 | 2026-08-20 |
 | [ADR-20260821004057：工业化后台的信息架构、运营统计与用户治理边界](20260821004057-industrial-admin-operations-and-user-governance.md) | 部分已替代（探针域名白名单展示） | 2026-08-21 |
 | [ADR-20260821115221：统一后台 API 进程并保留发布资源隔离](20260821115221-unified-admin-api-process.md) | 已接受 | 2026-08-21 |
@@ -285,5 +287,6 @@
 | [ADR-20260905180644：后台投影在 FORCE RLS 下的读取策略](20260905180644-admin-projection-forced-rls.md) | 已接受 | 2026-09-05 |
 | [ADR-20260905225608：公开正文增量在持久化前有界合并](20260905225608-runtime-text-delta-coalescing.md) | 已接受 | 2026-09-05 |
 | [ADR-20260905225738：已领取 Run 与有界后台维护并行](20260905225738-worker-background-maintenance.md) | 已接受 | 2026-09-05 |
+| [ADR-20260906001531：Pi 内核收敛与共享模型目录](20260906001531-pi-kernel-and-shared-model-catalog.md) | 已接受 | 2026-09-06 |
 
 </details>

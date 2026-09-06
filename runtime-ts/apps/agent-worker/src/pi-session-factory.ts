@@ -47,7 +47,7 @@ import {
   type InternalTrajectoryDiagnosticsPort,
 } from "@hoox/trajectory";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Models } from "@earendil-works/pi-ai";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
 import { digestCanonical } from "./mutation-protocol.js";
 import type {
@@ -174,7 +174,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
 
   constructor(
     private readonly model: Model<Api>,
-    private readonly modelRuntime: ModelRuntime,
+    private readonly modelRuntime: Models,
     private readonly createObservationRecorder: (
       input: Parameters<AgentSessionFactoryPort["create"]>[0],
       outputs: ControlledToolReceiptSource,
@@ -225,7 +225,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   /** 复用工具、持久化和恢复边界，只替换由 Run 固定配置决定的模型相关能力。 */
   withModel(input: {
     readonly model: Model<Api>;
-    readonly modelRuntime: ModelRuntime;
+    readonly modelRuntime: Models;
     readonly modelContext: TrustedPiModelContextCapability;
     readonly modelWireTraces: ModelWireTraceSession | undefined;
     readonly prepareRuntimeCompaction:

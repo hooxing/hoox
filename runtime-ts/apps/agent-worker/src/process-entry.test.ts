@@ -627,6 +627,15 @@ describe("Agent Worker 进程入口", () => {
     expect(model.id).toBe("model-b");
     expect(model.reasoning).toBe(true);
     expect(modelRuntime.getProvider("runtime-openai-compatible")?.name).toBe("主模型供应商");
+    expect(modelRuntime.getProviders().map((provider) => provider.id)).toEqual([
+      "runtime-openai-compatible",
+    ]);
+    expect(modelRuntime.getModels().map((candidate) => candidate.id)).toEqual([
+      "model-a",
+      "model-b",
+    ]);
+    expect((await modelRuntime.getAuth(model))?.auth.apiKey === "deployment-secret").toBe(true);
+    expect(JSON.stringify(model).includes("deployment-secret")).toBe(false);
     expect(
       modelRuntime.getModels("runtime-openai-compatible").map((candidate) => candidate.id),
     ).toEqual(["model-a", "model-b"]);

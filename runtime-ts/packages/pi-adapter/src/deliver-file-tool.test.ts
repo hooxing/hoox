@@ -27,7 +27,6 @@ describe("deliver_file Pi 工具", () => {
       { path: "/workspace/report.pdf" },
       undefined,
       () => undefined,
-      {} as never,
     );
     expect(JSON.stringify(result)).toContain('\\"download_ready\\":true');
   });
@@ -64,13 +63,7 @@ describe("deliver_file Pi 工具", () => {
       const prepared = tool.prepareArguments(input);
       expect(Value.Check(tool.parameters, prepared)).toBe(true);
       await expect(
-        tool.execute(
-          `call-deliver-invalid-${index}`,
-          prepared,
-          undefined,
-          () => undefined,
-          {} as never,
-        ),
+        tool.execute(`call-deliver-invalid-${index}`, prepared, undefined, () => undefined),
       ).rejects.toThrow("INVALID_ARGUMENT");
     }
 
@@ -105,7 +98,6 @@ describe("deliver_file Pi 工具", () => {
         { path: "/workspace/report.pdf" },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("PUBLICATION_RESULT_UNKNOWN");
     expect(order).toEqual(["receipt:failed"]);

@@ -1,4 +1,7 @@
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentEvent } from "@earendil-works/pi-agent-core";
+
+/** settled 由 Runtime 在底层完成及事务回滚后补发，不把 agent_end 当作空闲屏障。 */
+export type PiAgentEvent = AgentEvent | { type: "agent_settled" };
 import type { TodoSnapshot } from "@hoox/domain";
 
 export type ToolPresentation = {
@@ -86,7 +89,7 @@ export type RuntimeAgentEvent =
   | { type: "error"; code: "ABORTED" | "PROVIDER" | "PROTOCOL"; message: string };
 
 /** Pi 事件属于可替换内核协议；此处转换后，上层不需要依赖 Pi 的事件结构。 */
-export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefined {
+export function mapPiEvent(event: PiAgentEvent): RuntimeAgentEvent | undefined {
   switch (event.type) {
     case "agent_start":
       return { type: "agent.started" };
@@ -217,12 +220,6 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
         toolResults,
       };
     }
-    case "queue_update":
-      return { type: "queue.updated", steering: event.steering, followUp: event.followUp };
-    case "compaction_start":
-    case "compaction_end":
-      // 配置层已经关闭 Pi compaction；若仍收到事件，必须作为违反不变量上报而不是静默吞掉。
-      return { type: "compaction.forbidden", source: "pi" };
     default:
       return undefined;
   }

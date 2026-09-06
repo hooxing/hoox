@@ -1,5 +1,5 @@
 import type { ToolObservationResult } from "@hoox/context-policy";
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";
 
@@ -46,7 +46,7 @@ export function createDeliverFilePiTool(
     (token) => ({ path: `/workspace/.runtime-invalid/${token}` }),
     (value) => value.path.slice("/workspace/.runtime-invalid/".length),
   );
-  return defineTool({
+  const tool: AgentTool<typeof DeliverFileToolArgumentsSchema, unknown> = {
     name: "deliver_file",
     label: "交付文件",
     description:
@@ -90,5 +90,6 @@ export function createDeliverFilePiTool(
         details: {},
       };
     },
-  });
+  };
+  return tool;
 }

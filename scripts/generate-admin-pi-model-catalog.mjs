@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const targetUrl = new URL(
-  "../runtime-ts/apps/admin-web/src/pi-model-catalog.generated.ts",
+  "../runtime-ts/packages/protocol/src/pi-model-catalog.generated.ts",
   import.meta.url,
 );
 
@@ -47,7 +47,7 @@ function render() {
   const header = [
     "// 此文件由 scripts/generate-admin-pi-model-catalog.mjs 从精确锁定的 Pi 版本生成。",
     "// 请勿手工修改；升级 Pi 后运行 pnpm admin:pi-catalog:generate。",
-    'import type { PiModelCatalogModelDto, PiModelCatalogProviderDto } from "@hoox/protocol";',
+    'import type { PiModelCatalogModelDto, PiModelCatalogProviderDto } from "./admin-control.js";',
     "",
   ].join("\n");
   return `${header}export const LOCAL_PI_MODEL_CATALOG_PROVIDERS: readonly PiModelCatalogProviderDto[] = ${JSON.stringify(
@@ -66,10 +66,10 @@ if (process.argv.includes("--check")) {
   const actual = await readFile(targetUrl, "utf8").catch(() => "");
   if (actual !== expected) {
     throw new Error(
-      "前端 Pi 模型目录已过期，请运行 pnpm admin:pi-catalog:generate 并提交生成结果。",
+      "共享 Pi 模型目录已过期，请运行 pnpm admin:pi-catalog:generate 并提交生成结果。",
     );
   }
-  console.log("前端 Pi 模型目录与当前锁定版本一致。");
+  console.log("共享 Pi 模型目录与当前锁定版本一致。");
 } else {
   await writeFile(targetUrl, expected, "utf8");
   console.log(`已生成 ${fileURLToPath(targetUrl)}`);

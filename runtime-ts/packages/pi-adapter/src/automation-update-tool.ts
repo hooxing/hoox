@@ -9,7 +9,7 @@ import {
   type ScheduledTaskMutation,
 } from "@hoox/automation";
 import type { ToolObservationResult } from "@hoox/context-policy";
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";
@@ -224,7 +224,7 @@ export function createAutomationUpdatePiTool(
         : undefined,
     automationSchemaIssues,
   );
-  return defineTool({
+  const tool: AgentTool<typeof AutomationUpdateToolProviderSchema, unknown> = {
     name: "automation_update",
     label: "管理定时任务",
     executionMode: "sequential",
@@ -267,7 +267,8 @@ export function createAutomationUpdatePiTool(
       if (failure !== undefined) throw new Error(JSON.stringify(failure));
       return { content: [{ type: "text" as const, text: JSON.stringify(task) }], details: {} };
     },
-  });
+  };
+  return tool;
 }
 
 function normalizeArgument<T>(field: string, normalize: () => T): T {

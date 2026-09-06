@@ -1,8 +1,10 @@
 # ADR-0032：Runtime Rollout 到 Pi 的恢复投影
 
-- 状态：已接受
+- 状态：部分已替代（Pi 内存恢复目标）
 - 日期：2026-07-28
 - 关联：ADR-0029、ADR-0030、ADR-0031、M5-04
+
+> 部分替代关系：[20260906001531：Pi 内核收敛与共享模型目录](20260906001531-pi-kernel-and-shared-model-catalog.md)。兼容身份、双栅栏、事实顺序、工具 provenance、未配对调用处理和稳定错误继续有效；恢复到 AgentSession 与禁用 Pi 自动压缩的装配方式由直接构造 Agent 消息替代。Runtime 持久压缩的后续决策继续有效。
 
 ## 背景
 

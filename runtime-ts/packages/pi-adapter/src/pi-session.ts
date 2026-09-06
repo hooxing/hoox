@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { types } from "node:util";
 import {
   assertControlledToolObservation,
@@ -18,25 +18,24 @@ import {
   type ToolCapabilityManifest,
 } from "@hoox/prompt-builder";
 import type { SandboxHandle } from "@hoox/sandbox";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import type {
   Api,
   AssistantMessage,
-  Context,
   ImageContent,
   Model,
+  Models,
   Provider,
-  SimpleStreamOptions,
   ToolResultMessage,
   UserMessage,
 } from "@earendil-works/pi-ai/compat";
 import {
-  type AgentSessionEvent,
-  createAgentSession,
-  type ModelRuntime,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+  Agent,
+  type AgentMessage,
+  type AgentTool,
+  type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import {
   type AgentControlPiToolExecutorPort,
   createAgentControlPiTools,
@@ -59,9 +58,8 @@ import {
   createDeliverFilePiTool,
   type DeliverFilePiToolExecutorPort,
 } from "./deliver-file-tool.js";
-import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { subscribeBufferedRuntimeEvents } from "./event-buffer.js";
-import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
+import { mapPiEvent, type PiAgentEvent, type RuntimeAgentEvent } from "./events.js";
 import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
 import {
   assertThreadActiveHistory,
@@ -74,16 +72,6 @@ import {
   type SandboxToolEffectAuthorizer,
   type SandboxToolHandleProvider,
 } from "./tools.js";
-
-interface PiSessionPort {
-  readonly isStreaming: boolean;
-  prompt(text: string, options?: { readonly images?: ImageContent[] }): Promise<void>;
-  steer(text: string, images?: ImageContent[]): Promise<void>;
-  followUp(text: string, images?: ImageContent[]): Promise<void>;
-  abort(): Promise<void>;
-  subscribe(listener: (event: AgentSessionEvent) => void): () => void;
-  dispose(): void;
-}
 
 export interface PiContextBudgetDiagnostics {
   readonly outcome: ContextBudgetDecision["outcome"];
@@ -111,22 +99,19 @@ export interface PiSessionDiagnostics {
   capabilityManifestDigest: string;
   promptDigest: string;
   compactionEnabled: false;
-  hasCompactionEntry: boolean;
   activeAgentMessageCount: number;
-  activeSessionEntryCount: number;
-  pendingMessageCount: number;
+  hasPendingMessages: boolean;
   contextBudget: Readonly<PiContextBudgetDiagnostics>;
 }
 
 export interface PiSessionController {
   prompt(text: string, images?: readonly ImageContent[]): Promise<void>;
   steer(text: string, images?: readonly ImageContent[]): Promise<void>;
-  followUp(text: string, images?: readonly ImageContent[]): Promise<void>;
   abort(): Promise<void>;
   dispose(): void;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
   /** @internal 在任何公开投影、聚合或截断前观察 Pi 原始事件。 */
-  subscribeInternal(listener: (event: AgentSessionEvent) => void): () => void;
+  subscribeInternal(listener: (event: PiAgentEvent) => void): () => void;
   getDiagnostics(): Readonly<PiSessionDiagnostics>;
 }
 
@@ -193,19 +178,17 @@ class DeferredProviderFailure {
 }
 
 class PiSessionControllerImpl implements PiSessionController {
-  readonly #session: PiSessionPort;
+  readonly #agent: Agent;
+  readonly #listeners = new Set<(event: PiAgentEvent) => void>();
+  readonly #stopAgentEvents: () => void;
   readonly #eventSubscriptions = new Set<() => void>();
   readonly #diagnostics: () => PiSessionDiagnostics;
   readonly #admitInput: (text: string) => void;
   readonly #providerFailure: DeferredProviderFailure;
   readonly #checkpoint: () => {
-    readonly leafId: string | null;
-    readonly messages: readonly unknown[];
+    readonly messages: readonly AgentMessage[];
   };
-  readonly #rollback: (checkpoint: {
-    readonly leafId: string | null;
-    readonly messages: readonly unknown[];
-  }) => void;
+  readonly #rollback: (checkpoint: { readonly messages: readonly AgentMessage[] }) => void;
   #activeGeneration: number | undefined;
   #activeTransaction:
     | {
@@ -217,17 +200,15 @@ class PiSessionControllerImpl implements PiSessionController {
   #nextGeneration = 1;
 
   constructor(
-    session: PiSessionPort,
+    agent: Agent,
     diagnostics: () => PiSessionDiagnostics,
     admitInput: (text: string) => void,
     providerFailure: DeferredProviderFailure,
-    checkpoint: () => { readonly leafId: string | null; readonly messages: readonly unknown[] },
-    rollback: (checkpoint: {
-      readonly leafId: string | null;
-      readonly messages: readonly unknown[];
-    }) => void,
+    checkpoint: () => { readonly messages: readonly AgentMessage[] },
+    rollback: (checkpoint: { readonly messages: readonly AgentMessage[] }) => void,
   ) {
-    this.#session = session;
+    this.#agent = agent;
+    this.#stopAgentEvents = agent.subscribe((event) => this.#emit(event));
     this.#diagnostics = diagnostics;
     this.#admitInput = admitInput;
     this.#providerFailure = providerFailure;
@@ -238,21 +219,17 @@ class PiSessionControllerImpl implements PiSessionController {
   async prompt(text: string, images: readonly ImageContent[] = []): Promise<void> {
     if (this.#activeGeneration !== undefined) throw new Error("PI_SESSION_TRANSACTION_ACTIVE");
     this.#admitInput(text);
-    await this.#runTransactional(() =>
-      this.#session.prompt(text, images.length === 0 ? undefined : { images: [...images] }),
-    );
+    await this.#runTransactional(() => this.#agent.prompt(text, [...images]));
   }
 
   async steer(text: string, images: readonly ImageContent[] = []): Promise<void> {
-    if (!this.#session.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
+    if (!this.#agent.state.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
     this.#admitInput(text);
-    await this.#session.steer(text, [...images]);
-  }
-
-  async followUp(text: string, images: readonly ImageContent[] = []): Promise<void> {
-    if (!this.#session.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
-    this.#admitInput(text);
-    await this.#session.followUp(text, [...images]);
+    this.#agent.steer({
+      role: "user",
+      content: [{ type: "text", text }, ...images],
+      timestamp: Date.now(),
+    });
   }
 
   async #runTransactional(action: () => Promise<void>): Promise<void> {
@@ -286,12 +263,17 @@ class PiSessionControllerImpl implements PiSessionController {
         throw providerFailure;
       }
     } finally {
-      this.#providerFailure.end(generation);
-      if (this.#activeGeneration === generation) this.#activeGeneration = undefined;
-      if (this.#activeTransaction?.generation === generation) {
-        const transaction = this.#activeTransaction;
-        this.#activeTransaction = undefined;
-        transaction.resolve();
+      try {
+        // agent_end 仍处于底层执行屏障内；回滚后才发布 settled，回调期间仍禁止 prompt 重入。
+        this.#emit({ type: "agent_settled" });
+      } finally {
+        this.#providerFailure.end(generation);
+        if (this.#activeGeneration === generation) this.#activeGeneration = undefined;
+        if (this.#activeTransaction?.generation === generation) {
+          const transaction = this.#activeTransaction;
+          this.#activeTransaction = undefined;
+          transaction.resolve();
+        }
       }
     }
   }
@@ -300,7 +282,8 @@ class PiSessionControllerImpl implements PiSessionController {
     // 只捕获调用 abort 时的 transaction；之后启动的新事务不属于本次同步屏障。
     const transaction = this.#activeTransaction;
     try {
-      await this.#session.abort();
+      this.#agent.abort();
+      await this.#agent.waitForIdle();
     } finally {
       await transaction?.completion;
     }
@@ -308,13 +291,15 @@ class PiSessionControllerImpl implements PiSessionController {
 
   dispose(): void {
     for (const unsubscribe of this.#eventSubscriptions) unsubscribe();
-    this.#session.dispose();
+    this.#stopAgentEvents();
+    this.#listeners.clear();
+    this.#agent.abort();
   }
 
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void {
     const stop = subscribeBufferedRuntimeEvents(
       (emit) =>
-        this.#session.subscribe((event) => {
+        this.subscribeInternal((event) => {
           const mapped = mapPiEvent(event);
           if (mapped !== undefined) emit(mapped);
         }),
@@ -328,8 +313,15 @@ class PiSessionControllerImpl implements PiSessionController {
     return unsubscribe;
   }
 
-  subscribeInternal(listener: (event: AgentSessionEvent) => void): () => void {
-    return this.#session.subscribe(listener);
+  subscribeInternal(listener: (event: PiAgentEvent) => void): () => void {
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  #emit(event: PiAgentEvent): void {
+    for (const listener of this.#listeners) listener(event);
   }
 
   getDiagnostics(): Readonly<PiSessionDiagnostics> {
@@ -343,7 +335,7 @@ const UTF8_BYTE_TOKENIZER = Object.freeze<TokenizerPort>({
 });
 const TRUSTED_MODEL_CAPABILITIES = new WeakMap<
   object,
-  Readonly<{ modelRuntime: ModelRuntime; registeredCompatibilityHash: string }>
+  Readonly<{ modelRuntime: Models; registeredCompatibilityHash: string }>
 >();
 export interface TrustedPiModelContextCapability {
   readonly model: Model<Api>;
@@ -354,7 +346,7 @@ export interface TrustedPiModelContextCapability {
 
 /** Provider/model registry 的唯一绑定入口；Session 不接受独立 descriptor 或裸 tokenizer。 */
 export function bindTrustedPiModelContextCapability(
-  modelRuntime: ModelRuntime,
+  modelRuntime: Models,
   model: Model<Api>,
   tokenizer?: TrustedModelTokenizerCapability,
 ): TrustedPiModelContextCapability {
@@ -366,7 +358,7 @@ export function bindTrustedPiModelContextCapability(
 
 /** @internal 仅供本包测试构造极端预算；未从包入口导出。 */
 export function bindTestingPiModelContextCapability(
-  modelRuntime: ModelRuntime,
+  modelRuntime: Models,
   model: Model<Api>,
   tokenizer: TokenizerPort,
 ): TrustedPiModelContextCapability {
@@ -374,7 +366,7 @@ export function bindTestingPiModelContextCapability(
 }
 
 function bindModelContextCapability(
-  modelRuntime: ModelRuntime,
+  modelRuntime: Models,
   model: Model<Api>,
   selected: TokenizerPort,
 ): TrustedPiModelContextCapability {
@@ -415,7 +407,7 @@ function bindModelContextCapability(
 export interface CreateSafePiSessionOptions {
   model: Model<Api>;
   modelContext: TrustedPiModelContextCapability;
-  modelRuntime: ModelRuntime;
+  modelRuntime: Models;
   /** 固定 Sandbox 只供测试和独立 smoke；生产 Worker 使用按需准备能力。 */
   sandbox?: SandboxHandle;
   prepareSandboxTool?: SandboxToolHandleProvider["prepareSandboxTool"];
@@ -500,16 +492,6 @@ export async function createSafePiSession(
   if (typeof options.createToolObservationRecorder !== "function") {
     throw new Error("生产 Pi Session 缺少 durable Tool Observation recorder");
   }
-  const settingsManager = SettingsManager.inMemory(
-    {
-      compaction: { enabled: false },
-      retry: { enabled: false },
-      // Runtime 已在 durable 安全点冻结有序批次；Pi 必须把该批次一次送入下一请求。
-      steeringMode: "all",
-    },
-    { projectTrusted: false },
-  );
-
   const material = buildSafeSessionMaterial(options);
   const { customTools, builtPrompt } = material;
   const budget = assessSafePiSessionContext(options, material);
@@ -518,61 +500,49 @@ export async function createSafePiSession(
     throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
   }
   const activeProjection = selectActiveProjection(options.rolloutProjection, budget.activeEntries);
-  const resourceLoader = new EmptyResourceLoader(builtPrompt.systemPrompt);
-  await resourceLoader.reload();
-  const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
-  for (const entry of builtPrompt.contextEntries) {
-    sessionManager.appendCustomMessageEntry(entry.customType, entry.content, false, entry.source);
-  }
-  for (const instruction of options.recoveredSkillInstructions ?? []) {
-    sessionManager.appendCustomMessageEntry(
-      "runtime.skill_instruction.v1",
-      instruction.modelText,
-      false,
-      {
-        name: instruction.name,
-        version: instruction.version,
-        digest: instruction.digest,
-        recovered: true,
-      },
-    );
-  }
-  if (options.explicitSkillInstruction !== undefined) {
-    sessionManager.appendCustomMessageEntry(
-      "runtime.skill_instruction.v1",
-      options.explicitSkillInstruction.modelText,
-      false,
-      {
-        name: options.explicitSkillInstruction.name,
-        version: options.explicitSkillInstruction.version,
-        digest: options.explicitSkillInstruction.digest,
-      },
-    );
-  }
+  // Runtime 直接提供模型消息，不建立第二份 Session 树，也不发现宿主资源。
+  const messages: AgentMessage[] = [];
+  const appendContext = (content: string) => {
+    messages.push({
+      role: "user",
+      content: [{ type: "text", text: content }],
+      timestamp: Date.now(),
+    });
+  };
+  for (const entry of builtPrompt.contextEntries) appendContext(entry.content);
+  for (const instruction of options.recoveredSkillInstructions ?? [])
+    appendContext(instruction.modelText);
+  if (options.explicitSkillInstruction !== undefined)
+    appendContext(options.explicitSkillInstruction.modelText);
   let activeThreadHistory = options.threadActiveHistory;
   if (activeThreadHistory !== undefined) {
     assertThreadActiveHistory(activeThreadHistory);
-    for (const message of providerVisibleThreadHistoryMessages(activeThreadHistory.messages)) {
-      sessionManager.appendMessage(toPiHistoryMessage(message));
-    }
-  }
-  const projectedContext = formatRolloutProjection(activeProjection);
-  if (projectedContext !== undefined) {
-    sessionManager.appendCustomMessageEntry(
-      "runtime.controlled_rollout_projection.v1",
-      projectedContext,
-      false,
-      { checkpointId: activeProjection?.checkpointId },
+    messages.push(
+      ...providerVisibleThreadHistoryMessages(activeThreadHistory.messages).map(toPiHistoryMessage),
     );
   }
+  const projectedContext = formatRolloutProjection(activeProjection);
+  if (projectedContext !== undefined) appendContext(projectedContext);
   const providerFailure = new DeferredProviderFailure();
   const providerBinding = await resolveProviderBinding(options);
-  const { session } = await createAgentSession({
-    // Pi 会按宿主平台规范化 cwd；本 Runtime 禁用其全部文件/命令内建工具，实际 I/O 只经
-    // 受控的 CubeSandbox 自定义工具执行，因此该值仅是 Session 的逻辑标签，不能用于宿主 I/O。
-    cwd: LOGICAL_WORKSPACE,
-    model: options.modelContext.model,
-    modelRuntime: providerGatedRuntime(
+  const agent = new Agent({
+    initialState: {
+      // 保留原 Linux 会话实际发送的固定上下文后缀，逻辑目录与宿主路径无关。
+      systemPrompt: `${builtPrompt.systemPrompt}\nCurrent working directory: ${LOGICAL_WORKSPACE}`,
+      model: options.modelContext.model,
+      thinkingLevel: clampThinkingLevel(
+        options.modelContext.model,
+        defaultModelThinkingLevel(options.modelContext.model),
+      ),
+      messages,
+      // Schema 在工具循环的参数验证后才调用 execute；异构工具只在注册边界擦除泛型。
+      tools: customTools as AgentTool[],
+    },
+    // durable 安全点已经冻结有序批次；底层必须一次送入下一请求。
+    steeringMode: "all",
+    // 亲和标识只属于传输层；同一内核跨轮稳定，不进入可缓存的系统提示词。
+    sessionId: randomUUID(),
+    streamFn: providerGatedStream(
       options,
       providerBinding,
       providerFailure,
@@ -581,25 +551,14 @@ export async function createSafePiSession(
         latestContextBudgetDecision = decision;
       },
     ),
-    thinkingLevel: defaultModelThinkingLevel(options.modelContext.model),
-    sessionManager,
-    settingsManager,
-    resourceLoader,
-    customTools,
-    // 双重白名单：即便 Pi 将来新增默认工具，也不会把宿主机工具暴露给模型。
-    noTools: "all",
-    tools: customTools.map((tool) => tool.name),
-    excludeTools: ["bash", "grep", "find", "ls"],
   });
   assertPiSessionCapabilityManifest({
-    readTools: () => session.agent.state.tools,
+    readTools: () => agent.state.tools,
     expected: builtPrompt.manifest,
-    dispose: () => session.dispose(),
+    dispose: () => agent.abort(),
   });
   if (options.prepareNextTurnHistory !== undefined) {
-    const previousPrepareNextTurn = session.agent.prepareNextTurnWithContext;
-    session.agent.prepareNextTurnWithContext = async (turn, signal) => {
-      const previous = await previousPrepareNextTurn?.(turn, signal);
+    agent.prepareNextTurnWithContext = async (turn) => {
       const mapped = mapPiEvent({
         type: "turn_end",
         message: turn.message,
@@ -607,7 +566,7 @@ export async function createSafePiSession(
       });
       if (mapped?.type !== "turn.completed") throw new TypeError("Pi turn 安全点事件无效");
       const replacement = await options.prepareNextTurnHistory?.(mapped);
-      if (replacement === undefined) return previous;
+      if (replacement === undefined) return undefined;
       assertThreadActiveHistory(replacement);
       if (
         activeThreadHistory !== undefined &&
@@ -615,36 +574,26 @@ export async function createSafePiSession(
       ) {
         throw new TypeError("Thread Active History cursor 回退");
       }
-      const messages = providerVisibleThreadHistoryMessages(replacement.messages).map(
+      const replacementMessages = providerVisibleThreadHistoryMessages(replacement.messages).map(
         toPiHistoryMessage,
       );
-      session.agent.state.messages = messages;
+      agent.state.messages = replacementMessages;
       activeThreadHistory = replacement;
-      const previousContext = previous?.context ?? turn.context;
-      return {
-        ...previous,
-        context: { ...previousContext, messages },
-      };
+      return { context: { ...turn.context, messages: replacementMessages } };
     };
   }
-
-  // 对外只返回窄能力对象；AgentSession（含 compact）保留在闭包和 #private 字段内。
   return new PiSessionControllerImpl(
-    session,
+    agent,
     () => ({
       logicalCwd: LOGICAL_WORKSPACE,
-      activeToolNames: session.agent.state.tools.map((tool) => tool.name),
+      activeToolNames: agent.state.tools.map((tool) => tool.name),
       promptSchemaVersion: builtPrompt.schemaVersion,
       promptVersion: builtPrompt.version,
       capabilityManifestDigest: builtPrompt.manifest.digest,
       promptDigest: builtPrompt.promptDigest,
       compactionEnabled: false,
-      hasCompactionEntry: session.sessionManager
-        .getEntries()
-        .some((entry) => entry.type === "compaction"),
-      activeAgentMessageCount: session.agent.state.messages.length,
-      activeSessionEntryCount: session.sessionManager.buildContextEntries().length,
-      pendingMessageCount: session.pendingMessageCount,
+      activeAgentMessageCount: agent.state.messages.length,
+      hasPendingMessages: agent.hasQueuedMessages(),
       contextBudget: contextBudgetDiagnostics(latestContextBudgetDecision),
     }),
     (text) =>
@@ -661,17 +610,10 @@ export async function createSafePiSession(
         },
       ),
     providerFailure,
-    () => ({
-      leafId: session.sessionManager.getLeafId(),
-      messages: session.agent.state.messages.slice(),
-    }),
+    () => ({ messages: agent.state.messages.slice() }),
     (checkpoint) => {
-      session.clearQueue();
-      session.agent.state.messages = [
-        ...checkpoint.messages,
-      ] as typeof session.agent.state.messages;
-      if (checkpoint.leafId === null) session.sessionManager.resetLeaf();
-      else session.sessionManager.branch(checkpoint.leafId);
+      agent.clearAllQueues();
+      agent.state.messages = [...checkpoint.messages];
     },
   );
 }
@@ -1008,6 +950,11 @@ async function resolveProviderBinding(
   const provider = options.modelRuntime.getProvider(options.model.provider);
   const resolution = await options.modelRuntime.getAuth(options.modelContext.model);
   if (provider === undefined || resolution === undefined) throw new ProviderBindingDriftError();
+  // 认证解析会让出执行权；恢复后必须重验注册表，不能沿用等待前捕获的 Provider。
+  assertTrustedModelCapability(options);
+  if (options.modelRuntime.getProvider(options.model.provider) !== provider) {
+    throw new ProviderBindingDriftError();
+  }
   const model = freezeModelSnapshot(
     resolution.auth.baseUrl === undefined
       ? options.modelContext.model
@@ -1057,107 +1004,74 @@ function assertResolvedProviderBinding(expected: ProviderBinding, current: Provi
 }
 
 /** 每次 Pi 真正请求 Provider 前解析并冻结路由，再按最终 Context 计量。 */
-function providerGatedRuntime(
+function providerGatedStream(
   options: CreateSafePiSessionOptions,
   binding: ProviderBinding,
   providerFailure: DeferredProviderFailure,
   assertInternalModelRequestAllowed: () => void,
   onContextBudgetDecision: (decision: ContextBudgetDecision) => void,
-): ModelRuntime {
-  const runtime = options.modelRuntime;
-  return new Proxy(runtime, {
-    get(target, property, receiver) {
-      if (property === "streamSimple") {
-        return (
-          model: Model<Api>,
-          context: Context,
-          streamOptions?: SimpleStreamOptions & {
-            transformHeaders?: (
-              headers: Record<string, string | null>,
-            ) => Promise<Record<string, string | null>>;
-            env?: Record<string, string>;
+): StreamFn {
+  return (model, context, streamOptions) =>
+    lazyStream(model, async () => {
+      try {
+        // Tool executor 内不能 await 当前 Session 的 abort，否则会与本轮完成屏障互相等待；
+        // 因此在下一模型轮次的同步入口再次检查 durable Observation 恢复闩锁。
+        assertInternalModelRequestAllowed();
+        options.assertModelRequestAllowed?.();
+        assertTrustedModelCapability(options);
+        if (model !== options.modelContext.model) throw new ProviderBindingDriftError();
+        const { onPayload, apiKey, headers, ...dynamicOptions } = streamOptions ?? {};
+        if (apiKey !== undefined || headers !== undefined) throw new ProviderBindingDriftError();
+        const beforeTransform = await resolveProviderBinding(options);
+        assertResolvedProviderBinding(binding, beforeTransform);
+        const decision = decideModelAwareContextBudget({
+          model: options.modelContext.descriptor,
+          trustedSystemPrompt: context.systemPrompt ?? "",
+          toolSchema: JSON.stringify(context.tools ?? []),
+          additionalFixedInputs: context.messages.map((message) => JSON.stringify(message)),
+          entries: [],
+          tokenizer: options.modelContext.tokenizer,
+        });
+        onContextBudgetDecision(decision);
+        if (decision.outcome !== "ready")
+          return providerFailure.reject(
+            new ContextBudgetAdmissionError("reserved_context_exceeds_window"),
+          );
+        const preparedOptions = Object.freeze({
+          // 保留原会话装配的传输超时与最大重试等待；不改变 Provider 自身重试策略。
+          ...dynamicOptions,
+          timeoutMs: dynamicOptions.timeoutMs ?? 300_000,
+          maxRetryDelayMs: dynamicOptions.maxRetryDelayMs ?? 60_000,
+          onPayload: async (payload: unknown, payloadModel: Model<Api>) => {
+            const transformed = await onPayload?.(payload, payloadModel);
+            return normalizeOfficialDeepSeekV4FlashPayload(
+              binding.model.id,
+              transformed === undefined ? payload : transformed,
+            );
           },
-        ) =>
-          lazyStream(model, async () => {
-            try {
-              // Tool executor 内不能 await 当前 Session 的 abort，否则会与本轮完成屏障互相等待；
-              // 因此在下一模型轮次的同步入口再次检查 durable Observation 恢复闩锁。
-              assertInternalModelRequestAllowed();
-              options.assertModelRequestAllowed?.();
-              assertTrustedModelCapability(options);
-              if (model !== options.modelContext.model) throw new ProviderBindingDriftError();
-              const { transformHeaders, onPayload, apiKey, headers, env, ...dynamicOptions } =
-                streamOptions ?? {};
-              if (apiKey !== undefined || headers !== undefined || env !== undefined)
-                throw new ProviderBindingDriftError();
-              const beforeTransform = await resolveProviderBinding(options);
-              assertResolvedProviderBinding(binding, beforeTransform);
-              const transformedHeaders = transformHeaders
-                ? await transformHeaders({ ...(beforeTransform.auth.headers ?? {}) })
-                : beforeTransform.auth.headers;
-              // transformHeaders 是唯一异步窗口；其后重新解析，再同步调用已捕获的实现。
-              const finalBinding = await resolveProviderBinding(options);
-              assertResolvedProviderBinding(binding, finalBinding);
-              const decision = decideModelAwareContextBudget({
-                model: options.modelContext.descriptor,
-                trustedSystemPrompt: context.systemPrompt ?? "",
-                toolSchema: JSON.stringify(context.tools ?? []),
-                additionalFixedInputs: context.messages.map((message) => JSON.stringify(message)),
-                entries: [],
-                tokenizer: options.modelContext.tokenizer,
-              });
-              onContextBudgetDecision(decision);
-              if (decision.outcome !== "ready")
-                return providerFailure.reject(
-                  new ContextBudgetAdmissionError("reserved_context_exceeds_window"),
-                );
-              const preparedOptions = Object.freeze({
-                ...dynamicOptions,
-                onPayload: async (payload: unknown, payloadModel: Model<Api>) => {
-                  const transformed = await onPayload?.(payload, payloadModel);
-                  return normalizeOfficialDeepSeekV4FlashPayload(
-                    binding.model.id,
-                    transformed === undefined ? payload : transformed,
-                  );
-                },
-                ...(binding.auth.apiKey === undefined ? {} : { apiKey: binding.auth.apiKey }),
-                ...(transformedHeaders === undefined
-                  ? {}
-                  : { headers: freezeProtocolRecord(transformedHeaders) }),
-                ...(binding.auth.env === undefined ? {} : { env: binding.auth.env }),
-              });
-              const invoke = () =>
-                binding.streamSimple.call(
-                  binding.provider,
-                  binding.model,
-                  context,
-                  preparedOptions,
-                );
-              return options.withProviderInvocation === undefined
-                ? invoke()
-                : options.withProviderInvocation(invoke);
-            } catch (error) {
-              if (
-                error instanceof ContextBudgetAdmissionError ||
-                error instanceof ModelContinuationRejectedError
-              ) {
-                return providerFailure.reject(error);
-              }
-              return providerFailure.reject(
-                error instanceof ProviderBindingDriftError
-                  ? error
-                  : new ProviderBindingDriftError(),
-              );
-            }
-          });
+          ...(binding.auth.apiKey === undefined ? {} : { apiKey: binding.auth.apiKey }),
+          ...(binding.auth.headers === undefined
+            ? {}
+            : { headers: freezeProtocolRecord(binding.auth.headers) }),
+          ...(binding.auth.env === undefined ? {} : { env: binding.auth.env }),
+        });
+        const invoke = () =>
+          binding.streamSimple.call(binding.provider, binding.model, context, preparedOptions);
+        return options.withProviderInvocation === undefined
+          ? invoke()
+          : options.withProviderInvocation(invoke);
+      } catch (error) {
+        if (
+          error instanceof ContextBudgetAdmissionError ||
+          error instanceof ModelContinuationRejectedError
+        ) {
+          return providerFailure.reject(error);
+        }
+        return providerFailure.reject(
+          error instanceof ProviderBindingDriftError ? error : new ProviderBindingDriftError(),
+        );
       }
-      if (property === "hasConfiguredAuth")
-        return (providerId: string) =>
-          providerId === binding.model.provider || runtime.hasConfiguredAuth(providerId);
-      const value = Reflect.get(target, property, receiver) as unknown;
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
+    });
 }
 
 function freezeModelSnapshot(model: Model<Api>): Model<Api> {

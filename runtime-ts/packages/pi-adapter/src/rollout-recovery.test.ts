@@ -3,7 +3,7 @@ import { encodeControlledToolReceipt } from "@hoox/context-policy";
 import { type RuntimeRolloutEntry, sha256Digest } from "@hoox/domain";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createModels } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
   assessSafePiSessionContext,
@@ -390,41 +390,38 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
     });
   });
 
-  it.runIf(process.platform === "linux")(
-    "Linux Faux Pi 从 PG loaded 形状创建全新 Session，且无 compaction 入口",
-    async () => {
-      const harness = await sessionHarness();
-      harness.faux.setResponses([fauxAssistantMessage("恢复后继续")]);
-      const deliverFileToolRouter = {
-        deliverFile: async () => ({ status: "published", download_ready: true }),
-        projectError: () => ({
-          status: "failed" as const,
-          code: "SERVICE_UNAVAILABLE",
-          message: "暂不可用",
-          correctable: false,
-          fatal: false,
-        }),
-      };
-      const result = await recoverSafePiSession({
-        ...harness.options,
-        deliverFileToolRouter,
-        loadRecovery: async (current) => ({
-          ...loaded([entry(0, "user", { text: "恢复前的问题" })]),
-          recordedCompatibility: current,
-        }),
-      });
-      expect(result.outcome).toBe("session_created");
-      if (result.outcome !== "session_created") return;
-      try {
-        expect(result.controller.getDiagnostics().compactionEnabled).toBe(false);
-        expect(result.controller.getDiagnostics().activeToolNames).toContain("deliver_file");
-        expect("compact" in result.controller).toBe(false);
-        await result.controller.prompt("恢复后的输入");
-      } finally {
-        result.controller.dispose();
-      }
-    },
-  );
+  it("Faux Pi 从 PG loaded 形状创建全新 Session，且无 compaction 入口", async () => {
+    const harness = await sessionHarness();
+    harness.faux.setResponses([fauxAssistantMessage("恢复后继续")]);
+    const deliverFileToolRouter = {
+      deliverFile: async () => ({ status: "published", download_ready: true }),
+      projectError: () => ({
+        status: "failed" as const,
+        code: "SERVICE_UNAVAILABLE",
+        message: "暂不可用",
+        correctable: false,
+        fatal: false,
+      }),
+    };
+    const result = await recoverSafePiSession({
+      ...harness.options,
+      deliverFileToolRouter,
+      loadRecovery: async (current) => ({
+        ...loaded([entry(0, "user", { text: "恢复前的问题" })]),
+        recordedCompatibility: current,
+      }),
+    });
+    expect(result.outcome).toBe("session_created");
+    if (result.outcome !== "session_created") return;
+    try {
+      expect(result.controller.getDiagnostics().compactionEnabled).toBe(false);
+      expect(result.controller.getDiagnostics().activeToolNames).toContain("deliver_file");
+      expect("compact" in result.controller).toBe(false);
+      await result.controller.prompt("恢复后的输入");
+    } finally {
+      result.controller.dispose();
+    }
+  });
 });
 
 async function sessionHarness() {
@@ -433,12 +430,13 @@ async function sessionHarness() {
     provider: `faux-recovery-${Date.now()}-${Math.random()}`,
     tokensPerSecond: 10_000,
   });
-  const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
-    modelsPath: null,
-  });
-  modelRuntime.registerNativeProvider(faux.provider);
-  await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify(faux.provider.id, async () => ({
+    type: "api_key",
+    key: "test-only-key",
+  }));
+  const modelRuntime = createModels({ credentials });
+  modelRuntime.setProvider(faux.provider);
   const model = faux.getModel();
   return {
     faux,

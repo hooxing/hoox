@@ -165,6 +165,8 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 
 Worker 通过 `pi-adapter` 直接装配 `pi-ai` 的 `Models`、Provider 和内存凭据，并用 `pi-agent-core` 的 `Agent` 执行受控工具循环。逻辑工作目录固定为 `/workspace`，实际 system prompt 保留固定后缀 `\nCurrent working directory: /workspace`，不使用宿主路径或资源发现。每个内核实例的随机 `sessionId` 跨轮稳定，仅传给 Provider，不进入 prompt。Provider 流默认超时为 300,000ms，重试等待上限为 60,000ms；上层自动重试与自动压缩不启用。内核和目录取舍见 [Pi 内核收敛决策](../decisions/20260906001531-pi-kernel-and-shared-model-catalog.md)，持久恢复与安全点见 [Thread 连续上下文](../architecture/thread-continuity.md)。
 
+成功 Run 的终态事务仍可登记记忆 Outbox。消费者按 Run 固定配置解析提供方，关闭时以 `skipped` 结束本地消费并释放 claim，保留已有 Provider 事件与提交时间，不伪造成功或计入失败。`skipped` 不参与后续领取、待处理统计和 Tenant 调度；维护成功后正常释放 Tenant 租约。升级必须先应用 0059 迁移，再启动新 Worker；已有积压等待租约到期后自动重领收尾，无需手工改状态。存在 `skipped` 时数据库 down 拒绝回退，应用回退可以保留扩展 schema。决策及兼容边界见[关闭记忆的消费终态](../decisions/20260906163952-disabled-memory-ingestion-terminal-state.md)。
+
 启用配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
 `run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本及其托管密钥。没有已启用模型时回退部署时
 `MODEL_*` 配置。模型页面必须直接显示当前 Provider 与默认模型或部署回退，并标明只影响新 Run；Provider 密钥只显示配置状态，

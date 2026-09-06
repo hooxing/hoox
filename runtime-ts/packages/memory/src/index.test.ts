@@ -206,6 +206,7 @@ class FakeIngestionStore implements MemoryIngestionStore {
   readonly submitted = vi.fn(async () => true);
   readonly deferPoll = vi.fn(async () => true);
   readonly complete = vi.fn(async () => true);
+  readonly skip = vi.fn(async () => true);
   readonly fail = vi.fn(async () => true);
 
   constructor(readonly claim: MemoryIngestionClaim | undefined) {}
@@ -223,7 +224,7 @@ const ingestionClaim = Object.freeze({
 }) satisfies MemoryIngestionClaim;
 
 describe("记忆异步 Outbox 消费器", () => {
-  it("按 claim 解析 Provider，Run 配置关闭时直接完成而不出站", async () => {
+  it("按 claim 解析 Provider，Run 配置关闭时跳过消费而不伪造成功", async () => {
     const store = new FakeIngestionStore(ingestionClaim);
     const resolver = { resolve: vi.fn(async () => undefined) };
     const consumer = new MemoryIngestionConsumer(
@@ -238,7 +239,8 @@ describe("记忆异步 Outbox 消费器", () => {
 
     await expect(consumer.drainTenant("tenant-a")).resolves.toBe(1);
     expect(resolver.resolve).toHaveBeenCalledWith(ingestionClaim);
-    expect(store.complete).toHaveBeenCalledWith(ingestionClaim);
+    expect(store.skip).toHaveBeenCalledWith(ingestionClaim);
+    expect(store.complete).not.toHaveBeenCalled();
     expect(store.submitted).not.toHaveBeenCalled();
   });
 
@@ -261,6 +263,27 @@ describe("记忆异步 Outbox 消费器", () => {
     await expect(consumer.drainTenant("tenant-a")).resolves.toBe(1);
     expect(store.submitted).toHaveBeenCalledWith(ingestionClaim, { eventId, status: "PENDING" });
     expect(store.complete).not.toHaveBeenCalled();
+  });
+
+  it("关闭记忆后的陈旧 claim 不计为消费成功，持久化失败继续交给维护重试", async () => {
+    const store = new FakeIngestionStore({ ...ingestionClaim, providerEventId: eventId });
+    const consumer = new MemoryIngestionConsumer(
+      store,
+      { resolve: async () => undefined },
+      "worker-a",
+      30_000,
+      5,
+      1_000,
+      2_000,
+    );
+    store.skip.mockResolvedValueOnce(false);
+    await expect(consumer.drainTenant("tenant-a")).resolves.toBe(0);
+    const failure = new Error("PERSISTENCE_UNAVAILABLE");
+    store.skip.mockRejectedValueOnce(failure);
+    await expect(consumer.drainTenant("tenant-a")).rejects.toBe(failure);
+    expect(store.skip).toHaveBeenCalledWith(store.claim);
+    expect(store.complete).not.toHaveBeenCalled();
+    expect(store.fail).not.toHaveBeenCalled();
   });
 
   it("已提交任务轮询成功后才完成", async () => {

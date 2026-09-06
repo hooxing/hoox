@@ -1,6 +1,7 @@
 # ADR-20260906195752：后台按管理任务保存配置与发布技能
 
-- 状态：已接受
+- 状态：部分已替代
+- 被部分替代：[ADR-20260906211335](20260906211335-admin-live-configuration-and-memory-credentials.md)。运行参数归部署配置、记忆依赖托管模型及 Mem0 密钥仅由部署提供的结论由新决策替代；一次保存、自动审计、隐藏内部版本、Skill 直发与权限边界继续有效。
 - 日期：2026-09-06
 - 决策者：Runtime 维护者
 - 当前说明：[配置参考](../reference/configuration.md)、[身份与会话](../architecture/identity-and-session.md)、[Skill Runtime](../architecture/skill-runtime.md)、[维护者开发边界](../maintainers/runtime-development-boundaries.md)

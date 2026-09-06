@@ -1159,6 +1159,31 @@ body {
   padding-top: 30px;
 }
 
+.memory-control-form,
+.memory-control-form .memory-configuration-fields {
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+}
+
+.memory-control-form .wide {
+  grid-column: 1 / -1;
+}
+
+.memory-control-form .checkbox {
+  padding-top: 0;
+}
+
+.memory-control-form input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+
+.memory-control-form .primary-button {
+  justify-self: start;
+  min-width: 160px;
+}
+
 .control-form input:not([type="checkbox"]):not([type="radio"]),
 .control-form select,
 .control-form textarea,
@@ -2105,6 +2130,29 @@ body {
 .runtime-settings-workspace {
   display: grid;
   gap: 16px;
+}
+
+.runtime-settings-form {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 960px;
+}
+
+.runtime-settings-form fieldset {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.runtime-settings-form details > .form-grid {
+  margin-top: 16px;
+}
+
+.runtime-settings-form .primary-button {
+  justify-self: start;
+  min-width: 160px;
 }
 
 .runtime-settings-guide {

@@ -58,6 +58,13 @@ export class ModelProviderCredentialCipher {
       decipher.final(),
     ]).toString("utf8");
   }
+
+  /** 独立用途派生稳定的记忆隔离密钥，不能随 Mem0 API Key 更新而改变用户标识。 */
+  memoryScopeHmacKey(): string {
+    return Buffer.from(
+      hkdfSync("sha256", this.key, Buffer.from("hoox-memory-scope"), Buffer.from("v1"), 32),
+    ).toString(encoding);
+  }
 }
 
 export function isEncryptedModelProviderCredential(

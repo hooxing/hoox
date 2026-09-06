@@ -40,7 +40,7 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       runId: input.scope.runId,
     });
     const modelMaxOutputTokens =
-      snapshot === undefined
+      snapshot?.model === undefined
         ? this.deploymentModelMaxOutputTokens
         : defaultModelConfiguration(snapshot.model.configuration).maxTokens;
     const savedCompactionSettings = await this.compactionSettings.resolveForRun({
@@ -61,8 +61,8 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       maxOutputTokens: Math.min(savedCompactionSettings.maxOutputTokens, modelMaxOutputTokens),
     };
     const key = [
-      snapshot?.model.configuration.providerKey ?? "deployment",
-      snapshot?.model.revision ?? 0,
+      snapshot?.model?.configuration.providerKey ?? "deployment",
+      snapshot?.model?.revision ?? 0,
       compactionSettings.softLimitPercent,
       compactionSettings.targetPercent,
       compactionSettings.recentUserTokens,
@@ -94,6 +94,7 @@ export class RuntimeConfiguredMemoryProvider implements MemoryRetriever, MemoryP
     private readonly configurations: RuntimeControlConfigurationPort,
     private readonly deploymentSecrets: RuntimeMemoryDeploymentSecrets | undefined,
     private readonly fallback?: Mem0PlatformMemoryProvider,
+    private readonly platformScopeHmacKey?: string,
   ) {}
 
   async resolve(
@@ -105,15 +106,27 @@ export class RuntimeConfiguredMemoryProvider implements MemoryRetriever, MemoryP
     });
     if (snapshot === undefined) return this.fallback;
     const memory = snapshot.memory;
-    if (memory === undefined || !memory.configuration.enabled) return undefined;
-    if (this.deploymentSecrets === undefined) throw new Error("MEMORY_DEPLOYMENT_SECRETS_MISSING");
+    if (memory === undefined) return snapshot.model === undefined ? this.fallback : undefined;
+    if (!memory.configuration.enabled) return undefined;
+    const apiKey =
+      memory.configuration.apiSecretRef === "managed:memory-api"
+        ? snapshot.memoryApiKey
+        : this.deploymentSecrets?.apiKey;
+    // 优先保留既有隔离密钥，接管 API Key 不能改变已有用户的记忆命名空间。
+    const scopeHmacKey =
+      this.deploymentSecrets?.scopeHmacKey ??
+      (memory.configuration.scopeSecretRef === "platform:memory-scope"
+        ? this.platformScopeHmacKey
+        : undefined);
+    if (apiKey === undefined || scopeHmacKey === undefined)
+      throw new Error("MEMORY_DEPLOYMENT_SECRETS_MISSING");
     const key = `${memory.configuration.providerKey}:${memory.revision}`;
     let provider = this.providers.get(key);
     if (provider === undefined) {
       provider = new Mem0PlatformMemoryProvider({
         baseUrl: memory.configuration.baseUrl,
-        apiKey: this.deploymentSecrets.apiKey,
-        scopeHmacKey: this.deploymentSecrets.scopeHmacKey,
+        apiKey,
+        scopeHmacKey,
         timeoutMs: memory.configuration.requestTimeoutMs,
       });
       this.providers.set(key, provider);

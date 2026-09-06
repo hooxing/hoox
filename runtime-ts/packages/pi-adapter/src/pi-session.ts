@@ -66,6 +66,7 @@ import {
   providerVisibleThreadHistoryMessages,
   type ThreadActiveHistoryV1,
 } from "./thread-history.js";
+import { publicToolParameters, runtimeToolParameters } from "./tool-parameter-schemas.js";
 import { createTodoWritePiTool, type TodoWritePiToolExecutorPort } from "./todo-write-tool.js";
 import {
   createObservedSandboxTools,
@@ -536,7 +537,10 @@ export async function createSafePiSession(
       ),
       messages,
       // Schema 在工具循环的参数验证后才调用 execute；异构工具只在注册边界擦除泛型。
-      tools: customTools as AgentTool[],
+      tools: customTools.map((tool) => ({
+        ...tool,
+        parameters: runtimeToolParameters(tool.parameters),
+      })) as AgentTool[],
     },
     // durable 安全点已经冻结有序批次；底层必须一次送入下一请求。
     steeringMode: "all",
@@ -874,7 +878,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     capabilities: customTools.map((tool) => ({
       id: tool.name,
       description: tool.description,
-      inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
+      inputSchemaDigest: digestCanonicalToolInputSchema(publicToolParameters(tool.parameters)),
     })),
     availableSkills: isEnabled("skill") ? (options.availableSkills ?? []) : [],
     ...(options.personalizationPromptContent === undefined
@@ -1011,9 +1015,21 @@ function providerGatedStream(
   assertInternalModelRequestAllowed: () => void,
   onContextBudgetDecision: (decision: ContextBudgetDecision) => void,
 ): StreamFn {
-  return (model, context, streamOptions) =>
+  return (model, runtimeContext, streamOptions) =>
     lazyStream(model, async () => {
       try {
+        const context = {
+          ...runtimeContext,
+          ...(runtimeContext.tools === undefined
+            ? {}
+            : {
+                tools: runtimeContext.tools.map((tool) => ({
+                  name: tool.name,
+                  description: tool.description,
+                  parameters: publicToolParameters(tool.parameters),
+                })),
+              }),
+        };
         // Tool executor 内不能 await 当前 Session 的 abort，否则会与本轮完成屏障互相等待；
         // 因此在下一模型轮次的同步入口再次检查 durable Observation 恢复闩锁。
         assertInternalModelRequestAllowed();
@@ -1273,7 +1289,7 @@ export function assertPiSessionCapabilityManifest(input: {
       input.readTools().map((tool) => ({
         id: tool.name,
         description: tool.description,
-        inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
+        inputSchemaDigest: digestCanonicalToolInputSchema(publicToolParameters(tool.parameters)),
       })),
     );
     if (

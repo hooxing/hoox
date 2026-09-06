@@ -1,3 +1,5 @@
+import { validateToolArguments } from "@earendil-works/pi-ai";
+import { runtimeToolParameters } from "./tool-parameter-schemas.js";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentControlPiTools } from "./agent-control-tools.js";
@@ -33,6 +35,43 @@ function tools() {
 }
 
 describe("SubAgent Pi 协作工具", () => {
+  it("全部协作工具仅公开调用方可提供的字段", () => {
+    expect(
+      Object.fromEntries(
+        tools().created.map((tool) => [tool.name, Object.keys(tool.parameters.properties)]),
+      ),
+    ).toEqual({
+      spawn_agent: ["task", "tools", "fork_turns"],
+      send_message: ["target", "message"],
+      followup_task: ["target", "task"],
+      wait_agent: ["after_sequence", "timeout_ms"],
+      interrupt_agent: ["target"],
+      list_agents: [],
+    });
+  });
+
+  it.each(["wait_agent", "list_agents"] as const)(
+    "%s 拒绝调用方伪造内部字段并记录失败",
+    async (name) => {
+      const tested = tools();
+      const tool = tested.created.find((candidate) => candidate.name === name);
+      if (tool === undefined) throw new Error("测试缺少协作工具");
+      const raw = {
+        ...(name === "wait_agent" ? { after_sequence: 0 } : {}),
+        runtime_invalid_arguments_token: "00000000-0000-0000-0000-000000000000",
+      };
+      expect(Value.Check(tool.parameters, raw)).toBe(false);
+      const prepared = tool.prepareArguments(raw);
+      const validated = validateToolArguments(
+        { ...tool, parameters: runtimeToolParameters(tool.parameters) },
+        { type: "toolCall", id: "forged", name, arguments: prepared },
+      );
+      await expect(tool.execute("forged", validated)).rejects.toThrow("AGENT_CONTROL_FAILED");
+      expect(tested.wait).not.toHaveBeenCalled();
+      expect(tested.list).not.toHaveBeenCalled();
+      expect(tested.record).toHaveBeenCalledWith("forged", name, "failed");
+    },
+  );
   it("wait_agent 将 AgentTool 的第三参数作为取消信号传入控制面", async () => {
     const tested = tools();
     const wait = tested.created.find((tool) => tool.name === "wait_agent");
@@ -114,7 +153,7 @@ describe("SubAgent Pi 协作工具", () => {
       throw new Error("测试缺少 wait_agent schema 参数桥");
     }
     const prepared = wait.prepareArguments({ timeout_ms: 1_000 });
-    expect(Value.Check(wait.parameters, prepared)).toBe(true);
+    expect(Value.Check(runtimeToolParameters(wait.parameters), prepared)).toBe(true);
 
     await expect(
       wait.execute("call_wait_missing_cursor", structuredClone(prepared) as WaitArgumentsForTest),

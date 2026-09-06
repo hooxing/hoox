@@ -17,6 +17,8 @@ Root Agent 可以创建可复用的独立子 Agent 对话。子 Agent 拥有自�
 | `interrupt_agent` | 中断当前 Turn，并等待 durable settle 后返回 |
 | `list_agents` | 返回当前 Agent 树和稳定状态摘要 |
 
+`wait_agent` 的公开参数只有必填的 `after_sequence` 和可选的 `timeout_ms`；`list_agents` 接收空对象。Runtime 用于识别非法参数的占位字段只参与内部校验，不进入模型工具定义、公开能力摘要或上下文预算。调用方提供内部字段或其他未声明字段时，调用失败并写入 durable 失败回执，不执行控制面操作。分层理由见 [ADR-20260906211950](../decisions/20260906211950-private-tool-validation-schema.md)。
+
 Runtime 对可创建的子 Agent 总数和同时运行数量设置上限。Agent Thread、Turn、命令、mailbox 和终态都持久化；Worker 重启后不能依赖内存对象恢复协作状态。子 Agent 不获得 Root 协作工具，创建后也不能扩大工具集合。
 
 ## Todo

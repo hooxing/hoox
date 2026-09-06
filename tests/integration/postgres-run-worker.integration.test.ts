@@ -33,6 +33,8 @@ import {
   runtimeMutationDigest,
 } from "@hoox/run-contracts/mutation-protocol";
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
+import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
+import { performWorkerMaintenance } from "../../runtime-ts/apps/agent-worker/src/worker-maintenance.js";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -2152,6 +2154,264 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       { generation: "2", resource_filesystem_mounted: true, state: "running" },
     ]);
   });
+
+  it.each(["pending", "expired", "submitted"] as const)(
+    "关闭记忆将 %s 任务收尾为 skipped，释放租户租约并立即领取新 Run",
+    async (initialState) => {
+      const migrationContext = {
+        runtimeRole,
+        migratorRole,
+        skillPublisherRole,
+        workerCoordinatorRole,
+        teamCoordinatorRole,
+        adminControlRole,
+        schema,
+      };
+      if (initialState === "pending") {
+        await migrateDown(migrator, {
+          ...migrationContext,
+          targetVersion: 58,
+          allowDestructive: true,
+          environment: "test",
+        });
+      }
+      const base = await serialQueueFixture(`memory-skip-${initialState}-${suffix}`);
+      const sourceRun = createRun({
+        id: runId(`memory-source-${initialState}-${suffix}`),
+        thread: base.thread,
+        now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+      });
+      const f = {
+        ...base,
+        scope: {
+          tenantId: base.tenantScope.tenantId,
+          threadId: base.thread.id,
+          runId: sourceRun.id,
+          rootRunId: sourceRun.id,
+          workspaceId: base.workspace.id,
+        },
+      };
+      const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+      const memoryPersistence = new PgExecutionPersistence(runtime, {
+        threadContextWriteEnabled: true,
+        memoryIngestionEnabled: true,
+      });
+      await creation.createQueuedRun({
+        scope: f.tenantScope,
+        run: sourceRun,
+        thread: f.thread,
+        inputText: "生成记忆关闭回归的来源消息",
+        idempotency: { key: `memory-source-${initialState}`, requestHash: requestDigest("source") },
+      });
+      const sourceDispatch = (
+        await runDispatchOutbox.claim({
+          tenantId: f.scope.tenantId,
+          dispatcherId: "memory-fixture-dispatcher",
+          limit: 1,
+          leaseMilliseconds: 30_000,
+        })
+      )[0];
+      if (sourceDispatch === undefined) throw new Error("记忆来源 dispatch 缺失");
+      const runClaim = await memoryPersistence.claim({
+        scope: f.scope,
+        workerId: "memory-fixture-worker",
+        leaseDurationMs: 30_000,
+      });
+      if (runClaim.outcome !== "claimed") throw new Error("记忆来源 Attempt 缺失");
+      expect(
+        await memoryPersistence.mutate(
+          signed({
+            idempotencyKey: `${runClaim.snapshot.attempt.attemptId}/running`,
+            fence: runClaim.fence,
+            expectedAttemptVersion: 0,
+            nextAttemptStatus: "running",
+            events: [],
+            outbox: [],
+          }),
+        ),
+      ).toMatchObject({ outcome: "applied" });
+      expect(
+        await memoryPersistence.mutate(
+          signed({
+            idempotencyKey: `${runClaim.snapshot.attempt.attemptId}/finalizing`,
+            fence: runClaim.fence,
+            expectedAttemptVersion: 1,
+            nextAttemptStatus: "finalizing",
+            nextStage: "finalizing",
+            events: [],
+            outbox: [],
+          }),
+        ),
+      ).toMatchObject({ outcome: "applied" });
+      expect(
+        await memoryPersistence.mutate(
+          signed({
+            idempotencyKey: `${runClaim.snapshot.attempt.attemptId}/terminal`,
+            fence: runClaim.fence,
+            expectedAttemptVersion: 2,
+            nextAttemptStatus: "succeeded",
+            nextStage: "finished",
+            nextRunStatus: "succeeded",
+            releaseFences: true,
+            events: [],
+            outbox: [],
+            threadContextAppend: {
+              schemaVersion: 1,
+              idempotencyKey: `${runClaim.snapshot.attempt.attemptId}/context/terminal`,
+              entries: (
+                [
+                  {
+                    kind: "workspace_unchanged",
+                    value: { outcome: "unchanged", revisionId: null },
+                  },
+                  { kind: "run_terminal", value: { status: "succeeded" } },
+                ] as const
+              ).map(({ kind, value }) => ({
+                entryId: `${runClaim.snapshot.attempt.attemptId}/${kind}`,
+                kind,
+                body: {
+                  storage: "inline" as const,
+                  value,
+                  sha256: digestCanonical(value),
+                  size: Buffer.byteLength(JSON.stringify(value), "utf8"),
+                },
+              })),
+            },
+          }),
+        ),
+      ).toMatchObject({ outcome: "applied", run: { status: "succeeded" } });
+      await runDispatchOutbox.acknowledge({ claim: sourceDispatch, outcome: "terminal" });
+      const store = new PgMemoryIngestionStore(runtime, {} as BlobStore);
+      const claim = await store.claimNext({
+        tenantId: f.scope.tenantId,
+        workerId: "memory-old-worker",
+        leaseMs: 30_000,
+      });
+      if (claim === undefined) throw new Error("记忆任务缺失");
+      await expect(store.complete(claim)).rejects.toThrow("记忆成功必须具有 Provider 事件");
+      // 直接走数据库验证 succeeded 约束仍在，不能通过放宽成功语义修复关闭分支。
+      await expect(
+        withTenantTransaction(runtime, f.scope, (client) =>
+          client.query(
+            `UPDATE memory_ingestion_outbox SET state='succeeded',completed_at=clock_timestamp(),
+               claim_token=NULL,claimed_by=NULL,claim_expires_at=NULL
+             WHERE tenant_id=$1 AND run_id=$2`,
+            [f.scope.tenantId, f.scope.runId],
+          ),
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      if (initialState === "pending") {
+        await migrateUp(migrator, migrationContext);
+      }
+      const eventId = "ba2763d6-284d-4d01-b5ca-cac9f98d99db";
+      if (initialState === "submitted") {
+        await store.submitted(claim, { eventId, status: "PENDING" });
+      }
+      await withTenantTransaction(runtime, f.scope, (client) =>
+        client.query(
+          initialState === "expired"
+            ? `UPDATE memory_ingestion_outbox SET claim_expires_at=clock_timestamp()-interval '1 second'
+                 WHERE tenant_id=$1 AND run_id=$2`
+            : `UPDATE memory_ingestion_outbox SET state=$3,claim_token=NULL,claimed_by=NULL,
+                 claim_expires_at=NULL,next_attempt_at=clock_timestamp()
+                 WHERE tenant_id=$1 AND run_id=$2`,
+          initialState === "expired"
+            ? [f.scope.tenantId, f.scope.runId]
+            : [f.scope.tenantId, f.scope.runId, initialState],
+        ),
+      );
+      const assignment = {
+        tenantId: f.scope.tenantId,
+        workerId: "memory-maintenance-worker",
+        generation: 1,
+        claimToken: randomUUID(),
+      };
+      await workerCoordinator.query(
+        `UPDATE worker_tenant_assignments SET state='claimed',generation=$2,claim_token=$3,
+           claimed_by=$4,lease_expires_at=clock_timestamp()+interval '5 minutes'
+         WHERE tenant_id=$1`,
+        [assignment.tenantId, assignment.generation, assignment.claimToken, assignment.workerId],
+      );
+      const consumer = new MemoryIngestionConsumer(
+        store,
+        { resolve: async () => undefined },
+        "memory-maintenance-worker",
+        30_000,
+        5,
+        1_000,
+        2_000,
+      );
+      await performWorkerMaintenance({
+        recoverResourceBlobs: async () => ({ claimed: 0, converged: 0 }),
+        drainMemory: () => consumer.drainTenant(f.scope.tenantId),
+        drainScheduledTasks: async () => undefined,
+        resourceBlobBatchLimit: 16,
+      });
+      expect(await store.skip(claim)).toBe(false);
+      expect(await consumer.drainTenant(f.scope.tenantId)).toBe(0);
+      expect(await workerTenantAssignments.settle(assignment)).toBe(true);
+      const state = await withTenantTransaction(runtime, f.scope, (client) =>
+        client.query(
+          `SELECT state,provider_event_id,submitted_at,completed_at,claim_token,claim_expires_at,
+                  claim_generation::text FROM memory_ingestion_outbox WHERE tenant_id=$1 AND run_id=$2`,
+          [f.scope.tenantId, f.scope.runId],
+        ),
+      );
+      expect(state.rows[0]).toMatchObject({
+        state: "skipped",
+        provider_event_id: initialState === "submitted" ? eventId : null,
+        submitted_at: initialState === "submitted" ? expect.any(Date) : null,
+        completed_at: expect.any(Date),
+        claim_token: null,
+        claim_expires_at: null,
+        claim_generation: "2",
+      });
+      if (initialState === "pending") {
+        await expect(
+          migrateDown(migrator, {
+            ...migrationContext,
+            targetVersion: 58,
+            allowDestructive: true,
+            environment: "test",
+          }),
+        ).rejects.toMatchObject({ code: "UNEXPECTED" });
+        const protection = await admin.query(
+          "SELECT relforcerowsecurity FROM pg_class WHERE oid=to_regclass($1)",
+          [`${schema}.memory_ingestion_outbox`],
+        );
+        expect(protection.rows[0]?.relforcerowsecurity).toBe(true);
+      }
+      const settled = await workerCoordinator.query(
+        "SELECT state,lease_expires_at FROM worker_tenant_assignments WHERE tenant_id=$1",
+        [f.scope.tenantId],
+      );
+      expect(settled.rows[0]).toEqual({ state: "idle", lease_expires_at: null });
+      const nextRun = createRun({
+        id: runId(`memory-next-${initialState}-${suffix}`),
+        thread: f.thread,
+        now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+      });
+      await creation.createQueuedRun({
+        scope: { tenantId: tenantId(f.scope.tenantId), userId: f.user.id },
+        run: nextRun,
+        thread: f.thread,
+        inputText: "验证记忆关闭后的调度",
+        idempotency: { key: `memory-next-${initialState}`, requestHash: requestDigest("next") },
+      });
+      const ready = await workerCoordinator.query(
+        "SELECT state,next_attempt_at<=clock_timestamp() AS due FROM worker_tenant_assignments WHERE tenant_id=$1",
+        [f.scope.tenantId],
+      );
+      expect(ready.rows[0]).toEqual({ state: "ready", due: true });
+      const dispatches = await runDispatchOutbox.claim({
+        tenantId: f.scope.tenantId,
+        dispatcherId: "memory-next-worker",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      });
+      expect(dispatches[0]?.scope.runId).toBe(nextRun.id);
+    },
+  );
 
   it("阶段 2 让 Run B 只读取激活时冻结的 Run A 历史，重启重建 digest 稳定", async () => {
     const f = await serialQueueFixture(`context-v2-${suffix}`);

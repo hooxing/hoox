@@ -191,6 +191,9 @@ export class PgMemoryIngestionStore implements MemoryIngestionStore {
     if (submission !== undefined && submission.status !== "SUCCEEDED") {
       throw new TypeError("只有已成功的记忆提交可以直接完成");
     }
+    if (submission === undefined && claim.providerEventId === undefined) {
+      throw new TypeError("记忆成功必须具有 Provider 事件；关闭记忆应跳过消费");
+    }
     return await this.updateClaim(
       claim,
       `state='succeeded',provider_event_id=COALESCE($5::uuid,provider_event_id),
@@ -198,6 +201,15 @@ export class PgMemoryIngestionStore implements MemoryIngestionStore {
        claim_token=NULL,claimed_by=NULL,claim_expires_at=NULL,completed_at=clock_timestamp(),
        last_error_code=NULL,updated_at=clock_timestamp()`,
       [submission?.eventId ?? null],
+    );
+  }
+
+  async skip(claim: MemoryIngestionClaim): Promise<boolean> {
+    return await this.updateClaim(
+      claim,
+      `state='skipped',claim_token=NULL,claimed_by=NULL,claim_expires_at=NULL,
+       completed_at=clock_timestamp(),last_error_code=NULL,updated_at=clock_timestamp()`,
+      [],
     );
   }
 

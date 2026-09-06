@@ -179,7 +179,7 @@
 | [ADR-0151：开发 Worker 启动前自编译应用入口](0151-development-worker-self-build.md) | 已接受 | 2026-08-12 |
 | [ADR-0152：开发阶段使用 Mem0 Platform 的异步记忆边界](0152-development-mem0-platform-boundary.md) | 已接受 | 2026-08-12 |
 | [ADR-0152：SubAgent 控制命令参数摘要由规范化参数派生](0152-subagent-control-command-canonical-digest.md) | 已接受 | 2026-08-12 |
-| [ADR-0153：Mem0 持久写入与 User Turn 检索闭环](0153-mem0-durable-ingestion-and-user-turn-retrieval.md) | 已接受 | 2026-08-12 |
+| [ADR-0153：Mem0 持久写入与 User Turn 检索闭环](0153-mem0-durable-ingestion-and-user-turn-retrieval.md) | 部分已替代（关闭记忆的消费终态） | 2026-08-12 |
 | [ADR-0153：SubAgent mailbox 显式携带终态与错误码](0153-subagent-mailbox-terminal-status.md) | 已接受 | 2026-08-12 |
 | [ADR-0154：隔离集群级数据库角色并固定开发配置真源](0154-cluster-scoped-database-roles-and-development-env-source.md) | 已接受 | 2026-08-12 |
 | [ADR-0154：SubAgent 摘要区分首次任务与当前任务](0154-subagent-initial-and-current-task.md) | 已接受 | 2026-08-12 |
@@ -288,5 +288,6 @@
 | [ADR-20260905225608：公开正文增量在持久化前有界合并](20260905225608-runtime-text-delta-coalescing.md) | 已接受 | 2026-09-05 |
 | [ADR-20260905225738：已领取 Run 与有界后台维护并行](20260905225738-worker-background-maintenance.md) | 已接受 | 2026-09-05 |
 | [ADR-20260906001531：Pi 内核收敛与共享模型目录](20260906001531-pi-kernel-and-shared-model-catalog.md) | 已接受 | 2026-09-06 |
+| [ADR-20260906163952：关闭记忆时使用独立的消费终态](20260906163952-disabled-memory-ingestion-terminal-state.md) | 已接受 | 2026-09-06 |
 
 </details>

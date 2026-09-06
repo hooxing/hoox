@@ -84,6 +84,8 @@ export interface MemoryIngestionStore {
   submitted(claim: MemoryIngestionClaim, submission: MemorySubmission): Promise<boolean>;
   deferPoll(claim: MemoryIngestionClaim, delayMs: number): Promise<boolean>;
   complete(claim: MemoryIngestionClaim, submission?: MemorySubmission): Promise<boolean>;
+  /** 当前 Run 的配置关闭记忆时终止本地消费；保留已有提交事实，不声称 Provider 成功。 */
+  skip(claim: MemoryIngestionClaim): Promise<boolean>;
   fail(
     claim: MemoryIngestionClaim,
     input: {
@@ -133,8 +135,8 @@ export class MemoryIngestionConsumer {
     } catch (error) {
       return await this.recordProviderFailure(claim, error);
     }
-    // 当前 Run 的固定配置显式关闭记忆时，消费事实仍需完成，不能形成永久积压。
-    if (provider === undefined) return (await this.store.complete(claim)) ? 1 : 0;
+    // 未提交的任务没有 Provider 成功凭据，必须使用独立终态释放消费租约。
+    if (provider === undefined) return (await this.store.skip(claim)) ? 1 : 0;
 
     if (claim.providerEventId === undefined) {
       let submission: MemorySubmission;

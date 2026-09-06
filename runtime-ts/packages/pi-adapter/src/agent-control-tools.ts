@@ -1,6 +1,7 @@
 import type { ToolObservationResult } from "@hoox/context-policy";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
+import { registerRuntimeToolParameters } from "./tool-parameter-schemas.js";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";
 
 const strict = { additionalProperties: false } as const;
@@ -44,16 +45,7 @@ const TargetArgumentsSchema = Type.Object(
   { target: Type.String({ minLength: 1, maxLength: 200 }) },
   strict,
 );
-const RuntimeInvalidArgumentsTokenSchema = Type.Optional(
-  Type.String({
-    pattern: "^[0-9a-f-]{36}$",
-    description: "Runtime 内部保留字段，调用方不得提供。",
-  }),
-);
-const EmptyArgumentsSchema = Type.Object(
-  { runtime_invalid_arguments_token: RuntimeInvalidArgumentsTokenSchema },
-  strict,
-);
+const EmptyArgumentsSchema = Type.Object({}, strict);
 const WaitArgumentsSchema = Type.Object(
   {
     after_sequence: Type.Integer({
@@ -62,17 +54,27 @@ const WaitArgumentsSchema = Type.Object(
       description: "首次等待传 0；后续必须传上次返回的 nextAfterSequence。",
     }),
     timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: 60_000 })),
-    runtime_invalid_arguments_token: RuntimeInvalidArgumentsTokenSchema,
   },
   strict,
 );
+
+const runtimeToken = {
+  runtime_invalid_arguments_token: Type.Optional(Type.String({ pattern: "^[0-9a-f-]{36}$" })),
+};
+const WaitRuntimeArgumentsSchema = Type.Object(
+  { ...WaitArgumentsSchema.properties, ...runtimeToken },
+  strict,
+);
+const EmptyRuntimeArgumentsSchema = Type.Object(runtimeToken, strict);
+registerRuntimeToolParameters(WaitArgumentsSchema, WaitRuntimeArgumentsSchema);
+registerRuntimeToolParameters(EmptyArgumentsSchema, EmptyRuntimeArgumentsSchema);
 
 type SpawnArguments = Static<typeof SpawnArgumentsSchema>;
 type TargetMessageArguments = Static<typeof TargetMessageArgumentsSchema>;
 type FollowUpArguments = Static<typeof FollowUpArgumentsSchema>;
 type TargetArguments = Static<typeof TargetArgumentsSchema>;
-type WaitArguments = Static<typeof WaitArgumentsSchema>;
-type EmptyArguments = Static<typeof EmptyArgumentsSchema>;
+type WaitArguments = Static<typeof WaitRuntimeArgumentsSchema>;
+type EmptyArguments = Static<typeof EmptyRuntimeArgumentsSchema>;
 
 const INVALID_ARGUMENT_PREFIX = "runtime-invalid-agent-control:";
 

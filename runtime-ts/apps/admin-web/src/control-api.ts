@@ -1,11 +1,10 @@
 import type {
   AdminControlOverviewDto,
-  IdentityAdminConfigurationDto,
-  UpdateIdentityAdminConfigurationRequest,
   ControlAuditEventDto,
   CreateMemoryProviderDraftRequest,
   CreateModelProviderDraftRequest,
   CreateRuntimeSettingsDraftRequest,
+  IdentityAdminConfigurationDto,
   MemoryProviderRevisionDto,
   ModelProviderControlRevisionRequest,
   ModelProviderRevisionDto,
@@ -16,8 +15,10 @@ import type {
   ProbeControlRevisionRequest,
   PublishControlRevisionRequest,
   RuntimeSettingsRevisionDto,
-  SaveModelProviderConfigurationRequest,
   SaveMemoryProviderConfigurationRequest,
+  SaveModelProviderConfigurationRequest,
+  SaveRuntimeSettingsConfigurationRequest,
+  UpdateIdentityAdminConfigurationRequest,
   UpdatePlatformUserStatusRequest,
 } from "@hoox/protocol";
 import { adminAuthorizationHeader } from "./admin-session.js";
@@ -229,6 +230,15 @@ export class AdminControlApi {
     return this.request("/runtime-settings", { method: "POST", body: JSON.stringify(input) });
   }
 
+  saveRuntimeSettingsConfiguration(
+    input: SaveRuntimeSettingsConfigurationRequest,
+  ): Promise<RuntimeSettingsRevisionDto> {
+    return this.request("/runtime-settings/current", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  }
+
   probe(
     kind: "model-providers" | "memory-providers",
     providerKey: string,
@@ -292,6 +302,7 @@ export type AdminControlApiContract = Pick<
   | "createModelDraft"
   | "createMemoryDraft"
   | "createRuntimeSettingsDraft"
+  | "saveRuntimeSettingsConfiguration"
   | "probe"
   | "publish"
 >;

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  AdminControlService,
   type AdminControlRepository,
+  AdminControlService,
   type ControlOperatorRole,
 } from "./index.js";
 
@@ -52,6 +52,10 @@ function fixture(role: ControlOperatorRole = "admin") {
       value: { status: "active" },
     })),
     updateUserStatus: vi.fn(async () => ({ outcome: "applied", value: { status: "disabled" } })),
+    saveRuntimeSettingsConfiguration: vi.fn(async () => ({
+      outcome: "applied",
+      value: { status: "active" },
+    })),
   };
   const probes = { probeModel: vi.fn(), probeMemory: vi.fn() };
   return {
@@ -67,6 +71,38 @@ function fixture(role: ControlOperatorRole = "admin") {
 }
 
 describe("管理员直接保存", () => {
+  it("运行设置一次保存，不要求模型接入、原因或审批，并检查字段关系", async () => {
+    const { service, repository } = fixture();
+    const command = {
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 80,
+      compactionTargetPercent: 55,
+      compactionRecentUserTokens: 4096,
+      compactionMaxOutputTokens: 4096,
+      compactionTimeoutMs: 60000,
+      expectedGeneration: 0,
+    };
+    await expect(service.saveRuntimeSettingsConfiguration(context, command)).resolves.toEqual({
+      status: "active",
+    });
+    expect(repository.listModelProviders).not.toHaveBeenCalled();
+    expect(repository.saveRuntimeSettingsConfiguration).toHaveBeenCalledWith({
+      ...context,
+      command: { ...command, reason: "保存并使用运行设置" },
+    });
+    await expect(
+      service.saveRuntimeSettingsConfiguration(context, {
+        ...command,
+        compactionTargetPercent: 80,
+      }),
+    ).rejects.toThrow("压缩目标必须低于软上限");
+    for (const role of ["operator", "viewer"] as const) {
+      await expect(
+        fixture(role).service.saveRuntimeSettingsConfiguration(context, command),
+      ).rejects.toThrow();
+    }
+  });
   it.each(["viewer", "operator"] as const)("%s 不能通过保存接口直接激活配置", async (role) => {
     const { repository, service } = fixture(role);
     await expect(
@@ -122,12 +158,40 @@ describe("管理员直接保存", () => {
     expect(probes.probeMemory).not.toHaveBeenCalled();
   });
 
-  it("未接入后台模型时明确拒绝记忆保存，避免运行时继续使用部署回退", async () => {
+  it("未接入后台模型时也能独立保存记忆密钥", async () => {
     const { repository, service } = fixture();
     repository.listModelProviders.mockResolvedValueOnce([]);
     await expect(
-      service.saveMemoryConfiguration(context, { ...memory, expectedGeneration: 0 }),
-    ).rejects.toThrow("请先在模型服务中接入当前模型");
+      service.saveMemoryConfiguration(context, {
+        ...memory,
+        expectedGeneration: 0,
+        apiSecretRef: "managed:memory-api",
+        scopeSecretRef: "platform:memory-scope",
+        apiKey: "unit-memory-key",
+      }),
+    ).resolves.toEqual({ status: "active" });
+    expect(repository.saveMemoryConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({ command: expect.objectContaining({ apiKey: "unit-memory-key" }) }),
+    );
+    expect(repository.listModelProviders).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {},
+    { apiKey: "" },
+    { apiKey: "line\nbreak" },
+    { apiKey: "key", reuseCredentialFromRevision: 1 },
+    { reuseCredentialFromRevision: 0 },
+  ])("拒绝无效托管记忆凭据 %#", async (credentials) => {
+    const { service, repository } = fixture();
+    await expect(
+      service.saveMemoryConfiguration(context, {
+        ...memory,
+        apiSecretRef: "managed:memory-api",
+        expectedGeneration: 0,
+        ...credentials,
+      }),
+    ).rejects.toThrow();
     expect(repository.saveMemoryConfiguration).not.toHaveBeenCalled();
   });
 

@@ -15,8 +15,8 @@ import {
 import { userId } from "@hoox/domain";
 import {
   createPostgresPool,
-  PgAdminControlRepository,
   ModelProviderCredentialCipher,
+  PgAdminControlRepository,
   PgIdentityConfigurationRepository,
   PgSkillPublicationAuthorization,
   PgSkillPublicationRepository,
@@ -30,8 +30,8 @@ import {
   startServiceProcess,
 } from "@hoox/process-runtime";
 import { SkillPublicationService } from "@hoox/skill";
+import { type AdminControlApiAppOptions, createAdminControlApiApp } from "./app.js";
 import { createIdentityAdminService } from "./identity-configuration.js";
-import { createAdminControlApiApp, type AdminControlApiAppOptions } from "./app.js";
 import { createPiModelCatalog } from "./pi-model-catalog.js";
 import type { AdminControlApiProcessConfiguration } from "./process-entry.js";
 
@@ -250,8 +250,11 @@ export function createProviderProbes(
         throw new Error("MODEL_RESPONSE_MISMATCH");
       }
     },
-    probeMemory: async (memory: MemoryProviderConfiguration) => {
-      const apiKey = configuration.providerSecrets.memoryApiKey;
+    probeMemory: async (memory: MemoryProviderConfiguration, managedApiKey?: string) => {
+      const apiKey =
+        memory.apiSecretRef === "managed:memory-api"
+          ? managedApiKey
+          : configuration.providerSecrets.memoryApiKey;
       if (apiKey === undefined) throw new Error("MEMORY_SECRET_UNAVAILABLE");
       const response = await fetch(new URL(memory.baseUrl), {
         method: "HEAD",
@@ -335,26 +338,26 @@ function deploymentSettings(
       "MODEL_CREDENTIAL_ENCRYPTION_KEY",
       "secret",
       true,
-      "模型凭据加密主密钥；仅用于解密后台托管密文，不能调用任何 Provider",
+      "模型与记忆凭据的稳定平台主密钥，不能调用任何 Provider",
     ),
     descriptor("MODEL_API_KEY", "secret", true, "没有 active 模型配置时的兼容回退凭据"),
     descriptor(
       "MEM0_API_KEY",
       "secret",
       configuration.providerSecrets.memoryApiKey !== undefined,
-      "记忆 Provider 部署秘密，页面只保存引用",
+      "记忆 Provider 兼容回退密钥，日常可在后台配置托管密钥",
     ),
     descriptor(
       "MEM0_SCOPE_HMAC_KEY",
       "secret",
       configuration.runtimeDeploymentSettings.memoryScopeKeyConfigured,
-      "Mem0 租户与用户作用域匿名化密钥，必须与 API Key 独立生成",
+      "既有 Mem0 用户作用域密钥，迁移 API Key 后须保持稳定；新部署可由平台派生",
     ),
     descriptor(
       "THREAD_CONTEXT_COMPACTION_ENABLED",
       "restart_required",
       configuration.runtimeDeploymentSettings.compactionEnabledConfigured,
-      "Runtime compaction 总开关；百分比和预算可版本化，该开关需要重新部署",
+      "Runtime compaction 总开关；百分比和预算可在线保存，该开关需要重新部署",
     ),
     descriptor(
       "THREAD_CONTEXT_COMPACTION_PATH",

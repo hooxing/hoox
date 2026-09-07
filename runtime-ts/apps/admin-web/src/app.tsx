@@ -8,6 +8,7 @@ import {
   MenuUnfoldOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
+  SettingOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
 import type {
@@ -950,6 +951,7 @@ const navigation: NonNullable<MenuProps["items"]> = [
     label: "系统",
     children: [
       { key: "/identity", icon: <SafetyCertificateOutlined />, label: "身份与登录" },
+      { key: "/settings", icon: <SettingOutlined />, label: "运行设置" },
       { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
     ],
   },
@@ -990,6 +992,7 @@ const pageMetadata: Readonly<
     title: "操作审计",
     description: "查看不可变的控制面变更记录",
   },
+  "/settings": { title: "运行设置", description: "在线调整任务并发与上下文压缩" },
 };
 
 const defaultPageMetadata = {
@@ -1136,7 +1139,15 @@ function AdminPlatform({
               }
             />
             <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
-            <Route path="/settings" element={<Navigate to="/identity" replace />} />
+            <Route
+              path="/settings"
+              element={
+                <AdminControlConsole
+                  view="settings"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
             <Route
               path="/audits"
               element={

@@ -55,15 +55,15 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - 日常 Provider 密钥在后台模型页面写入；“保存并使用”由服务端一次原子保存并启用，列表中的“使用”切换已保存供应商。已有托管模型快照继续固定旧 Run 的配置与密钥，新配置只影响之后首次建立模型配置快照的 Run。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 是 Admin API 与 Worker 共享的稳定加密根，production 至少 32 字节且不能用于调用模型。
 - Context window、最大输出和图片能力是显式可信配置，不能只依赖模型名称猜测。
 - Thread Context、Compaction、Sandbox 复用和 Subagent 功能使用独立 feature flag。
-- 新 Run 的压缩参数来自 Worker 部署配置，不读取后台运行参数。五项分别为 `THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT`（默认 `80`）、`THREAD_CONTEXT_COMPACTION_TARGET_PERCENT`（默认 `55`）、`THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS`（默认 `4096`）、`THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS`（省略时使用部署 `MODEL_MAX_OUTPUT_TOKENS`）、`THREAD_CONTEXT_COMPACTION_TIMEOUT_MS`（默认 `60000`）。示例文件的显式值是部署样例，不改变省略时的解析默认值。
-- 压缩输出预算先按 Run 使用模型的最大输出裁剪，再与其余四项一起形成独立持久快照。恢复和旧 Run 兼容边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
-- 部署回退模型本身尚未持久快照化；从 `MODEL_*` 回退模式切换为后台托管模型前，应先排空这类在途 Run。否则旧 Run 恢复时可能首次绑定新模型。恢复输出预算仍会按实际模型上限裁剪，但不改变原快照，也不保证部署模型身份稳定。
+- 新 Run 的压缩参数优先采用后台“运行设置”，未保存时使用 Worker 部署回退。部署字段分别为 `THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT`（默认 `80`）、`THREAD_CONTEXT_COMPACTION_TARGET_PERCENT`（默认 `55`）、`THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS`（默认 `4096`）、`THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS`（省略时使用部署 `MODEL_MAX_OUTPUT_TOKENS`）、`THREAD_CONTEXT_COMPACTION_TIMEOUT_MS`（默认 `60000`）。示例文件的显式值是部署样例，不改变省略时的解析默认值。
+- 压缩五项参数形成独立持久快照，执行输出预算按实际模型最大输出裁剪；恢复不改写原快照。部署回退输出预算在首次存储前也按当时模型上限裁剪。恢复和旧 Run 兼容边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
+- 首次运行快照固定是否使用托管模型与记忆，包括尚未配置的状态；后台新增配置不会改变已有空配置快照。部署回退模型的具体参数仍来自 `MODEL_*`，修改这些环境变量仍需重启，并应排空使用部署回退的在途 Run。升级前尚未建立快照的旧 Run 无法还原原部署状态。
 - 标题生成可以使用独立低成本模型，且只接收受限输入。
 
 ### Scheduler 与 Worker
 
 - Scheduler 仍按明确 Tenant 分片；Agent Worker 通过动态 Tenant assignment 发现可执行 Run，并始终在具体 Tenant RLS 中读取业务事实。
-- `AGENT_WORKER_MAX_CONCURRENT_RUNS` 控制单 Worker 在途 Run 上限，默认 `20`；`AGENT_WORKER_USER_MAX_CONCURRENT_RUNS_PER_TENANT` 控制同一 Tenant 内单用户上限，默认 `2`。两者范围均为 `1..100`，启动时读取，变更后重启 Worker；后台历史运行设置不再影响新 claim。
+- `AGENT_WORKER_MAX_CONCURRENT_RUNS` 控制单 Worker 在途 Run 上限，默认 `20`；`AGENT_WORKER_USER_MAX_CONCURRENT_RUNS_PER_TENANT` 控制同一 Tenant 内单用户上限，默认 `2`。两者范围均为 `1..100`，作为启动回退值；后台“运行设置”保存后在后续调度读取，无需重启。读取失败保留上次有效值，初始失败采用启动回退。
 - 单用户上限按 `(tenant_id,user_id)` 统计；同一 Thread 始终最多一个活跃 Run，不设置固定 Tenant 最大运行数。
 - 调低上限不会取消在途 Run；新 dispatch 会等到 Worker 与用户活跃数低于新值后再领取。
 - 新 dispatch 在提交 Worker Tenant assignment 的同一 PostgreSQL 事务中发送无载荷通知，Worker 使用独占连接立即唤醒 claim；通知重复、迟到、丢失或监听断线都不改变 durable 事实，定时轮询继续作为兜底。
@@ -72,11 +72,11 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 ### 后台管理
 
-- 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、身份、统计与 Skill 路由共用管理身份。运行参数与部署连接由配置文件管理，后台没有运行参数写入口；旧 `/settings` 页面跳转到身份设置。
+- 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、身份、统计与 Skill 路由共用管理身份。“运行设置”在 `/settings` 配置并发和上下文压缩参数，一次保存生效；尚未保存时页面展示推荐默认值，并明确标识未保存。数据库、端口、部署角色与平台根秘密保留在部署配置。
 - “身份与登录”配置保存后动态生效；页面不要求填写原因或理解版本，服务端仍执行并发检查并自动记录审计。Provider、SMTP 与短信秘密只返回已配置状态，不回显明文。
 - 模型 Provider 的 API Key 是写入型字段：首次配置必填，编辑时可保留旧密钥或替换。多个已保存供应商可分别使用或测试；“测试已保存配置”只验证已保存的默认模型，不测试未保存输入。模型能力高级设置保留显式覆盖，页面不展示内部版本或原因输入。
-- 记忆页显示当前开关，保存后对新任务生效；必须先在后台接入当前模型。Mem0 密钥和作用域秘密仍从部署配置读取，页面只显示凭据就绪状态，连接参数从当前值开始编辑。
-- 模型和记忆的日常保存使用 `PUT /v1/admin/control/model-providers/current`、`PUT /v1/admin/control/memory-providers/current`，均要求控制面 admin、幂等键和内部 `expectedGeneration`。冲突返回 409 并保留当前配置，页面保留输入等待显式刷新。旧模型/记忆草稿与发布接口仅供兼容；详细边界见[维护者开发边界](../maintainers/runtime-development-boundaries.md)。
+- 记忆页可独立配置 Mem0 API Key、开关、地址与超时，不要求先配置模型。密钥加密保存、不回显，留空保留现有密钥；保存后对尚未建立运行快照的新任务生效，无需重启。新部署的作用域秘密由平台稳定主密钥独立派生；已有 `MEM0_SCOPE_HMAC_KEY` 优先沿用，接管 API Key 后仍必须保留，以免改变已有记忆标识。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 同时保护模型和记忆密钥，必须稳定并备份。
+- 模型、记忆和运行设置的日常保存使用 `PUT /v1/admin/control/model-providers/current`、`PUT /v1/admin/control/memory-providers/current`、`PUT /v1/admin/control/runtime-settings/current`，均要求控制面 admin、幂等键和内部 `expectedGeneration`。冲突返回 409 并保留当前配置，页面保留输入等待显式刷新。旧模型/记忆草稿与发布接口仅供兼容；详细边界见[维护者开发边界](../maintainers/runtime-development-boundaries.md)。
 - 进程内仍使用 Admin Control 与 Skill Publisher 两套数据库连接和角色，Skill Publisher 对象存储凭据不能复用普通 API/Worker 身份。
 - 开发发布 fixture 不等于生产 Skill 目录。
 

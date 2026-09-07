@@ -127,6 +127,64 @@ describe("Agent Worker production polling loop", () => {
     expect(assignmentCalls).toBeGreaterThanOrEqual(2);
   });
 
+  it("在线提高并发无需重启，下调和读取失败保留在途任务及最后有效设置", async () => {
+    const assignments = ["a", "b", "c", "d"].map((suffix) => tenantAssignment(suffix));
+    const releases = [deferred<void>(), deferred<void>(), deferred<void>(), deferred<void>()];
+    let settings = { workerMaxConcurrentRuns: 1, userMaxConcurrentRunsPerTenant: 2 };
+    let failed = false;
+    let reads = 0;
+    let executions = 0;
+    const observedUserLimits: number[] = [];
+    const loop = new AgentWorkerPollingLoop(
+      { claim: async () => assignments.shift(), settle: async () => true },
+      {
+        claim: async ({ tenantId, userMaxConcurrentRunsPerTenant }) => {
+          observedUserLimits.push(userMaxConcurrentRunsPerTenant);
+          return [claim(tenantId.replace("tenant-", ""))];
+        },
+        acknowledge: async () => undefined,
+      },
+      {
+        execute: async () => {
+          const index = executions++;
+          await releases[index]?.promise;
+          return { outcome: "succeeded" };
+        },
+      },
+      {
+        workerId: "worker-live-settings",
+        pollIntervalMs: 5,
+        tenantAssignmentLeaseMs: 30000,
+        dispatchLeaseMs: 30000,
+        resolveConcurrencySettings: async () => {
+          reads++;
+          if (failed) throw new Error("temporary-read-failure");
+          return settings;
+        },
+      },
+    );
+    loop.start();
+    await vi.waitFor(() => expect(executions).toBe(1));
+    settings = { workerMaxConcurrentRuns: 3, userMaxConcurrentRunsPerTenant: 4 };
+    loop.wake();
+    await vi.waitFor(() => expect(executions).toBe(3));
+    settings = { workerMaxConcurrentRuns: 1, userMaxConcurrentRunsPerTenant: 6 };
+    const readCount = reads;
+    loop.wake();
+    await vi.waitFor(() => expect(reads).toBeGreaterThan(readCount));
+    failed = true;
+    releases[0]?.resolve();
+    releases[1]?.resolve();
+    const beforeFailure = reads;
+    await vi.waitFor(() => expect(reads).toBeGreaterThan(beforeFailure));
+    expect(executions).toBe(3);
+    releases[2]?.resolve();
+    await vi.waitFor(() => expect(executions).toBe(4));
+    expect(observedUserLimits).toEqual([2, 4, 4, 6]);
+    releases[3]?.resolve();
+    await loop.close();
+  });
+
   it("固定启动时的部署并发配置，在 Worker 上限处停止继续领取", async () => {
     const assignments = [
       tenantAssignment("parallel-a"),

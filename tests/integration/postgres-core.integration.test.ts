@@ -536,6 +536,109 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("记忆密钥独立于模型托管、加密保存且只影响新 Run", async () => {
+    const initial = await createFixture("memory_bootstrap");
+    const cipher = new ModelProviderCredentialCipher("integration-memory-root-at-least-32-bytes");
+    const repository = new PgAdminControlRepository(adminControlPool, cipher);
+    const service = new AdminControlService(
+      repository,
+      repository,
+      { probeModel: async () => undefined, probeMemory: async () => undefined },
+      [],
+    );
+    const runtime = new PgRuntimeControlConfigurationRepository(runtimePool, cipher);
+    const scope = { tenantId: initial.scope.tenantId, runId: initial.run.id };
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [initial.user.id],
+    );
+    const context = (id: string) => ({
+      actorUserId: initial.user.id,
+      idempotencyKey: `memory-online-${id}`,
+      requestDigest: "b".repeat(64),
+    });
+    try {
+      const empty = await runtime.resolveForRun(scope);
+      expect(empty).toEqual({ generation: 0 });
+      const command = {
+        providerKey: "mem0",
+        displayName: "长期记忆",
+        providerKind: "mem0",
+        baseUrl: "https://memory.example.invalid/",
+        apiSecretRef: "managed:memory-api",
+        scopeSecretRef: "platform:memory-scope",
+        requestTimeoutMs: 10000,
+        enabled: true,
+        apiKey: "integration-memory-key-a",
+        expectedGeneration: 0,
+      } as const;
+      const first = await service.saveMemoryConfiguration(context("first"), command);
+      await expect(service.saveMemoryConfiguration(context("first"), command)).resolves.toEqual(
+        first,
+      );
+      expect(JSON.stringify(first)).not.toContain(command.apiKey);
+      expect(JSON.stringify(await repository.listMemoryProviders(initial.user.id))).not.toContain(
+        "ciphertext",
+      );
+      const raw = await migratorPool.query(
+        "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='memory_provider'",
+      );
+      expect(JSON.stringify(raw.rows)).not.toContain(command.apiKey);
+      expect(raw.rows[0].configuration.credential).toBeDefined();
+      const migration = (await loadMigrations()).find((item) => item.version === 62);
+      if (migration === undefined) throw new Error("托管记忆迁移缺失");
+      await expect(
+        withTenantTransaction(migratorPool, initial.scope, (client) =>
+          client.query(migration.downSql),
+        ),
+      ).rejects.toThrow("DOWN_MIGRATION_BLOCKED:managed_memory_configuration_exists");
+      await expect(runtime.resolveForRun(scope)).resolves.toEqual(empty);
+      const activeRun = await createFixture("memory_active");
+      const activeScope = { tenantId: activeRun.scope.tenantId, runId: activeRun.run.id };
+      const active = await runtime.resolveForRun(activeScope);
+      expect(active?.model).toBeUndefined();
+      expect(active?.memoryApiKey).toBe(command.apiKey);
+      const second = await service.saveMemoryConfiguration(context("second"), {
+        ...command,
+        apiKey: "integration-memory-key-b",
+        expectedGeneration: await repository.generation(initial.user.id),
+      });
+      await expect(runtime.resolveForRun(activeScope)).resolves.toEqual(active);
+      const newRun = await createFixture("memory_updated");
+      expect(
+        (await runtime.resolveForRun({ tenantId: newRun.scope.tenantId, runId: newRun.run.id }))
+          ?.memoryApiKey,
+      ).toBe("integration-memory-key-b");
+      const { apiKey: _apiKey, ...reuse } = command;
+      const reused = await service.saveMemoryConfiguration(context("reuse"), {
+        ...reuse,
+        enabled: false,
+        reuseCredentialFromRevision: second.revision,
+        expectedGeneration: await repository.generation(initial.user.id),
+      });
+      expect(reused.configuration.enabled).toBe(false);
+      expect(
+        await repository.resolveMemoryCredential(initial.user.id, "mem0", reused.revision),
+      ).toBe("integration-memory-key-b");
+      await expect(
+        adminControlPool.query("SELECT * FROM run_runtime_config_snapshots"),
+      ).rejects.toMatchObject({ code: "42501" });
+      const foreign = await withTenantTransaction(runtimePool, initial.scope, (client) =>
+        client.query("SELECT run_id FROM run_runtime_config_snapshots WHERE run_id=$1", [
+          activeRun.run.id,
+        ]),
+      );
+      expect(foreign.rows).toHaveLength(0);
+    } finally {
+      await migratorPool.query(`DELETE FROM run_runtime_config_snapshots;
+        DELETE FROM admin_control_audits; DELETE FROM admin_control_commands;
+        DELETE FROM admin_control_activation_events; DELETE FROM admin_control_active_configs;
+        DELETE FROM admin_control_provider_probes; DELETE FROM admin_control_config_revisions;
+        DELETE FROM platform_control_operators;
+        UPDATE admin_control_generation SET generation=0,updated_at=clock_timestamp() WHERE singleton='global'`);
+    }
+  });
+
   it("模型保存可直接启用并由新 Run 固化，旧 Run 在切换后保持不变", async () => {
     const firstRun = await createFixture("control_first");
     await migratorPool.query(
@@ -626,8 +729,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         tenantId: firstRun.scope.tenantId,
         runId: firstRun.run.id,
       });
-      expect(firstSnapshot?.model.configuration.defaultModelId).toBe("model-a");
-      expect(firstSnapshot?.model.configuration.models).toHaveLength(2);
+      expect(firstSnapshot?.model?.configuration.defaultModelId).toBe("model-a");
+      expect(firstSnapshot?.model?.configuration.models).toHaveLength(2);
       await expect(
         adminControlPool.query("SELECT tenant_id,run_id FROM run_runtime_config_snapshots"),
       ).rejects.toMatchObject({ code: "42501" });
@@ -644,7 +747,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         tenantId: secondRun.scope.tenantId,
         runId: secondRun.run.id,
       });
-      expect(secondSnapshot?.model.configuration.defaultModelId).toBe("model-b");
+      expect(secondSnapshot?.model?.configuration.defaultModelId).toBe("model-b");
       expect(secondSnapshot?.generation).toBeGreaterThan(firstSnapshot?.generation ?? 0);
       const memoryCommand = {
         ...memoryDraft.configuration,
@@ -670,7 +773,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
       expect(await repository.generation(firstRun.user.id)).toBe(unchangedGeneration);
 
-      if (secondSnapshot === undefined) throw new Error("第二个运行快照未保存");
+      if (secondSnapshot?.model === undefined) throw new Error("第二个运行快照未保存");
       const { credentialConfigured: _credentialConfigured, ...configuration } =
         secondSnapshot.model.configuration;
       const concurrentCommand = {
@@ -786,8 +889,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         tenantId: fixture.scope.tenantId,
         runId: fixture.run.id,
       });
-      expect(runtimeSnapshot?.model.configuration.providerKey).toBe(historicalProviderKey);
-      expect(runtimeSnapshot?.model.configuration.defaultModelId).toBe("model-history");
+      expect(runtimeSnapshot?.model?.configuration.providerKey).toBe(historicalProviderKey);
+      expect(runtimeSnapshot?.model?.configuration.defaultModelId).toBe("model-history");
     } finally {
       await migratorPool.query(
         `DELETE FROM run_runtime_config_snapshots;
@@ -2814,5 +2917,117 @@ describe("PostgreSQL Run 压缩参数快照", () => {
         deploymentSettings,
       }),
     ).resolves.toEqual(deploymentSettings);
+  });
+
+  it("后台运行设置独立保存并热读取，新 Run 生效且旧 Run 保持快照", async () => {
+    const { PgRunCompactionSettingsRepository } = await import(
+      "../../runtime-ts/packages/persistence/src/pg-run-compaction-settings.js"
+    );
+    const first = await createFixture("runtime_live_first");
+    const second = await createFixture("runtime_live_second");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [first.user.id],
+    );
+    const cipher = new ModelProviderCredentialCipher(
+      "integration-live-settings-root-at-least-32-bytes",
+    );
+    const repository = new PgAdminControlRepository(adminControlPool, cipher);
+    const service = new AdminControlService(
+      repository,
+      repository,
+      { probeModel: async () => undefined, probeMemory: async () => undefined },
+      [],
+    );
+    const runtime = new PgRuntimeControlConfigurationRepository(runtimePool, cipher);
+    const compaction = new PgRunCompactionSettingsRepository(runtimePool);
+    const command = {
+      workerMaxConcurrentRuns: 7,
+      userMaxConcurrentRunsPerTenant: 3,
+      compactionSoftLimitPercent: 90,
+      compactionTargetPercent: 65,
+      compactionRecentUserTokens: 2048,
+      compactionMaxOutputTokens: 1024,
+      compactionTimeoutMs: 45000,
+      expectedGeneration: await repository.generation(first.user.id),
+    };
+    const context = {
+      actorUserId: first.user.id,
+      idempotencyKey: "runtime-live-first-0001",
+      requestDigest: "c".repeat(64),
+    };
+    const firstInput = { tenantId: first.scope.tenantId, runId: first.run.id, deploymentSettings };
+    try {
+      expect(
+        (await repository.listModelProviders(first.user.id)).some(
+          (revision) => revision.status === "active",
+        ),
+      ).toBe(false);
+      const saved = await service.saveRuntimeSettingsConfiguration(context, command);
+      expect(saved.status).toBe("active");
+      await expect(service.saveRuntimeSettingsConfiguration(context, command)).resolves.toEqual(
+        saved,
+      );
+      await expect(runtime.resolveActiveRuntimeSettings()).resolves.toMatchObject({
+        workerMaxConcurrentRuns: 7,
+        userMaxConcurrentRunsPerTenant: 3,
+      });
+      const fixed = await compaction.resolveForRun(firstInput);
+      expect(fixed).toEqual({
+        softLimitPercent: 90,
+        targetPercent: 65,
+        recentUserTokens: 2048,
+        maxOutputTokens: 1024,
+        timeoutMs: 45000,
+      });
+      await service.saveRuntimeSettingsConfiguration(
+        { ...context, idempotencyKey: "runtime-live-second-0001", requestDigest: "d".repeat(64) },
+        {
+          ...command,
+          expectedGeneration: await repository.generation(first.user.id),
+          workerMaxConcurrentRuns: 2,
+          userMaxConcurrentRunsPerTenant: 1,
+          compactionTargetPercent: 70,
+        },
+      );
+      await expect(runtime.resolveActiveRuntimeSettings()).resolves.toMatchObject({
+        workerMaxConcurrentRuns: 2,
+        userMaxConcurrentRunsPerTenant: 1,
+      });
+      await expect(compaction.resolveForRun(firstInput)).resolves.toEqual(fixed);
+      await expect(
+        compaction.resolveForRun({
+          tenantId: second.scope.tenantId,
+          runId: second.run.id,
+          deploymentSettings,
+        }),
+      ).resolves.toEqual({ ...fixed, targetPercent: 70 });
+      await expect(
+        service.saveRuntimeSettingsConfiguration(
+          { ...context, idempotencyKey: "runtime-live-stale-0001" },
+          command,
+        ),
+      ).rejects.toThrow();
+    } finally {
+      await migratorPool.query("DELETE FROM admin_control_audits WHERE actor_user_id=$1", [
+        first.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM admin_control_commands WHERE actor_user_id=$1", [
+        first.user.id,
+      ]);
+      await migratorPool.query(
+        "DELETE FROM admin_control_activation_events WHERE actor_user_id=$1",
+        [first.user.id],
+      );
+      await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
+        first.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM admin_control_config_revisions WHERE created_by=$1", [
+        first.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM platform_control_operators WHERE user_id=$1", [
+        first.user.id,
+      ]);
+    }
   });
 });

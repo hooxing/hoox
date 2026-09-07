@@ -9,48 +9,51 @@ import {
 } from "@hoox/admin-control";
 import type { AuthContextResolver } from "@hoox/api";
 import {
-  registerSkillAdminApiRoutes,
-  type SkillAdminApiRouteDependencies,
-} from "@hoox/skill-admin-api";
-import {
   AdminControlOverviewSuccessEnvelopeSchema,
   ControlAuditListSuccessEnvelopeSchema,
+  type ControlRevisionPath,
   ControlRevisionPathSchema,
+  type CreateMemoryProviderDraftRequest,
   CreateMemoryProviderDraftRequestSchema,
+  type CreateModelProviderDraftRequest,
   CreateModelProviderDraftRequestSchema,
   createErrorEnvelope,
   ErrorEnvelopeSchema,
   IdentityAdminConfigurationSuccessEnvelopeSchema,
   MemoryProviderRevisionListSuccessEnvelopeSchema,
   MemoryProviderRevisionSuccessEnvelopeSchema,
+  type ModelProviderControlRevisionRequest,
   ModelProviderControlRevisionRequestSchema,
   ModelProviderRevisionListSuccessEnvelopeSchema,
   ModelProviderRevisionSuccessEnvelopeSchema,
   PiModelCatalogModelListSuccessEnvelopeSchema,
   PiModelCatalogProviderListSuccessEnvelopeSchema,
   PlatformUserPageSuccessEnvelopeSchema,
+  type PlatformUserPath,
   PlatformUserPathSchema,
   PlatformUserQuerySchema,
   PlatformUserSummarySuccessEnvelopeSchema,
+  type ProbeControlRevisionRequest,
   ProbeControlRevisionRequestSchema,
+  type PublishControlRevisionRequest,
   PublishControlRevisionRequestSchema,
   RuntimeSettingsRevisionListSuccessEnvelopeSchema,
-  SaveModelProviderConfigurationRequestSchema,
+  RuntimeSettingsRevisionSuccessEnvelopeSchema,
+  type SaveMemoryProviderConfigurationRequest,
   SaveMemoryProviderConfigurationRequestSchema,
   type SaveModelProviderConfigurationRequest,
-  type SaveMemoryProviderConfigurationRequest,
-  UpdateIdentityAdminConfigurationRequestSchema,
+  SaveModelProviderConfigurationRequestSchema,
+  type SaveRuntimeSettingsConfigurationRequest,
+  SaveRuntimeSettingsConfigurationRequestSchema,
   type UpdateIdentityAdminConfigurationRequest,
-  UpdatePlatformUserStatusRequestSchema,
-  type ControlRevisionPath,
-  type CreateMemoryProviderDraftRequest,
-  type CreateModelProviderDraftRequest,
-  type ModelProviderControlRevisionRequest,
-  type ProbeControlRevisionRequest,
-  type PublishControlRevisionRequest,
-  type PlatformUserPath,
+  UpdateIdentityAdminConfigurationRequestSchema,
   type UpdatePlatformUserStatusRequest,
+  UpdatePlatformUserStatusRequestSchema,
 } from "@hoox/protocol";
+import {
+  registerSkillAdminApiRoutes,
+  type SkillAdminApiRouteDependencies,
+} from "@hoox/skill-admin-api";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import type { IdentityAdminService } from "./identity-configuration.js";
@@ -85,6 +88,7 @@ type ControlServiceContract = Pick<
   | "createMemoryDraft"
   | "saveModelConfiguration"
   | "saveMemoryConfiguration"
+  | "saveRuntimeSettingsConfiguration"
   | "probe"
   | "publish"
 >;
@@ -340,6 +344,26 @@ export function createAdminControlApiApp(
       return success(
         request,
         await dependencies.control.saveMemoryConfiguration(
+          mutationContext(request, userId),
+          request.body,
+        ),
+      );
+    },
+  );
+  app.put<{ Body: SaveRuntimeSettingsConfigurationRequest }>(
+    "/v1/admin/control/runtime-settings/current",
+    {
+      schema: {
+        body: SaveRuntimeSettingsConfigurationRequestSchema,
+        response: responseSchemas(RuntimeSettingsRevisionSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const userId = await actor(request);
+      return success(
+        request,
+        await dependencies.control.saveRuntimeSettingsConfiguration(
           mutationContext(request, userId),
           request.body,
         ),

@@ -818,7 +818,7 @@ export class AgentWorkerPollingLoop {
     string,
     { assignment: PgClaimedWorkerTenantAssignment; promise: Promise<void> }
   >();
-  private readonly concurrencySettings: WorkerRunConcurrencySettings;
+  private concurrencySettings: WorkerRunConcurrencySettings;
 
   constructor(
     private readonly tenantAssignments: TenantAssignmentQueue,
@@ -830,6 +830,7 @@ export class AgentWorkerPollingLoop {
       readonly tenantAssignmentLeaseMs: number;
       readonly dispatchLeaseMs: number;
       readonly concurrencySettings?: WorkerRunConcurrencySettings;
+      readonly resolveConcurrencySettings?: () => Promise<WorkerRunConcurrencySettings | undefined>;
       /** 有界后台维护成功后释放 Tenant 租约；失败或容量不足时保留租约，过期后重试。 */
       readonly maintenance?: (tenantId: string) => Promise<unknown>;
     },
@@ -916,6 +917,25 @@ export class AgentWorkerPollingLoop {
   }
 
   private async tick(): Promise<boolean> {
+    if (this.closed) return false;
+    if (this.options.resolveConcurrencySettings !== undefined) {
+      try {
+        const next = await this.options.resolveConcurrencySettings();
+        if (
+          next !== undefined &&
+          Number.isSafeInteger(next.workerMaxConcurrentRuns) &&
+          next.workerMaxConcurrentRuns >= 1 &&
+          next.workerMaxConcurrentRuns <= 100 &&
+          Number.isSafeInteger(next.userMaxConcurrentRunsPerTenant) &&
+          next.userMaxConcurrentRunsPerTenant >= 1 &&
+          next.userMaxConcurrentRunsPerTenant <= 100
+        ) {
+          this.concurrencySettings = Object.freeze({ ...next });
+        }
+      } catch {
+        // 短暂读取失败继续采用最后有效值；下调上限只限制新领取，不打断正在运行的任务。
+      }
+    }
     if (this.closed) return false;
     const hasRunCapacity = this.executions.size < this.concurrencySettings.workerMaxConcurrentRuns;
     if (!hasRunCapacity && (this.options.maintenance === undefined || this.maintenances.size >= 4))

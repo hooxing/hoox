@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import {
+  measureExecutionPhase,
+  type ExecutionPhaseTimingObserver,
   type ArtifactId,
   artifactId,
   type ResourceVersionId,
@@ -85,6 +87,7 @@ export class SimpleArtifactDeliveryService {
     readonly sourcePath: string;
     readonly name: string;
     readonly body: Uint8Array;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
   }): Promise<SimpleDeliveredFileSnapshot> {
     const bytes = Uint8Array.from(input.body);
     const sha256 = sha256Digest(createHash("sha256").update(bytes).digest("hex"));
@@ -114,24 +117,38 @@ export class SimpleArtifactDeliveryService {
         )
         .digest("hex"),
     );
-    const persisted = await this.blobs.persist({
-      tenantId: input.authorization.scope.tenantId,
-      idempotencyKey: input.idempotencyKey,
-      body: bytes,
-      sha256,
-      mediaType,
-    });
+    // Blob 写入包含对象上传及其稳定引用持久化；不等同于纯网络上传。
+    const timingDetails = { toolCallId: input.authorization.callId, toolName: "deliver_file" };
+    const persisted = await measureExecutionPhase(
+      input.phaseTiming,
+      "file_upload",
+      () =>
+        this.blobs.persist({
+          tenantId: input.authorization.scope.tenantId,
+          idempotencyKey: input.idempotencyKey,
+          body: bytes,
+          sha256,
+          mediaType,
+        }),
+      timingDetails,
+    );
     try {
-      return await this.repository.commit({
-        authorization: input.authorization,
-        idempotencyKey: input.idempotencyKey,
-        commandDigest,
-        ids,
-        sourcePath: input.sourcePath,
-        name: input.name,
-        mediaType,
-        persisted,
-      });
+      return await measureExecutionPhase(
+        input.phaseTiming,
+        "file_metadata_commit",
+        () =>
+          this.repository.commit({
+            authorization: input.authorization,
+            idempotencyKey: input.idempotencyKey,
+            commandDigest,
+            ids,
+            sourcePath: input.sourcePath,
+            name: input.name,
+            mediaType,
+            persisted,
+          }),
+        timingDetails,
+      );
     } catch (error) {
       // abandon 内部以 PG 规范引用做 guarded release；若 COMMIT 实际成功，只会返回 still_referenced。
       try {

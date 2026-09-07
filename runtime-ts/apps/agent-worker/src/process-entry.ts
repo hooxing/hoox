@@ -111,6 +111,7 @@ import {
   createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
   createDevelopmentProjectRunStartupTimingMirror,
+  createDevelopmentProjectRunPhaseTimingMirror,
   withDevelopmentProjectModelWireTraceMirror,
 } from "./project-model-wire-trace.js";
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";
@@ -918,6 +919,10 @@ async function assembleWorkerRuntime(
       runtimeMode,
       configuration.model.wireTraceEnabled,
     );
+    const phaseTimingDiagnostics = createDevelopmentProjectRunPhaseTimingMirror(
+      runtimeMode,
+      configuration.model.wireTraceEnabled,
+    );
     const startupTimingDiagnostics = createDevelopmentProjectRunStartupTimingMirror(
       runtimeMode,
       configuration.model.wireTraceEnabled,
@@ -1296,6 +1301,7 @@ async function assembleWorkerRuntime(
         continuityMetrics: threadContinuityMetrics,
         ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
         ...(startupTimingDiagnostics === undefined ? {} : { startupTimingDiagnostics }),
+        ...(phaseTimingDiagnostics === undefined ? {} : { phaseTimingDiagnostics }),
         ...(configuration.threadContext.writeEnabled ? { threadContextBodies } : {}),
         ...(configuration.threadSandbox.reuseEnabled ? { threadSandboxes } : {}),
         ...(configuration.subagents.enabled

@@ -1,3 +1,4 @@
+import type { ExecutionPhaseTimingObserver } from "@hoox/domain";
 import { parseControlledToolReceipt } from "@hoox/context-policy";
 import type { SandboxHandle } from "@hoox/sandbox";
 import { Value } from "typebox/value";
@@ -24,6 +25,7 @@ function fixture(
     readonly consumedAtMonotonicMs: number;
     readonly maxContinuationDelayMs: number;
   }> = async () => immediateAuthorization(),
+  phaseTiming?: ExecutionPhaseTimingObserver,
 ) {
   const receipts: string[] = [];
   const authorized: Array<{
@@ -34,6 +36,7 @@ function fixture(
   const observed = createObservedSandboxTools(
     sandbox,
     {
+      ...(phaseTiming === undefined ? {} : { phaseTiming }),
       authorizeToolEffect: async (call) => {
         authorized.push(call);
         return await authorize();
@@ -212,6 +215,48 @@ describe("Sandbox 文件工具", () => {
     ).rejects.toThrow("WRITE_INVALID_ARGUMENTS");
     expect(prepareSandboxTool).not.toHaveBeenCalled();
     expect(authorizeToolEffect).not.toHaveBeenCalled();
+  });
+
+  it("工具执行计时排除授权等待，诊断失败不阻止文件读取或 durable 回执", async () => {
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const record = vi.fn(() => {
+      throw new Error("diagnostic unavailable");
+    });
+    try {
+      const tested = fixture(
+        "read",
+        {
+          command: async () => {
+            now += 3;
+            return base64Result("ok");
+          },
+          readFile: async () => {
+            now += 2;
+            return "ok";
+          },
+        } as unknown as SandboxHandle,
+        async () => {
+          now += 100;
+          return immediateAuthorization();
+        },
+        { record },
+      );
+      await expect(
+        tested.execute("timed-read", { path: "input.txt" }, undefined, () => undefined),
+      ).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          phase: "tool_execute",
+          durationMs: 5,
+          toolCallId: "timed-read",
+          status: "succeeded",
+        }),
+      );
+      expect(tested.receipts).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("read 支持相对路径、offset/limit，并返回继续读取提示", async () => {

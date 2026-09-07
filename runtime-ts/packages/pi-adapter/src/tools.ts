@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
+import { measureExecutionPhase, type ExecutionPhaseTimingObserver } from "@hoox/domain";
 import type { ControlledToolReceiptSource, ToolObservationResult } from "@hoox/context-policy";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
 import { type SandboxHandle, SandboxRuntimeError } from "@hoox/sandbox";
@@ -76,6 +77,7 @@ const WriteArgumentsSchema = Type.Object({
 type WriteArguments = Static<typeof WriteArgumentsSchema>;
 
 export interface SandboxToolEffectAuthorizer {
+  readonly phaseTiming?: ExecutionPhaseTimingObserver;
   /** 每次工具副作用前都向 Runtime DB 重新领取短时许可。 */
   authorizeToolEffect(input: {
     readonly callId: string;
@@ -301,12 +303,19 @@ function createExecCommandTool(
           signal,
         );
         const authorization = await authorizeTool(authorizer, callId, "exec_command", params);
-        assertImmediateContinuation(authorization, signal);
         const startedAt = performance.now();
-        const commandOutput = await preparedSandbox.command(buildBashCommand(params.cmd, workdir), {
-          ...signalControl(signal),
-          timeoutMs,
-        });
+        const commandOutput = await measureExecutionPhase(
+          authorizer.phaseTiming,
+          "tool_execute",
+          async () => {
+            assertImmediateContinuation(authorization, signal);
+            return await preparedSandbox.command(buildBashCommand(params.cmd, workdir), {
+              ...signalControl(signal),
+              timeoutMs,
+            });
+          },
+          { toolCallId: callId, toolName: "exec_command" },
+        );
         result = projectCommandResult(
           commandOutput,
           Math.max(0, performance.now() - startedAt),
@@ -370,61 +379,72 @@ function createReadTool(
         const path = resolveSandboxPath(params.path);
         const preparedSandbox = await prepareSandboxTool(sandbox, callId, "read", params, signal);
         const authorization = await authorizeTool(authorizer, callId, "read", params);
-        assertImmediateContinuation(authorization, signal);
-        const probe = await preparedSandbox.command(
-          buildBase64ReadCommand(path, IMAGE_SNIFF_BYTES),
-          {
-            ...signalControl(signal),
-            timeoutMs: DEFAULT_TIMEOUT_MS,
-          },
-        );
-        if (probe.exitCode !== 0) {
-          throw new FileToolUsageError("READ_NOT_FOUND", "无法读取指定的 Sandbox 文件");
-        }
-        const mimeType = detectSupportedImageMimeType(decodeBase64Output(probe.stdout));
-        let content: Array<
-          | { readonly type: "text"; readonly text: string }
-          | { readonly type: "image"; readonly data: string; readonly mimeType: string }
-        >;
-        let details: Readonly<Record<string, unknown>>;
-        if (mimeType === undefined) {
-          const text = await preparedSandbox.readFile(path, {
-            ...signalControl(signal),
-            timeoutMs: DEFAULT_TIMEOUT_MS,
-          });
-          const projected = projectTextRead(text, params);
-          content = [{ type: "text", text: projected.text }];
-          details = projected.details;
-        } else {
-          const image = await preparedSandbox.command(buildBase64ReadCommand(path), {
-            ...signalControl(signal),
-            timeoutMs: DEFAULT_TIMEOUT_MS,
-          });
-          if (image.exitCode !== 0) {
-            throw new FileToolUsageError("READ_NOT_FOUND", "无法读取指定的 Sandbox 图片");
-          }
-          const bytes = decodeBase64Output(image.stdout);
-          if (bytes.byteLength > MAX_INLINE_IMAGE_BYTES) {
-            throw new FileToolUsageError(
-              "READ_IMAGE_TOO_LARGE",
-              "图片超过 32MB 的模型内联输入上限",
+        result = await measureExecutionPhase(
+          authorizer.phaseTiming,
+          "tool_execute",
+          async () => {
+            assertImmediateContinuation(authorization, signal);
+            const probe = await preparedSandbox.command(
+              buildBase64ReadCommand(path, IMAGE_SNIFF_BYTES),
+              {
+                ...signalControl(signal),
+                timeoutMs: DEFAULT_TIMEOUT_MS,
+              },
             );
-          }
-          const verifiedMimeType = detectSupportedImageMimeType(bytes);
-          if (verifiedMimeType === undefined) {
-            throw new FileToolUsageError("READ_INVALID_IMAGE", "图片内容与受支持的格式不匹配");
-          }
-          content = [
-            { type: "text", text: `Read image file [${verifiedMimeType}]` },
-            {
-              type: "image",
-              data: bytes.toString("base64"),
-              mimeType: verifiedMimeType,
-            },
-          ];
-          details = Object.freeze({ path, media_type: verifiedMimeType, bytes: bytes.byteLength });
-        }
-        result = { content, details };
+            if (probe.exitCode !== 0) {
+              throw new FileToolUsageError("READ_NOT_FOUND", "无法读取指定的 Sandbox 文件");
+            }
+            const mimeType = detectSupportedImageMimeType(decodeBase64Output(probe.stdout));
+            let content: Array<
+              | { readonly type: "text"; readonly text: string }
+              | { readonly type: "image"; readonly data: string; readonly mimeType: string }
+            >;
+            let details: Readonly<Record<string, unknown>>;
+            if (mimeType === undefined) {
+              const text = await preparedSandbox.readFile(path, {
+                ...signalControl(signal),
+                timeoutMs: DEFAULT_TIMEOUT_MS,
+              });
+              const projected = projectTextRead(text, params);
+              content = [{ type: "text", text: projected.text }];
+              details = projected.details;
+            } else {
+              const image = await preparedSandbox.command(buildBase64ReadCommand(path), {
+                ...signalControl(signal),
+                timeoutMs: DEFAULT_TIMEOUT_MS,
+              });
+              if (image.exitCode !== 0) {
+                throw new FileToolUsageError("READ_NOT_FOUND", "无法读取指定的 Sandbox 图片");
+              }
+              const bytes = decodeBase64Output(image.stdout);
+              if (bytes.byteLength > MAX_INLINE_IMAGE_BYTES) {
+                throw new FileToolUsageError(
+                  "READ_IMAGE_TOO_LARGE",
+                  "图片超过 32MB 的模型内联输入上限",
+                );
+              }
+              const verifiedMimeType = detectSupportedImageMimeType(bytes);
+              if (verifiedMimeType === undefined) {
+                throw new FileToolUsageError("READ_INVALID_IMAGE", "图片内容与受支持的格式不匹配");
+              }
+              content = [
+                { type: "text", text: `Read image file [${verifiedMimeType}]` },
+                {
+                  type: "image",
+                  data: bytes.toString("base64"),
+                  mimeType: verifiedMimeType,
+                },
+              ];
+              details = Object.freeze({
+                path,
+                media_type: verifiedMimeType,
+                bytes: bytes.byteLength,
+              });
+            }
+            return { content, details };
+          },
+          { toolCallId: callId, toolName: "read" },
+        );
       } catch (error) {
         effectRejected = error instanceof ToolEffectRejectedError;
         await persistReceipt(callId, "read", "failed", capture);
@@ -473,33 +493,40 @@ function createEditTool(
         const preparedSandbox = await prepareSandboxTool(sandbox, callId, "edit", params, signal);
         result = await withSandboxFileMutation(preparedSandbox, path, async () => {
           const authorization = await authorizeTool(authorizer, callId, "edit", params);
-          assertImmediateContinuation(authorization, signal);
-          const original = await preparedSandbox.readFile(path, {
-            ...signalControl(signal),
-            timeoutMs: DEFAULT_TIMEOUT_MS,
-          });
-          const applied = applyExactEdits(original, params.edits);
-          if (signal?.aborted) {
-            throw new SandboxRuntimeError("CANCELLED", "文件修改已取消");
-          }
-          await preparedSandbox.writeFile(path, applied.content, {
-            ...signalControl(signal),
-            timeoutMs: DEFAULT_TIMEOUT_MS,
-          });
-          const details = Object.freeze({
-            path,
-            replacements: params.edits.length,
-            bytes: Buffer.byteLength(applied.content, "utf8"),
-          });
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Successfully applied ${params.edits.length} replacement(s) to ${params.path}`,
-              },
-            ],
-            details,
-          };
+          return measureExecutionPhase(
+            authorizer.phaseTiming,
+            "tool_execute",
+            async () => {
+              assertImmediateContinuation(authorization, signal);
+              const original = await preparedSandbox.readFile(path, {
+                ...signalControl(signal),
+                timeoutMs: DEFAULT_TIMEOUT_MS,
+              });
+              const applied = applyExactEdits(original, params.edits);
+              if (signal?.aborted) {
+                throw new SandboxRuntimeError("CANCELLED", "文件修改已取消");
+              }
+              await preparedSandbox.writeFile(path, applied.content, {
+                ...signalControl(signal),
+                timeoutMs: DEFAULT_TIMEOUT_MS,
+              });
+              const details = Object.freeze({
+                path,
+                replacements: params.edits.length,
+                bytes: Buffer.byteLength(applied.content, "utf8"),
+              });
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `Successfully applied ${params.edits.length} replacement(s) to ${params.path}`,
+                  },
+                ],
+                details,
+              };
+            },
+            { toolCallId: callId, toolName: "edit" },
+          );
         });
       } catch (error) {
         effectRejected = error instanceof ToolEffectRejectedError;
@@ -546,34 +573,41 @@ function createWriteTool(
         const preparedSandbox = await prepareSandboxTool(sandbox, callId, "write", params, signal);
         result = await withSandboxFileMutation(preparedSandbox, path, async () => {
           const authorization = await authorizeTool(authorizer, callId, "write", params);
-          assertImmediateContinuation(authorization, signal);
-          const prepared = await preparedSandbox.command(
-            `mkdir -p -- ${shellQuote(posix.dirname(path))}`,
-            {
-              ...signalControl(signal),
-              timeoutMs: DEFAULT_TIMEOUT_MS,
+          return measureExecutionPhase(
+            authorizer.phaseTiming,
+            "tool_execute",
+            async () => {
+              assertImmediateContinuation(authorization, signal);
+              const prepared = await preparedSandbox.command(
+                `mkdir -p -- ${shellQuote(posix.dirname(path))}`,
+                {
+                  ...signalControl(signal),
+                  timeoutMs: DEFAULT_TIMEOUT_MS,
+                },
+              );
+              if (prepared.exitCode !== 0) {
+                throw new FileToolUsageError("WRITE_PARENT_FAILED", "无法创建 Sandbox 父目录");
+              }
+              if (signal?.aborted) {
+                throw new SandboxRuntimeError("CANCELLED", "文件写入已取消");
+              }
+              await preparedSandbox.writeFile(path, params.content, {
+                ...signalControl(signal),
+                timeoutMs: DEFAULT_TIMEOUT_MS,
+              });
+              const bytes = Buffer.byteLength(params.content, "utf8");
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `Successfully wrote ${bytes} bytes to ${params.path}`,
+                  },
+                ],
+                details: Object.freeze({ path, bytes }),
+              };
             },
+            { toolCallId: callId, toolName: "write" },
           );
-          if (prepared.exitCode !== 0) {
-            throw new FileToolUsageError("WRITE_PARENT_FAILED", "无法创建 Sandbox 父目录");
-          }
-          if (signal?.aborted) {
-            throw new SandboxRuntimeError("CANCELLED", "文件写入已取消");
-          }
-          await preparedSandbox.writeFile(path, params.content, {
-            ...signalControl(signal),
-            timeoutMs: DEFAULT_TIMEOUT_MS,
-          });
-          const bytes = Buffer.byteLength(params.content, "utf8");
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Successfully wrote ${bytes} bytes to ${params.path}`,
-              },
-            ],
-            details: Object.freeze({ path, bytes }),
-          };
         });
       } catch (error) {
         effectRejected = error instanceof ToolEffectRejectedError;

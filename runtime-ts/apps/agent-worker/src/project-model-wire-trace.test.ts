@@ -13,6 +13,8 @@ import {
   ProjectModelWireTraceMirror,
   ProjectRunEventMirror,
   ProjectRunStartupTimingMirror,
+  ProjectRunPhaseTimingMirror,
+  createDevelopmentProjectRunPhaseTimingMirror,
   withDevelopmentProjectModelWireTraceMirror,
 } from "./project-model-wire-trace.js";
 
@@ -26,6 +28,43 @@ afterEach(async () => {
 });
 
 describe("项目模型报文本地镜像", () => {
+  it("阶段耗时保留线程上下文，独立编号且遵守诊断开关", async () => {
+    const root = await temporaryRoot();
+    const mirror = new ProjectRunPhaseTimingMirror(root);
+    const phase = {
+      context: {
+        tenantId: "tenant_1",
+        threadId: "thread_1",
+        runId: "run_1",
+        attemptId: "attempt_1",
+      },
+      sequence: 1,
+      phase: "tool_execute" as const,
+      startedAt: "2026-09-07T00:00:00.000Z",
+      durationMs: 7.5,
+      status: "succeeded" as const,
+    };
+    await mirror.persist(phase);
+    await mirror.persist(phase);
+    expect(
+      JSON.parse(
+        await readFile(join(root, "run_1", "attempt_1", "phase-timing-00000001.json"), "utf8"),
+      ),
+    ).toEqual(phase);
+    await expect(mirror.persist({ ...phase, durationMs: 8 })).rejects.toThrow(
+      "LOCAL_MODEL_WIRE_TRACE_CONFLICT",
+    );
+    expect(
+      createDevelopmentProjectRunPhaseTimingMirror("production", true, () => mirror),
+    ).toBeUndefined();
+    expect(
+      createDevelopmentProjectRunPhaseTimingMirror("development", false, () => mirror),
+    ).toBeUndefined();
+    expect(createDevelopmentProjectRunPhaseTimingMirror("development", true, () => mirror)).toBe(
+      mirror,
+    );
+  });
+
   it("按已校验 Run/Attempt 与明确 part/status 的稳定文件名保存原始字节", async () => {
     const root = await temporaryRoot();
     const mirror = new ProjectModelWireTraceMirror(root);

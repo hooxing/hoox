@@ -17,6 +17,7 @@ const runtimeEventPattern = /^runtime-event-(\d{8})-([a-z_]+)\.json$/u;
 const trajectoryEventPattern = /^trajectory-event-(\d{8})\.json$/u;
 // 列表与正文读取共用白名单，历史 response 文件也不再由内部查看器暴露。
 const wireFilePattern = /^model-turn-(\d+)-transport-(\d+)-(request)-([a-z_]+)\.(json|bin)$/u;
+const phaseTimingPattern = /^phase-timing-(\d{8})\.json$/u;
 const maximumTraceFileBytes = 4 * 1024 * 1024;
 
 export interface TrajectoryServerOptions {
@@ -164,10 +165,113 @@ export async function discoverRuns(rootInput: string): Promise<readonly RunDirec
   return runs.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 500);
 }
 
+interface PhaseTiming {
+  readonly sequence: number;
+  readonly phase: string;
+  readonly startedAt: string;
+  readonly durationMs: number;
+  readonly status: "succeeded" | "failed";
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly context: {
+    readonly runId: string;
+    readonly threadId: string;
+    readonly attemptId: string;
+  };
+}
+
+function isPhaseTiming(value: unknown): value is PhaseTiming {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as Record<string, unknown>;
+  const context = item.context as Record<string, unknown> | undefined;
+  return (
+    Number.isSafeInteger(item.sequence) &&
+    (item.sequence as number) > 0 &&
+    (item.toolCallId === undefined || typeof item.toolCallId === "string") &&
+    (item.toolName === undefined || typeof item.toolName === "string") &&
+    typeof item.phase === "string" &&
+    typeof item.startedAt === "string" &&
+    Number.isFinite(Date.parse(item.startedAt)) &&
+    typeof item.durationMs === "number" &&
+    Number.isFinite(item.durationMs) &&
+    item.durationMs >= 0 &&
+    (item.status === "succeeded" || item.status === "failed") &&
+    typeof context === "object" &&
+    context !== null &&
+    [context.runId, context.threadId, context.attemptId].every(
+      (value) => typeof value === "string" && identifierPattern.test(value),
+    )
+  );
+}
+
+async function localRunMetadata(run: RunDirectory): Promise<RunDisplayMetadata | undefined> {
+  for (const attempt of run.attempts) {
+    const entries = (await readdir(attempt.path, { withFileTypes: true }))
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          !entry.isSymbolicLink() &&
+          (phaseTimingPattern.test(entry.name) || entry.name === "startup-timings.json"),
+      )
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries.slice(0, 8)) {
+      try {
+        const path = join(attempt.path, entry.name);
+        if ((await stat(path)).size > 64 * 1024) continue;
+        const value: unknown = JSON.parse(await readFile(path, "utf8"));
+        if (typeof value !== "object" || value === null) continue;
+        const record = value as Record<string, unknown>;
+        const context = record.context as Record<string, unknown> | undefined;
+        if (
+          context === undefined ||
+          context === null ||
+          context.runId !== run.runId ||
+          context.attemptId !== attempt.attemptId ||
+          typeof context.threadId !== "string" ||
+          !identifierPattern.test(context.threadId)
+        )
+          continue;
+        if (entry.name !== "startup-timings.json" && !isPhaseTiming(value)) continue;
+        // 只有创建至领取阶段的起点才是 Run 创建时间，其他阶段不能替代它。
+        const createdAt =
+          record.phase === "run_queue_wait" && typeof record.startedAt === "string"
+            ? record.startedAt
+            : undefined;
+        return {
+          runId: run.runId,
+          threadId: context.threadId,
+          title: context.threadId,
+          ...(createdAt === undefined ? {} : { createdAt }),
+        };
+      } catch {
+        // 元数据增强不可让损坏的可选诊断文件阻止列表读取。
+      }
+    }
+  }
+  return undefined;
+}
+
+async function resolveMetadata(runs: readonly RunDirectory[], provider?: RunMetadataProvider) {
+  const remote = await resolveRunMetadata(
+    provider,
+    runs.map((run) => run.runId),
+  );
+  const result = new Map(remote);
+  await Promise.all(
+    runs.map(async (run) => {
+      if (result.has(run.runId)) return;
+      const local = await localRunMetadata(run);
+      if (local !== undefined) result.set(run.runId, local);
+    }),
+  );
+  return result;
+}
+
 async function readAttempt(attempt: AttemptDirectory) {
   const entries = await readdir(attempt.path, { withFileTypes: true });
   const events: ObservedRuntimeEvent[] = [];
   const internalEvents: InternalTrajectoryEventV1[] = [];
+  const phaseTimings: PhaseTiming[] = [];
   const warnings: string[] = [];
   const wireFiles: Array<{
     name: string;
@@ -184,6 +288,22 @@ async function readAttempt(attempt: AttemptDirectory) {
     const trajectoryMatch = trajectoryEventPattern.exec(entry.name);
     const wireMatch = wireFilePattern.exec(entry.name);
     const path = join(attempt.path, entry.name);
+    if (phaseTimingPattern.test(entry.name)) {
+      try {
+        if ((await stat(path)).size > 64 * 1024) throw new Error("PHASE_TIMING_TOO_LARGE");
+        const value: unknown = JSON.parse(await readFile(path, "utf8"));
+        if (
+          !isPhaseTiming(value) ||
+          value.context.attemptId !== attempt.attemptId ||
+          value.context.runId !== basename(resolve(attempt.path, ".."))
+        )
+          throw new Error("INVALID_PHASE_TIMING");
+        phaseTimings.push(value);
+      } catch {
+        warnings.push(`${entry.name}: 阶段计时格式无效或无法读取`);
+      }
+      continue;
+    }
     if (runtimeMatch !== null) {
       try {
         const [body, metadata] = await Promise.all([readFile(path, "utf8"), stat(path)]);
@@ -243,6 +363,7 @@ async function readAttempt(attempt: AttemptDirectory) {
     trajectory: projectTrajectory(events),
     internalTrajectory: projectInternalTrajectory(internalEvents),
     rawEvents: internalEvents,
+    phaseTimings: phaseTimings.sort((a, b) => a.sequence - b.sequence),
     wireFiles,
     warnings,
   };
@@ -277,7 +398,7 @@ async function readRunDetails(run: RunDirectory, metadata?: RunDisplayMetadata) 
 }
 
 async function runDetails(run: RunDirectory, provider?: RunMetadataProvider) {
-  const metadata = (await resolveRunMetadata(provider, [run.runId])).get(run.runId);
+  const metadata = (await resolveMetadata([run], provider)).get(run.runId);
   return readRunDetails(run, metadata);
 }
 
@@ -317,10 +438,7 @@ async function summarizeAttempt(attempt: AttemptDirectory): Promise<{
 }
 
 async function runSummaries(runs: readonly RunDirectory[], provider?: RunMetadataProvider) {
-  const metadata = await resolveRunMetadata(
-    provider,
-    runs.map((run) => run.runId),
-  );
+  const metadata = await resolveMetadata(runs, provider);
   return Promise.all(
     runs.map(async (run) => {
       const attempts = await Promise.all(run.attempts.map(summarizeAttempt));
@@ -393,10 +511,7 @@ async function threadDetails(
   runs: readonly RunDirectory[],
   provider?: RunMetadataProvider,
 ) {
-  const metadata = await resolveRunMetadata(
-    provider,
-    runs.map((run) => run.runId),
-  );
+  const metadata = await resolveMetadata(runs, provider);
   const selected = runs
     .filter((run) => (metadata.get(run.runId)?.threadId ?? run.runId) === id)
     .sort((left, right) => {

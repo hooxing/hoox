@@ -50,6 +50,8 @@ export interface DeepSeekTrajectoryTurn {
   readonly startedAt: string;
   readonly completedAt?: string;
   readonly durationMs?: number;
+  /** turn_start 到首个 assistant message_start，包含请求准备，不等同 HTTP TTFT。 */
+  readonly modelWaitDurationMs?: number;
   readonly records: readonly DeepSeekTrajectoryRecord[];
 }
 
@@ -70,6 +72,8 @@ export interface DeepSeekTrajectoryProjection {
     readonly cacheWriteTokens: number;
     /** Assistant 流从 message_start 到 message_end 的累计解码时长。 */
     readonly modelDurationMs: number;
+    /** 已观察到首个 assistant message_start 的各轮等待累计；缺少边界的轮次不估算，完全未采集时为 null。 */
+    readonly modelWaitDurationMs: number | null;
     readonly outputTokensPerSecond: number | null;
     /** cacheRead / (input + cacheRead)，无输入时为 null。 */
     readonly cacheHitRate: number | null;
@@ -101,6 +105,8 @@ export function combineDeepSeekTrajectoryProjections(
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
   let modelDurationMs = 0;
+  let modelWaitDurationMs = 0;
+  let hasModelWait = false;
 
   for (const segment of segments) {
     const mappedRecords = segment.projection.records.map((record) => {
@@ -136,6 +142,10 @@ export function combineDeepSeekTrajectoryProjections(
     cacheReadTokens += stats.cacheReadTokens;
     cacheWriteTokens += stats.cacheWriteTokens;
     modelDurationMs += stats.modelDurationMs;
+    if (stats.modelWaitDurationMs !== null) {
+      modelWaitDurationMs += stats.modelWaitDurationMs;
+      hasModelWait = true;
+    }
     turnOffset += stats.turns;
     durationOffsetMs += stats.durationMs;
   }
@@ -155,6 +165,7 @@ export function combineDeepSeekTrajectoryProjections(
       cacheReadTokens,
       cacheWriteTokens,
       modelDurationMs,
+      modelWaitDurationMs: hasModelWait ? modelWaitDurationMs : null,
       outputTokensPerSecond: modelDurationMs > 0 ? outputTokens / (modelDurationMs / 1_000) : null,
       cacheHitRate: cacheEligibleTokens > 0 ? cacheReadTokens / cacheEligibleTokens : null,
       durationMs: durationOffsetMs,
@@ -191,6 +202,7 @@ export function projectInternalTrajectory(
   const drafts: RecordDraft[] = [];
   const turnStarts = new Map<number, InternalTrajectoryEventV1>();
   const turnEnds = new Map<number, InternalTrajectoryEventV1>();
+  const modelWaits = new Map<number, number>();
   const activeTools = new Map<string, ToolAccumulator>();
   const completedToolCalls = new Set<string>();
   let activeAssistant: AssistantAccumulator | undefined;
@@ -250,6 +262,13 @@ export function projectInternalTrajectory(
     if (event.type === "message_start") {
       const message = objectValue(body?.message);
       if (message?.role === "assistant") {
+        const turnStart = turnStarts.get(effectiveTurn);
+        if (turnStart !== undefined && !modelWaits.has(effectiveTurn)) {
+          modelWaits.set(
+            effectiveTurn,
+            Math.max(0, event.monotonicOffsetMs - turnStart.monotonicOffsetMs),
+          );
+        }
         finishAssistant();
         activeAssistant = {
           turn: effectiveTurn,
@@ -393,15 +412,18 @@ export function projectInternalTrajectory(
       first === undefined || last === undefined
         ? undefined
         : Math.max(0, last.monotonicOffsetMs - first.monotonicOffsetMs);
+    const modelWaitDurationMs = modelWaits.get(number);
     return {
       turn: number,
       startedAt: first?.occurredAt ?? new Date(0).toISOString(),
       ...(last === undefined ? {} : { completedAt: last.occurredAt }),
       ...(durationMs === undefined ? {} : { durationMs }),
+      ...(modelWaitDurationMs === undefined ? {} : { modelWaitDurationMs }),
       records: grouped,
     };
   });
 
+  const modelWaitDurationMs = [...modelWaits.values()].reduce((sum, value) => sum + value, 0);
   const modelDurationMs = records
     .filter((record) => record.eventType === "assistant_generation")
     .reduce((sum, record) => sum + (record.durationMs ?? 0), 0);
@@ -422,6 +444,7 @@ export function projectInternalTrajectory(
       cacheReadTokens,
       cacheWriteTokens,
       modelDurationMs,
+      modelWaitDurationMs: modelWaits.size > 0 ? modelWaitDurationMs : null,
       outputTokensPerSecond: modelDurationMs > 0 ? outputTokens / (modelDurationMs / 1_000) : null,
       cacheHitRate: cacheEligibleTokens > 0 ? cacheReadTokens / cacheEligibleTokens : null,
       durationMs:

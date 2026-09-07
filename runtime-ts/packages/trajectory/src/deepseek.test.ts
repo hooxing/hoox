@@ -20,6 +20,20 @@ function event(
 }
 
 describe("projectInternalTrajectory", () => {
+  it("没有等待起点的旧轨迹显示未采集，组合时不制造零等待", () => {
+    const projection = projectInternalTrajectory([
+      event(1, 10, "message_end", {
+        type: "message_end",
+        message: { role: "assistant", content: [] },
+      }),
+    ]);
+    expect(projection.stats.modelWaitDurationMs).toBeNull();
+    expect(
+      combineDeepSeekTrajectoryProjections([{ runId: "run_1", attemptId: "attempt_1", projection }])
+        .stats.modelWaitDurationMs,
+    ).toBeNull();
+  });
+
   it("将同一次 Assistant 流聚合为一个逻辑记录，同时保留原始事件统计和范围", () => {
     const projection = projectInternalTrajectory([
       event(1, 0, "session_created", {
@@ -89,6 +103,7 @@ describe("projectInternalTrajectory", () => {
       cacheReadTokens: 80,
       cacheWriteTokens: 5,
       modelDurationMs: 30,
+      modelWaitDurationMs: 8,
       outputTokensPerSecond: 20 / 0.03,
       cacheHitRate: 80 / 180,
       durationMs: 65,
@@ -268,4 +283,23 @@ describe("combineDeepSeekTrajectoryProjections", () => {
       durationMs: 20,
     });
   });
+});
+
+it("模型等待只使用同轮完整边界，跨轮累计不包含轮间空闲", () => {
+  const first = projectInternalTrajectory([
+    event(1, 100, "turn_start", {}),
+    event(2, 600, "message_start", { message: { role: "assistant" } }),
+    event(3, 800, "message_end", { message: { role: "assistant" } }),
+    event(4, 900, "turn_end", {}),
+    event(5, 2000, "turn_start", {}),
+    event(6, 2100, "message_end", { message: { role: "assistant" } }),
+  ]);
+  expect(first.stats.modelWaitDurationMs).toBe(500);
+  expect(first.turns[0]?.modelWaitDurationMs).toBe(500);
+  expect(first.turns[1]?.modelWaitDurationMs).toBeUndefined();
+  const combined = combineDeepSeekTrajectoryProjections([
+    { runId: "run_1", attemptId: "a", projection: first },
+    { runId: "run_2", attemptId: "b", projection: first },
+  ]);
+  expect(combined.stats.modelWaitDurationMs).toBe(1000);
 });

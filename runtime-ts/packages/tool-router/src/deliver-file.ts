@@ -6,7 +6,13 @@ import {
   SimpleDeliveryCleanupResultUnknownError,
   SimpleDeliveryCommitResultUnknownError,
 } from "@hoox/artifact";
-import type { ArtifactId, ResourceVersionId, Sha256Digest } from "@hoox/domain";
+import {
+  measureExecutionPhase,
+  type ExecutionPhaseTimingObserver,
+  type ArtifactId,
+  type ResourceVersionId,
+  type Sha256Digest,
+} from "@hoox/domain";
 import { type DeliverFileToolArguments, DeliverFileToolArgumentsSchema } from "@hoox/pi-adapter";
 import type { ExecutionScope, ExternalEffectCall, SandboxSessionRef } from "@hoox/run-contracts";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
@@ -53,6 +59,7 @@ export interface DeliverFilePublicationPort {
     readonly sourcePath: string;
     readonly name: string;
     readonly body: Uint8Array;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
   }): Promise<DeliveredFilePublication>;
 }
 
@@ -111,6 +118,7 @@ export interface DeliverFileToolRouterFactoryPort {
   create(input: {
     readonly binding: DeliverFileSessionBinding;
     readonly authorizer: DeliverFileEffectAuthorizer;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
   }): DeliverFileToolRouterPort;
 }
 
@@ -126,6 +134,7 @@ export class DeliverFileToolRouterFactory implements DeliverFileToolRouterFactor
   create(input: {
     readonly binding: DeliverFileSessionBinding;
     readonly authorizer: DeliverFileEffectAuthorizer;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
   }): DeliverFileToolRouterPort {
     return new DeliverFileToolRouter({ ...this.dependencies, ...input });
   }
@@ -138,6 +147,7 @@ class DeliverFileToolRouter implements DeliverFileToolRouterPort {
     private readonly options: {
       readonly binding: DeliverFileSessionBinding;
       readonly authorizer: DeliverFileEffectAuthorizer;
+      readonly phaseTiming?: ExecutionPhaseTimingObserver;
       readonly source: DeliverFileSourcePort;
       readonly publications: DeliverFilePublicationPort;
       readonly authorizationVerifier: ArtifactExecutionAuthorizationVerifierPort;
@@ -157,11 +167,17 @@ class DeliverFileToolRouter implements DeliverFileToolRouterPort {
     const name = normalizeName(args.name ?? basename(relativePath));
     let source: DeliverFileReadResult;
     try {
-      source = await this.options.source.read({
-        binding: this.options.binding,
-        absolutePath: args.path,
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      });
+      source = await measureExecutionPhase(
+        this.options.phaseTiming,
+        "file_read",
+        () =>
+          this.options.source.read({
+            binding: this.options.binding,
+            absolutePath: args.path,
+            ...(input.signal === undefined ? {} : { signal: input.signal }),
+          }),
+        { toolCallId: input.callId, toolName: "deliver_file" },
+      );
     } catch {
       throw unavailable();
     }
@@ -185,6 +201,9 @@ class DeliverFileToolRouter implements DeliverFileToolRouterPort {
         sourcePath: source.relativePath,
         name,
         body: source.body,
+        ...(this.options.phaseTiming === undefined
+          ? {}
+          : { phaseTiming: this.options.phaseTiming }),
       });
       return Object.freeze({
         status: "published",

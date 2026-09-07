@@ -1,3 +1,4 @@
+import type { ExecutionPhaseTiming } from "@hoox/domain";
 import type { PgClaimedRunDispatch, PgClaimedWorkerTenantAssignment } from "@hoox/persistence";
 import type { ExecutionScope, SandboxSessionRef } from "@hoox/run-contracts";
 import { describe, expect, it, vi } from "vitest";
@@ -980,6 +981,60 @@ describe("生产 Workspace revision 安全下限", () => {
     expect(command).toHaveBeenCalledOnce();
     expect(commands[0]).toContain('sudo install -d -o "$uid" -g "$gid" -m 0700 /workspace');
     expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("分开记录沙箱创建、连接恢复、初始化和资源准备，诊断失败不改变 ready", async () => {
+    const phases: ExecutionPhaseTiming[] = [];
+    const sandbox = {
+      id: "sandbox-timing",
+      command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill: async () => undefined,
+    };
+    const registry = new ProviderSandboxSessionRegistry(
+      { providerKey: "e2b", create: async () => sandbox, connect: async () => sandbox } as never,
+      "base",
+      3600,
+      90000,
+      undefined,
+      { materialize: async () => undefined },
+      { initialize: async () => undefined },
+    );
+    const phaseTiming = {
+      record: (span: ExecutionPhaseTiming) => {
+        phases.push(span);
+        throw new Error("diagnostic failed");
+      },
+    };
+    const scope = claim().scope as ExecutionScope;
+    await expect(
+      registry.acquire({
+        scope,
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: true,
+        phaseTiming,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+    await expect(
+      registry.connect({
+        scope,
+        registryId: "registry-timing",
+        providerKey: "e2b",
+        providerSandboxId: sandbox.id,
+        signal: new AbortController().signal,
+        phaseTiming,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+    expect(phases.map((span) => span.phase)).toEqual([
+      "sandbox_create",
+      "sandbox_initialize",
+      "sandbox_resource_prepare",
+      "sandbox_connect",
+      "sandbox_initialize",
+      "sandbox_resource_prepare",
+    ]);
   });
 
   it("Sandbox 初始化失败且清理未知时保留 providerSandboxId 供恢复清理路由", async () => {

@@ -1,3 +1,4 @@
+import { measureExecutionPhase, type ExecutionPhaseTimingObserver } from "@hoox/domain";
 import { randomUUID } from "node:crypto";
 import {
   DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
@@ -270,6 +271,7 @@ export class ProviderSandboxSessionRegistry
     readonly scope: ExecutionScope;
     readonly signal: AbortSignal;
     readonly requiresResourceFilesystem: boolean;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
   }): Promise<SandboxAcquireResult> {
     this.uncertainCreate = undefined;
     if (this.uncertainEvents !== undefined) this.uncertainEvents.current = undefined;
@@ -281,25 +283,31 @@ export class ProviderSandboxSessionRegistry
       ) {
         throw new Error("ResourceFS provider 未配置");
       }
-      const volume = input.requiresResourceFilesystem
-        ? await this.resourceVolume?.ensure({
-            tenantId: input.scope.tenantId,
-            signal: input.signal,
-          })
-        : undefined;
-      const sandbox = await this.gateway.create(
-        {
-          templateId: this.templateId,
-          ttlSeconds: this.ttlSeconds,
-          ...(volume === undefined ? {} : { volumeMounts: [volume] }),
-        },
-        { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
+      const volume =
+        input.requiresResourceFilesystem && this.resourceVolume !== undefined
+          ? await measureExecutionPhase(input.phaseTiming, "sandbox_resource_prepare", async () =>
+              this.resourceVolume?.ensure({
+                tenantId: input.scope.tenantId,
+                signal: input.signal,
+              }),
+            )
+          : undefined;
+      const sandbox = await measureExecutionPhase(input.phaseTiming, "sandbox_create", async () =>
+        this.gateway.create(
+          {
+            templateId: this.templateId,
+            ttlSeconds: this.ttlSeconds,
+            ...(volume === undefined ? {} : { volumeMounts: [volume] }),
+          },
+          { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
+        ),
       );
       await this.prepareCreatedSandbox(
         input.scope,
         sandbox,
         input.signal,
         input.requiresResourceFilesystem,
+        input.phaseTiming,
       );
       const session = this.bindSession(input.scope, `registry-${randomUUID()}`, sandbox, "created");
       return { outcome: "ready", session };
@@ -334,26 +342,32 @@ export class ProviderSandboxSessionRegistry
       ) {
         throw new Error("ResourceFS provider 未配置");
       }
-      const volume = input.requiresResourceFilesystem
-        ? await this.resourceVolume?.ensure({
-            tenantId: input.scope.tenantId,
-            signal: input.signal,
-          })
-        : undefined;
-      const sandbox = await this.gateway.create(
-        {
-          templateId: this.templateId,
-          ttlSeconds: this.ttlSeconds,
-          lifecycle: { onTimeout: "pause", autoResume: true },
-          ...(volume === undefined ? {} : { volumeMounts: [volume] }),
-        },
-        { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
+      const volume =
+        input.requiresResourceFilesystem && this.resourceVolume !== undefined
+          ? await measureExecutionPhase(input.phaseTiming, "sandbox_resource_prepare", async () =>
+              this.resourceVolume?.ensure({
+                tenantId: input.scope.tenantId,
+                signal: input.signal,
+              }),
+            )
+          : undefined;
+      const sandbox = await measureExecutionPhase(input.phaseTiming, "sandbox_create", async () =>
+        this.gateway.create(
+          {
+            templateId: this.templateId,
+            ttlSeconds: this.ttlSeconds,
+            lifecycle: { onTimeout: "pause", autoResume: true },
+            ...(volume === undefined ? {} : { volumeMounts: [volume] }),
+          },
+          { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
+        ),
       );
       await this.prepareCreatedSandbox(
         input.scope,
         sandbox,
         input.signal,
         input.requiresResourceFilesystem,
+        input.phaseTiming,
       );
       return {
         outcome: "ready",
@@ -382,11 +396,18 @@ export class ProviderSandboxSessionRegistry
     sandbox: SandboxSessionRef["sandbox"],
     signal: AbortSignal,
     requiresResourceFilesystem: boolean,
+    phaseTiming?: ExecutionPhaseTimingObserver,
   ): Promise<void> {
     try {
-      await this.sandboxInitializer?.initialize({ sandbox, signal });
-      if (requiresResourceFilesystem) {
-        await this.resourceFilesystemMaterializer?.materialize({ scope, sandbox, signal });
+      if (this.sandboxInitializer !== undefined) {
+        await measureExecutionPhase(phaseTiming, "sandbox_initialize", async () =>
+          this.sandboxInitializer?.initialize({ sandbox, signal }),
+        );
+      }
+      if (requiresResourceFilesystem && this.resourceFilesystemMaterializer !== undefined) {
+        await measureExecutionPhase(phaseTiming, "sandbox_resource_prepare", async () =>
+          this.resourceFilesystemMaterializer?.materialize({ scope, sandbox, signal }),
+        );
       }
     } catch (error) {
       console.warn(`SANDBOX_PREPARE_FAILED category=${sandboxFailureCategory(error)}`);
@@ -417,17 +438,25 @@ export class ProviderSandboxSessionRegistry
       throw new Error(`Sandbox Provider 路由不匹配: ${input.providerKey}`);
     }
     try {
-      const sandbox = await this.gateway.connect(input.providerSandboxId, {
-        signal: input.signal,
-        timeoutMs: this.lifecycleTimeoutMs,
-      });
-      await this.sandboxInitializer?.initialize({ sandbox, signal: input.signal });
-      if (this.resourceFilesystemMaterializer !== undefined) {
-        await this.resourceFilesystemMaterializer.materialize({
-          scope: input.scope,
-          sandbox,
+      const sandbox = await measureExecutionPhase(input.phaseTiming, "sandbox_connect", async () =>
+        this.gateway.connect(input.providerSandboxId, {
           signal: input.signal,
-        });
+          timeoutMs: this.lifecycleTimeoutMs,
+        }),
+      );
+      if (this.sandboxInitializer !== undefined) {
+        await measureExecutionPhase(input.phaseTiming, "sandbox_initialize", async () =>
+          this.sandboxInitializer?.initialize({ sandbox, signal: input.signal }),
+        );
+      }
+      if (this.resourceFilesystemMaterializer !== undefined) {
+        await measureExecutionPhase(input.phaseTiming, "sandbox_resource_prepare", async () =>
+          this.resourceFilesystemMaterializer?.materialize({
+            scope: input.scope,
+            sandbox,
+            signal: input.signal,
+          }),
+        );
       }
       return {
         outcome: "ready",

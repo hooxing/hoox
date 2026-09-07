@@ -1,3 +1,4 @@
+import type { RunPhaseTimingDiagnosticsPort } from "./run-phase-diagnostics.js";
 import {
   type RunPersonalizationSnapshot,
   resourceId,
@@ -89,6 +90,7 @@ function harness(
     }): Promise<RunPersonalizationSnapshot>;
   }>,
   startupTimingDiagnostics?: RunStartupTimingDiagnosticsPort,
+  phaseTimingDiagnostics?: RunPhaseTimingDiagnosticsPort,
 ) {
   const persistence = new FakeExecutionPersistence();
   const scope = persistence.addSeed(seed);
@@ -121,6 +123,7 @@ function harness(
       continuityMetrics,
       ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
       ...(startupTimingDiagnostics === undefined ? {} : { startupTimingDiagnostics }),
+      ...(phaseTimingDiagnostics === undefined ? {} : { phaseTimingDiagnostics }),
       ...(workerOptions.threadContextWriteEnabled === true ? { threadContextBodies } : {}),
       ...(workerOptions.threadSandboxSessionReuseEnabled === true ? { threadSandboxes } : {}),
       ...(workerOptions.subagentsEnabled === true ? { agentControl } : {}),
@@ -179,6 +182,41 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.persistence.record(h.scope).outbox).not.toContainEqual(
       expect.objectContaining({ kind: "sandbox_cleanup" }),
     );
+  });
+
+  it("阶段诊断覆盖排队、沙箱、工作区和持久化，且诊断失败不改变任务完成", async () => {
+    const records: Parameters<RunPhaseTimingDiagnosticsPort["persist"]>[0][] = [];
+    const h = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      fakeSeed("phase-timing"),
+      {},
+      undefined,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      {
+        persist: async (record) => {
+          records.push(record);
+          if (record.phase === "runtime_persist") throw new Error("diagnostic unavailable");
+        },
+      },
+    );
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(records.map((record) => record.phase)).toEqual(
+      expect.arrayContaining([
+        "run_queue_wait",
+        "sandbox_acquire",
+        "workspace_materialize",
+        "workspace_verify",
+        "sandbox_settle",
+        "runtime_persist",
+      ]),
+    );
+    expect(
+      records.every((record) => record.context.runId === h.scope.runId && record.durationMs >= 0),
+    ).toBe(true);
+    expect(records.map((record) => record.sequence)).toEqual(records.map((_, index) => index + 1));
   });
 
   it("在首个模型请求前发布细分启动耗时且不包含后续阶段", async () => {

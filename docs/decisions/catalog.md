@@ -294,5 +294,6 @@
 | [ADR-20260906183557：CI 独立容器并行与兼容汇总门禁](20260906183557-ci-parallel-gates-and-image-cache.md) | 已接受 | 2026-09-06 |
 | [ADR-20260906211335：后台在线配置与记忆密钥托管](20260906211335-admin-live-configuration-and-memory-credentials.md) | 已接受 | 2026-09-06 |
 | [ADR-20260906195752：后台按管理任务保存配置与发布技能](20260906195752-admin-task-oriented-configuration-and-publication.md) | 部分已替代 | 2026-09-06 |
+| [ADR-20260906211950：工具内部校验字段不进入模型契约](20260906211950-private-tool-validation-schema.md) | 已接受 | 2026-09-06 |
 
 </details>

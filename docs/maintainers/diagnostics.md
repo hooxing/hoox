@@ -36,9 +36,24 @@ model-wire-traces/<runId>/<attemptId>/
 model-turn-00-transport-0-request-complete.json
 runtime-event-00000003-agent_event.json
 startup-timings.json
+phase-timing-00000001.json
 ```
 
 `startup-timings.json` 记录 Worker 开始领取 Run 到首个 Provider 请求即将发起之间的总耗时，以及 claim、个性化、记忆、停止点、AgentSupervisor、Skill 恢复、Observation、Thread 历史、Runtime compaction、Pi Session 创建、模型阶段持久化、输入准备和模型许可等低基数阶段。它不保存 Prompt、工具参数或用户正文；若 Run 在首模前失败，则在 Run 收口时保存截至失败点的部分快照。
+
+`phase-timing-*.json` 在同一诊断开关下记录整个 Attempt 的内部阶段。每条包含 Run/Thread/Attempt、独立序号、阶段名、开始时间、持续时间、调用结果，以及可选工具调用 ID；不包含工具参数、文件路径、正文或凭据。持续时间使用单调时钟，开始时间只用于定位；创建至领取阶段例外，使用同一数据库时钟的 `Run.createdAt` 与 claim 时间之差。它包含调度、领取以及重试前的累计等待，不能当作纯 Broker 排队时间。
+
+| 阶段 | 边界与解释 |
+| --- | --- |
+| 沙箱获取 | 生命周期 acquire 总调用，包含创建/连接、资源准备及相关持久化；子阶段不可重复加到总计 |
+| 沙箱创建、连接／自动恢复 | Provider create/connect 的调用时间；底层自动恢复若不可单独观测，不伪造独立恢复耗时 |
+| 沙箱初始化、资源准备和验证 | 初始化器、资源目录挂载/物化、数据面探测分别计时；未执行的可选步骤不生成记录 |
+| 工作区恢复、历史目录准备、结果校验 | 分别对应 manifest 物化、历史入口准备和输出 revision 校验 |
+| 工具调用持久化、环境准备、授权、执行、回执持久化 | 关联工具调用 ID；执行阶段在准备和授权后计时，文件编辑锁等待不包含在执行时间内 |
+| 交付文件读取、上传及稳定引用持久化、元数据提交 | 读取包含工作区打开和文件检查；上传阶段是 Blob writer 完整调用，包含稳定引用持久化，不等于纯网络上传 |
+| 运行状态持久化、沙箱收尾 | mutation/readback 每次调用与沙箱终态处理；不代表所有数据库访问或整个 Run 收尾时间 |
+
+阶段的 `succeeded/failed` 仅表示被测调用正常返回或抛出，业务失败返回值仍须结合原始日志判断。嵌套与并行阶段不能直接求和。诊断写入失败被隔离，不改变工具授权、操作结果或恢复流程；收口会等待已提交的诊断写入。通用 production 不装配该本地镜像，受控 Demo 沿用既有 development 诊断装配，不新增开关或开放接口。
 
 文件使用同目录临时文件和原子发布；相同字节可以幂等重放，不同字节不会覆盖已有文件。本地镜像写入在首模边界异步启动，失败不阻塞 Provider 请求，也不改变模型调用或 PostgreSQL/MinIO 持久化结果。
 
@@ -88,7 +103,11 @@ corepack pnpm dev:trajectory -- --port 4190
 corepack pnpm dev:trajectory -- --root <受控目录>
 ```
 
-事件文件不包含 PostgreSQL `occurred_at`，页面耗时使用不可变文件 mtime 近似计算，只用于排障。
+查看器按 Thread 聚合 Run；Runtime 元数据不可用时，使用本地阶段记录或旧 `startup-timings.json` 中的匹配上下文回退分组。没有真实标题时显示 Thread ID，没有上下文的旧记录仍按 Run 展示，不从用户输入猜测标题。
+
+Attempt 下拉框支持切换单次 Attempt，默认组合各 Run 的最新 Attempt。内部阶段表和“阶段计时”下载保留阶段明细；旧日志没有采集的阶段显示“未采集”，不补零。Session log 下载继续保留原始事件格式。
+
+“模型流生成”为 assistant `message_start` 到 `message_end` 的累计时间；“模型等待”为各轮 `turn_start` 到首个 assistant `message_start` 的已采集等待，包含请求准备及首响应等待，不是精确 HTTP TTFT。完全缺少等待边界时显示空值。轨迹跨度来自内部事件的单调时钟范围，不能当作服务端完整 Run 总耗时。只有旧版 Runtime 镜像时才使用文件 mtime 做近似定位。
 
 ## 安全约束
 

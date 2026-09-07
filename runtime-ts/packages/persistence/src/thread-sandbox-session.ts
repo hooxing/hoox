@@ -273,6 +273,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       await this.recordCachedSessionAge(input, prepared);
       if (prepared.kind === "retire") {
         const connected = await this.provider.connect({
+          ...(input.phaseTiming === undefined ? {} : { phaseTiming: input.phaseTiming }),
           scope: input.scope,
           registryId: prepared.row.registry_id,
           providerKey: prepared.row.provider_key,
@@ -325,6 +326,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         );
       }
       const connected = await this.provider.connect({
+        ...(input.phaseTiming === undefined ? {} : { phaseTiming: input.phaseTiming }),
         scope: input.scope,
         registryId: prepared.row.registry_id,
         providerKey: prepared.row.provider_key,
@@ -835,6 +837,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       return { outcome: "failed", code: "PERSISTENCE_UNAVAILABLE" };
     }
     const created = await this.provider.create({
+      ...(input.phaseTiming === undefined ? {} : { phaseTiming: input.phaseTiming }),
       scope: input.scope,
       registryId,
       signal: input.signal,

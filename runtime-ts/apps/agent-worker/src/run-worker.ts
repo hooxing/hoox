@@ -1,5 +1,7 @@
 import {
   applyTodoWrite,
+  measureExecutionPhase,
+  type ExecutionPhaseTimingObserver,
   type IsoTimestamp,
   type Run,
   type RunPersonalizationSnapshot,
@@ -64,6 +66,10 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
+import {
+  RunPhaseTimingCollector,
+  type RunPhaseTimingDiagnosticsPort,
+} from "./run-phase-diagnostics.js";
 import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 import {
   RunStartupTimingCollector,
@@ -281,6 +287,7 @@ interface WorkerDependencies {
   readonly runEventDiagnostics?: RunEventDiagnosticsPort;
   /** development 首模前分段耗时诊断；失败不得阻塞模型请求或改变 Run 语义。 */
   readonly startupTimingDiagnostics?: RunStartupTimingDiagnosticsPort;
+  readonly phaseTimingDiagnostics?: RunPhaseTimingDiagnosticsPort;
   readonly agentControl?: AgentControlPersistencePort;
   /** 长期记忆是低信任可选上下文；任何失败都不得改变 Run 终态。 */
   readonly memoryRetriever?: MemoryRetriever;
@@ -295,6 +302,7 @@ interface WorkerDependencies {
 }
 
 interface ExecutionContext {
+  phaseTiming?: ExecutionPhaseTimingObserver;
   readonly scope: ExecutionScope;
   fence: ExecutionFence;
   attemptVersion: number;
@@ -513,6 +521,28 @@ export class RunWorker {
       adapterRejected: false,
       contextTurnOrdinal: 0,
     };
+    const phaseTiming =
+      this.dependencies.phaseTimingDiagnostics === undefined
+        ? undefined
+        : new RunPhaseTimingCollector(
+            {
+              tenantId: scope.tenantId,
+              threadId: scope.threadId,
+              runId: scope.runId,
+              attemptId: context.attemptId,
+            },
+            this.dependencies.phaseTimingDiagnostics,
+          );
+    if (phaseTiming !== undefined) {
+      context.phaseTiming = phaseTiming;
+      // 同一数据库时钟的创建到领取间隔，重试 Attempt 仍以 Run 创建为起点，不冒充 Broker 排队。
+      phaseTiming.record({
+        phase: "run_queue_wait",
+        startedAt: context.run.createdAt,
+        durationMs: Math.max(0, Date.parse(claim.databaseNow) - Date.parse(context.run.createdAt)),
+        status: "succeeded",
+      });
+    }
     const startupTiming =
       this.dependencies.startupTimingDiagnostics === undefined
         ? undefined
@@ -617,6 +647,17 @@ export class RunWorker {
       const ensureSandboxReady: Parameters<
         AgentSessionFactoryPort["create"]
       >[0]["ensureSandboxReady"] = async (request) => {
+        const preparationTiming =
+          phaseTiming === undefined || request.reason !== "tool"
+            ? phaseTiming
+            : {
+                record: (span: Parameters<ExecutionPhaseTimingObserver["record"]>[0]) =>
+                  phaseTiming.record({
+                    ...span,
+                    toolCallId: request.call.callId,
+                    toolName: request.call.toolName,
+                  }),
+              };
         if (request.reason === "tool") {
           const call = request.call;
           const gate = context.toolStartedGates.get(call.callId);
@@ -657,14 +698,20 @@ export class RunWorker {
           if (this.options.threadSandboxSessionReuseEnabled === true) {
             const lifecycle = this.dependencies.threadSandboxes;
             if (lifecycle === undefined) throw new Error("Thread Sandbox lifecycle 缺失");
-            let acquisition = await lifecycle.acquire({
-              scope,
-              attemptId: context.attemptId,
-              owner: this.options.workerId,
-              leaseDurationMs: this.#leaseDurationMs,
-              signal: executionAbort.signal,
-              requiresResourceFilesystem,
-            });
+            let acquisition = await measureExecutionPhase(
+              preparationTiming,
+              "sandbox_acquire",
+              () =>
+                lifecycle.acquire({
+                  scope,
+                  attemptId: context.attemptId,
+                  owner: this.options.workerId,
+                  leaseDurationMs: this.#leaseDurationMs,
+                  signal: executionAbort.signal,
+                  requiresResourceFilesystem,
+                  ...(preparationTiming === undefined ? {} : { phaseTiming: preparationTiming }),
+                }),
+            );
             if (acquisition.outcome !== "ready") {
               context.agentFailure =
                 acquisition.outcome === "unknown" ? "SANDBOX_UNKNOWN" : acquisition.code;
@@ -679,12 +726,18 @@ export class RunWorker {
               throw new Error("Thread Sandbox ResourceFS 能力事实缺失");
             }
             if (acquisition.source !== "cold_created") {
-              const probe = await probeResourceFilesystemDataPlane(acquisition.session.sandbox, {
-                threadId: scope.threadId,
-                historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
-                directAttachmentPaths,
-                signal: executionAbort.signal,
-              });
+              const probeSession = acquisition.session;
+              const probe = await measureExecutionPhase(
+                preparationTiming,
+                "sandbox_resource_probe",
+                () =>
+                  probeResourceFilesystemDataPlane(probeSession.sandbox, {
+                    threadId: scope.threadId,
+                    historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
+                    directAttachmentPaths,
+                    signal: executionAbort.signal,
+                  }),
+              );
               if (probe.outcome === "failed") {
                 context.agentFailure = "SANDBOX_FAILED";
                 throw new Error("复用 Thread Sandbox 的 ResourceFS 数据面验证失败");
@@ -708,14 +761,22 @@ export class RunWorker {
                     retired === "unknown" ? "SANDBOX_UNKNOWN" : "SANDBOX_FAILED";
                   throw new Error("失效 Thread Sandbox generation 退役失败");
                 }
-                acquisition = await lifecycle.acquire({
-                  scope,
-                  attemptId: context.attemptId,
-                  owner: this.options.workerId,
-                  leaseDurationMs: this.#leaseDurationMs,
-                  signal: executionAbort.signal,
-                  requiresResourceFilesystem,
-                });
+                acquisition = await measureExecutionPhase(
+                  preparationTiming,
+                  "sandbox_acquire",
+                  () =>
+                    lifecycle.acquire({
+                      scope,
+                      attemptId: context.attemptId,
+                      owner: this.options.workerId,
+                      leaseDurationMs: this.#leaseDurationMs,
+                      signal: executionAbort.signal,
+                      requiresResourceFilesystem,
+                      ...(preparationTiming === undefined
+                        ? {}
+                        : { phaseTiming: preparationTiming }),
+                    }),
+                );
                 if (acquisition.outcome !== "ready") {
                   context.agentFailure =
                     acquisition.outcome === "unknown" ? "SANDBOX_UNKNOWN" : acquisition.code;
@@ -735,14 +796,17 @@ export class RunWorker {
                   context.agentFailure = "SANDBOX_FAILED";
                   throw new Error("Thread Sandbox 冷恢复没有切换到新的完整 generation");
                 }
-                const recoveredProbe = await probeResourceFilesystemDataPlane(
-                  acquisition.session.sandbox,
-                  {
-                    threadId: scope.threadId,
-                    historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
-                    directAttachmentPaths,
-                    signal: executionAbort.signal,
-                  },
+                const recoveredSession = acquisition.session;
+                const recoveredProbe = await measureExecutionPhase(
+                  preparationTiming,
+                  "sandbox_resource_probe",
+                  () =>
+                    probeResourceFilesystemDataPlane(recoveredSession.sandbox, {
+                      threadId: scope.threadId,
+                      historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
+                      directAttachmentPaths,
+                      signal: executionAbort.signal,
+                    }),
                 );
                 if (recoveredProbe.outcome !== "ready") {
                   context.agentFailure = "SANDBOX_FAILED";
@@ -753,11 +817,14 @@ export class RunWorker {
           } else {
             let acquisition: Awaited<ReturnType<SandboxSessionRegistryPort["acquire"]>>;
             try {
-              acquisition = await this.dependencies.sandboxes.acquire({
-                scope,
-                signal: executionAbort.signal,
-                requiresResourceFilesystem,
-              });
+              acquisition = await measureExecutionPhase(preparationTiming, "sandbox_acquire", () =>
+                this.dependencies.sandboxes.acquire({
+                  scope,
+                  signal: executionAbort.signal,
+                  requiresResourceFilesystem,
+                  ...(preparationTiming === undefined ? {} : { phaseTiming: preparationTiming }),
+                }),
+              );
             } catch {
               context.agentFailure = "SANDBOX_FAILED";
               throw new Error("Sandbox acquire 失败");
@@ -847,17 +914,19 @@ export class RunWorker {
           const materializeStartedAt = Date.now();
           try {
             if (requiresMaterialization) {
-              await this.dependencies.revisions.materialize({
-                scope,
-                attemptId: context.attemptId,
-                ...(context.currentRevisionId === undefined
-                  ? {}
-                  : { expectedCurrentRevisionId: context.currentRevisionId }),
-                sandbox: acquired,
-                // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
-                operationKey: `${context.attemptId}:workspace:materialize`,
-                signal: executionAbort.signal,
-              });
+              await measureExecutionPhase(preparationTiming, "workspace_materialize", () =>
+                this.dependencies.revisions.materialize({
+                  scope,
+                  attemptId: context.attemptId,
+                  ...(context.currentRevisionId === undefined
+                    ? {}
+                    : { expectedCurrentRevisionId: context.currentRevisionId }),
+                  sandbox: acquired,
+                  // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
+                  operationKey: `${context.attemptId}:workspace:materialize`,
+                  signal: executionAbort.signal,
+                }),
+              );
             }
             if (context.threadSandboxLease !== undefined && requiresMaterialization) {
               const attested = await this.dependencies.threadSandboxes?.attestMaterialized({
@@ -885,10 +954,8 @@ export class RunWorker {
           }
           if (this.options.historyFilesystemEnabled === true) {
             try {
-              await prepareHistoryEntrypoints(
-                acquired.sandbox,
-                scope.threadId,
-                executionAbort.signal,
+              await measureExecutionPhase(preparationTiming, "workspace_history_prepare", () =>
+                prepareHistoryEntrypoints(acquired.sandbox, scope.threadId, executionAbort.signal),
               );
             } catch {
               context.agentFailure = "SANDBOX_FAILED";
@@ -1018,6 +1085,7 @@ export class RunWorker {
           ...(claim.snapshot.skills === undefined ? {} : { skillSnapshot: claim.snapshot.skills }),
           ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
           ...(startupTimingObserver === undefined ? {} : { startupTiming: startupTimingObserver }),
+          ...(phaseTiming === undefined ? {} : { phaseTiming }),
           ...(claim.snapshot.contextThroughSequence === undefined
             ? {}
             : { contextThroughSequence: claim.snapshot.contextThroughSequence }),
@@ -1317,18 +1385,21 @@ export class RunWorker {
         if (sandbox !== undefined) {
           const preVerify = await this.stopPoint(context, cancellation);
           if (preVerify) return await this.finishStopped(context, preVerify, sandbox);
+          const verifiedSandbox = sandbox;
           let candidate: WorkspaceRevisionCandidate | undefined;
           try {
-            candidate = await this.dependencies.revisions.verify({
-              scope,
-              attemptId: context.attemptId,
-              ...(context.currentRevisionId === undefined
-                ? {}
-                : { expectedCurrentRevisionId: context.currentRevisionId }),
-              sandbox,
-              operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
-              signal: executionAbort.signal,
-            });
+            candidate = await measureExecutionPhase(context.phaseTiming, "workspace_verify", () =>
+              this.dependencies.revisions.verify({
+                scope,
+                attemptId: context.attemptId,
+                ...(context.currentRevisionId === undefined
+                  ? {}
+                  : { expectedCurrentRevisionId: context.currentRevisionId }),
+                sandbox: verifiedSandbox,
+                operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
+                signal: executionAbort.signal,
+              }),
+            );
           } catch (error) {
             reportWorkspaceVerifyFailure(error);
             return await this.recoverWithCleanup(
@@ -1372,7 +1443,11 @@ export class RunWorker {
           if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
           if (sandbox !== undefined) {
             if (context.threadSandboxLease === undefined) {
-              const settled = await this.settleSandbox(context, sandbox, "pause");
+              const settled = await measureExecutionPhase(
+                context.phaseTiming,
+                "sandbox_settle",
+                this.settleSandbox.bind(this, context, sandbox, "pause"),
+              );
               if (settled.outcome !== "settled") return settled.result;
               const postSettle = await this.stopPoint(context, cancellation);
               if (postSettle) return await this.finishStopped(context, postSettle);
@@ -1400,7 +1475,11 @@ export class RunWorker {
           });
           if (!isApplied(waiting)) return await this.handleMutationFailure(waiting);
           if (sandbox !== undefined) {
-            await this.completeThreadSandboxTerminalEffect(context, sandbox, waiting);
+            await measureExecutionPhase(
+              context.phaseTiming,
+              "sandbox_settle",
+              this.completeThreadSandboxTerminalEffect.bind(this, context, sandbox, waiting),
+            );
           }
           return { outcome: "waiting" };
         }
@@ -1414,7 +1493,11 @@ export class RunWorker {
         if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
       } else {
         if (context.threadSandboxLease === undefined) {
-          const settled = await this.settleSandbox(context, sandbox, "close");
+          const settled = await measureExecutionPhase(
+            context.phaseTiming,
+            "sandbox_settle",
+            this.settleSandbox.bind(this, context, sandbox, "close"),
+          );
           if (settled.outcome !== "settled") return settled.result;
           // settle 与 Run success 之间必须同步重验，避免取消被成功覆盖。
           const postSettle = await this.stopPoint(context, cancellation);
@@ -1444,7 +1527,11 @@ export class RunWorker {
       });
       if (!isApplied(final)) return await this.handleMutationFailure(final);
       if (sandbox !== undefined) {
-        await this.completeThreadSandboxTerminalEffect(context, sandbox, final);
+        await measureExecutionPhase(
+          context.phaseTiming,
+          "sandbox_settle",
+          this.completeThreadSandboxTerminalEffect.bind(this, context, sandbox, final),
+        );
       }
       return { outcome: "succeeded" };
     } catch {
@@ -1478,6 +1565,7 @@ export class RunWorker {
       await Promise.allSettled([context.abortPromise ?? Promise.resolve()]);
       await Promise.allSettled([
         startupTiming?.drain() ?? Promise.resolve(),
+        phaseTiming?.drain() ?? Promise.resolve(),
         Promise.resolve().then(() => unsubscribe?.()),
         Promise.resolve().then(() => session?.dispose()),
       ]);
@@ -1864,7 +1952,9 @@ export class RunWorker {
       let result: RuntimeMutationResult;
       for (let attempt = 0; ; attempt += 1) {
         try {
-          result = await this.dependencies.persistence.mutate(command);
+          result = await measureExecutionPhase(context.phaseTiming, "runtime_persist", () =>
+            this.dependencies.persistence.mutate(command),
+          );
         } catch {
           result = { outcome: "unavailable" };
         }
@@ -1882,10 +1972,15 @@ export class RunWorker {
           if (delayMs > 0) {
             await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
           }
-          const recovered = await this.dependencies.persistence.readMutation({
-            scope: context.scope,
-            idempotencyKey: input.idempotencyKey,
-          });
+          const recovered = await measureExecutionPhase(
+            context.phaseTiming,
+            "runtime_persist",
+            () =>
+              this.dependencies.persistence.readMutation({
+                scope: context.scope,
+                idempotencyKey: input.idempotencyKey,
+              }),
+          );
           if (recovered.outcome === "unavailable" || recovered.outcome === "not_found") continue;
           result = recovered;
           break;
@@ -2162,7 +2257,9 @@ export class RunWorker {
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
     if (sandbox !== undefined) {
-      const settled = await this.settleSandbox(context, sandbox, "close", code);
+      const settled = await measureExecutionPhase(context.phaseTiming, "sandbox_settle", () =>
+        this.settleSandbox(context, sandbox, "close", code),
+      );
       if (settled.outcome !== "settled") return settled.result;
     }
     const stopped = await this.stopPoint(context, cancellation);
@@ -2209,7 +2306,9 @@ export class RunWorker {
       );
     }
     if (sandbox !== undefined) {
-      const settled = await this.settleSandbox(context, sandbox, "close", code);
+      const settled = await measureExecutionPhase(context.phaseTiming, "sandbox_settle", () =>
+        this.settleSandbox(context, sandbox, "close", code),
+      );
       if (settled.outcome !== "settled") return settled.result;
     }
     const stopped = await this.stopPoint(context, cancellation);
@@ -2251,7 +2350,9 @@ export class RunWorker {
     });
     if (!isApplied(final)) return await this.handleMutationFailure(final);
     if (retainedSandbox !== undefined) {
-      await this.completeThreadSandboxTerminalEffect(context, retainedSandbox, final);
+      await measureExecutionPhase(context.phaseTiming, "sandbox_settle", () =>
+        this.completeThreadSandboxTerminalEffect(context, retainedSandbox, final),
+      );
     }
     return { outcome: runStatus };
   }

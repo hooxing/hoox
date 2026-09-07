@@ -12,6 +12,11 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EXECUTION_TIMING_PHASES } from "@hoox/domain";
+import type {
+  RunPhaseTimingDiagnosticRecord,
+  RunPhaseTimingDiagnosticsPort,
+} from "./run-phase-diagnostics.js";
 import type {
   InternalTrajectoryDiagnosticRecord,
   InternalTrajectoryDiagnosticsPort,
@@ -152,10 +157,6 @@ export class ProjectRunEventMirror implements RunEventDiagnosticsPort {
   }
 }
 
-/**
- * Pi 原始事件逐条不可变保存；正文已经由 trajectory 包转换为无截断、可逆的 JSON 快照。
- * root 与 subagent 使用独立目录，避免各 Session 的局部 sequence 冲突。
- */
 /** 将首个 Provider 请求前的低基数分段耗时保存为单个不可变快照。 */
 export class ProjectRunStartupTimingMirror implements RunStartupTimingDiagnosticsPort {
   readonly #trustedBase: string;
@@ -194,6 +195,61 @@ export class ProjectRunStartupTimingMirror implements RunStartupTimingDiagnostic
   }
 }
 
+/** 内部阶段沿用同一受控镜像目录，独立编号，不占用 Pi 或 Runtime 事件序号。 */
+export class ProjectRunPhaseTimingMirror implements RunPhaseTimingDiagnosticsPort {
+  readonly #trustedBase: string;
+  readonly #rootSegments: readonly string[];
+
+  constructor(root = PROJECT_MODEL_WIRE_TRACE_ROOT, trustedBase = dirname(root)) {
+    if (!isAbsolute(root) || !isAbsolute(trustedBase))
+      throw new TypeError("阶段耗时本地镜像根目录必须是绝对路径");
+    const lexicalBase = resolve(trustedBase);
+    const lexicalRoot = resolve(root);
+    const rootRelative = relative(lexicalBase, lexicalRoot);
+    if (!isContainedRelative(rootRelative))
+      throw new TypeError("阶段耗时本地镜像根目录越出受信边界");
+    const segments = rootRelative.split(sep).filter((segment) => segment.length > 0);
+    if (segments.length === 0 || segments.some((segment) => segment === "." || segment === ".."))
+      throw new TypeError("阶段耗时本地镜像根目录无效");
+    this.#trustedBase = lexicalBase;
+    this.#rootSegments = Object.freeze(segments);
+  }
+
+  async persist(record: RunPhaseTimingDiagnosticRecord): Promise<void> {
+    assertModelWireTraceContext(record.context);
+    if (
+      !Number.isSafeInteger(record.sequence) ||
+      record.sequence < 1 ||
+      !EXECUTION_TIMING_PHASES.includes(record.phase) ||
+      !Number.isFinite(record.durationMs) ||
+      record.durationMs < 0 ||
+      !Number.isFinite(Date.parse(record.startedAt)) ||
+      !["succeeded", "failed"].includes(record.status)
+    )
+      throw new TypeError("阶段耗时格式无效");
+    const directory = await openMirrorDirectory(this.#trustedBase, [
+      ...this.#rootSegments,
+      record.context.runId,
+      record.context.attemptId,
+    ]);
+    try {
+      const body = new TextEncoder().encode(`${canonicalJson(record)}
+`);
+      await writeOnceAtomically(
+        directory,
+        `phase-timing-${String(record.sequence).padStart(8, "0")}.json`,
+        body,
+      );
+    } finally {
+      await directory.close().catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * Pi 原始事件逐条不可变保存；正文已经由 trajectory 包转换为无截断、可逆的 JSON 快照。
+ * root 与 subagent 使用独立目录，避免各 Session 的局部 sequence 冲突。
+ */
 export class ProjectInternalTrajectoryMirror implements InternalTrajectoryDiagnosticsPort {
   readonly #trustedBase: string;
   readonly #rootSegments: readonly string[];
@@ -287,6 +343,15 @@ export function createDevelopmentProjectRunStartupTimingMirror(
   createMirror: () => RunStartupTimingDiagnosticsPort = () =>
     new ProjectRunStartupTimingMirror(PROJECT_MODEL_WIRE_TRACE_ROOT, PROJECT_ROOT),
 ): RunStartupTimingDiagnosticsPort | undefined {
+  return runtimeMode === "development" && enabled ? createMirror() : undefined;
+}
+
+export function createDevelopmentProjectRunPhaseTimingMirror(
+  runtimeMode: "development" | "production",
+  enabled: boolean,
+  createMirror: () => RunPhaseTimingDiagnosticsPort = () =>
+    new ProjectRunPhaseTimingMirror(PROJECT_MODEL_WIRE_TRACE_ROOT, PROJECT_ROOT),
+): RunPhaseTimingDiagnosticsPort | undefined {
   return runtimeMode === "development" && enabled ? createMirror() : undefined;
 }
 

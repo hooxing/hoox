@@ -1,3 +1,4 @@
+import type { RunPhaseTimingDiagnosticRecord } from "./run-phase-diagnostics.js";
 import { createHash } from "node:crypto";
 import { createArtifactExecutionAuthorizationAuthority } from "@hoox/artifact";
 import {
@@ -966,6 +967,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
   });
 
   it("真实 Pi tool.started 先提交，issue/consume 不被 heartbeat 插入且文件成功写入", async () => {
+    const phases: RunPhaseTimingDiagnosticRecord[] = [];
     const persistence = new FakeExecutionPersistence();
     const scope = persistence.addSeed(fakeSeed("pi-lane"));
     const sandboxes = new FakeSandboxRegistry();
@@ -1024,6 +1026,11 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const worker = new RunWorker(
       {
         persistence,
+        phaseTimingDiagnostics: {
+          persist: async (span) => {
+            phases.push(span);
+          },
+        },
         revisions: new FakeRevisionVerifier(),
         sandboxes,
         orphanSandboxes: sandboxes,
@@ -1069,6 +1076,19 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     expect(observationOperations).toHaveLength(2);
     expect(observationOperations[0]).toMatch(/^call:/u);
     expect(observationOperations[1]).toMatch(/^result:/u);
+    expect(phases.map((span) => span.phase)).toEqual(
+      expect.arrayContaining([
+        "tool_prepare",
+        "tool_authorize",
+        "tool_execute",
+        "tool_receipt_persist",
+      ]),
+    );
+    expect(
+      phases
+        .filter((span) => span.phase.startsWith("tool_"))
+        .every((span) => typeof span.toolCallId === "string"),
+    ).toBe(true);
   });
 
   it("同轮两个 Pi 工具调用按 durable call/result 对串行，不触发 observation conflict", async () => {

@@ -1,3 +1,4 @@
+import type { ExecutionPhaseTiming } from "@hoox/domain";
 import { isoTimestamp, runId, sha256Digest, tenantId, threadId, workspaceId } from "@hoox/domain";
 import type { StableBlobRef } from "@hoox/persistence";
 import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@hoox/run-contracts";
@@ -52,7 +53,13 @@ describe("SimpleArtifactDeliveryService", () => {
         abandon: async () => "released",
       },
     );
+    const phases: ExecutionPhaseTiming[] = [];
     const result = await service.publish({
+      phaseTiming: {
+        record: (span) => {
+          phases.push(span);
+        },
+      },
       authorization,
       idempotencyKey: "call-simple-delivery",
       toolArgsDigest: argsDigest,
@@ -61,6 +68,11 @@ describe("SimpleArtifactDeliveryService", () => {
       body: new Uint8Array([0, 255, 1]),
     });
 
+    expect(phases.map((span) => [span.phase, span.status])).toEqual([
+      ["file_upload", "succeeded"],
+      ["file_metadata_commit", "succeeded"],
+    ]);
+    expect(phases.every((span) => span.toolCallId === authorization.callId)).toBe(true);
     expect(result).toMatchObject({
       name: "报告.docx",
       size: 3,
@@ -98,8 +110,15 @@ describe("SimpleArtifactDeliveryService", () => {
       },
     );
 
+    const phases: ExecutionPhaseTiming[] = [];
     await expect(
       service.publish({
+        phaseTiming: {
+          record: (span) => {
+            phases.push(span);
+            throw new Error("diagnostic failed");
+          },
+        },
         authorization,
         idempotencyKey: "call-simple-delivery",
         toolArgsDigest: argsDigest,
@@ -108,6 +127,10 @@ describe("SimpleArtifactDeliveryService", () => {
         body: new Uint8Array([1, 2, 3]),
       }),
     ).rejects.toThrow("DELIVER_FILE_COMMIT_FAILED");
+    expect(phases.map((span) => [span.phase, span.status])).toEqual([
+      ["file_upload", "succeeded"],
+      ["file_metadata_commit", "failed"],
+    ]);
     expect(abandoned).toEqual([
       {
         tenantId: scope.tenantId,

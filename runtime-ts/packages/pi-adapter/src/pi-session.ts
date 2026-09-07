@@ -449,6 +449,7 @@ export interface CreateSafePiSessionOptions {
   threadActiveHistory?: ThreadActiveHistoryV1;
   /** 生产 Tool Router 在每次 Sandbox 工具执行前回到 DB 重验双栅栏。 */
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
+  phaseTiming?: SandboxToolEffectAuthorizer["phaseTiming"];
   /** 只有生产装配提供真实交付依赖时才注册。 */
   deliverFileToolRouter?: DeliverFilePiToolExecutorPort;
   /** 必须绑定当前 Tenant/Attempt 的 durable Observation recorder；生产缺失时拒绝创建 Session。 */
@@ -814,6 +815,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     sandboxTarget,
     {
       authorizeToolEffect: options.authorizeToolEffect,
+      ...(options.phaseTiming === undefined ? {} : { phaseTiming: options.phaseTiming }),
     },
     options.createToolObservationRecorder,
     () => {

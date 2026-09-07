@@ -1,3 +1,4 @@
+import { measureExecutionPhase } from "@hoox/domain";
 import { createHash } from "node:crypto";
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@hoox/artifact";
 import type { ScheduledTask, ScheduledTaskMutation } from "@hoox/automation";
@@ -451,7 +452,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       durableToolCalls.add(call.toolCallId);
       let recorded: ToolObservationResult["outcome"] | undefined;
       try {
-        recorded = await observationRecorder?.recordStarted(call);
+        recorded = await measureExecutionPhase(
+          input.phaseTiming,
+          "tool_call_persist",
+          async () => observationRecorder?.recordStarted(call),
+          call,
+        );
       } catch {
         requireObservationRecovery();
         throw new Error("Tool Rollout 前驱持久化状态未知");
@@ -481,11 +487,17 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       }
       // durable tool_call 已完成后才领取并消费一次性许可，返回后下一步直接触碰副作用端口。
       try {
-        return await input.authorizeToolEffect({
-          ...call,
-          callId: runtimeCallId(call.callId),
-          argsDigest: sha256Digest(call.argsDigest),
-        });
+        return await measureExecutionPhase(
+          input.phaseTiming,
+          "tool_authorize",
+          () =>
+            input.authorizeToolEffect({
+              ...call,
+              callId: runtimeCallId(call.callId),
+              argsDigest: sha256Digest(call.argsDigest),
+            }),
+          { toolCallId: call.callId, toolName: call.toolName },
+        );
       } catch (error) {
         let resolve: () => void = () => undefined;
         const completed = new Promise<void>((done) => {
@@ -512,10 +524,16 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       sandboxPreparationRequested.add(call.callId);
       await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
       try {
-        return await input.ensureSandboxReady({
-          reason: "tool",
-          call: { ...call, callId: runtimeCallId(call.callId) },
-        });
+        return await measureExecutionPhase(
+          input.phaseTiming,
+          "tool_prepare",
+          () =>
+            input.ensureSandboxReady({
+              reason: "tool",
+              call: { ...call, callId: runtimeCallId(call.callId) },
+            }),
+          { toolCallId: call.callId, toolName: call.toolName },
+        );
       } catch (error) {
         let resolve: () => void = () => undefined;
         const completed = new Promise<void>((done) => {
@@ -545,6 +563,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 argsDigest: digestCanonical(request.arguments),
               });
               activeDeliverFileRouter ??= deliverFileTools.create({
+                ...(input.phaseTiming === undefined ? {} : { phaseTiming: input.phaseTiming }),
                 binding: {
                   scope: input.scope,
                   attemptId: input.attemptId,
@@ -648,6 +667,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       },
     };
     const sessionMaterial = {
+      ...(input.phaseTiming === undefined ? {} : { phaseTiming: input.phaseTiming }),
       model: this.model,
       modelContext: this.modelContext,
       modelRuntime: this.modelRuntime,
@@ -674,7 +694,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               // schema 级错误与 Router 在许可前拒绝都不会进入 authorizer；在失败
               // tool_result 前补齐 durable tool_call，但不消费外部副作用许可。
               if (!durableToolCalls.has(call.toolCallId)) await recordStartedTool(call);
-              const result = await recorder.record(call);
+              const result = await measureExecutionPhase(
+                input.phaseTiming,
+                "tool_receipt_persist",
+                () => recorder.record(call),
+                { toolCallId: call.toolCallId, toolName: call.toolName },
+              );
               if (result.outcome !== "recorded" && result.outcome !== "replayed") {
                 requireObservationRecovery(result.outcome);
               }
@@ -903,6 +928,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     }
     trajectoryRecorder?.record("runtime", "session_created", {
       type: "session_created",
+      threadId: input.scope.threadId,
+      runId: input.scope.runId,
       model: {
         api: this.model.api,
         provider: this.model.provider,

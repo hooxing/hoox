@@ -1,3 +1,4 @@
+import { createContext, runInContext } from "node:vm";
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,58 @@ afterEach(async () => {
 });
 
 describe("轨迹查看器 HTTP 页面", () => {
+  it("执行页面脚本后切换不同 Run 的 Attempt，不读取不存在的顶层 attempts", async () => {
+    const nodes = new Map<string, Record<string, unknown>>();
+    const document = {
+      getElementById: (id: string) => {
+        if (id === "phaseTimings") return null;
+        if (!nodes.has(id))
+          nodes.set(id, {
+            value: "",
+            innerHTML: "",
+            prepend: (child: unknown) =>
+              nodes.set("renderedPhase", child as Record<string, unknown>),
+          });
+        return nodes.get(id);
+      },
+      createElement: () => ({ innerHTML: "" }),
+      querySelectorAll: () => [],
+    };
+    const context = createContext({
+      document,
+      window: { location: { href: "http://localhost/trajectory/" } },
+      URL,
+      localStorage: { getItem: () => null },
+      fetch: async () => ({ ok: true, json: async () => ({ items: [] }) }),
+    });
+    const script = trajectoryHtml.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
+    expect(script).toBeDefined();
+    runInContext(script ?? "", context);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    runInContext(
+      `state.run={id:'thread-1',runs:[{runId:'run-1',attempts:[{attemptId:'a-1'}]},{runId:'run-2',attempts:[{attemptId:'a-2'}]}]};render=()=>{};`,
+      context,
+    );
+    const change = nodes.get("attempt")?.onchange as (event: { target: { value: string } }) => void;
+    expect(typeof change).toBe("function");
+    change({ target: { value: "run-2::a-2" } });
+    expect(runInContext("state.attempt.runId + '/' + state.attempt.attemptId", context)).toBe(
+      "run-2/a-2",
+    );
+    change({ target: { value: "all" } });
+    expect(runInContext("state.attempt.attemptId", context)).toBe("all");
+    expect(trajectoryHtml.match(/\$\('attempt'\)\.onchange=/gu)).toHaveLength(1);
+    expect(trajectoryHtml).toContain("模型流生成");
+    expect(trajectoryHtml).toContain("不是精确 TTFT");
+    runInContext(
+      `state.run.runs[1].attempts[0].phaseTimings=[{phase:'file_read',startedAt:'2026-09-07T00:00:00.000Z',durationMs:250,status:'succeeded',toolCallId:'<private-call>',toolName:'deliver_file'}];renderPhases();`,
+      context,
+    );
+    expect(nodes.get("renderedPhase")?.innerHTML).toContain("交付文件读取");
+    expect(nodes.get("renderedPhase")?.innerHTML).toContain("&lt;private-call&gt;");
+    expect(nodes.get("renderedPhase")?.innerHTML).toContain("250");
+  });
+
   it("使用当前页面子路径请求 API，并只把同源 Hoox 会话用于网关鉴权", () => {
     expect(trajectoryHtml).toContain("new URL(path,window.location.href)");
     expect(trajectoryHtml).toContain("api('api/threads')");
@@ -29,6 +82,61 @@ describe("轨迹查看器 HTTP 页面", () => {
 });
 
 describe("trajectory diagnostics filesystem", () => {
+  it("API 元数据不可用时用新阶段或旧启动上下文聚合线程，并拒绝错配计时", async () => {
+    const root = await temporaryRoot();
+    for (const runId of ["run_a", "run_b"]) {
+      const directory = join(root, runId, "attempt_1");
+      await mkdir(directory, { recursive: true });
+      const context = {
+        tenantId: "tenant_1",
+        threadId: "thread_shared",
+        runId,
+        attemptId: "attempt_1",
+      };
+      if (runId === "run_a") {
+        await writeFile(
+          join(directory, "startup-timings.json"),
+          JSON.stringify({
+            context,
+            observedAt: "2026-09-07T00:00:00.000Z",
+            totalDurationMs: 12,
+            spans: [],
+          }),
+        );
+      } else {
+        const phase = {
+          context,
+          sequence: 1,
+          phase: "file_read",
+          startedAt: "2026-09-07T00:00:02.000Z",
+          durationMs: 5,
+          status: "succeeded",
+        };
+        await writeFile(join(directory, "phase-timing-00000001.json"), JSON.stringify(phase));
+        await writeFile(
+          join(directory, "phase-timing-00000002.json"),
+          JSON.stringify({ ...phase, context: { ...context, runId: "run_wrong" }, sequence: 2 }),
+        );
+      }
+    }
+    const runs = await discoverRuns(root);
+    const provider = {
+      resolve: async () => {
+        throw new Error("API unavailable");
+      },
+    };
+    const threads = await internalTesting.threadSummaries(runs, provider);
+    expect(threads).toHaveLength(1);
+    expect(threads[0]).toMatchObject({ id: "thread_shared", runCount: 2, attemptCount: 2 });
+    const details = await internalTesting.threadDetails("thread_shared", runs, provider);
+    const attempt = details?.runs.find((run) => run.runId === "run_b")?.attempts[0];
+    expect(attempt?.phaseTimings).toHaveLength(1);
+    expect(attempt?.warnings).toEqual([expect.stringContaining("阶段计时格式无效")]);
+    expect(details?.runs.find((run) => run.runId === "run_a")?.attempts[0]?.phaseTimings).toEqual(
+      [],
+    );
+  });
+
   it("只列出请求报文并拒绝读取历史响应，仍保留轨迹中的思考和回复", async () => {
     const root = await temporaryRoot();
     const attemptPath = join(root, "run_1", "attempt-1");

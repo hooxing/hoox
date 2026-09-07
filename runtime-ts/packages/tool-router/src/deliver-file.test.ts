@@ -1,3 +1,4 @@
+import type { ExecutionPhaseTiming } from "@hoox/domain";
 import {
   createArtifactExecutionAuthorizationAuthority,
   SimpleDeliveryCleanupResultUnknownError,
@@ -29,6 +30,7 @@ const scope: ExecutionScope = {
 function harness(read: DeliverFileReadResult, publicationError?: Error) {
   const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
   const publications: unknown[] = [];
+  const phases: ExecutionPhaseTiming[] = [];
   const factory = new DeliverFileToolRouterFactory({
     source: { read: async () => read },
     publications: {
@@ -48,6 +50,11 @@ function harness(read: DeliverFileReadResult, publicationError?: Error) {
     authorizationVerifier: authority.verifier,
   });
   const router = factory.create({
+    phaseTiming: {
+      record: (span) => {
+        phases.push(span);
+      },
+    },
     binding: {
       scope,
       attemptId: "attempt-deliver",
@@ -67,12 +74,12 @@ function harness(read: DeliverFileReadResult, publicationError?: Error) {
         }),
     },
   });
-  return { router, publications };
+  return { router, publications, phases };
 }
 
 describe("deliver_file Tool Router", () => {
   it("只接收 Sandbox 绝对路径，并在 published 后返回可下载事实", async () => {
-    const { router, publications } = harness({
+    const { router, publications, phases } = harness({
       outcome: "found",
       relativePath: "reports/final.pdf",
       body: new Uint8Array([1, 2, 3]),
@@ -92,6 +99,14 @@ describe("deliver_file Tool Router", () => {
       media_type: "application/pdf",
       download_ready: true,
     });
+    expect(phases).toEqual([
+      expect.objectContaining({
+        phase: "file_read",
+        toolCallId: "call-deliver-1",
+        status: "succeeded",
+      }),
+    ]);
+    expect(publications[0]).toHaveProperty("phaseTiming");
     expect(publications).toHaveLength(1);
     expect(publications[0]).toMatchObject({
       idempotencyKey: "call-deliver-1",

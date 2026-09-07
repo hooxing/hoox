@@ -1,5 +1,6 @@
 import type {
   AgentThreadId,
+  ExecutionPhaseTimingObserver,
   IsoTimestamp,
   ResourceId,
   ResourceVersionId,
@@ -852,6 +853,7 @@ export interface SandboxSessionRegistryPort {
   acquire(input: {
     readonly scope: ExecutionScope;
     readonly signal: AbortSignal;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
     /** 只有当前输入包含必须通过虚拟文件系统读取的附件时才挂载 `/resources`。 */
     readonly requiresResourceFilesystem: boolean;
   }): Promise<SandboxAcquireResult>;
@@ -921,6 +923,7 @@ export interface ThreadSandboxProviderPort {
     readonly scope: ExecutionScope;
     readonly registryId: string;
     readonly signal: AbortSignal;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
     /** 只有当前输入包含必须通过虚拟文件系统读取的附件时才挂载 `/resources`。 */
     readonly requiresResourceFilesystem: boolean;
   }): Promise<SandboxAcquireResult>;
@@ -930,6 +933,7 @@ export interface ThreadSandboxProviderPort {
     readonly providerKey: SandboxProviderKey;
     readonly providerSandboxId: string;
     readonly signal: AbortSignal;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
   }): Promise<SandboxAcquireResult | { readonly outcome: "not_found" }>;
   settle(input: {
     readonly scope: ExecutionScope;
@@ -946,6 +950,7 @@ export interface ThreadSandboxSessionLifecyclePort {
     readonly owner: string;
     readonly leaseDurationMs: number;
     readonly signal: AbortSignal;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
     /** true 时不得复用未挂载 ResourceFS 的 Session。 */
     readonly requiresResourceFilesystem: boolean;
   }): Promise<ThreadSandboxAcquireResult>;
@@ -1072,6 +1077,7 @@ export interface AgentSessionFactoryPort {
     ) => Promise<SandboxSessionRef>;
     /** 只记录首个模型请求前的低基数阶段耗时；诊断失败不得影响 Session。 */
     readonly startupTiming?: RunStartupTimingObserver;
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
     readonly rolloutProjection: ControlledRolloutProjection;
     /** Session 创建前已知的首轮文本，只用于把即将追加的 user turn 计入自动压缩触发。 */
     readonly initialInputText?: string;

@@ -63,6 +63,14 @@
       "upstreamCommit": "a7aaed80dd2df27620eb534454253ea25eb11c7a",
       "localModified": false,
       "sourceTreeSha256": "63ba71e3bd46d107b32db436f05454cf5277f6c83009653a75216675d8c54da5"
+    },
+    "@hoox/vendor-file-type-icons": {
+      "license": "LicenseRef-Hoox-Iconfont-33437",
+      "licenseFile": "runtime-ts/vendor/iconfont-file-types-33437/LICENSE",
+      "sourceFile": "runtime-ts/vendor/iconfont-file-types-33437/SOURCE.md",
+      "upstreamCommit": "iconfont-33437-20260908",
+      "localModified": false,
+      "sourceTreeSha256": "85ee359a3b150b1473a1099eecb127c1f3e7534b8c1004a86a125bb0c6c02479"
     }
   }
 }

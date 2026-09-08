@@ -10,7 +10,7 @@
 
 ## 支持范围
 
-上传待发送附件、消息附件、交付文件、云盘、文件引用和预览标题共用 `FileTypeIcon`，使用 [File Icon Vectors](https://github.com/dmhendricks/file-icon-vectors) 1.0.0 的 Vivid SVG（MIT 许可）。图标通过精确版本依赖按需打包，无运行时 CDN 请求。已知扩展名优先，缺失或未知时按 MIME 类型回退，无法识别时显示通用文件图标；图标分类不决定预览权限。可显示的图片继续使用缩略图。
+上传待发送附件、消息附件、交付文件、云盘、文件引用和预览标题共用 `FileTypeIcon`，使用 [iconfont 图库 33437「文件类型」](https://www.iconfont.cn/collections/detail?cid=33437) 的彩色 SVG。资源固定快照后随应用按需打包，无运行时 CDN 请求；作者、资源清单和 Hoox 商用授权确认见[来源说明](../../runtime-ts/vendor/iconfont-file-types-33437/SOURCE.md)。已知扩展名优先，缺失或未知时按 MIME 类型回退，无法识别时显示通用文件图标；图标分类不决定预览权限。可显示的图片继续使用缩略图。
 
 | 格式 | 当前预览 | 引用 |
 | --- | --- | --- |

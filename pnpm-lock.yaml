@@ -305,15 +305,15 @@ importers:
       '@hoox/vendor-deepseek-markdown':
         specifier: workspace:*
         version: link:../../vendor/deepseek-markdown
+      '@hoox/vendor-file-type-icons':
+        specifier: workspace:*
+        version: link:../../vendor/iconfont-file-types-33437
       docx-preview:
         specifier: 0.4.0
         version: 0.4.0
       exceljs:
         specifier: 4.4.0
         version: 4.4.0
-      file-icon-vectors:
-        specifier: 1.0.0
-        version: 1.0.0
       html-to-image:
         specifier: 1.11.13
         version: 1.11.13
@@ -629,6 +629,8 @@ importers:
   runtime-ts/vendor/deepseek-trajectory: {}
 
   runtime-ts/vendor/deepseek-v4-tokenizer: {}
+
+  runtime-ts/vendor/iconfont-file-types-33437: {}
 
 packages:
 
@@ -2848,9 +2850,6 @@ packages:
   fetch-blob@3.2.0:
     resolution: {integrity: sha512-7yAQpD2UMJzLi1Dqv7qFYnPbaPx7ZfFK6PiIxQ4PfkGPyNyl2Ugx+a/umUonmKqjhM4DnfbMvdX6otXq83soQQ==}
     engines: {node: ^12.20 || >= 14.13}
-
-  file-icon-vectors@1.0.0:
-    resolution: {integrity: sha512-me+C0t1IU+ggE31CpZNImXID8HV8/eD4eO8go4RwLLZdMaIFr25x23m1xmzYBZH3r/FxyMbbQkD0SNGnRC4meg==}
 
   find-my-way@9.7.0:
     resolution: {integrity: sha512-f2JHn75x2JlwUwLenZypgczR7YWMb/uO9BvUXtus+JMgkbIkLADd38cI4EiV+OQqrGo1Zlq6V8wnqMJ8e62wUQ==}
@@ -6625,8 +6624,6 @@ snapshots:
     dependencies:
       node-domexception: 1.0.0
       web-streams-polyfill: 3.3.3
-
-  file-icon-vectors@1.0.0: {}
 
   find-my-way@9.7.0:
     dependencies:

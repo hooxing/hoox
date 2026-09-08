@@ -1,13 +1,5 @@
-import {
-  ChevronDown,
-  ChevronRight,
-  Download,
-  FileText,
-  LoaderCircle,
-  Plus,
-  Search,
-  X,
-} from "lucide-react";
+import { FileTypeIcon } from "./file-type-icon.js";
+import { ChevronDown, ChevronRight, Download, LoaderCircle, Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ApiError, type HistoryFile, type HistoryFilePage, type RuntimeApi } from "./api.js";
 import { openResolvedUrl } from "./popup.js";
@@ -360,7 +352,7 @@ export function CloudDrivePanel({
                           const isSelected = selected.has(historyFileKey(file));
                           return (
                             <li key={historyFileKey(file)}>
-                              <FileText size={17} aria-hidden="true" />
+                              <FileTypeIcon name={file.entryName} mediaType={file.mediaType} />
                               <span className="cloud-file-meta">
                                 <strong title={file.entryName}>{file.entryName}</strong>
                                 <small>
@@ -601,7 +593,7 @@ function CloudDriveSearchResults({
                           const isSelected = selected.has(historyFileKey(file));
                           return (
                             <li key={`${source.id}:${historyFileKey(file)}`}>
-                              <FileText size={17} aria-hidden="true" />
+                              <FileTypeIcon name={file.entryName} mediaType={file.mediaType} />
                               <span className="cloud-file-meta">
                                 <strong title={file.entryName}>{file.entryName}</strong>
                                 <small>

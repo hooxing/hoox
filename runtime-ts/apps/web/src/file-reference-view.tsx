@@ -1,5 +1,6 @@
+import { FileTypeIcon } from "./file-type-icon.js";
 import { createContext, useContext, useMemo, useReducer } from "react";
-import { FileText, X } from "lucide-react";
+import { X } from "lucide-react";
 import {
   fileSelectionLabel,
   readFileReferences,
@@ -63,7 +64,11 @@ export function DraftFileReferences({
             {item.snapshotDataUrl ? (
               <img src={item.snapshotDataUrl} alt="引用区域" />
             ) : (
-              <FileText size={16} aria-hidden="true" />
+              <FileTypeIcon
+                name={item.reference.source.name}
+                mediaType={item.reference.source.mediaType}
+                size={24}
+              />
             )}
             <strong title={item.reference.source.name}>{item.reference.source.name}</strong>
             <span

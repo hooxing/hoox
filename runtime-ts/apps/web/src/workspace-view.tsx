@@ -1,3 +1,4 @@
+import { FileTypeIcon } from "./file-type-icon.js";
 import {
   Archive,
   Check,
@@ -7,13 +8,6 @@ import {
   Circle,
   Download,
   Eye,
-  FileArchive,
-  FileAudio,
-  FileCode2,
-  FileImage,
-  FileSpreadsheet,
-  FileText,
-  FileVideo,
   GitBranch,
   LoaderCircle,
   MessageSquarePlus,
@@ -157,23 +151,6 @@ function composerFileKind(name: string, mediaType: string): ComposerFileKind {
   )
     return "code";
   return "document";
-}
-
-function ComposerFileIcon({
-  kind,
-  size = 20,
-}: {
-  readonly kind: ComposerFileKind;
-  readonly size?: number;
-}) {
-  const properties = { size, "aria-hidden": true as const };
-  if (kind === "image") return <FileImage {...properties} />;
-  if (kind === "audio") return <FileAudio {...properties} />;
-  if (kind === "video") return <FileVideo {...properties} />;
-  if (kind === "sheet") return <FileSpreadsheet {...properties} />;
-  if (kind === "archive") return <FileArchive {...properties} />;
-  if (kind === "code") return <FileCode2 {...properties} />;
-  return <FileText {...properties} />;
 }
 
 export function shouldInitiallyCollapseUserRequest(text: string): boolean {
@@ -883,7 +860,7 @@ function UserRequestAttachment({
           {previewable && !failed ? (
             <LoaderCircle className="spin" size={18} aria-hidden="true" />
           ) : (
-            <FileText size={18} aria-hidden="true" />
+            <FileTypeIcon name={attachment.name} mediaType={attachment.mediaType} />
           )}
         </div>
       ) : (
@@ -1186,7 +1163,7 @@ export function InlineArtifactDelivery({
       <ul className="artifact-list inline-artifact-list">
         {artifacts.map((artifact) => (
           <li key={artifact.id}>
-            <FileText size={17} aria-hidden="true" />
+            <FileTypeIcon name={artifact.name} mediaType={artifact.mediaType} />
             <div className="artifact-details">
               <strong>{artifact.name}</strong>
               <small>
@@ -1323,7 +1300,7 @@ function ComposerFileVisual({
   return (
     <span className={`composer-file-visual is-${kind}`} data-file-kind={kind}>
       {previewUrl === undefined ? (
-        <ComposerFileIcon kind={kind} />
+        <FileTypeIcon name={name} mediaType={mediaType} size={24} />
       ) : (
         <img className="composer-file-preview" src={previewUrl} alt="" />
       )}
@@ -1556,7 +1533,7 @@ export function ConversationComposer({
                   onMouseEnter={() => setMentionActiveIndex(index)}
                   onClick={() => selectMention(file)}
                 >
-                  <FileText size={16} />
+                  <FileTypeIcon name={file.entryName} mediaType={file.mediaType} size={24} />
                   <span>
                     <strong>{file.name}</strong>
                     <small>{file.taskName}</small>

@@ -34,7 +34,7 @@
       },
       {
         "name": "hoox:lockfile-sha256",
-        "value": "315ea4c1213f9825fded3eb23e4bba069f6ca059a669f13a167d9855800fe544"
+        "value": "1499fef78a5d8a349aa430344e8ada49badc59b964102874085ca3da0e6e2bfc"
       }
     ]
   },
@@ -1207,6 +1207,23 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/protocol@0.0.0",
+      "name": "@hoox/protocol",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/protocol@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/protocol"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/%40hoox/resource@0.0.0",
       "name": "@hoox/resource",
       "version": "0.0.0",
@@ -1661,6 +1678,26 @@
         {
           "license": {
             "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40sinclair/typebox@0.34.52",
+      "name": "@sinclair/typebox",
+      "version": "0.34.52",
+      "purl": "pkg:npm/%40sinclair/typebox@0.34.52",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
           }
         }
       ],
@@ -3734,6 +3771,7 @@
         "pkg:npm/%40hoox/pi-adapter@0.0.0",
         "pkg:npm/%40hoox/process-runtime@0.0.0",
         "pkg:npm/%40hoox/prompt-builder@0.0.0",
+        "pkg:npm/%40hoox/protocol@0.0.0",
         "pkg:npm/%40hoox/resource@0.0.0",
         "pkg:npm/%40hoox/run-contracts@0.0.0",
         "pkg:npm/%40hoox/sandbox@0.0.0",
@@ -3757,6 +3795,7 @@
         "pkg:npm/%40protobufjs/path@1.1.2",
         "pkg:npm/%40protobufjs/pool@1.1.0",
         "pkg:npm/%40protobufjs/utf8@1.1.2",
+        "pkg:npm/%40sinclair/typebox@0.34.52",
         "pkg:npm/%40smithy/core@3.30.0",
         "pkg:npm/%40smithy/credential-provider-imds@4.4.14",
         "pkg:npm/%40smithy/fetch-http-handler@5.6.11",

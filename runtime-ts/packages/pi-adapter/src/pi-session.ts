@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { projectFileReferencePrompt } from "./file-reference-prompt.js";
 import { types } from "node:util";
 import {
   assertControlledToolObservation,
@@ -1022,6 +1023,21 @@ function providerGatedStream(
       try {
         const context = {
           ...runtimeContext,
+          messages: runtimeContext.messages.map((message) =>
+            message.role !== "user"
+              ? message
+              : {
+                  ...message,
+                  content:
+                    typeof message.content === "string"
+                      ? projectFileReferencePrompt(message.content)
+                      : message.content.map((part) =>
+                          part.type === "text"
+                            ? { ...part, text: projectFileReferencePrompt(part.text) }
+                            : part,
+                        ),
+                },
+          ),
           ...(runtimeContext.tools === undefined
             ? {}
             : {
@@ -1152,7 +1168,7 @@ function assertCurrentInputFits(
   const assessed = assessSafePiSessionContext(
     activeProjection === undefined ? options : { ...options, rolloutProjection: activeProjection },
     material,
-    [...admittedInputs, text],
+    [...admittedInputs, text].map(projectFileReferencePrompt),
     priorOutputReserve,
   );
   onContextBudgetDecision(assessed);

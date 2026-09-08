@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { projectFileReferencePrompt } from "./file-reference-prompt.js";
 
 export interface ThreadActiveHistoryV1 {
   readonly schemaVersion: 1;
@@ -78,7 +79,13 @@ export function isProviderVisibleThreadHistoryMessage(message: ThreadHistoryMess
 export function providerVisibleThreadHistoryMessages(
   messages: readonly ThreadHistoryMessageV1[],
 ): readonly ThreadHistoryMessageV1[] {
-  return messages.filter(isProviderVisibleThreadHistoryMessage);
+  return messages
+    .filter(isProviderVisibleThreadHistoryMessage)
+    .map((message) =>
+      message.role === "user"
+        ? { ...message, text: projectFileReferencePrompt(message.text) }
+        : message,
+    );
 }
 
 export function threadActiveHistoryDigest(history: Omit<ThreadActiveHistoryV1, "digest">): string {

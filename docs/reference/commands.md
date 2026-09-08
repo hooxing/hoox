@@ -20,6 +20,7 @@
 | 命令 | 访问外部服务 | 适用场景 |
 | --- | --- | --- |
 | `corepack pnpm test` | 否 | 构建并运行普通 Vitest 测试 |
+| `corepack pnpm test:web:file-preview` | 本地 Vite 与 Chromium | 真实浏览器验证文件预览、选区和大小屏；首次运行前执行 `pnpm exec playwright install chromium --only-shell` |
 | `corepack pnpm check` | Compose 配置解析 | 单次拓扑构建后复用产物执行格式、lint、补充类型检查、测试和 development 配置检查 |
 | `corepack pnpm check:clean-workspace` | Compose 配置解析 | 删除全部 Workspace `dist` 后执行单次构建的完整工程 Gate |
 | `corepack pnpm test:process-runtime` | 否 | API、Worker、Scheduler、统一 Admin API 的进程生命周期 |

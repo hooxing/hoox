@@ -1,6 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { ArtifactDtoSchema, RunDtoSchema, ThreadDtoSchema } from "./dto.js";
 import { successEnvelopeSchema } from "./envelopes.js";
+import { FileReferenceSchema, MAX_FILE_REFERENCES } from "./file-references.js";
 import { IdSchema, IsoTimestampSchema, Sha256DigestSchema } from "./schemas.js";
 
 const strict = { additionalProperties: false } as const;
@@ -151,6 +152,9 @@ export type CreateRunRequest = Static<typeof CreateRunRequestSchema>;
 export const CreateThreadInputRequestSchema = Type.Object(
   {
     input: Type.String({ maxLength: MAX_RUN_INPUT_UTF8_BYTES }),
+    fileReferences: Type.Optional(
+      Type.Array(FileReferenceSchema, { maxItems: MAX_FILE_REFERENCES }),
+    ),
     attachments: Type.Optional(
       Type.Array(ResourceAttachmentReferenceSchema, { maxItems: 20, uniqueItems: true }),
     ),

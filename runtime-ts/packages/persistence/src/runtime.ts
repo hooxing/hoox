@@ -293,6 +293,7 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
             run_id: string;
             thread_id: string;
             resource_version_id: string;
+            resource_id: string | null;
             name: string;
             media_type: string;
             size: string;
@@ -312,7 +313,7 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
            SELECT publication.id,publication.run_id,publication.thread_id,publication.resource_version_id,publication.name,publication.media_type,
                   publication.size,publication.created_at,publication.updated_at,publication.blob_incarnation_id,
                   publication.blob_purpose,publication.physical_object_key,publication.digest,
-                  publication.authorization_revision
+                  publication.authorization_revision,version.resource_id
              FROM authorized_run run
              LEFT JOIN LATERAL (
                SELECT candidate.*,
@@ -333,6 +334,7 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
                   AND candidate.purpose='deliverable'
                 ORDER BY candidate.created_at,candidate.id
              ) publication ON true
+             LEFT JOIN resource_versions version ON version.tenant_id=$1 AND version.id=publication.resource_version_id
             ORDER BY publication.created_at,publication.id`,
             [input.scope.tenantId, input.scope.userId, input.runId],
           );
@@ -345,6 +347,7 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
               runId: row.run_id as import("@hoox/domain").RunId,
               threadId: row.thread_id as import("@hoox/domain").ThreadId,
               resourceVersionId: row.resource_version_id,
+              ...(row.resource_id == null ? {} : { resourceId: row.resource_id }),
               name: row.name,
               mediaType: row.media_type,
               sizeBytes: Number(row.size),

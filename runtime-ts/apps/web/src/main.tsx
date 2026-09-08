@@ -19,6 +19,20 @@ import {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
+import "./file-preview.css";
+import {
+  appendFileReferences,
+  MAX_FILE_REFERENCES,
+  type FileSource,
+  type FileSelection,
+  type FileReference,
+} from "@hoox/protocol/file-references";
+import { FilePreviewPanel, type PreviewTarget } from "./file-preview-panel.js";
+import {
+  DraftFileReferences,
+  FilePreviewContext,
+  useFileReferenceDraft,
+} from "./file-reference-view.js";
 import {
   ApiError,
   type ArtifactPreview,
@@ -146,6 +160,7 @@ type WorkspaceApi = Pick<
   | "previewArtifact"
   | "uploadResource"
 > & {
+  readonly readArtifactContent?: RuntimeApi["readArtifactContent"];
   readonly streamEvents?: RuntimeApi["streamEvents"];
   readonly listThreadContext?: RuntimeApi["listThreadContext"];
   readonly previewHistoryFile?: RuntimeApi["previewHistoryFile"];
@@ -347,6 +362,7 @@ function AuthenticatedWorkspace({
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<ApiError | undefined>();
   const [textPreview, setTextPreview] = useState<ArtifactPreview | undefined>();
+  const [filePreview, setFilePreview] = useState<PreviewTarget>();
   const [recoveryUi, setRecoveryUi] = useState<RecoveryUiState | undefined>();
   const [recoveryNonce, setRecoveryNonce] = useState(0);
   const [isCompact, setIsCompact] = useState(initialCompact);
@@ -360,6 +376,24 @@ function AuthenticatedWorkspace({
   const [activeTeamId, setActiveTeamId] = useState<string>();
   const { input, setInput, moveInputTo, clearSentInput, draftPersistenceFailed } =
     useConversationDraft(accountProfile.id, activeTeamId, state.selectedThreadId);
+  const referenceDraft = useFileReferenceDraft(
+    accountProfile.id,
+    activeTeamId,
+    state.selectedThreadId,
+  );
+  const snapshotUploads = useRef(new Map<string, UploadedResource>());
+  const readPreviewContent = useMemo(
+    () => apiClient.readArtifactContent?.bind(apiClient),
+    [apiClient],
+  );
+  const previewContext = useMemo(
+    () => ({
+      open(source: FileSource, selection?: FileSelection) {
+        setFilePreview({ source, ...(selection === undefined ? {} : { selection }) });
+      },
+    }),
+    [],
+  );
   const { ask, dialog } = useActionDialog();
   const [selectedTeamId, setSelectedTeamId] = useState<string>();
   const [personalThreads, setPersonalThreads] = useState<readonly Thread[]>([]);
@@ -440,6 +474,8 @@ function AuthenticatedWorkspace({
     dispatch({ type: "select", threadId });
     setPendingInputs([]);
     setHistoryFiles([]);
+    setFilePreview(undefined);
+    snapshotUploads.current.clear();
     setError(undefined);
     setNavigationOpen(false);
   }, []);
@@ -950,7 +986,10 @@ function AuthenticatedWorkspace({
   };
   const send = async (mode: "auto" | "follow_up" = "auto") => {
     if (
-      (!input.trim() && uploadFiles.length === 0 && historyFiles.length === 0) ||
+      (!input.trim() &&
+        uploadFiles.length === 0 &&
+        historyFiles.length === 0 &&
+        referenceDraft.items.length === 0) ||
       actionLoading ||
       sendInFlightRef.current
     )
@@ -960,10 +999,34 @@ function AuthenticatedWorkspace({
     setActionLoading(true);
     try {
       const request = input.trim() || "请处理本轮提供的文件。";
+      if (referenceDraft.items.length > 0 && apiClient.submitThreadInput === undefined)
+        throw new ApiError("当前服务不支持文件引用，请更新服务后重试。", 422, false);
+      const fileReferences: FileReference[] = [];
+      const snapshotAttachments: UploadedResource[] = [];
+      for (const draft of referenceDraft.items) {
+        let snapshot = snapshotUploads.current.get(draft.id);
+        if (draft.snapshotDataUrl && snapshot === undefined) {
+          const encoded = draft.snapshotDataUrl.split(",")[1] ?? "";
+          const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
+          snapshot = await apiClient.uploadResource(
+            new File([bytes], `引用区域-${draft.id}.png`, { type: "image/png" }),
+            draft.id,
+          );
+          if (!navigationRef.current.isCurrent(expectedNavigation)) return;
+          snapshotUploads.current.set(draft.id, snapshot);
+        }
+        if (snapshot) snapshotAttachments.push(snapshot);
+        fileReferences.push({
+          ...draft.reference,
+          ...(snapshot
+            ? { snapshot: { resourceId: snapshot.resourceId, versionId: snapshot.versionId } }
+            : {}),
+        });
+      }
       const expectedUserOccurrence = nextExpectedUserOccurrence(
         state.threadContext ?? [],
         pendingInputs,
-        request,
+        appendFileReferences(request, fileReferences),
       );
       const localId = crypto.randomUUID();
       const uploaded: readonly UploadedResource[] = await Promise.all(
@@ -976,7 +1039,14 @@ function AuthenticatedWorkspace({
           return apiClient.uploadResource(file, idempotencyKey);
         }),
       );
-      const attachments = [...uploaded, ...historyFiles];
+      const attachments = [...uploaded, ...historyFiles, ...snapshotAttachments];
+      if (!navigationRef.current.isCurrent(expectedNavigation)) return;
+      if (
+        attachments.length +
+          new Set(fileReferences.map((reference) => reference.source.versionId)).size >
+        20
+      )
+        throw new ApiError("文件与引用合计超过 20 个附件，请减少后发送。", 400, false);
       let threadId = state.selectedThreadId;
       if (threadId === undefined) {
         const thread = await apiClient.createThread(deriveThreadTitle(request));
@@ -999,6 +1069,7 @@ function AuthenticatedWorkspace({
               mode,
               state.run?.status === "running" ? state.run.id : undefined,
               attachments,
+              ...(fileReferences.length === 0 ? [] : ([fileReferences] as const)),
             );
       const run =
         receipt === undefined
@@ -1012,7 +1083,7 @@ function AuthenticatedWorkspace({
         ...current,
         {
           localId,
-          text: request,
+          text: appendFileReferences(request, fileReferences),
           attachments,
           expectedUserOccurrence,
           disposition: receipt?.disposition ?? "queued",
@@ -1022,6 +1093,8 @@ function AuthenticatedWorkspace({
         },
       ]);
       if (receipt?.disposition === "rejected") return;
+      referenceDraft.setItems([]);
+      snapshotUploads.current.clear();
       if (run === undefined || state.run?.status === "running") {
         clearSentInput(threadId);
         setUploadFiles([]);
@@ -1248,6 +1321,18 @@ function AuthenticatedWorkspace({
     if (!state.selectedThreadId || !state.run) return;
     const threadId = state.selectedThreadId;
     const runId = state.run.id;
+    const artifact = state.artifacts.find((item) => item.id === artifactId);
+    if (readPreviewContent && artifact?.resourceVersionId) {
+      previewContext.open({
+        threadId,
+        runId,
+        artifactId,
+        versionId: artifact.resourceVersionId,
+        name: artifact.name,
+        ...(artifact.mediaType === undefined ? {} : { mediaType: artifact.mediaType }),
+      });
+      return;
+    }
     try {
       const resolved = await apiClient.previewArtifact(threadId, runId, artifactId);
       if (resolved.kind === "text") {
@@ -1312,421 +1397,480 @@ function AuthenticatedWorkspace({
     return () => observer.disconnect();
   }, [state.selectedThreadId]);
   return (
-    <main className={`workspace ${navigationOpen ? "navigation-open" : ""}`}>
-      {dialog}
-      <NavigationSidebar
-        isCompact={isCompact}
-        isOpen={navigationOpen}
-        returnFocusRef={mobileNavigationToggleRef}
-        onClose={() => setNavigationOpen(false)}
+    <FilePreviewContext.Provider value={previewContext}>
+      <main
+        className={`workspace ${navigationOpen ? "navigation-open" : ""} ${filePreview ? "has-file-preview" : ""}`}
       >
-        <ThreadCreate actionLoading={actionLoading} onCreate={createConversation} />
-        {personalizationApi !== undefined && (
-          <button
-            type="button"
-            className="personalization-entry"
-            onClick={() => {
-              setPersonalizationOpen(true);
-              setNavigationOpen(false);
-            }}
-          >
-            <SlidersHorizontal size={17} />
-            个性化
-          </button>
-        )}
-        {skillCenterApi !== undefined && (
-          <button
-            type="button"
-            className="skill-center-entry"
-            onClick={() => {
-              setSkillCenterOpen(true);
-              setNavigationOpen(false);
-            }}
-          >
-            <Puzzle size={17} />
-            {activeTeam === undefined ? "技能中心" : "团队技能"}
-          </button>
-        )}
-        {automationCenterApi !== undefined && (
-          <button
-            type="button"
-            className="automation-entry"
-            onClick={() => {
-              setAutomationCenterOpen(true);
-              setNavigationOpen(false);
-            }}
-          >
-            <CalendarClock size={17} />
-            定时任务
-          </button>
-        )}
-        {cloudDriveApi !== undefined && (
-          <button
-            type="button"
-            className="cloud-drive-entry"
-            onClick={() => {
-              setCloudDriveOpen(true);
-              setNavigationOpen(false);
-            }}
-          >
-            <Cloud size={17} />
-            云盘
-          </button>
-        )}
-        {teamWorkspaceApi !== undefined && teams.length > 0 && (
-          <TeamSwitcher
-            teams={teams}
-            {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
-            loading={teamsLoading}
-            onSwitch={(teamId) => {
-              setSelectedTeamId(teamId);
-              setCloudTeamId(teamId);
-            }}
-            onNewTeamThread={() => {
-              if (selectedTeam !== undefined) switchWorkspace(selectedTeam.id);
-            }}
-            onOpenTeamCenter={() => setTeamCenterOpen(true)}
-            taskCount={teamThreads.length}
-          >
-            <ThreadNavigation ariaLabel="团队任务列表">
-              {teamThreadsLoading ? (
-                <div className="empty compact">
-                  <LoaderCircle className="spin" size={18} />
-                  正在加载团队任务
-                </div>
-              ) : teamThreads.length === 0 ? (
-                <div className="empty compact">还没有团队任务。</div>
-              ) : (
-                teamThreads.map((thread) => (
+        {dialog}
+        <NavigationSidebar
+          isCompact={isCompact}
+          isOpen={navigationOpen}
+          returnFocusRef={mobileNavigationToggleRef}
+          onClose={() => setNavigationOpen(false)}
+        >
+          <ThreadCreate actionLoading={actionLoading} onCreate={createConversation} />
+          {personalizationApi !== undefined && (
+            <button
+              type="button"
+              className="personalization-entry"
+              onClick={() => {
+                setPersonalizationOpen(true);
+                setNavigationOpen(false);
+              }}
+            >
+              <SlidersHorizontal size={17} />
+              个性化
+            </button>
+          )}
+          {skillCenterApi !== undefined && (
+            <button
+              type="button"
+              className="skill-center-entry"
+              onClick={() => {
+                setSkillCenterOpen(true);
+                setNavigationOpen(false);
+              }}
+            >
+              <Puzzle size={17} />
+              {activeTeam === undefined ? "技能中心" : "团队技能"}
+            </button>
+          )}
+          {automationCenterApi !== undefined && (
+            <button
+              type="button"
+              className="automation-entry"
+              onClick={() => {
+                setAutomationCenterOpen(true);
+                setNavigationOpen(false);
+              }}
+            >
+              <CalendarClock size={17} />
+              定时任务
+            </button>
+          )}
+          {cloudDriveApi !== undefined && (
+            <button
+              type="button"
+              className="cloud-drive-entry"
+              onClick={() => {
+                setCloudDriveOpen(true);
+                setNavigationOpen(false);
+              }}
+            >
+              <Cloud size={17} />
+              云盘
+            </button>
+          )}
+          {teamWorkspaceApi !== undefined && teams.length > 0 && (
+            <TeamSwitcher
+              teams={teams}
+              {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
+              loading={teamsLoading}
+              onSwitch={(teamId) => {
+                setSelectedTeamId(teamId);
+                setCloudTeamId(teamId);
+              }}
+              onNewTeamThread={() => {
+                if (selectedTeam !== undefined) switchWorkspace(selectedTeam.id);
+              }}
+              onOpenTeamCenter={() => setTeamCenterOpen(true)}
+              taskCount={teamThreads.length}
+            >
+              <ThreadNavigation ariaLabel="团队任务列表">
+                {teamThreadsLoading ? (
+                  <div className="empty compact">
+                    <LoaderCircle className="spin" size={18} />
+                    正在加载团队任务
+                  </div>
+                ) : teamThreads.length === 0 ? (
+                  <div className="empty compact">还没有团队任务。</div>
+                ) : (
+                  teamThreads.map((thread) => (
+                    <button
+                      type="button"
+                      className={
+                        activeTeamId === selectedTeam?.id && thread.id === state.selectedThreadId
+                          ? "thread selected"
+                          : "thread"
+                      }
+                      key={thread.id}
+                      onClick={() => selectWorkspaceThread(selectedTeam?.id, thread.id)}
+                      aria-label={`${thread.title}${thread.status === "archived" ? "，已归档" : ""}`}
+                    >
+                      <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
+                      {thread.status === "archived" && <small>已归档</small>}
+                    </button>
+                  ))
+                )}
+              </ThreadNavigation>
+            </TeamSwitcher>
+          )}
+          <div className="thread-heading">
+            <span>个人任务</span>
+            <span>{visiblePersonalThreads.length}</span>
+          </div>
+          <ThreadNavigation ariaLabel="个人任务列表">
+            {personalThreadsLoading || (activeTeamId === undefined && loading) ? (
+              <div className="empty compact">
+                <LoaderCircle className="spin" size={18} />
+                正在加载会话
+              </div>
+            ) : visiblePersonalThreads.length === 0 ? (
+              <div className="empty compact">创建第一个会话以开始工作。</div>
+            ) : (
+              visiblePersonalThreads.map((thread) => (
+                <div className="personal-thread-row" key={thread.id}>
                   <button
                     type="button"
                     className={
-                      activeTeamId === selectedTeam?.id && thread.id === state.selectedThreadId
+                      activeTeamId === undefined && thread.id === state.selectedThreadId
                         ? "thread selected"
                         : "thread"
                     }
-                    key={thread.id}
-                    onClick={() => selectWorkspaceThread(selectedTeam?.id, thread.id)}
-                    aria-label={`${thread.title}${thread.status === "archived" ? "，已归档" : ""}`}
+                    onClick={() => selectWorkspaceThread(undefined, thread.id)}
+                    aria-label={thread.title}
                   >
                     <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
-                    {thread.status === "archived" && <small>已归档</small>}
                   </button>
-                ))
-              )}
-            </ThreadNavigation>
-          </TeamSwitcher>
-        )}
-        <div className="thread-heading">
-          <span>个人任务</span>
-          <span>{visiblePersonalThreads.length}</span>
-        </div>
-        <ThreadNavigation ariaLabel="个人任务列表">
-          {personalThreadsLoading || (activeTeamId === undefined && loading) ? (
-            <div className="empty compact">
-              <LoaderCircle className="spin" size={18} />
-              正在加载会话
-            </div>
-          ) : visiblePersonalThreads.length === 0 ? (
-            <div className="empty compact">创建第一个会话以开始工作。</div>
-          ) : (
-            visiblePersonalThreads.map((thread) => (
-              <div className="personal-thread-row" key={thread.id}>
+                  {apiClient.renamePersonalThreadForTenant !== undefined &&
+                    apiClient.archiveThreadForTenant !== undefined && (
+                      <div className="personal-thread-actions">
+                        <button
+                          type="button"
+                          title="重命名任务"
+                          aria-label={`重命名个人任务“${thread.title}”`}
+                          disabled={actionLoading}
+                          onClick={() => void renamePersonalTask(thread)}
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="danger"
+                          title="删除任务"
+                          aria-label={`删除个人任务“${thread.title}”`}
+                          disabled={actionLoading}
+                          onClick={() => void deletePersonalTask(thread)}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    )}
+                </div>
+              ))
+            )}
+          </ThreadNavigation>
+          <AccountMenu
+            profile={accountProfile}
+            {...(selectedTeam === undefined ? {} : { activeTeamName: selectedTeam.displayName })}
+            canManageActiveTeam={
+              selectedTeam !== undefined &&
+              (selectedTeam.role === "owner" || selectedTeam.role === "admin")
+            }
+            {...(teamWorkspaceApi === undefined
+              ? {}
+              : {
+                  onOpenTeamCenter: () => {
+                    setTeamCenterOpen(true);
+                    if (isCompact) setNavigationOpen(false);
+                  },
+                  ...(selectedTeam === undefined
+                    ? {}
+                    : {
+                        onOpenTeamManagement: () => {
+                          setTeamManagementOpen(true);
+                          if (isCompact) setNavigationOpen(false);
+                        },
+                      }),
+                })}
+            onSignOut={onSignOut}
+          />
+        </NavigationSidebar>
+        <section className="content" aria-label="对话工作区">
+          <button
+            ref={mobileNavigationToggleRef}
+            className="mobile-nav-toggle icon-button"
+            type="button"
+            onClick={() => setNavigationOpen(true)}
+            aria-label="打开会话导航"
+            hidden={navigationOpen}
+          >
+            <PanelLeftOpen size={18} />
+          </button>
+          {visibleError && (
+            <div role="alert" className="error" aria-live="assertive">
+              <span>
+                <strong>操作未完成。</strong>
+                {visibleError.message}
+              </span>
+              {visibleError.retryable && (
                 <button
                   type="button"
-                  className={
-                    activeTeamId === undefined && thread.id === state.selectedThreadId
-                      ? "thread selected"
-                      : "thread"
-                  }
-                  onClick={() => selectWorkspaceThread(undefined, thread.id)}
-                  aria-label={thread.title}
+                  className="icon-button"
+                  onClick={() => {
+                    if (currentRecovery?.status === "error") {
+                      setRecoveryNonce((nonce) => nonce + 1);
+                    } else {
+                      void refreshThreads();
+                    }
+                  }}
+                  title="重试"
+                  aria-label="重试加载"
                 >
-                  <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
+                  <RotateCw size={16} />
                 </button>
-                {apiClient.renamePersonalThreadForTenant !== undefined &&
-                  apiClient.archiveThreadForTenant !== undefined && (
-                    <div className="personal-thread-actions">
-                      <button
-                        type="button"
-                        title="重命名任务"
-                        aria-label={`重命名个人任务“${thread.title}”`}
-                        disabled={actionLoading}
-                        onClick={() => void renamePersonalTask(thread)}
-                      >
-                        <Pencil size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        title="删除任务"
-                        aria-label={`删除个人任务“${thread.title}”`}
-                        disabled={actionLoading}
-                        onClick={() => void deletePersonalTask(thread)}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  )}
-              </div>
-            ))
+              )}
+            </div>
           )}
-        </ThreadNavigation>
-        <AccountMenu
-          profile={accountProfile}
-          {...(selectedTeam === undefined ? {} : { activeTeamName: selectedTeam.displayName })}
-          canManageActiveTeam={
-            selectedTeam !== undefined &&
-            (selectedTeam.role === "owner" || selectedTeam.role === "admin")
-          }
-          {...(teamWorkspaceApi === undefined
-            ? {}
-            : {
-                onOpenTeamCenter: () => {
-                  setTeamCenterOpen(true);
-                  if (isCompact) setNavigationOpen(false);
-                },
-                ...(selectedTeam === undefined
+          {!selected ? (
+            <div className="empty primary">
+              <img className="welcome-logo" src={HOOX_HORIZONTAL_PATH} alt="" aria-hidden="true" />
+              <h1>准备好协作了吗？</h1>
+              <p>描述任务后会自动创建会话，并用首条请求作为标题。</p>
+            </div>
+          ) : (
+            <>
+              <ThreadHeader
+                thread={selected}
+                run={state.run}
+                {...(continuity === undefined ? {} : { continuity })}
+                actionLoading={actionLoading}
+                onArchive={() => void archive()}
+                onCancel={() => void cancel()}
+                {...(apiClient.forkThread === undefined
                   ? {}
-                  : {
-                      onOpenTeamManagement: () => {
-                        setTeamManagementOpen(true);
-                        if (isCompact) setNavigationOpen(false);
-                      },
-                    }),
-              })}
-          onSignOut={onSignOut}
-        />
-      </NavigationSidebar>
-      <section className="content" aria-label="对话工作区">
-        <button
-          ref={mobileNavigationToggleRef}
-          className="mobile-nav-toggle icon-button"
-          type="button"
-          onClick={() => setNavigationOpen(true)}
-          aria-label="打开会话导航"
-          hidden={navigationOpen}
-        >
-          <PanelLeftOpen size={18} />
-        </button>
-        {visibleError && (
-          <div role="alert" className="error" aria-live="assertive">
-            <span>
-              <strong>操作未完成。</strong>
-              {visibleError.message}
-            </span>
-            {visibleError.retryable && (
+                  : activeTeam === undefined
+                    ? teams.length > 0
+                      ? { onPublishToTeam: publishToTeam }
+                      : {}
+                    : { onFork: () => void fork() })}
+              />
+              <section
+                ref={runAreaRef}
+                className="run-area"
+                aria-live="polite"
+                onScroll={(event) => {
+                  const area = event.currentTarget;
+                  followLatestRef.current = shouldFollowLatest(
+                    area.scrollHeight,
+                    area.scrollTop,
+                    area.clientHeight,
+                  );
+                }}
+              >
+                <div ref={runContentRef} className="run-content">
+                  <ThreadTranscript
+                    messages={state.threadContext ?? []}
+                    pendingInputs={visiblePendingInputs}
+                    loadRunEvents={(runId) =>
+                      loadAllRunEvents((after, limit) =>
+                        apiClient.listEvents(selected.id, runId, after, limit),
+                      )
+                    }
+                    {...(attachmentPreviewLoader === undefined
+                      ? {}
+                      : { loadAttachmentUrl: attachmentPreviewLoader })}
+                    {...(state.run === undefined
+                      ? {}
+                      : { currentRun: state.run, currentRunEvents: state.events })}
+                  />
+                  {state.run ? (
+                    <InlineArtifactDelivery
+                      artifacts={state.artifacts}
+                      onPreview={(artifactId) => void preview(artifactId)}
+                      onDownload={(artifactId) => void download(artifactId)}
+                    />
+                  ) : currentRecovery?.status === "loading" ? (
+                    <RunRecoveryLoading />
+                  ) : (
+                    <EmptyConversation />
+                  )}
+                </div>
+              </section>
+              {state.run && (
+                <div className="run-progress-dock">
+                  <RunTimeline run={state.run} events={state.events} />
+                </div>
+              )}
+            </>
+          )}
+          {(draftPersistenceFailed || referenceDraft.persistenceFailed) && (
+            <p role="alert">浏览器无法保存草稿，请在刷新前发送或备份未发送的文字和引用。</p>
+          )}
+          <DraftFileReferences
+            items={referenceDraft.items}
+            disabled={actionLoading}
+            onRemove={(id) =>
+              referenceDraft.setItems(referenceDraft.items.filter((item) => item.id !== id))
+            }
+          />
+          <ConversationComposer
+            referenceCount={referenceDraft.items.length}
+            input={input}
+            files={uploadFiles}
+            selectedHistoryFiles={historyFiles}
+            onHistoryFilesChange={setHistoryFiles}
+            {...(apiClient.listHistoryFiles === undefined
+              ? {}
+              : {
+                  historyFileApi: {
+                    listHistoryFiles: apiClient.listHistoryFiles.bind(apiClient),
+                    ...(attachmentPreviewLoader === undefined
+                      ? {}
+                      : { previewHistoryFile: attachmentPreviewLoader }),
+                  },
+                })}
+            disabled={actionLoading}
+            onChange={setInput}
+            onFilesChange={setUploadFiles}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void send();
+            }}
+            showQueueAction={
+              state.run?.status === "running" && state.run.executionStatus !== "recovery_required"
+            }
+            onQueue={() => void send("follow_up")}
+          />
+        </section>
+        {filePreview && readPreviewContent && (
+          <FilePreviewPanel
+            key={`${activeTeamId ?? "personal"}:${filePreview.source.artifactId}:${JSON.stringify(filePreview.selection)}`}
+            target={filePreview}
+            readContent={readPreviewContent}
+            disabled={actionLoading || referenceDraft.items.length >= MAX_FILE_REFERENCES}
+            onClose={() => setFilePreview(undefined)}
+            onDownload={() =>
+              void openArtifact(
+                () =>
+                  apiClient.downloadArtifact(
+                    filePreview.source.threadId,
+                    filePreview.source.runId,
+                    filePreview.source.artifactId,
+                  ),
+                "下载文件失败",
+              )
+            }
+            onReference={(reference) => {
+              if (referenceDraft.items.length >= MAX_FILE_REFERENCES) return;
+              referenceDraft.setItems([...referenceDraft.items, reference]);
+            }}
+            reply={
+              <details>
+                <summary>填写修改要求 · {referenceDraft.items.length} 处引用</summary>
+                <textarea
+                  aria-label="预览中的修改要求"
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  placeholder="说明希望如何修改所选内容…"
+                  disabled={actionLoading}
+                />
+                <button
+                  type="button"
+                  disabled={actionLoading || (!input.trim() && referenceDraft.items.length === 0)}
+                  onClick={() => void send()}
+                >
+                  发送修改要求
+                </button>
+              </details>
+            }
+          />
+        )}
+        {textPreview?.kind === "text" && (
+          <dialog className="artifact-text-preview" open aria-label="纯文本交付物预览">
+            <header>
+              <strong>交付物预览</strong>
               <button
                 type="button"
                 className="icon-button"
-                onClick={() => {
-                  if (currentRecovery?.status === "error") {
-                    setRecoveryNonce((nonce) => nonce + 1);
-                  } else {
-                    void refreshThreads();
-                  }
-                }}
-                title="重试"
-                aria-label="重试加载"
+                onClick={() => setTextPreview(undefined)}
               >
-                <RotateCw size={16} />
+                关闭
               </button>
-            )}
-          </div>
+            </header>
+            <pre>{textPreview.text}</pre>
+          </dialog>
         )}
-        {!selected ? (
-          <div className="empty primary">
-            <img className="welcome-logo" src={HOOX_HORIZONTAL_PATH} alt="" aria-hidden="true" />
-            <h1>准备好协作了吗？</h1>
-            <p>描述任务后会自动创建会话，并用首条请求作为标题。</p>
-          </div>
-        ) : (
-          <>
-            <ThreadHeader
-              thread={selected}
-              run={state.run}
-              {...(continuity === undefined ? {} : { continuity })}
-              actionLoading={actionLoading}
-              onArchive={() => void archive()}
-              onCancel={() => void cancel()}
-              {...(apiClient.forkThread === undefined
-                ? {}
-                : activeTeam === undefined
-                  ? teams.length > 0
-                    ? { onPublishToTeam: publishToTeam }
-                    : {}
-                  : { onFork: () => void fork() })}
-            />
-            <section
-              ref={runAreaRef}
-              className="run-area"
-              aria-live="polite"
-              onScroll={(event) => {
-                const area = event.currentTarget;
-                followLatestRef.current = shouldFollowLatest(
-                  area.scrollHeight,
-                  area.scrollTop,
-                  area.clientHeight,
-                );
-              }}
-            >
-              <div ref={runContentRef} className="run-content">
-                <ThreadTranscript
-                  messages={state.threadContext ?? []}
-                  pendingInputs={visiblePendingInputs}
-                  loadRunEvents={(runId) =>
-                    loadAllRunEvents((after, limit) =>
-                      apiClient.listEvents(selected.id, runId, after, limit),
-                    )
-                  }
-                  {...(attachmentPreviewLoader === undefined
-                    ? {}
-                    : { loadAttachmentUrl: attachmentPreviewLoader })}
-                  {...(state.run === undefined
-                    ? {}
-                    : { currentRun: state.run, currentRunEvents: state.events })}
-                />
-                {state.run ? (
-                  <InlineArtifactDelivery
-                    artifacts={state.artifacts}
-                    onPreview={(artifactId) => void preview(artifactId)}
-                    onDownload={(artifactId) => void download(artifactId)}
-                  />
-                ) : currentRecovery?.status === "loading" ? (
-                  <RunRecoveryLoading />
-                ) : (
-                  <EmptyConversation />
-                )}
-              </div>
-            </section>
-            {state.run && (
-              <div className="run-progress-dock">
-                <RunTimeline run={state.run} events={state.events} />
-              </div>
-            )}
-          </>
+        {skillCenterOpen && skillCenterApi !== undefined && (
+          <SkillCenterDialog
+            api={skillCenterApi}
+            {...(activeTeam === undefined
+              ? {}
+              : { scopeName: activeTeam.displayName, readOnly: activeTeam.role === "member" })}
+            onClose={() => setSkillCenterOpen(false)}
+          />
         )}
-        {draftPersistenceFailed && (
-          <p role="alert">浏览器无法保存草稿，请在刷新前复制未发送的文字。</p>
+        {automationCenterOpen && automationCenterApi !== undefined && (
+          <AutomationCenterDialog
+            api={automationCenterApi}
+            threads={state.threads}
+            {...(state.selectedThreadId === undefined
+              ? {}
+              : { initialThreadId: state.selectedThreadId })}
+            onClose={() => setAutomationCenterOpen(false)}
+          />
         )}
-        <ConversationComposer
-          input={input}
-          files={uploadFiles}
-          selectedHistoryFiles={historyFiles}
-          onHistoryFilesChange={setHistoryFiles}
-          {...(apiClient.listHistoryFiles === undefined
-            ? {}
-            : {
-                historyFileApi: {
-                  listHistoryFiles: apiClient.listHistoryFiles.bind(apiClient),
-                  ...(attachmentPreviewLoader === undefined
-                    ? {}
-                    : { previewHistoryFile: attachmentPreviewLoader }),
-                },
-              })}
-          disabled={actionLoading}
-          onChange={setInput}
-          onFilesChange={setUploadFiles}
-          onSubmit={(event) => {
-            event.preventDefault();
-            void send();
-          }}
-          showQueueAction={
-            state.run?.status === "running" && state.run.executionStatus !== "recovery_required"
-          }
-          onQueue={() => void send("follow_up")}
-        />
-      </section>
-      {textPreview?.kind === "text" && (
-        <dialog className="artifact-text-preview" open aria-label="纯文本交付物预览">
-          <header>
-            <strong>交付物预览</strong>
-            <button type="button" className="icon-button" onClick={() => setTextPreview(undefined)}>
-              关闭
-            </button>
-          </header>
-          <pre>{textPreview.text}</pre>
-        </dialog>
-      )}
-      {skillCenterOpen && skillCenterApi !== undefined && (
-        <SkillCenterDialog
-          api={skillCenterApi}
-          {...(activeTeam === undefined
-            ? {}
-            : { scopeName: activeTeam.displayName, readOnly: activeTeam.role === "member" })}
-          onClose={() => setSkillCenterOpen(false)}
-        />
-      )}
-      {automationCenterOpen && automationCenterApi !== undefined && (
-        <AutomationCenterDialog
-          api={automationCenterApi}
-          threads={state.threads}
-          {...(state.selectedThreadId === undefined
-            ? {}
-            : { initialThreadId: state.selectedThreadId })}
-          onClose={() => setAutomationCenterOpen(false)}
-        />
-      )}
-      {personalizationOpen && personalizationApi !== undefined && (
-        <PersonalizationDialog
-          api={personalizationApi}
-          hasTeams={teams.length > 0}
-          onClose={() => setPersonalizationOpen(false)}
-        />
-      )}
-      {cloudDriveOpen && personalCloudDriveApi !== undefined && (
-        <CloudDriveDialog
-          api={personalCloudDriveApi}
-          selectedFiles={historyFiles}
-          {...(activeTeamId === undefined
-            ? {
-                onSelectFile: selectPersonalCloudFile,
-              }
-            : {})}
-          teams={teamCloudDriveSources}
-          {...(cloudTeamId === undefined ? {} : { selectedTeamId: cloudTeamId })}
-          onSwitchTeam={setCloudTeamId}
-          onSelectTeamFile={selectTeamCloudFile}
-          onClose={() => setCloudDriveOpen(false)}
-        />
-      )}
-      {teamCenterOpen && teamWorkspaceApi !== undefined && (
-        <TeamCenterDialog
-          userId={accountProfile.id}
-          teams={teams}
-          {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
-          loading={teamsLoading}
-          onSelectTeam={(teamId) => {
-            setSelectedTeamId(teamId);
-            setCloudTeamId(teamId);
-          }}
-          onCreate={createTeam}
-          onRefresh={refreshTeams}
-          onManage={(teamId) => {
-            setSelectedTeamId(teamId);
-            setTeamCenterOpen(false);
-            setTeamManagementOpen(true);
-          }}
-          onClose={() => setTeamCenterOpen(false)}
-        />
-      )}
-      {teamManagementOpen && managedTeam !== undefined && teamWorkspaceApi !== undefined && (
-        <TeamManagementDialog
-          api={teamWorkspaceApi}
-          team={managedTeam}
-          onDissolved={() => {
-            setTeamManagementOpen(false);
-            setTeams((current) => {
-              const remaining = current.filter((team) => team.id !== managedTeam.id);
-              setSelectedTeamId(remaining[0]?.id);
-              return remaining;
-            });
-            if (activeTeamId === managedTeam.id) switchWorkspace(undefined);
-          }}
-          onClose={() => setTeamManagementOpen(false)}
-        />
-      )}
-    </main>
+        {personalizationOpen && personalizationApi !== undefined && (
+          <PersonalizationDialog
+            api={personalizationApi}
+            hasTeams={teams.length > 0}
+            onClose={() => setPersonalizationOpen(false)}
+          />
+        )}
+        {cloudDriveOpen && personalCloudDriveApi !== undefined && (
+          <CloudDriveDialog
+            api={personalCloudDriveApi}
+            selectedFiles={historyFiles}
+            {...(activeTeamId === undefined
+              ? {
+                  onSelectFile: selectPersonalCloudFile,
+                }
+              : {})}
+            teams={teamCloudDriveSources}
+            {...(cloudTeamId === undefined ? {} : { selectedTeamId: cloudTeamId })}
+            onSwitchTeam={setCloudTeamId}
+            onSelectTeamFile={selectTeamCloudFile}
+            onClose={() => setCloudDriveOpen(false)}
+          />
+        )}
+        {teamCenterOpen && teamWorkspaceApi !== undefined && (
+          <TeamCenterDialog
+            userId={accountProfile.id}
+            teams={teams}
+            {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
+            loading={teamsLoading}
+            onSelectTeam={(teamId) => {
+              setSelectedTeamId(teamId);
+              setCloudTeamId(teamId);
+            }}
+            onCreate={createTeam}
+            onRefresh={refreshTeams}
+            onManage={(teamId) => {
+              setSelectedTeamId(teamId);
+              setTeamCenterOpen(false);
+              setTeamManagementOpen(true);
+            }}
+            onClose={() => setTeamCenterOpen(false)}
+          />
+        )}
+        {teamManagementOpen && managedTeam !== undefined && teamWorkspaceApi !== undefined && (
+          <TeamManagementDialog
+            api={teamWorkspaceApi}
+            team={managedTeam}
+            onDissolved={() => {
+              setTeamManagementOpen(false);
+              setTeams((current) => {
+                const remaining = current.filter((team) => team.id !== managedTeam.id);
+                setSelectedTeamId(remaining[0]?.id);
+                return remaining;
+              });
+              if (activeTeamId === managedTeam.id) switchWorkspace(undefined);
+            }}
+            onClose={() => setTeamManagementOpen(false)}
+          />
+        )}
+      </main>
+    </FilePreviewContext.Provider>
   );
 }
 

@@ -90,14 +90,16 @@ GET /v1/threads/:threadId/runs/:runId/artifacts
 ```http
 GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/preview
 GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/download
+GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/content
 ```
 
-- 两个端点都只为已授权的 published Artifact 签发短期 S3 URL。
+- `download` 和二进制 `preview` 为已授权的 published Artifact 签发短期 S3 URL；规范 UTF-8 纯文本 `preview` 返回安全 JSON 文本。
 - 签名前后重验 Tenant 成员关系、Thread/Run 归属、授权修订和完整固定 Blob 身份。
 - `preview` 只允许安全 charset 的纯文本、PNG、JPEG、GIF、WebP 和 PDF inline。
 - HTML、SVG、XML 等主动内容不能 inline，只能通过使用净化文件名的 attachment 下载。
 - URL、对象键和签名不能写入 API 日志或持久化事实。
 - BlobStore 异常统一返回不泄漏内部消息的 503。
+- `content` 提供有界、受授权的原始字节，供浏览器解析 Office、PDF、图片和文本，不执行服务端转换；读取前后复核固定身份，返回版本响应头。支持格式、选区引用请求与限制见[文件预览与选区引用](file-preview.md)。
 
 ## 输入与幂等
 

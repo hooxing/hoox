@@ -78,7 +78,7 @@
 | [ADR-0050：生产 API 的 JWT 身份、租户选择与受审网络装配](0050-production-api-jwt-authentication.md) | 已接受 | 2026-07-29 |
 | [ADR-0051：Workspace 物化失败的脱敏诊断](0051-workspace-materialization-safe-diagnostics.md) | 已接受 | 2026-07-29 |
 | [ADR-0052：Artifact 工具许可与 Attempt 版本的单调边界](0052-artifact-permit-version-monotonicity.md) | 已接受 | 2026-07-30 |
-| [ADR-0053：Workspace Artifact 的受限预览媒体类型](0053-workspace-artifact-preview-media.md) | 已接受 | 2026-07-30 |
+| [ADR-0053：Workspace Artifact 的受限预览媒体类型](0053-workspace-artifact-preview-media.md) | 部分已替代 | 2026-07-30 |
 | [ADR-0054：生产传输、进程边界与可复现发布制品](0054-production-transport-and-reproducible-release.md) | 已接受 | 2026-07-30 |
 | [ADR-0055：模型网络报文诊断的受限保存](0055-model-wire-trace-diagnostics.md) | 部分已替代（原始 response 采集） | 2026-07-30 |
 | [ADR-0056：模型网络报文诊断的安全读取与原始字节呈现](0056-model-wire-trace-safe-reading.md) | 已接受 | 2026-07-30 |
@@ -295,5 +295,7 @@
 | [ADR-20260906211335：后台在线配置与记忆密钥托管](20260906211335-admin-live-configuration-and-memory-credentials.md) | 已接受 | 2026-09-06 |
 | [ADR-20260906195752：后台按管理任务保存配置与发布技能](20260906195752-admin-task-oriented-configuration-and-publication.md) | 部分已替代 | 2026-09-06 |
 | [ADR-20260906211950：工具内部校验字段不进入模型契约](20260906211950-private-tool-validation-schema.md) | 已接受 | 2026-09-06 |
+
+| [ADR-20260908104231：浏览器优先的文件预览与固定版本选区引用](20260908104231-browser-file-preview-and-versioned-references.md) | 已接受 | 2026-09-08 |
 
 </details>

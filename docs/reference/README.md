@@ -8,6 +8,7 @@
 | [命令参考](commands.md) | 启动、迁移、校验或执行外部服务 Gate 时 | 应运行哪个命令，前置条件和影响范围是什么 |
 | [Development API 契约](development-api.md) | 开发 Web 或本地集成时 | 当前 development HTTP 接口、身份和错误契约是什么 |
 | [历史文件与 ResourceFS](history-files.md) | 浏览个人历史交付物或在 Sandbox 中读取历史文件时 | 查询窗口、分页、虚拟目录、所有权和数据边界是什么 |
+| [文件预览与选区引用](file-preview.md) | 维护交付文件预览或向 Agent 引用内容时 | 浏览器支持范围、大小屏交互、版本绑定与安全边界是什么 |
 | [Todo Write](todo-write.md) | 实现或调用 `todo_write` 时 | 输入约束、全量快照、持久化和恢复语义是什么 |
 | [品牌资产](brand-assets.md) | 修改工作台、管理台、站点图标或对外材料时 | 哪些文件是品牌真源、各版本如何使用以及哪些图形关系必须保持 |
 | [UI 主题 Token](ui-theme.md) | 迁移或新增 Web、Admin Web 界面时 | 共享主题真源、语义角色、消费规则和当前迁移边界是什么 |

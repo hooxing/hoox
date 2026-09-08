@@ -24,6 +24,8 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { filePreviewKind, readFileReferences } from "@hoox/protocol/file-references";
+import { MessageFileReferences } from "./file-reference-view.js";
 import {
   type FormEventHandler,
   type ReactNode,
@@ -933,8 +935,9 @@ function UserRequestMessage({
     <article className={`message user-request${pendingInput === undefined ? "" : " is-pending"}`}>
       <div className="message-card">
         <p ref={contentRef} className={`user-request-content${collapsed ? " is-collapsed" : ""}`}>
-          {text}
+          {readFileReferences(text).text}
         </p>
+        <MessageFileReferences text={text} />
         {attachments.length > 0 && (
           <ul className="user-request-attachments" aria-label="消息附件">
             {attachments.map((attachment) => (
@@ -1195,7 +1198,8 @@ export function InlineArtifactDelivery({
             </div>
             <fieldset className="artifact-actions">
               <legend className="sr-only">{artifact.name} 操作</legend>
-              {canPreviewArtifact(artifact.mediaType) && (
+              {(filePreviewKind(artifact.name, artifact.mediaType) !== undefined ||
+                canPreviewArtifact(artifact.mediaType)) && (
                 <button
                   type="button"
                   className="artifact-action-button"
@@ -1372,6 +1376,7 @@ function ComposerHistoryFileVisual({
 }
 
 export function ConversationComposer({
+  referenceCount = 0,
   input,
   files,
   disabled,
@@ -1391,6 +1396,7 @@ export function ConversationComposer({
   readonly onFilesChange: (files: readonly File[]) => void;
   readonly onSubmit: FormEventHandler<HTMLFormElement>;
   readonly showQueueAction: boolean;
+  readonly referenceCount?: number;
   readonly onQueue: () => void;
   readonly selectedHistoryFiles?: readonly HistoryFile[];
   readonly onHistoryFilesChange?: (files: readonly HistoryFile[]) => void;
@@ -1457,7 +1463,11 @@ export function ConversationComposer({
     setMentionActiveIndex(0);
   };
 
-  const hasInput = input.trim().length > 0 || files.length > 0 || selectedHistoryFiles.length > 0;
+  const hasInput =
+    input.trim().length > 0 ||
+    files.length > 0 ||
+    selectedHistoryFiles.length > 0 ||
+    referenceCount > 0;
   return (
     <form
       className="composer"

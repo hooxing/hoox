@@ -982,6 +982,7 @@ describe("Artifact PostgreSQL 持久化", () => {
     });
     expect(publishedProjection.outcome).toBe("found");
     if (publishedProjection.outcome === "found") {
+      expect(publishedProjection.artifacts[0]?.resourceId).toBe(ids.resource);
       expect(publishedProjection.artifacts.map((artifact) => artifact.id)).toEqual([
         publishedArtifact,
       ]);

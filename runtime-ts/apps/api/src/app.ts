@@ -2196,6 +2196,52 @@ export function createApiApp(
     normalizedDependencies.experience !== undefined &&
     normalizedDependencies.blobs !== undefined
   ) {
+    app.get<{ Params: RunArtifactPath }>(
+      "/v1/threads/:threadId/runs/:runId/artifacts/:artifactId/content",
+      { schema: { params: RunArtifactPathSchema } },
+      async (request, reply) => {
+        const auth = await authenticate(request);
+        await service.getRun(auth, request.params.threadId, request.params.runId);
+        const lookup = {
+          scope: auth.scope,
+          runId: runId(request.params.runId),
+          artifactId: request.params.artifactId,
+        };
+        const found = await normalizedDependencies.experience?.getArtifact(lookup);
+        if (found?.outcome !== "found") throw new ApiFailure("not_found");
+        const { MAX_FILE_PREVIEW_BYTES, filePreviewKind } = await import(
+          "@hoox/protocol/file-references"
+        );
+        if (
+          found.artifact.sizeBytes > MAX_FILE_PREVIEW_BYTES ||
+          filePreviewKind(found.artifact.name, found.artifact.mediaType) === undefined
+        )
+          throw new ApiFailure("invalid_state");
+        const bytes = await normalizedDependencies.blobs?.getBytes(
+          { tenantId: auth.scope.tenantId },
+          found.artifact.blob,
+        );
+        const confirmed = await normalizedDependencies.experience?.getArtifact(lookup);
+        if (
+          confirmed?.outcome !== "found" ||
+          !sameArtifactAuthorization(found.artifact, confirmed.artifact)
+        )
+          throw new ApiFailure("not_found");
+        if (
+          bytes === undefined ||
+          bytes.byteLength !== found.artifact.sizeBytes ||
+          bytes.byteLength > MAX_FILE_PREVIEW_BYTES
+        )
+          throw new ApiFailure("invalid_state");
+        return reply
+          .header("cache-control", "no-store")
+          .header("x-content-type-options", "nosniff")
+          .header("content-disposition", "attachment")
+          .header("x-resource-version-id", found.artifact.resourceVersionId)
+          .type("application/octet-stream")
+          .send(Buffer.from(bytes));
+      },
+    );
     const artifactDeliverySchema = {
       params: RunArtifactPathSchema,
       response: {

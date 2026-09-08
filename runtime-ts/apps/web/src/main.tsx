@@ -1697,14 +1697,16 @@ function AuthenticatedWorkspace({
           {(draftPersistenceFailed || referenceDraft.persistenceFailed) && (
             <p role="alert">浏览器无法保存草稿，请在刷新前发送或备份未发送的文字和引用。</p>
           )}
-          <DraftFileReferences
-            items={referenceDraft.items}
-            disabled={actionLoading}
-            onRemove={(id) =>
-              referenceDraft.setItems(referenceDraft.items.filter((item) => item.id !== id))
-            }
-          />
           <ConversationComposer
+            references={
+              <DraftFileReferences
+                items={referenceDraft.items}
+                disabled={actionLoading}
+                onRemove={(id) =>
+                  referenceDraft.setItems(referenceDraft.items.filter((item) => item.id !== id))
+                }
+              />
+            }
             referenceCount={referenceDraft.items.length}
             input={input}
             files={uploadFiles}
@@ -1758,6 +1760,13 @@ function AuthenticatedWorkspace({
             reply={
               <details>
                 <summary>填写修改要求 · {referenceDraft.items.length} 处引用</summary>
+                <DraftFileReferences
+                  items={referenceDraft.items}
+                  disabled={actionLoading}
+                  onRemove={(id) =>
+                    referenceDraft.setItems(referenceDraft.items.filter((item) => item.id !== id))
+                  }
+                />
                 <textarea
                   aria-label="预览中的修改要求"
                   value={input}

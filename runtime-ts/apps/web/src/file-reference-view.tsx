@@ -1,4 +1,5 @@
 import { createContext, useContext, useMemo, useReducer } from "react";
+import { FileText, X } from "lucide-react";
 import {
   fileSelectionLabel,
   readFileReferences,
@@ -51,29 +52,41 @@ export function DraftFileReferences({
   const context = useContext(FilePreviewContext);
   if (items.length === 0) return null;
   return (
-    <ul className="file-reference-list" aria-label="待发送引用">
+    <ul className="file-reference-list is-draft" aria-label="待发送引用">
       {items.map((item, index) => (
         <li key={item.id}>
           <button
             type="button"
+            className="reference-item-content"
             onClick={() => context?.open(item.reference.source, item.reference.selection)}
           >
-            <strong>
-              {index + 1}. {item.reference.source.name}
-            </strong>
-            <span>{fileSelectionLabel(item.reference.selection)}</span>
-            {item.snapshotDataUrl && <img src={item.snapshotDataUrl} alt="引用区域" />}
-            {"quote" in item.reference.selection && (
-              <q>{item.reference.selection.quote.slice(0, 160)}</q>
+            {item.snapshotDataUrl ? (
+              <img src={item.snapshotDataUrl} alt="引用区域" />
+            ) : (
+              <FileText size={16} aria-hidden="true" />
             )}
+            <strong title={item.reference.source.name}>{item.reference.source.name}</strong>
+            <span
+              className="reference-item-excerpt"
+              title={
+                "quote" in item.reference.selection
+                  ? item.reference.selection.quote
+                  : fileSelectionLabel(item.reference.selection)
+              }
+            >
+              {"quote" in item.reference.selection
+                ? item.reference.selection.quote.slice(0, 160)
+                : fileSelectionLabel(item.reference.selection)}
+            </span>
           </button>
           <button
             type="button"
+            className="reference-remove"
             disabled={disabled}
             aria-label={`移除引用 ${index + 1}`}
             onClick={() => onRemove(item.id)}
           >
-            移除
+            <X size={14} aria-hidden="true" />
           </button>
         </li>
       ))}

@@ -4,6 +4,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
+      "@hoox/protocol/file-references": fileURLToPath(
+        new URL("./runtime-ts/packages/protocol/src/file-references.ts", import.meta.url),
+      ),
       "@hoox/sandbox/testing": fileURLToPath(
         new URL("./runtime-ts/packages/sandbox/src/testing/fake.ts", import.meta.url),
       ),

@@ -1376,6 +1376,7 @@ function ComposerHistoryFileVisual({
 }
 
 export function ConversationComposer({
+  references,
   referenceCount = 0,
   input,
   files,
@@ -1397,6 +1398,7 @@ export function ConversationComposer({
   readonly onSubmit: FormEventHandler<HTMLFormElement>;
   readonly showQueueAction: boolean;
   readonly referenceCount?: number;
+  readonly references?: ReactNode;
   readonly onQueue: () => void;
   readonly selectedHistoryFiles?: readonly HistoryFile[];
   readonly onHistoryFilesChange?: (files: readonly HistoryFile[]) => void;
@@ -1479,6 +1481,7 @@ export function ConversationComposer({
         onFilesChange(appendComposerFiles(files, pastedFiles, selectedHistoryFiles.length));
       }}
     >
+      {references}
       {(files.length > 0 || selectedHistoryFiles.length > 0) && (
         <ul className="composer-files" aria-label="待发送文件">
           {selectedHistoryFiles.map((file, index) => (

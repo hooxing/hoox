@@ -9,6 +9,17 @@ import type { DraftFileReference } from "./file-reference-view.js";
 import { previewFrameHtml, renderPreview, type PreviewRenderer } from "./file-preview-renderer.js";
 import { regionSelection, textSelection } from "./file-preview-selection.js";
 import { FilePreviewTable } from "./file-preview-table.js";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  FileText,
+  MoreHorizontal,
+  Quote,
+  Scan,
+  Search,
+  X,
+} from "lucide-react";
 
 export type PreviewTarget = { source: FileSource; selection?: FileSelection };
 export function FilePreviewPanel({
@@ -50,6 +61,10 @@ export function FilePreviewPanel({
   const live = useRef({ mode, page, kind, selection });
   live.current = { mode, page, kind, selection };
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [hasText, setHasText] = useState(false);
+  const [anchor, setAnchor] = useState<{ left: number; top: number }>();
   const [panelWidth, setPanelWidth] = useState(0);
   const close = useRef(onClose);
   close.current = onClose;
@@ -131,6 +146,9 @@ export function FilePreviewPanel({
     )
       return;
     const doc = frame.current.contentDocument;
+    const theme = getComputedStyle(document.documentElement);
+    for (const token of ["--surface-sunken", "--text-primary", "--action-primary"])
+      doc.documentElement.style.setProperty(token, theme.getPropertyValue(token));
     const abort = new AbortController();
     let instance: PreviewRenderer | undefined;
     setReady(false);
@@ -150,6 +168,7 @@ export function FilePreviewPanel({
         setPage(selectedPage);
         setReady(true);
         const element = created.pageElement();
+        setHasText(Boolean(element.textContent?.trim()));
         element.style.position = "relative";
         if (target.selection?.kind === "text") restoreTextSelection(element, target.selection);
         if (target.selection?.kind === "region") drawRegion(element, target.selection);
@@ -159,6 +178,7 @@ export function FilePreviewPanel({
           setError(reason instanceof Error ? reason.message : "文件无法预览。");
       });
     let start: { x: number; y: number } | undefined;
+    let selectingText = false;
     let dragged: FileSelection | undefined;
     const point = (event: PointerEvent, element: HTMLElement) => {
       const rect = element.getBoundingClientRect();
@@ -168,6 +188,12 @@ export function FilePreviewPanel({
       };
     };
     const down = (event: PointerEvent) => {
+      setMoreOpen(false);
+      if (live.current.mode === "read") {
+        selectingText = true;
+        setSelection(undefined);
+        return;
+      }
       if (live.current.mode !== "region" || event.button !== 0) return;
       const element = renderer.current?.pageElement();
       if (!element || event.target === null || !element.contains(event.target as Node)) return;
@@ -202,17 +228,23 @@ export function FilePreviewPanel({
       }
     };
     const up = (event: PointerEvent) => {
+      if (live.current.mode === "read") {
+        selectingText = false;
+        select();
+        return;
+      }
       move(event);
       start = undefined;
       if (dragged) setSelection(dragged);
     };
     const cancel = () => {
+      selectingText = false;
       start = undefined;
       setSelection(undefined);
       doc.getElementById("selection-box")?.remove();
     };
     const select = () => {
-      if (live.current.mode !== "read") return;
+      if (live.current.mode !== "read" || selectingText) return;
       const element = renderer.current?.pageElement();
       if (!element) return;
       const result = textSelection(
@@ -221,7 +253,7 @@ export function FilePreviewPanel({
         ["docx", "pdf", "pptx"].includes(live.current.kind ?? "") ? live.current.page : undefined,
         live.current.kind === "code" || live.current.kind === "text",
       );
-      if (result) setSelection(result);
+      setSelection(result);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") close.current();
@@ -251,6 +283,91 @@ export function FilePreviewPanel({
   }, [data, kind, frameReady, target.selection]);
 
   useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 3500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 缩放和查找栏改变 iframe 坐标，需要在布局完成后重新定位。
+  useEffect(() => {
+    if (!selection || (kind !== "table" && !ready)) {
+      setAnchor(undefined);
+      return;
+    }
+    const host = panel.current;
+    const iframe = frame.current;
+    if (!host) return;
+    const update = () => {
+      const bounds = host.getBoundingClientRect();
+      let rect: { left: number; top: number; right: number; bottom: number } | undefined;
+      let viewport = bounds;
+      if (selection.kind === "cells") {
+        rect = host.querySelector(".file-table-scroll .is-selected")?.getBoundingClientRect();
+        viewport = host.querySelector(".file-table-scroll")?.getBoundingClientRect() ?? bounds;
+      } else if (iframe) {
+        viewport = iframe.getBoundingClientRect();
+        const element = renderer.current?.pageElement();
+        const current = iframe.contentDocument?.getSelection();
+        const range = current && current.rangeCount > 0 ? current.getRangeAt(0) : undefined;
+        const local =
+          selection.kind === "text"
+            ? range?.getBoundingClientRect()
+            : element?.getBoundingClientRect();
+        if (local) {
+          const area =
+            selection.kind === "region" ? selection : { x: 0, y: 0, width: 1, height: 1 };
+          rect = {
+            left: viewport.left + local.left + local.width * area.x,
+            right: viewport.left + local.left + local.width * (area.x + area.width),
+            top: viewport.top + local.top + local.height * area.y,
+            bottom: viewport.top + local.top + local.height * (area.y + area.height),
+          };
+        }
+      }
+      if (
+        !rect ||
+        rect.bottom <= viewport.top ||
+        rect.top >= viewport.bottom ||
+        rect.right <= viewport.left ||
+        rect.left >= viewport.right
+      ) {
+        setAnchor(undefined);
+        return;
+      }
+      // iframe 内的选区坐标先转换到面板；工具条始终落在可见阅读区域内。
+      const above = rect.top - 48;
+      const top =
+        above >= viewport.top + 8 ? above : Math.min(rect.bottom + 8, viewport.bottom - 48);
+      setAnchor({
+        left: Math.max(
+          12,
+          Math.min(
+            bounds.width - 136,
+            (Math.max(rect.left, viewport.left) + Math.min(rect.right, viewport.right)) / 2 -
+              bounds.left -
+              60,
+          ),
+        ),
+        top: Math.max(viewport.top - bounds.top + 8, top - bounds.top),
+      });
+    };
+    const tick = requestAnimationFrame(update);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(update);
+    observer?.observe(host);
+    if (iframe) observer?.observe(iframe);
+    host.addEventListener("scroll", update, true);
+    iframe?.contentDocument?.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      cancelAnimationFrame(tick);
+      observer?.disconnect();
+      host.removeEventListener("scroll", update, true);
+      iframe?.contentDocument?.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [selection, kind, ready, zoom, searchOpen]);
+
+  useEffect(() => {
     if (!ready || page < 1) return;
     const element = renderer.current?.pageElement();
     if (element) {
@@ -264,6 +381,7 @@ export function FilePreviewPanel({
     setSelection(undefined);
     try {
       await renderer.current?.showPage(next);
+      setHasText(Boolean(renderer.current?.pageElement().textContent?.trim()));
       setPage(next);
       renderer.current?.pageElement().style.setProperty("position", "relative");
       fit();
@@ -274,7 +392,7 @@ export function FilePreviewPanel({
     }
   };
   const addReference = async () => {
-    if (!selection || busy) return;
+    if (!selection || busy || disabled) return;
     setBusy(true);
     setError("");
     try {
@@ -288,7 +406,11 @@ export function FilePreviewPanel({
         reference: { source: target.source, selection },
         ...(snapshotDataUrl === undefined ? {} : { snapshotDataUrl }),
       });
-      setNotice("已加入对话草稿，可继续选择其他位置。");
+      setNotice("已引用，继续选择或在对话中填写修改要求");
+      setSelection(undefined);
+      frame.current?.contentDocument?.getSelection()?.removeAllRanges();
+      frame.current?.contentDocument?.getElementById("selection-box")?.remove();
+      setMode("read");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法生成区域截图，请重试。");
     } finally {
@@ -335,91 +457,163 @@ export function FilePreviewPanel({
         }}
       />
       <header>
-        <div>
-          <strong>{target.source.name}</strong>
-          <small>引用固定版本 · {target.source.versionId.slice(-8)}</small>
+        <span className="preview-file-icon">
+          <FileText size={20} aria-hidden="true" />
+        </span>
+        <div className="preview-file-title">
+          <strong title={target.source.name}>{target.source.name}</strong>
+          <small title={`引用版本 ${target.source.versionId}`}>文件预览 · 只读</small>
         </div>
-        <button type="button" onClick={onDownload}>
-          下载
+        {kind !== "table" && kind !== "image" && (
+          <button
+            type="button"
+            className="preview-icon-button"
+            aria-label="查找文字"
+            title="查找文字"
+            aria-expanded={searchOpen}
+            onClick={() => setSearchOpen(!searchOpen)}
+          >
+            <Search size={18} />
+          </button>
+        )}
+        <button
+          type="button"
+          className="preview-icon-button"
+          aria-label="下载文件"
+          title="下载文件"
+          onClick={onDownload}
+        >
+          <Download size={18} />
         </button>
-        <button type="button" aria-label="关闭文件预览" onClick={onClose}>
-          返回对话
+        <div className="preview-more">
+          <button
+            type="button"
+            className="preview-icon-button"
+            aria-label="更多预览操作"
+            title="更多"
+            aria-expanded={moreOpen}
+            onClick={() => setMoreOpen(!moreOpen)}
+          >
+            <MoreHorizontal size={19} />
+          </button>
+          {moreOpen && (
+            <div className="preview-more-menu">
+              {kind !== "table" && (
+                <button
+                  type="button"
+                  disabled={!ready}
+                  onClick={() => {
+                    setMode("region");
+                    setSelection(undefined);
+                    setMoreOpen(false);
+                  }}
+                >
+                  <Scan size={16} />
+                  框选区域
+                </button>
+              )}
+              {kind !== "table" && (
+                <button
+                  type="button"
+                  disabled={!ready}
+                  onClick={() => {
+                    setSelection({ kind: "page", page });
+                    setMoreOpen(false);
+                  }}
+                >
+                  <Quote size={16} />
+                  引用整页
+                </button>
+              )}
+              <p>
+                {kind === "docx" || kind === "pptx"
+                  ? "预览排版可能与原文件略有差异，字体可能替换；页码以预览为准。"
+                  : "引用保留当前文件版本及所选位置。"}
+              </p>
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          className="preview-icon-button"
+          aria-label="关闭文件预览"
+          title="返回对话"
+          onClick={onClose}
+        >
+          <X size={19} />
         </button>
       </header>
-      <div className="file-preview-toolbar">
-        <button type="button" aria-pressed={mode === "read"} onClick={() => setMode("read")}>
-          阅读 / 选文字
-        </button>
-        {kind !== "table" && (
-          <>
-            <button
-              type="button"
-              disabled={!ready}
-              aria-pressed={mode === "region"}
-              onClick={() => setMode("region")}
-            >
-              框选区域
-            </button>
-            <label>
-              缩放{" "}
-              <select
-                aria-label="预览缩放"
-                value={zoom}
-                onChange={(event) => setZoom(Number(event.target.value))}
-              >
-                <option value={0}>适应宽度</option>
-                {[75, 100, 125, 150, 200].map((value) => (
-                  <option key={value} value={value}>
-                    {value}%
-                  </option>
-                ))}
-              </select>
-            </label>
-          </>
-        )}
-      </div>
-      {kind !== "table" && kind !== "image" && (
-        <div className="file-preview-toolbar">
+      {searchOpen && (
+        <form
+          className="file-preview-search"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const element = renderer.current?.pageElement();
+            const index = element?.textContent?.indexOf(search) ?? -1;
+            if (!element || index < 0) {
+              setNotice("当前页没有找到该文字");
+              return;
+            }
+            const found: FileSelection = {
+              kind: "text",
+              start: index,
+              end: index + search.length,
+              quote: search,
+              ...(["docx", "pdf", "pptx"].includes(kind ?? "") ? { page } : {}),
+            };
+            setMode("read");
+            restoreTextSelection(element, found);
+            setSelection(found);
+          }}
+        >
+          <Search size={16} aria-hidden="true" />
           <input
             aria-label="查找当前页文字"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="查找当前页文字"
           />
-          <button
-            type="button"
-            disabled={!ready || !search.trim()}
-            onClick={() => {
-              const element = renderer.current?.pageElement();
-              const index = element?.textContent?.indexOf(search) ?? -1;
-              if (!element || index < 0) {
-                setNotice("当前页没有找到该文字。");
-                return;
-              }
-              const found: FileSelection = {
-                kind: "text",
-                start: index,
-                end: index + search.length,
-                quote: search,
-                ...(pages > 1 ? { page } : {}),
-              };
-              setMode("read");
-              restoreTextSelection(element, found);
-              setSelection(found);
-              setNotice("已定位文字，可引用到对话。");
-            }}
-          >
+          <button type="submit" disabled={!ready || !search.trim()}>
             查找
           </button>
+          <button
+            type="button"
+            className="preview-icon-button"
+            aria-label="关闭查找"
+            onClick={() => setSearchOpen(false)}
+          >
+            <X size={16} />
+          </button>
+        </form>
+      )}
+      {mode === "region" ? (
+        <div className="preview-selection-hint">
+          <Scan size={15} />
+          <span>拖动框选需要引用的区域，可拖动四角调整</span>
+          <button
+            type="button"
+            onClick={() => {
+              setMode("read");
+              setSelection(undefined);
+              frame.current?.contentDocument?.getElementById("selection-box")?.remove();
+            }}
+          >
+            退出框选
+          </button>
         </div>
-      )}
-      {(kind === "docx" || kind === "pptx") && (
-        <p className="preview-notice">
-          浏览器预览可能与原文件排版不同；不播放动画，缺失字体可能被替代。DOCX 页码为预览页码。
-        </p>
-      )}
-      {mode === "region" && (
-        <p className="preview-notice">拖动框选区域；可重新拖动，或用下方位置与尺寸调整。</p>
+      ) : (
+        ready &&
+        kind !== "table" && (
+          <div className="preview-selection-hint">
+            <span>{hasText ? "选中文字，即可引用到对话" : "此页无法选中文字，可框选区域引用"}</span>
+            {!hasText && (
+              <button type="button" onClick={() => setMode("region")}>
+                <Scan size={14} />
+                框选区域
+              </button>
+            )}
+          </div>
+        )
       )}
       {error && (
         <div role="alert" className="preview-error">
@@ -454,21 +648,22 @@ export function FilePreviewPanel({
         />
       )}
       {data && !ready && kind !== "table" && !error && <p role="status">正在浏览器中生成预览…</p>}
-      {pages > 1 && (
-        <div className="file-preview-toolbar">
-          <button
-            type="button"
-            disabled={busy || page <= 1}
-            onClick={() => void changePage(page - 1)}
-          >
-            上一页
-          </button>
-          <label>
-            页码{" "}
+      {kind !== "table" && (
+        <footer className="preview-navigation">
+          <div className="preview-page-controls">
+            <button
+              type="button"
+              className="preview-icon-button"
+              aria-label="上一页"
+              disabled={busy || page <= 1}
+              onClick={() => void changePage(page - 1)}
+            >
+              <ChevronLeft size={17} />
+            </button>
             <select
               aria-label="预览页码"
               value={page}
-              disabled={busy}
+              disabled={busy || pages === 1}
               onChange={(event) => void changePage(Number(event.target.value))}
             >
               {Array.from({ length: pages }, (_, i) => i + 1).map((number) => (
@@ -477,60 +672,53 @@ export function FilePreviewPanel({
                 </option>
               ))}
             </select>
-          </label>
+            <button
+              type="button"
+              className="preview-icon-button"
+              aria-label="下一页"
+              disabled={busy || page >= pages}
+              onClick={() => void changePage(page + 1)}
+            >
+              <ChevronRight size={17} />
+            </button>
+          </div>
+          <select
+            aria-label="预览缩放"
+            value={zoom}
+            onChange={(event) => setZoom(Number(event.target.value))}
+          >
+            <option value={0}>适应宽度</option>
+            {[75, 100, 125, 150, 200].map((value) => (
+              <option key={value} value={value}>
+                {value}%
+              </option>
+            ))}
+          </select>
+        </footer>
+      )}
+      {selection && anchor && (
+        <div
+          className="preview-reference-popover"
+          role="toolbar"
+          aria-label="选区操作"
+          style={{ left: anchor.left, top: anchor.top }}
+          onPointerDown={(event) => event.preventDefault()}
+        >
           <button
             type="button"
-            disabled={busy || page >= pages}
-            onClick={() => void changePage(page + 1)}
+            aria-label="引用到对话"
+            title={fileSelectionLabel(selection)}
+            disabled={disabled || busy || (kind !== "table" && !ready)}
+            onClick={() => void addReference()}
           >
-            下一页
-          </button>
-          <button type="button" onClick={() => setSelection({ kind: "page", page })}>
-            引用整页
+            <Quote size={17} fill="currentColor" />
+            {busy ? "处理中…" : "引用"}
           </button>
         </div>
       )}
-      <footer>
-        {selection && <strong>{fileSelectionLabel(selection)}</strong>}
-        {selection?.kind === "region" && (
-          <div className="region-adjustments">
-            {(["x", "y", "width", "height"] as const).map((field) => (
-              <label key={field}>
-                {{ x: "左", y: "上", width: "宽", height: "高" }[field]} %
-                <input
-                  type="number"
-                  aria-label={`选区${field}`}
-                  min={field === "width" || field === "height" ? 1 : 0}
-                  max={100}
-                  value={Math.round(selection[field] * 100)}
-                  onChange={(event) => {
-                    const value = Math.max(
-                      field === "width" || field === "height" ? 0.01 : 0,
-                      Math.min(1, Number(event.target.value) / 100),
-                    );
-                    const next = { ...selection, [field]: value };
-                    next.width = Math.min(next.width, 1 - next.x);
-                    next.height = Math.min(next.height, 1 - next.y);
-                    if (next.width <= 0 || next.height <= 0) return;
-                    setSelection(next);
-                    const element = renderer.current?.pageElement();
-                    if (element) drawRegion(element, next);
-                  }}
-                />
-              </label>
-            ))}
-          </div>
-        )}
-        <button
-          type="button"
-          className="reference-action"
-          disabled={disabled || busy || !selection || (kind !== "table" && !ready)}
-          onClick={() => void addReference()}
-        >
-          {busy ? "正在处理…" : "引用到对话"}
-        </button>
-        <span role="status">{notice}</span>
-      </footer>
+      <div className={`preview-toast${notice ? " is-visible" : ""}`} role="status">
+        {notice}
+      </div>
       {reply && <div className="file-preview-mobile-reply">{reply}</div>}
     </section>
   );
@@ -555,7 +743,7 @@ function drawRegion(element: HTMLElement, selection: Extract<FileSelection, { ki
       width: "14px",
       height: "14px",
       background: "#fff",
-      border: "2px solid #3478f6",
+      border: "2px solid var(--action-primary, #345447)",
       borderRadius: "50%",
       pointerEvents: "auto",
       touchAction: "none",

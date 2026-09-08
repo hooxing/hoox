@@ -717,7 +717,12 @@ export function assessSafePiSessionContext(
         ? []
         : [
             JSON.stringify(
-              providerVisibleThreadHistoryMessages(options.threadActiveHistory.messages),
+              providerVisibleThreadHistoryMessages(options.threadActiveHistory.messages).map(
+                (message) =>
+                  message.role === "user"
+                    ? { ...message, text: projectFileReferencePrompt(message.text) }
+                    : message,
+              ),
             ),
           ]),
       ...sessionInputs.map((input) => JSON.stringify({ role: "user", content: input })),
@@ -739,7 +744,11 @@ function toPiHistoryMessage(
   message: ThreadActiveHistoryV1["messages"][number],
 ): UserMessage | AssistantMessage | ToolResultMessage {
   if (message.role === "user") {
-    return { role: "user", content: message.text, timestamp: message.timestamp };
+    return {
+      role: "user",
+      content: projectFileReferencePrompt(message.text),
+      timestamp: message.timestamp,
+    };
   }
   if (message.role === "runtimeNotice") {
     return {

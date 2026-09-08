@@ -214,7 +214,11 @@ export function serializeRuntimeCompactionSource(source: RuntimeCompactionSource
     sourceFromSequence: source.sourceFromSequence,
     sourceThroughSequence: source.sourceThroughSequence,
     retainedUserSequences: source.retainedPrefix.map((message) => message.sequence),
-    messages: providerVisibleThreadHistoryMessages(source.prefix),
+    messages: providerVisibleThreadHistoryMessages(source.prefix).map((message) =>
+      message.role === "user"
+        ? { ...message, text: projectFileReferencePrompt(message.text) }
+        : message,
+    ),
   });
 }
 

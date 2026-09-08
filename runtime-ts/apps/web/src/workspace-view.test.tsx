@@ -1246,6 +1246,14 @@ describe("工作台展示组件", () => {
       expect(container.querySelector<HTMLImageElement>(".composer-file-preview")?.src).toBe(
         "blob:composer-preview",
       );
+      act(() =>
+        container.querySelector<HTMLButtonElement>('[aria-label="预览图片 截图.png"]')?.click(),
+      );
+      expect(container.querySelector('[role="dialog"]')?.getAttribute("aria-label")).toBe(
+        "图片预览：截图.png",
+      );
+      act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
       expect(
         container.querySelector('[data-file-kind="archive"] [data-file-icon="zip"]'),
       ).not.toBeNull();

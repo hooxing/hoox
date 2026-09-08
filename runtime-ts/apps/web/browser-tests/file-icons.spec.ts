@@ -50,4 +50,12 @@ test("消息附件紧凑展示在气泡上方，图片可点击预览", async ({
   await page.screenshot({ path: info.outputPath("message-image-preview.png") });
   await page.getByRole("button", { name: "关闭图片预览" }).click();
   await expect(page.getByRole("dialog", { name: "图片预览：示例图片.png" })).toHaveCount(0);
+
+  await page
+    .locator('input[type="file"]')
+    .first()
+    .setInputFiles("runtime-ts/apps/web/browser-tests/fixtures/sample.png");
+  await page.locator(".composer").getByRole("button", { name: "预览图片 sample.png" }).click();
+  await expect(page.getByRole("dialog", { name: "图片预览：sample.png" })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("composer-image-preview.png") });
 });

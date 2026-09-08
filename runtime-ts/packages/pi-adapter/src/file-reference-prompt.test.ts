@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { appendFileReferences, type FileReference } from "@hoox/protocol/file-references";
 import { projectFileReferencePrompt } from "./file-reference-prompt.js";
-import { providerVisibleThreadHistoryMessages } from "./thread-history.js";
+import { serializeRuntimeCompactionSource } from "./runtime-compaction.js";
 
 const reference: FileReference = {
   source: {
@@ -38,7 +38,16 @@ it("模型只收到原话、去重路径与选区；历史中的内部引用保�
   );
   expect(result.split("公告.docx")).toHaveLength(2);
   const history = [{ role: "user" as const, text: input, sequence: 1, timestamp: 0 }];
-  expect(providerVisibleThreadHistoryMessages(history)[0]).toMatchObject({ text: result });
+  const compacted = JSON.parse(
+    serializeRuntimeCompactionSource({
+      sourceFromSequence: 1,
+      sourceThroughSequence: 1,
+      retainedPrefix: history,
+      prefix: history,
+      retainedSuffix: [],
+    }),
+  );
+  expect(compacted.messages[0]).toMatchObject({ text: result });
   expect(history[0]?.text).toBe(input);
   expect(projectFileReferencePrompt(result)).toBe(result);
 });

@@ -1,3 +1,4 @@
+import { useActionDialog } from "./action-dialog.js";
 import { Building2, ChevronDown, ChevronRight, Plus, RefreshCw, Users, X } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { ApiError, type TeamMember, type TeamPersonalization, type TeamSummary } from "./api.js";
@@ -275,6 +276,7 @@ export function TeamManagementDialog({
   readonly onDissolved: () => void;
   readonly onClose: () => void;
 }) {
+  const { ask, dialog } = useActionDialog();
   const [members, setMembers] = useState<readonly TeamMember[]>([]);
   const [userId, setUserId] = useState("");
   const [role, setRole] = useState<"admin" | "member">("member");
@@ -361,6 +363,7 @@ export function TeamManagementDialog({
 
   return (
     <div className="skill-center-backdrop">
+      {dialog}
       <section className="team-management-dialog" role="dialog" aria-modal="true">
         <header>
           <div>
@@ -462,8 +465,16 @@ export function TeamManagementDialog({
                 <button
                   type="button"
                   disabled={team.role === "member"}
-                  onClick={() => {
-                    if (!window.confirm(`确认移除 ${member.userId}？`)) return;
+                  onClick={async () => {
+                    if (
+                      (await ask({
+                        title: "移除团队成员",
+                        description: `确认移除 ${member.userId}？`,
+                        confirmLabel: "移除",
+                        danger: true,
+                      })) === null
+                    )
+                      return;
                     void api
                       .removeTeamMember(team.id, member.userId)
                       .then(() =>
@@ -491,8 +502,16 @@ export function TeamManagementDialog({
             <button
               type="button"
               className="danger-button"
-              onClick={() => {
-                if (!window.confirm(`解散“${team.displayName}”？团队云盘将不再可访问。`)) return;
+              onClick={async () => {
+                if (
+                  (await ask({
+                    title: "解散团队",
+                    description: `解散“${team.displayName}”？团队云盘将不再可访问。`,
+                    confirmLabel: "解散团队",
+                    danger: true,
+                  })) === null
+                )
+                  return;
                 void api
                   .dissolveTeam(team.id)
                   .then(onDissolved)

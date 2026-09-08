@@ -375,6 +375,54 @@ describe("Agent 工作台恢复接入", () => {
     expect(cloudDriveEntry?.nextElementSibling).toBe(taskHeading);
   });
 
+  it("发布到团队通过下拉选择目标，取消不创建分支", async () => {
+    const personalThread = thread("personal_task");
+    const forkThread = vi.fn(async () => thread("published_task"));
+    const { container } = mount(
+      apiFixture({
+        listThreads: async () => [personalThread],
+        forkThread,
+        listTeams: async () =>
+          ["one", "two"].map((id) => ({
+            id,
+            displayName: "同名团队",
+            role: "owner" as const,
+            joinedAt: "2026-08-09T08:00:00.000Z",
+          })),
+        createTeam: vi.fn(),
+        listTeamMembers: async () => [],
+        addTeamMember: vi.fn(),
+        changeTeamMemberRole: vi.fn(),
+        removeTeamMember: vi.fn(),
+        dissolveTeam: vi.fn(),
+      }),
+    );
+    await settleEffects();
+    const publish = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === "发布到团队",
+    );
+    expect(publish).toBeDefined();
+    await act(async () => publish?.click());
+    expect(forkThread).not.toHaveBeenCalled();
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>(".action-dialog [data-cancel]")?.click(),
+    );
+    expect(forkThread).not.toHaveBeenCalled();
+    await act(async () => publish?.click());
+    const select = document.querySelector<HTMLSelectElement>(".action-dialog select");
+    expect(select?.options).toHaveLength(2);
+    await act(async () => {
+      if (select) {
+        select.value = "two";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('.action-dialog button[type="submit"]')?.click(),
+    );
+    expect(forkThread).toHaveBeenCalledExactlyOnceWith("personal_task", "two");
+  });
+
   it("没有已加入团队时不显示发布到团队入口", async () => {
     const personalThread = thread("personal_task");
     const apiClient = apiFixture({
@@ -469,8 +517,6 @@ describe("Agent 工作台恢复接入", () => {
       ...personalThread,
       status: "archived" as const,
     }));
-    const prompt = vi.spyOn(window, "prompt").mockReturnValue("新的个人任务名称");
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const { container } = mount(
       apiFixture({
         listThreadsForTenant: vi.fn(async () => [personalThread, archivedThread]),
@@ -488,6 +534,19 @@ describe("Agent 工作台恢复接入", () => {
       'button[aria-label^="重命名个人任务"]',
     );
     await act(async () => renameButton?.click());
+    expect(renamePersonalThreadForTenant).not.toHaveBeenCalled();
+    const input = document.querySelector<HTMLInputElement>(".action-dialog input");
+    expect(input?.value).toBe(personalThread.title);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        input,
+        "新的个人任务名称",
+      );
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('.action-dialog button[type="submit"]')?.click(),
+    );
     await settleEffects();
     expect(renamePersonalThreadForTenant).toHaveBeenCalledWith(
       personalThread.id,
@@ -501,12 +560,21 @@ describe("Agent 工作台恢复接入", () => {
     );
     await act(async () => deleteButton?.click());
     await settleEffects();
-    expect(confirm).toHaveBeenCalledWith("删除“新的个人任务名称”？任务将从个人任务列表移除。");
+    expect(archiveThreadForTenant).not.toHaveBeenCalled();
+    expect(document.querySelector(".action-dialog")?.textContent).toContain(
+      "删除“新的个人任务名称”？任务将从个人任务列表移除。",
+    );
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>(".action-dialog [data-cancel]")?.click(),
+    );
+    expect(archiveThreadForTenant).not.toHaveBeenCalled();
+    await act(async () => deleteButton?.click());
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('.action-dialog button[type="submit"]')?.click(),
+    );
+    await settleEffects();
     expect(archiveThreadForTenant).toHaveBeenCalledWith(personalThread.id, undefined);
     expect(navigation?.querySelector('button[aria-label="新的个人任务名称"]')).toBeNull();
-
-    prompt.mockRestore();
-    confirm.mockRestore();
   });
 
   it("移动会话导航展开时隐藏打开按钮并保留关闭入口", async () => {

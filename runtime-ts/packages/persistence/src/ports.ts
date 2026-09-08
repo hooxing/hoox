@@ -474,6 +474,7 @@ export interface RunExperienceArtifact {
   readonly runId: Run["id"];
   readonly threadId: ThreadId;
   readonly resourceVersionId: string;
+  readonly resourceId?: string;
   readonly name: string;
   readonly mediaType: string;
   readonly sizeBytes: number;

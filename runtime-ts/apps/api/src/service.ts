@@ -25,6 +25,12 @@ import type {
   ThreadPageDto,
 } from "@hoox/protocol";
 import { MAX_RUN_INPUT_UTF8_BYTES } from "@hoox/protocol";
+import {
+  appendFileReferences,
+  validFileSelection,
+  type FileReference,
+} from "@hoox/protocol/file-references";
+import type { RunExperienceReadPort } from "@hoox/persistence";
 import { toRunDto, toThreadDto } from "@hoox/protocol-mapper";
 import {
   appendAttachmentsToLatestUserPrompt,
@@ -72,6 +78,7 @@ interface AuthContext {
 }
 
 interface ServiceDependencies {
+  readonly experience?: RunExperienceReadPort;
   readonly auth: AuthContextResolver;
   readonly repositories: CoreRepositories;
   readonly createCapability?: ApiCreateCapability;
@@ -326,7 +333,56 @@ export class ApiService {
     try {
       const routing = this.dependencies.createCapability?.threadInputs;
       if (routing === undefined) throw new ApiFailure("not_found");
-      const attachmentReferences = input.attachments ?? [];
+      const attachmentReferences = [...(input.attachments ?? [])];
+      const fileReferences: FileReference[] = [];
+      for (const reference of input.fileReferences ?? []) {
+        if (!validFileSelection(reference.selection) || reference.source.threadId !== rawThreadId)
+          throw new ApiFailure("bad_request");
+        await this.getRun(auth, rawThreadId, reference.source.runId);
+        const found = await this.dependencies.experience?.getArtifact({
+          scope: auth.scope,
+          runId: runId(reference.source.runId),
+          artifactId: reference.source.artifactId,
+        });
+        if (
+          found?.outcome !== "found" ||
+          found.artifact.resourceVersionId !== reference.source.versionId ||
+          found.artifact.resourceId === undefined
+        )
+          throw new ApiFailure("not_found");
+        if (
+          reference.snapshot !== undefined &&
+          !attachmentReferences.some(
+            (item) =>
+              item.resourceId === reference.snapshot?.resourceId &&
+              item.versionId === reference.snapshot.versionId,
+          )
+        )
+          throw new ApiFailure("bad_request");
+        if (reference.selection.kind === "region" && reference.snapshot === undefined)
+          throw new ApiFailure("bad_request");
+        if (
+          !attachmentReferences.some(
+            (item) =>
+              item.resourceId === found.artifact.resourceId &&
+              item.versionId === found.artifact.resourceVersionId,
+          )
+        )
+          attachmentReferences.push({
+            resourceId: found.artifact.resourceId,
+            versionId: found.artifact.resourceVersionId,
+          });
+        fileReferences.push({
+          ...reference,
+          source: {
+            ...reference.source,
+            name: found.artifact.name,
+            ...(reference.source.mediaType === undefined
+              ? {}
+              : { mediaType: found.artifact.mediaType }),
+          },
+        });
+      }
       if (input.input.trim().length === 0 && attachmentReferences.length === 0) {
         throw new ApiFailure("bad_request");
       }
@@ -343,7 +399,21 @@ export class ApiService {
                 versionId: resourceVersionId(attachment.versionId),
               })),
             });
-      const inputText = appendAttachmentsToLatestUserPrompt(input.input, attachments ?? []);
+      for (const reference of fileReferences) {
+        if (reference.snapshot !== undefined) {
+          const image = attachments?.find(
+            (item) =>
+              item.resourceId === reference.snapshot?.resourceId &&
+              item.versionId === reference.snapshot.versionId,
+          );
+          if (image?.mediaType !== "image/png" || image.sizeBytes > 2 * 1024 * 1024)
+            throw new ApiFailure("bad_request");
+        }
+      }
+      const inputText = appendAttachmentsToLatestUserPrompt(
+        appendFileReferences(input.input, fileReferences),
+        attachments ?? [],
+      );
       if (Buffer.byteLength(inputText, "utf8") > MAX_RUN_INPUT_UTF8_BYTES) {
         throw new ApiFailure("bad_request");
       }
@@ -381,6 +451,7 @@ export class ApiService {
             threadId: thread.entity.id,
             input: input.input,
             attachments: attachmentReferences,
+            ...(fileReferences.length === 0 ? {} : { fileReferences }),
             mode: input.mode,
             expectedRunId: input.expectedRunId ?? null,
             expectedTurnId: input.expectedTurnId ?? null,

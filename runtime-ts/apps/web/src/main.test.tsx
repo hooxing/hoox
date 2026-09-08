@@ -3,6 +3,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { appendFileReferences, type FileReference } from "@hoox/protocol/file-references";
 import { developmentSession, persistAccountSession } from "./account-access.js";
 import {
   ApiError,
@@ -140,6 +141,94 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("恢复选区草稿，空文字也可发送；引用保持旧版本并在成功后清除", async () => {
+    const active = thread("reference_thread");
+    const reference: FileReference = {
+      source: {
+        threadId: active.id,
+        runId: "old_run",
+        artifactId: "old_artifact",
+        versionId: "old_version",
+        name: "报告.docx",
+      },
+      selection: { kind: "text", quote: "待修改内容", start: 0, end: 5 },
+    };
+    const storageKey = `hoox.conversation-draft.v1:${encodeURIComponent(developmentSession.profile.id)}:references:${JSON.stringify([null, active.id])}`;
+    sessionStorage.setItem(storageKey, JSON.stringify([{ id: "draft_reference", reference }]));
+    const queuedRun = run("new_run", active.id);
+    const submitThreadInput = vi.fn(async () => ({
+      receiptId: "reference_receipt",
+      inputSequence: 1,
+      requestedMode: "auto" as const,
+      disposition: "queued" as const,
+      queuedRun,
+      createdAt: queuedRun.createdAt,
+      updatedAt: queuedRun.updatedAt,
+    }));
+    const { container } = mount(
+      apiFixture({ listThreads: async () => [active], submitThreadInput }),
+    );
+    await settleEffects();
+    expect(container.querySelector('[aria-label="待发送引用"]')?.textContent).toContain(
+      "报告.docx",
+    );
+    const sendButton = container.querySelector<HTMLButtonElement>('[aria-label="发送任务"]');
+    expect(sendButton?.disabled).toBe(false);
+    await act(async () => sendButton?.click());
+    await settleEffects();
+    expect(submitThreadInput).toHaveBeenCalledWith(
+      active.id,
+      "请处理本轮提供的文件。",
+      "auto",
+      undefined,
+      [],
+      [reference],
+    );
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(container.querySelector('[aria-label="引用的文件区域"]')?.textContent).toContain(
+      "报告.docx",
+    );
+  });
+
+  it("历史引用从原 Run 和不可变版本重新读取，切换会话立即关闭预览", async () => {
+    const active = thread("reference_history");
+    const reference: FileReference = {
+      source: {
+        threadId: active.id,
+        runId: "old_run",
+        artifactId: "old_artifact",
+        versionId: "old_version",
+        name: "报告.docx",
+      },
+      selection: { kind: "page", page: 2 },
+    };
+    const readArtifactContent = vi.fn(async () => new Promise<ArrayBuffer>(() => {}));
+    const { container } = mount(
+      apiFixture({
+        listThreads: async () => [active],
+        listThreadContext: async () => [
+          {
+            role: "user",
+            sequence: 1,
+            text: appendFileReferences("修改这页", [reference]),
+            createdAt: active.createdAt,
+          },
+        ],
+        readArtifactContent,
+      }),
+    );
+    await settleEffects();
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="引用的文件区域"] button')?.click(),
+    );
+    expect(readArtifactContent).toHaveBeenCalledWith(reference.source, expect.any(AbortSignal));
+    expect(container.querySelector("iframe")?.getAttribute("sandbox")).toBe("allow-same-origin");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="关闭文件预览"]')?.click(),
+    );
+    expect(container.querySelector(".file-preview-panel")).toBeNull();
+  });
+
   it("重新挂载工作台恢复当前会话文字草稿，成功发送后不再恢复", async () => {
     const selected = thread("draft_restore");
     const apiClient = apiFixture({ listThreads: async () => [selected] });

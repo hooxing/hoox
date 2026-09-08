@@ -13,15 +13,22 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@aiden0z/pptx-renderer": "1.2.4",
+    "@hoox/protocol": "workspace:*",
     "@hoox/ui-theme": "workspace:*",
     "@hoox/vendor-deepseek-markdown": "workspace:*",
-    "remark-parse": "11.0.0",
-    "unified": "11.0.5",
+    "docx-preview": "0.4.0",
+    "exceljs": "4.4.0",
+    "html-to-image": "1.11.13",
+    "jszip": "3.10.1",
     "lucide-react": "0.544.0",
+    "pdfjs-dist": "6.3.289",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "react-markdown": "10.1.0",
-    "remark-gfm": "4.0.1"
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5"
   },
   "devDependencies": {
     "@types/mdast": "4.0.4",

@@ -253,6 +253,7 @@ export const EVENT_PAGE_LIMIT = 100;
 const defaultFetcher: typeof fetch = (input, init) => globalThis.fetch(input, init);
 
 export type Artifact = {
+  readonly resourceVersionId?: string;
   readonly id: string;
   readonly name: string;
   readonly status: "publishing" | "published" | "failed";
@@ -867,6 +868,7 @@ export class RuntimeApi {
     mode: "auto" | "follow_up" = "auto",
     expectedRunId?: string,
     attachments: readonly Pick<UploadedResource, "resourceId" | "versionId">[] = [],
+    fileReferences: readonly import("@hoox/protocol/file-references").FileReference[] = [],
   ): Promise<ThreadInputReceipt> {
     try {
       return await this.request(`/v1/threads/${encodeURIComponent(threadId)}/inputs`, {
@@ -874,6 +876,7 @@ export class RuntimeApi {
         body: JSON.stringify({
           input,
           mode,
+          ...(fileReferences.length === 0 ? {} : { fileReferences }),
           ...(expectedRunId === undefined ? {} : { expectedRunId }),
           ...(attachments.length === 0
             ? {}
@@ -887,7 +890,12 @@ export class RuntimeApi {
       });
     } catch (error) {
       // Feature Flag 关闭或旧 API：统一入口不存在时保持 /runs=follow_up 的兼容语义。
-      if (!(error instanceof ApiError) || error.status !== 404 || attachments.length > 0)
+      if (
+        !(error instanceof ApiError) ||
+        error.status !== 404 ||
+        attachments.length > 0 ||
+        fileReferences.length > 0
+      )
         throw error;
       const run = await this.createRun(threadId, input);
       return {
@@ -932,6 +940,30 @@ export class RuntimeApi {
       );
     }
     return envelope<UploadedResource>(body);
+  }
+  async readArtifactContent(
+    source: import("@hoox/protocol/file-references").FileSource,
+    signal?: AbortSignal,
+  ): Promise<ArrayBuffer> {
+    const headers = new Headers();
+    if (this.accessToken !== undefined) headers.set("Authorization", `Bearer ${this.accessToken}`);
+    if (this.activeTenantId !== undefined) headers.set("X-Tenant-ID", this.activeTenantId);
+    const path = `/v1/threads/${encodeURIComponent(source.threadId)}/runs/${encodeURIComponent(source.runId)}/artifacts/${encodeURIComponent(source.artifactId)}/content`;
+    const response = await this.fetcher(`${this.baseUrl}${path}`, {
+      headers,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (!response.ok)
+      throw new ApiError(
+        response.status === 422
+          ? "该文件暂时无法预览，文件需小于 24 MB 且属于支持的格式。"
+          : "读取文件失败，请重试。",
+        response.status,
+        response.status >= 500,
+      );
+    if (response.headers.get("x-resource-version-id") !== source.versionId)
+      throw new ApiError("文件版本与引用不一致，请重新打开文件。", 409, false);
+    return response.arrayBuffer();
   }
   getThreadInputReceipt(threadId: string, receiptId: string): Promise<ThreadInputReceipt> {
     return this.request(

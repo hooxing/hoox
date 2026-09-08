@@ -1,6 +1,7 @@
 # ADR-0053：Workspace Artifact 的受限预览媒体类型
 
-- 状态：已接受
+- 状态：部分已替代
+- 替代范围：Web 查看器范围由 [ADR-20260908104231](20260908104231-browser-file-preview-and-versioned-references.md) 扩展；本文原 preview/download 安全规则仍有效。
 - 日期：2026-07-30
 
 ## 决策

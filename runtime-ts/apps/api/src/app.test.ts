@@ -99,6 +99,7 @@ const experienceArtifact = {
   runId: runId("run_1"),
   threadId: threadId("thread_1"),
   resourceVersionId: "resource_version_1",
+  resourceId: "resource_original",
   name: "交付说明.txt",
   mediaType: "text/plain",
   sizeBytes: 42,
@@ -2417,6 +2418,151 @@ describe("Fastify API 契约", () => {
         },
       ],
     });
+  });
+
+  it.each([undefined, "authorizationRevision", "resourceVersionId"] as const)(
+    "原文件读取入口返回惰性二进制并在权限或版本漂移时拒绝：%s",
+    async (drift) => {
+      const bytes = new TextEncoder().encode("<script>parent.pwned=true</script>");
+      const { app, presignInputs } = fixture({
+        enableExperience: true,
+        includeArtifact: true,
+        artifactSizeBytes: bytes.length,
+        blobBytes: bytes,
+        ...(drift ? { confirmationDrift: drift } : {}),
+      });
+      openApps.push(app);
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: { authorization: "Bearer token-a", "idempotency-key": "content-thread" },
+        payload: { title: "预览" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads/thread_1/runs",
+        headers: { authorization: "Bearer token-a", "idempotency-key": "content-run" },
+        payload: { input: "生成文件" },
+      });
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/content",
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(response.statusCode).toBe(drift ? 404 : 200);
+      if (!drift) {
+        expect(response.headers["content-type"]).toBe("application/octet-stream");
+        expect(response.headers["x-resource-version-id"]).toBe("resource_version_1");
+        expect(response.headers["content-disposition"]).toBe("attachment");
+        expect(response.headers["cache-control"]).toBe("no-store");
+        expect(response.rawPayload).toEqual(Buffer.from(bytes));
+      }
+      expect(presignInputs).toHaveLength(0);
+      const denied = await app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/content",
+        headers: { authorization: "Bearer token-b" },
+      });
+      expect(denied.statusCode).toBe(404);
+    },
+  );
+
+  it("选区引用校验原文件版本并将原文件加入模型附件，客户端文件名不能覆盖权威名称", async () => {
+    const resolve = vi.fn(
+      async (
+        input: Parameters<NonNullable<ApiDependencies["resourceAttachments"]>["resolve"]>[0],
+      ) =>
+        input.attachments.map((item) => ({
+          ...item,
+          name: "交付说明.txt",
+          path: `/resources/${item.resourceId}/${item.versionId}/original.txt`,
+          mediaType: "text/plain",
+          sizeBytes: 42,
+        })),
+    );
+    const { app, state } = fixture({
+      enableExperience: true,
+      includeArtifact: true,
+      enableThreadInputs: true,
+      resourceAttachments: { resolve },
+    });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "reference-thread" },
+      payload: { title: "引用" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "reference-run" },
+      payload: { input: "生成文件" },
+    });
+    const reference = {
+      source: {
+        threadId: "thread_1",
+        runId: "run_1",
+        artifactId: "artifact_1",
+        versionId: "resource_version_1",
+        name: "伪造名称",
+      },
+      selection: { kind: "text", quote: "说明", start: 0, end: 2 },
+    };
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/inputs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "reference-input" },
+      payload: { input: "精简这段", mode: "follow_up", fileReferences: [reference] },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(resolve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [{ resourceId: "resource_original", versionId: "resource_version_1" }],
+      }),
+    );
+    expect(state.submittedInputTexts.at(-1)).toContain('"name":"交付说明.txt"');
+    expect(state.submittedInputTexts.at(-1)).toContain(
+      "/resources/resource_original/resource_version_1/original.txt",
+    );
+    const wrongVersion = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/inputs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "reference-wrong-version" },
+      payload: {
+        input: "修改",
+        mode: "follow_up",
+        fileReferences: [
+          { ...reference, source: { ...reference.source, versionId: "other_version" } },
+        ],
+      },
+    });
+    expect(wrongVersion.statusCode).toBe(404);
+    const badRegion = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/inputs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "reference-bad-region" },
+      payload: {
+        input: "修改",
+        mode: "follow_up",
+        fileReferences: [
+          {
+            ...reference,
+            selection: {
+              kind: "region",
+              page: 1,
+              x: 0.9,
+              y: 0,
+              width: 0.3,
+              height: 1,
+              viewportWidth: 100,
+              viewportHeight: 100,
+            },
+          },
+        ],
+      },
+    });
+    expect(badRegion.statusCode).toBe(400);
   });
 
   it("UTF-8 纯文本预览经 API 返回安全文本而不暴露 S3 URL", async () => {

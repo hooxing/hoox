@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./file-references": {
+      "types": "./src/file-references.ts",
+      "default": "./dist/file-references.js"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./dist/index.js"

@@ -1,3 +1,4 @@
+import { FileTypeIcon } from "./file-type-icon.js";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   filePreviewKind,
@@ -13,7 +14,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
-  FileText,
   MoreHorizontal,
   Quote,
   Scan,
@@ -458,7 +458,7 @@ export function FilePreviewPanel({
       />
       <header>
         <span className="preview-file-icon">
-          <FileText size={20} aria-hidden="true" />
+          <FileTypeIcon name={target.source.name} mediaType={target.source.mediaType} size={24} />
         </span>
         <div className="preview-file-title">
           <strong title={target.source.name}>{target.source.name}</strong>

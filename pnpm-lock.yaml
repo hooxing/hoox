@@ -305,6 +305,9 @@ importers:
       '@hoox/vendor-deepseek-markdown':
         specifier: workspace:*
         version: link:../../vendor/deepseek-markdown
+      '@hoox/vendor-file-type-icons':
+        specifier: workspace:*
+        version: link:../../vendor/iconfont-file-types-33437
       docx-preview:
         specifier: 0.4.0
         version: 0.4.0
@@ -626,6 +629,8 @@ importers:
   runtime-ts/vendor/deepseek-trajectory: {}
 
   runtime-ts/vendor/deepseek-v4-tokenizer: {}
+
+  runtime-ts/vendor/iconfont-file-types-33437: {}
 
 packages:
 

@@ -16,6 +16,7 @@
 
 ## 工程质量
 
+- 默认以“改动已合并到 `main`，且 Demo 部署成功”为开发任务交付终点。
 - 依赖必须使用精确版本并提交 `pnpm-lock.yaml`。
 - 本地提交前执行与改动范围相符的快速验证：`pnpm format:check`、`pnpm lint`、受影响包的 `typecheck`，以及直接覆盖改动的测试；行为改动必须包含相应层级的测试。
 - 全量 `pnpm check:clean-workspace` 及 Linux 容器、生产门禁由 Pull Request CI 执行并作为合并门槛。本地无需为常规小改动重复执行全量 `pnpm check`；跨工作区依赖、构建配置、发布配置或无法确定影响范围的改动，仍建议在本地执行一次全量检查。

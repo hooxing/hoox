@@ -1236,7 +1236,7 @@ describe("工作台展示组件", () => {
         "blob:composer-preview",
       );
       expect(
-        container.querySelector('[data-file-kind="archive"] .lucide-file-archive'),
+        container.querySelector('[data-file-kind="archive"] [data-file-icon="zip"]'),
       ).not.toBeNull();
       expect(container.querySelector<HTMLButtonElement>(".send-button")?.disabled).toBe(false);
     } finally {

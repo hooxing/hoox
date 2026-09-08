@@ -98,6 +98,18 @@ describe("工作台滚动区域样式", () => {
     );
   });
 
+  it("用户附件位于消息气泡上方并限制为紧凑宽度", () => {
+    expect(styles).toMatch(
+      /\.user-request-attachments\s*\{[^}]*width:\s*min\(78%, 700px\);[^}]*justify-content:\s*flex-end;/su,
+    );
+    expect(styles).toMatch(
+      /\.user-request-attachment\s*\{[^}]*width:\s*min\(280px, 100%\);[^}]*min-height:\s*44px;/su,
+    );
+    expect(styles).toMatch(
+      /\.user-request-attachment-preview\s*\{[^}]*width:\s*46px;[^}]*height:\s*46px;/su,
+    );
+  });
+
   it("超长用户请求采用接近 ChatGPT 的默认折叠高度和渐隐范围", () => {
     expect(styles).toMatch(
       /\.user-request-content\.is-collapsed\s*\{[^}]*max-height:\s*264px;[^}]*overflow:\s*clip;[^}]*mask-image:\s*linear-gradient\(#000 calc\(100% - 48px\), transparent\);/su,

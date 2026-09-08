@@ -35,3 +35,19 @@ test("交付文件在大小屏显示可加载的彩色图标，上传文件复�
   await expect(page.getByRole("button", { name: "下载 sample.docx", exact: true })).toBeVisible();
   await page.screenshot({ path: info.outputPath("file-icons-mobile.png"), fullPage: true });
 });
+
+test("消息附件紧凑展示在气泡上方，图片可点击预览", async ({ page }, info) => {
+  await page.goto("/browser-tests/file-preview.html");
+  const request = page.locator(".user-request");
+  const attachments = request.locator(":scope > .user-request-attachments");
+  await expect(attachments).toBeVisible();
+  await expect(request.locator(".message-card .user-request-attachments")).toHaveCount(0);
+  await expect(attachments.locator(".user-request-attachment")).toHaveCount(2);
+  await expect(attachments.locator(".user-request-attachment").first()).toHaveCSS("width", "280px");
+
+  await attachments.getByRole("button", { name: "预览图片 示例图片.png" }).click();
+  await expect(page.getByRole("dialog", { name: "图片预览：示例图片.png" })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("message-image-preview.png") });
+  await page.getByRole("button", { name: "关闭图片预览" }).click();
+  await expect(page.getByRole("dialog", { name: "图片预览：示例图片.png" })).toHaveCount(0);
+});

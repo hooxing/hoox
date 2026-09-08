@@ -15,6 +15,7 @@ const mimeTypes = new Map([
   [".jpeg", "image/jpeg"],
   [".jpg", "image/jpeg"],
   [".js", "text/javascript; charset=utf-8"],
+  [".mjs", "text/javascript; charset=utf-8"],
   [".json", "application/json; charset=utf-8"],
   [".png", "image/png"],
   [".svg", "image/svg+xml"],
@@ -67,5 +68,5 @@ const server = createServer((request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.info(`Hoox Demo Web 已监听 ${host}:${port}`);
+  console.info(`Hoox Demo Web 已监听 ${host}:${server.address().port}`);
 });

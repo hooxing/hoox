@@ -369,6 +369,17 @@ describe("工作台展示组件", () => {
     expect(container.querySelector(".user-request-attachment-meta")?.textContent).toContain(
       "向日葵.png",
     );
+    expect(container.querySelector(".message-card .user-request-attachments")).toBeNull();
+    expect(container.querySelector(".user-request > .user-request-attachments")).not.toBeNull();
+
+    act(() =>
+      container.querySelector<HTMLButtonElement>('[aria-label="预览图片 向日葵.png"]')?.click(),
+    );
+    expect(container.querySelector('[role="dialog"]')?.getAttribute("aria-label")).toBe(
+      "图片预览：向日葵.png",
+    );
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="关闭图片预览"]')?.click());
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
 
     await act(async () => {
       root.render(renderTranscript());

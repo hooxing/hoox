@@ -1,8 +1,8 @@
 import type { ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "../src/main.js";
-import { persistAccountSession, developmentSession } from "../src/account-access.js";
+import { developmentSession, persistAccountSession } from "../src/account-access.js";
 import type { Artifact, Run, Thread } from "../src/api.js";
+import { App } from "../src/main.js";
 
 persistAccountSession(localStorage, developmentSession);
 const date = "2026-09-08T00:00:00.000Z";
@@ -36,13 +36,37 @@ const api: NonNullable<ComponentProps<typeof App>["apiClient"]> = {
   getRun: async () => run,
   listArtifacts: async () => artifacts,
   listEvents: async () => ({ attemptId: undefined, items: [] }),
-  listThreadContext: async () => [],
+  listThreadContext: async () => [
+    {
+      role: "user",
+      sequence: 1,
+      text: "请检查这些附件",
+      attachments: [
+        {
+          resourceId: "resource_docx",
+          versionId: "version_docx",
+          name: "这是一个用于验证超长文件名不会撑开消息区域的公告模板.docx",
+          mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          sizeBytes: 37_020,
+        },
+        {
+          resourceId: "resource_image",
+          versionId: "version_image",
+          name: "示例图片.png",
+          mediaType: "image/png",
+          sizeBytes: 5_991,
+        },
+      ],
+      createdAt: date,
+    },
+  ],
   createThread: async () => thread,
   createRun: async () => run,
   cancelRun: async () => run,
   archiveThread: async () => thread,
   downloadArtifact: async () => "/unused",
   previewArtifact: async () => ({ kind: "text", text: "兼容预览" }),
+  previewHistoryFile: async () => "/browser-tests/fixtures/sample.png",
   readArtifactContent: async (source, signal) => {
     const response = await fetch(`/browser-tests/fixtures/${source.name}`, { signal });
     return response.arrayBuffer();

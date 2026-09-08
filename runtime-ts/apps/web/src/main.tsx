@@ -75,6 +75,8 @@ import {
   ThreadTranscript,
 } from "./workspace-view.js";
 
+import { useActionDialog } from "./action-dialog.js";
+
 const api = new RuntimeApi();
 
 type PendingConversationInput = PendingThreadInputView & {
@@ -358,6 +360,7 @@ function AuthenticatedWorkspace({
   const [activeTeamId, setActiveTeamId] = useState<string>();
   const { input, setInput, moveInputTo, clearSentInput, draftPersistenceFailed } =
     useConversationDraft(accountProfile.id, activeTeamId, state.selectedThreadId);
+  const { ask, dialog } = useActionDialog();
   const [selectedTeamId, setSelectedTeamId] = useState<string>();
   const [personalThreads, setPersonalThreads] = useState<readonly Thread[]>([]);
   const [teamThreads, setTeamThreads] = useState<readonly Thread[]>([]);
@@ -1046,7 +1049,11 @@ function AuthenticatedWorkspace({
     }
   };
   const renamePersonalTask = async (thread: Thread) => {
-    const requestedTitle = window.prompt("重命名个人任务", thread.title);
+    const requestedTitle = await ask({
+      title: "重命名个人任务",
+      confirmLabel: "保存",
+      field: { label: "任务名称", initialValue: thread.title },
+    });
     if (requestedTitle === null) return;
     const title = requestedTitle.trim();
     if (title.length === 0) {
@@ -1071,7 +1078,15 @@ function AuthenticatedWorkspace({
   };
 
   const deletePersonalTask = async (thread: Thread) => {
-    if (!window.confirm(`删除“${thread.title}”？任务将从个人任务列表移除。`)) return;
+    if (
+      (await ask({
+        title: "删除个人任务",
+        description: `删除“${thread.title}”？任务将从个人任务列表移除。`,
+        confirmLabel: "删除",
+        danger: true,
+      })) === null
+    )
+      return;
     const archiveForTenant = apiClient.archiveThreadForTenant;
     if (archiveForTenant === undefined) return;
     setActionLoading(true);
@@ -1127,16 +1142,24 @@ function AuthenticatedWorkspace({
       setActionLoading(false);
     }
   };
-  const publishToTeam = () => {
+  const publishToTeam = async () => {
     if (teams.length === 0) {
       setError(new ApiError("请先创建或加入一个团队", 422, false));
       return;
     }
-    const selectedName =
+    const selectedId =
       teams.length === 1
-        ? teams[0]?.displayName
-        : window.prompt("发布到哪个团队？请输入团队名称", teams[0]?.displayName);
-    const target = teams.find((team) => team.displayName === selectedName);
+        ? teams[0]?.id
+        : await ask({
+            title: "发布到团队",
+            confirmLabel: "发布",
+            field: {
+              label: "目标团队",
+              initialValue: teams[0]?.id ?? "",
+              choices: teams.map((team) => ({ value: team.id, label: team.displayName })),
+            },
+          });
+    const target = teams.find((team) => team.id === selectedId);
     if (target === undefined) return;
     void fork(target.id);
   };
@@ -1290,6 +1313,7 @@ function AuthenticatedWorkspace({
   }, [state.selectedThreadId]);
   return (
     <main className={`workspace ${navigationOpen ? "navigation-open" : ""}`}>
+      {dialog}
       <NavigationSidebar
         isCompact={isCompact}
         isOpen={navigationOpen}

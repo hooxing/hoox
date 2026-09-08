@@ -272,4 +272,62 @@ describe("团队空间切换器", () => {
       expectedVersion: 3,
     });
   });
+  it("移除成员和解散团队仅在应用内确认后执行，失败仍展示错误", async () => {
+    const removeTeamMember = vi.fn(async () => undefined);
+    const dissolveTeam = vi.fn(async () => {
+      throw new Error("失败");
+    });
+    const api: TeamWorkspaceApi = {
+      listTeams: async () => teams,
+      createTeam: async () => teams[0] as TeamSummary,
+      listTeamMembers: async () => [
+        {
+          membershipId: "membership_one",
+          userId: "member_one",
+          role: "member",
+          joinedAt: "2026-08-09T08:00:00.000Z",
+        },
+      ],
+      addTeamMember: vi.fn(),
+      changeTeamMemberRole: vi.fn(),
+      removeTeamMember,
+      dissolveTeam,
+    };
+    await act(async () =>
+      root.render(
+        <TeamManagementDialog
+          api={api}
+          team={teams[0] as TeamSummary}
+          onDissolved={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      ),
+    );
+    const remove = container.querySelector<HTMLButtonElement>(".team-member-list button");
+    await act(async () => remove?.click());
+    expect(removeTeamMember).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(document.querySelector(".action-dialog [data-cancel]"));
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>(".action-dialog [data-cancel]")?.click(),
+    );
+    expect(removeTeamMember).not.toHaveBeenCalled();
+    await act(async () => remove?.click());
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('.action-dialog button[type="submit"]')?.click(),
+    );
+    expect(removeTeamMember).toHaveBeenCalledExactlyOnceWith("tenant_product", "member_one");
+    expect(container.querySelector(".team-member-list")?.textContent).not.toContain("member_one");
+    const dissolve = container.querySelector<HTMLButtonElement>(".danger-button");
+    await act(async () => dissolve?.click());
+    expect(dissolveTeam).not.toHaveBeenCalled();
+    await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+    expect(dissolveTeam).not.toHaveBeenCalled();
+    await act(async () => dissolve?.click());
+    expect(document.querySelector(".action-dialog")?.textContent).toContain("团队云盘将不再可访问");
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('.action-dialog button[type="submit"]')?.click(),
+    );
+    expect(dissolveTeam).toHaveBeenCalledExactlyOnceWith("tenant_product");
+    expect(container.textContent).toContain("解散团队失败");
+  });
 });

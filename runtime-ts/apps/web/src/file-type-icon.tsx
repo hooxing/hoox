@@ -1,41 +1,38 @@
-import blankIcon from "file-icon-vectors/dist/icons/vivid/blank.svg";
-import docxIcon from "file-icon-vectors/dist/icons/vivid/docx.svg";
-import xlsxIcon from "file-icon-vectors/dist/icons/vivid/xlsx.svg";
-import pptxIcon from "file-icon-vectors/dist/icons/vivid/pptx.svg";
-import pdfIcon from "file-icon-vectors/dist/icons/vivid/pdf.svg";
-import csvIcon from "file-icon-vectors/dist/icons/vivid/csv.svg";
-import txtIcon from "file-icon-vectors/dist/icons/vivid/txt.svg";
-import mdIcon from "file-icon-vectors/dist/icons/vivid/md.svg";
-import jsonIcon from "file-icon-vectors/dist/icons/vivid/json.svg";
-import htmlIcon from "file-icon-vectors/dist/icons/vivid/html.svg";
-import xmlIcon from "file-icon-vectors/dist/icons/vivid/xml.svg";
-import jsIcon from "file-icon-vectors/dist/icons/vivid/js.svg";
-import pyIcon from "file-icon-vectors/dist/icons/vivid/py.svg";
-import zipIcon from "file-icon-vectors/dist/icons/vivid/zip.svg";
-import imageIcon from "file-icon-vectors/dist/icons/vivid/image.svg";
-import mp3Icon from "file-icon-vectors/dist/icons/vivid/mp3.svg";
-import mp4Icon from "file-icon-vectors/dist/icons/vivid/mp4.svg";
-import svgIcon from "file-icon-vectors/dist/icons/vivid/svg.svg";
+import codeIcon from "@hoox/vendor-file-type-icons/code.svg";
+import gifIcon from "@hoox/vendor-file-type-icons/gif.svg";
+import configIcon from "@hoox/vendor-file-type-icons/config.svg";
+import blankIcon from "@hoox/vendor-file-type-icons/unknown.svg";
+import docxIcon from "@hoox/vendor-file-type-icons/docx.svg";
+import xlsxIcon from "@hoox/vendor-file-type-icons/xlsx.svg";
+import pptxIcon from "@hoox/vendor-file-type-icons/pptx.svg";
+import pdfIcon from "@hoox/vendor-file-type-icons/pdf.svg";
+import txtIcon from "@hoox/vendor-file-type-icons/text.svg";
+import zipIcon from "@hoox/vendor-file-type-icons/archive.svg";
+import imageIcon from "@hoox/vendor-file-type-icons/image.svg";
+import mp3Icon from "@hoox/vendor-file-type-icons/audio.svg";
+import mp4Icon from "@hoox/vendor-file-type-icons/video.svg";
 
 const icons = {
+  gif: gifIcon,
+  config: configIcon,
   blank: blankIcon,
   docx: docxIcon,
   xlsx: xlsxIcon,
   pptx: pptxIcon,
   pdf: pdfIcon,
-  csv: csvIcon,
+  csv: xlsxIcon,
   txt: txtIcon,
-  md: mdIcon,
-  json: jsonIcon,
-  html: htmlIcon,
-  xml: xmlIcon,
-  js: jsIcon,
-  py: pyIcon,
+  md: txtIcon,
+  json: codeIcon,
+  html: codeIcon,
+  xml: codeIcon,
+  js: codeIcon,
+  py: codeIcon,
   zip: zipIcon,
   image: imageIcon,
   mp3: mp3Icon,
   mp4: mp4Icon,
-  svg: svgIcon,
+  svg: imageIcon,
 };
 
 const extensionIcons: Readonly<Record<string, keyof typeof icons>> = {
@@ -66,8 +63,8 @@ const extensionIcons: Readonly<Record<string, keyof typeof icons>> = {
   md: "md",
   markdown: "md",
   json: "json",
-  yaml: "txt",
-  yml: "txt",
+  yaml: "config",
+  yml: "config",
   html: "html",
   htm: "html",
   xml: "xml",
@@ -86,7 +83,7 @@ const extensionIcons: Readonly<Record<string, keyof typeof icons>> = {
   png: "image",
   jpg: "image",
   jpeg: "image",
-  gif: "image",
+  gif: "gif",
   webp: "image",
   avif: "image",
   heic: "image",

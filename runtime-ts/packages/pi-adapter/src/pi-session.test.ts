@@ -1,4 +1,5 @@
 import type { TokenizerPort } from "@hoox/context-policy";
+import { appendFileReferences } from "@hoox/protocol/file-references";
 import { buildToolCapabilityManifest } from "@hoox/prompt-builder";
 import { SandboxRuntimeError } from "@hoox/sandbox";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
@@ -34,6 +35,39 @@ afterEach(() => {
 });
 
 describe("Pi 安全适配", () => {
+  it("Provider 当前输入与后续轮历史都隐藏引用内部标识，用户原话不加标签", async () => {
+    const input =
+      appendFileReferences("去掉这一段", [
+        {
+          source: {
+            threadId: "thread_a",
+            runId: "run_a",
+            artifactId: "artifact_a",
+            versionId: "version_a",
+            name: "公告.docx",
+          },
+          selection: { kind: "text", quote: "这一段", start: 0, end: 3 },
+        },
+      ]) +
+      '\n\n# 用户在本轮提供的文件\n- {"文件名":"公告.docx","文件地址":"/resources/resource_a/version_a/公告.docx"}';
+    let calls = 0;
+    const step: FauxResponseStep = (context) => {
+      calls += 1;
+      const visible = JSON.stringify(context.messages);
+      expect(visible).toContain("去掉这一段");
+      expect(visible).toContain("/resources/resource_a/version_a/公告.docx");
+      expect(visible).not.toMatch(
+        /threadId|runId|artifactId|versionId|hoox-file-references|用户要求/,
+      );
+      expect(visible.split("公告.docx")).toHaveLength(2);
+      return fauxAssistantMessage("完成");
+    };
+    const { controller } = await harness([step, step]);
+    await controller.prompt(input);
+    await controller.prompt("继续");
+    expect(calls).toBe(2);
+    controller.dispose();
+  });
   it("零 Skill 与多 Skill 始终注册同一 skill 工具 Schema，仅目录改变 Prompt", async () => {
     const empty = await harness([fauxAssistantMessage("empty")]);
     const populated = await harness(

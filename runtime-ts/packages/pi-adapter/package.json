@@ -20,6 +20,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@hoox/protocol": "workspace:*",
     "@earendil-works/pi-agent-core": "0.82.1",
     "@hoox/context-policy": "workspace:*",
     "@hoox/domain": "workspace:*",

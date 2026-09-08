@@ -1,4 +1,5 @@
 import type { TokenizerPort } from "@hoox/context-policy";
+import { projectFileReferencePrompt } from "./file-reference-prompt.js";
 import {
   assertThreadActiveHistory,
   providerVisibleThreadHistoryMessages,
@@ -64,7 +65,9 @@ export function providerVisibleThreadHistoryTokens(
 
 /** 与 Pi 首轮/steer admission 使用相同的 Provider 可见 user message 形状。 */
 export function providerVisibleUserInputTokens(text: string, tokenizer: TokenizerPort): number {
-  const tokens = tokenizer.countTokens(JSON.stringify({ role: "user", content: text }));
+  const tokens = tokenizer.countTokens(
+    JSON.stringify({ role: "user", content: projectFileReferencePrompt(text) }),
+  );
   if (!Number.isSafeInteger(tokens) || tokens < 0 || (text.length > 0 && tokens === 0)) {
     throw new TypeError("Provider 可见用户输入 token 计数无效");
   }
@@ -216,7 +219,8 @@ export function serializeRuntimeCompactionSource(source: RuntimeCompactionSource
 }
 
 function providerVisibleHistoryMessage(message: ThreadHistoryMessageV1): unknown {
-  if (message.role === "user") return { role: "user", content: message.text };
+  if (message.role === "user")
+    return { role: "user", content: projectFileReferencePrompt(message.text) };
   if (message.role === "runtimeNotice") {
     return {
       role: "user",

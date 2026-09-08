@@ -482,6 +482,9 @@ importers:
       '@hoox/prompt-builder':
         specifier: workspace:*
         version: link:../prompt-builder
+      '@hoox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@hoox/sandbox':
         specifier: workspace:*
         version: link:../sandbox

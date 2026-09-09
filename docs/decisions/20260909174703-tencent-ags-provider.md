@@ -1,6 +1,7 @@
 # ADR-20260909174703：腾讯云 AGS 独立 Provider 与受限生命周期
 
-- 状态：已接受（代码接入；目标云环境尚待验收）
+- 状态：部分已替代
+- 配置来源由 [后端管理 Sandbox 配置](20260910005916-managed-sandbox-routing.md) 部分替代；独立身份与 AGS 受限生命周期结论继续有效。
 - 日期：2026-09-09
 - 部分替代：[ADR-0177](0177-sandbox-provider-persistence-and-routing.md) 中 Provider key 仅有 cube/e2b 的限制；其身份、路由和失败关闭约束继续有效。
 - 关联：[ADR-0176](0176-e2b-provider-first-sdk-adapter.md)、[ADR-0178](0178-e2b-resourcefs-controlled-snapshot.md)。

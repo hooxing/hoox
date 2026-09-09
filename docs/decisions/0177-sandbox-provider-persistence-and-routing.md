@@ -1,6 +1,7 @@
 # ADR-0177：Sandbox Provider 身份持久化与失败关闭路由
 
 - 状态：部分已替代
+- 仅部署配置选择新实例供应商的结论由 [后端管理 Sandbox 配置](20260910005916-managed-sandbox-routing.md) 部分替代，实施状态见该决策。
 - Provider key 范围由 [ADR-20260909174703](20260909174703-tencent-ags-provider.md) 扩展；身份持久化与失败关闭路由结论继续有效。
 - 日期：2026-08-14
 

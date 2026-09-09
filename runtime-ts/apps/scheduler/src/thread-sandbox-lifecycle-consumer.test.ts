@@ -3,9 +3,10 @@ import type {
   ThreadSandboxLifecycleResolution,
 } from "@hoox/persistence";
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CubeThreadSandboxLifecycleResolver,
+  ThreadSandboxLifecycleRouterResolver,
   ThreadSandboxLifecycleConsumer,
   type ThreadSandboxLifecycleStore,
 } from "./thread-sandbox-lifecycle-consumer.js";
@@ -53,6 +54,23 @@ class FakeStore implements ThreadSandboxLifecycleStore {
 }
 
 describe("Thread Sandbox lifecycle consumer", () => {
+  it("AGS 生命周期只路由到持久 Provider，过渡态保留 unknown", async () => {
+    const pause = vi.fn(async () => undefined);
+    const connect = vi.fn(async () => ({ pause }));
+    const inspect = vi.fn(async () => "unknown" as const);
+    const requireProvider = vi.fn((key: string) => {
+      if (key !== "tencent-ags") throw new Error("禁止错误 Provider 路由");
+      return { connect, inspect } as never;
+    });
+    const resolver = new ThreadSandboxLifecycleRouterResolver({ require: requireProvider }, 1000);
+    const agsClaim = claim({ providerKey: "tencent-ags", providerSandboxId: "sbi-test" });
+    await expect(resolver.execute(agsClaim)).resolves.toBe("paused");
+    expect(connect).toHaveBeenCalledWith("sbi-test", { timeoutMs: 1000 });
+    await expect(resolver.reconcile(agsClaim)).resolves.toBe("unknown");
+    expect(requireProvider).toHaveBeenCalledWith("tencent-ags");
+    expect(pause).toHaveBeenCalledOnce();
+  });
+
   it("pending pause 先写 remote marker，确认后只收敛 paused", async () => {
     const gateway = new FakeSandboxGateway();
     await gateway.create({ templateId: "fake" });

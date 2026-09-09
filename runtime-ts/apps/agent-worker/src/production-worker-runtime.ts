@@ -29,6 +29,8 @@ import {
   CubeSandboxGateway,
   type E2BGatewayOptions,
   E2BSandboxGateway,
+  TencentAgsSandboxGateway,
+  type TencentAgsGatewayOptions,
   type OperationControl,
   type RuntimeSandboxGateway,
   type SandboxProviderKey,
@@ -229,6 +231,10 @@ export class ProviderSandboxSessionRegistry
     private readonly resourceFilesystemMaterializer?: SandboxResourceFilesystemMaterializerPort,
     private readonly sandboxInitializer?: SandboxSessionInitializerPort,
     private readonly uncertainEvents?: { current: UncertainLifecycleEvent | undefined },
+    private readonly threadLifecycle: { onTimeout: "kill" | "pause"; autoResume: boolean } = {
+      onTimeout: "pause",
+      autoResume: true,
+    },
   ) {
     if (
       !Number.isSafeInteger(lifecycleTimeoutMs) ||
@@ -356,7 +362,7 @@ export class ProviderSandboxSessionRegistry
           {
             templateId: this.templateId,
             ttlSeconds: this.ttlSeconds,
-            lifecycle: { onTimeout: "pause", autoResume: true },
+            lifecycle: this.threadLifecycle,
             ...(volume === undefined ? {} : { volumeMounts: [volume] }),
           },
           { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
@@ -466,13 +472,15 @@ export class ProviderSandboxSessionRegistry
       if (error instanceof SandboxRuntimeError && error.code === "NOT_FOUND") {
         return { outcome: "not_found" };
       }
-      return error instanceof SandboxRuntimeError && error.code === "TIMEOUT"
+      return error instanceof SandboxRuntimeError &&
+        (error.code === "TIMEOUT" || error.code === "UNKNOWN")
         ? {
             outcome: "unknown",
             event: fallbackUncertainEvent(
               this.gateway.providerKey,
               input.registryId,
               this.ttlSeconds,
+              input.providerSandboxId,
             ),
           }
         : { outcome: "failed", code: "SANDBOX_FAILED" };
@@ -634,6 +642,39 @@ export class E2BSandboxSessionRegistry extends ProviderSandboxSessionRegistry {
       resourceFilesystemMaterializer,
       new E2BSandboxBaselineInitializer(lifecycleTimeoutMs),
       uncertainEvents,
+    );
+  }
+}
+export class TencentAgsSandboxSessionRegistry extends ProviderSandboxSessionRegistry {
+  constructor(
+    options: TencentAgsGatewayOptions,
+    templateId: string,
+    ttlSeconds = 120,
+    lifecycleTimeoutMs = 90_000,
+    resourceFilesystemMaterializer?: SandboxResourceFilesystemMaterializerPort,
+  ) {
+    const uncertainEvents: { current: UncertainLifecycleEvent | undefined } = {
+      current: undefined,
+    };
+    const gateway = new TencentAgsSandboxGateway({
+      ...options,
+      maxCreateTtlSeconds: ttlSeconds,
+      connectTtlSeconds: ttlSeconds,
+      onUncertainLifecycle: (event) => {
+        uncertainEvents.current = event;
+      },
+    });
+    // 受控快照只把 Tenant RLS 已授权的业务字节写入 AGS，不向 Sandbox 暴露数据库、S3 或签名凭据。
+    super(
+      gateway,
+      templateId,
+      ttlSeconds,
+      lifecycleTimeoutMs,
+      undefined,
+      resourceFilesystemMaterializer,
+      new E2BSandboxBaselineInitializer(lifecycleTimeoutMs),
+      uncertainEvents,
+      { onTimeout: "kill", autoResume: false },
     );
   }
 }

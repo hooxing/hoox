@@ -108,7 +108,8 @@ export interface E2BGatewayOptions {
 }
 
 export class E2BSandboxGateway implements SandboxGateway {
-  readonly providerKey = "e2b" as const;
+  readonly providerKey: "e2b" | "tencent-ags" = "e2b";
+  protected readonly preserveMemoryOnPause: boolean = true;
   private readonly apiKey: string;
   private readonly domain: string | undefined;
   private readonly defaultOperationTimeoutMs: number;
@@ -210,7 +211,11 @@ export class E2BSandboxGateway implements SandboxGateway {
         "创建 E2B Sandbox 已完成并清理，执行期间收到取消请求",
       );
     }
-    return new E2BSandboxHandle(sandbox, this.defaultOperationTimeoutMs);
+    return new E2BSandboxHandle(
+      sandbox,
+      this.defaultOperationTimeoutMs,
+      this.preserveMemoryOnPause,
+    );
   }
 
   async connect(id: string, control: OperationControl = {}): Promise<SandboxHandle> {
@@ -225,7 +230,11 @@ export class E2BSandboxGateway implements SandboxGateway {
         }),
       effective,
     );
-    return new E2BSandboxHandle(sandbox, this.defaultOperationTimeoutMs);
+    return new E2BSandboxHandle(
+      sandbox,
+      this.defaultOperationTimeoutMs,
+      this.preserveMemoryOnPause,
+    );
   }
 
   async inspect(
@@ -240,7 +249,7 @@ export class E2BSandboxGateway implements SandboxGateway {
         () => this.sdk.getInfo(id, this.connection(effective.timeoutMs, effective.signal)),
         effective,
       );
-      return info.state === "running" ? "running" : info.state === "paused" ? "paused" : "unknown";
+      return this.inspectInfo(info);
     } catch (error) {
       if (error instanceof SandboxRuntimeError && error.code === "NOT_FOUND") return "not_found";
       throw error;
@@ -259,6 +268,10 @@ export class E2BSandboxGateway implements SandboxGateway {
         }),
       effective,
     );
+  }
+
+  protected inspectInfo(info: E2BSandboxInfo): "running" | "paused" | "not_found" | "unknown" {
+    return info.state === "running" ? "running" : info.state === "paused" ? "paused" : "unknown";
   }
 
   async connectWorkspace(
@@ -358,7 +371,7 @@ export class E2BSandboxGateway implements SandboxGateway {
   ): Promise<void> {
     try {
       await this.onUncertainLifecycle?.({
-        providerKey: "e2b",
+        providerKey: this.providerKey,
         kind: "sandbox_create_outcome_unknown",
         ...event,
         occurredAt: new Date().toISOString(),
@@ -409,6 +422,7 @@ class E2BSandboxHandle implements SandboxHandle {
   constructor(
     private readonly sandbox: E2BSdkSandbox,
     private readonly defaultTimeoutMs: number,
+    private readonly preserveMemoryOnPause: boolean,
   ) {}
 
   get id(): string {
@@ -509,7 +523,7 @@ class E2BSandboxHandle implements SandboxHandle {
       "暂停 E2B Sandbox",
       () =>
         this.sandbox.pause({
-          keepMemory: true,
+          ...(this.preserveMemoryOnPause ? { keepMemory: true } : {}),
           requestTimeoutMs: effective.timeoutMs,
           ...(effective.signal === undefined ? {} : { signal: effective.signal }),
         }),

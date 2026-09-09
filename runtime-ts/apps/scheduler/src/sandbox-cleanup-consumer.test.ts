@@ -1,7 +1,8 @@
 import type { CleanupClaim } from "@hoox/persistence";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   SandboxCleanupConsumer,
+  SandboxCleanupRouterResolver,
   type SandboxCleanupResolver,
   type SandboxCleanupStore,
 } from "./sandbox-cleanup-consumer.js";
@@ -58,6 +59,27 @@ class FakeResolver implements SandboxCleanupResolver {
 }
 
 describe("Sandbox Cleanup Consumer 崩溃窗口", () => {
+  it("AGS 清理按持久身份恢复，未启用时保持 unknown", async () => {
+    const kill = vi.fn(async () => undefined);
+    const requireProvider = vi.fn((key: string) => {
+      if (key !== "tencent-ags") throw new Error("未启用");
+      return { connect: async () => ({ kill }) } as never;
+    });
+    const resolver = new SandboxCleanupRouterResolver({ require: requireProvider }, 1000);
+    await expect(
+      resolver.settle({ ...claim, providerKey: "tencent-ags", disposition: "close" }),
+    ).resolves.toBe("settled");
+    expect(requireProvider).toHaveBeenCalledWith("tencent-ags");
+    expect(kill).toHaveBeenCalledOnce();
+    requireProvider.mockImplementation(() => {
+      throw new Error("未启用");
+    });
+    await expect(
+      resolver.settle({ ...claim, providerKey: "tencent-ags", disposition: "close" }),
+    ).resolves.toBe("unknown");
+    expect(kill).toHaveBeenCalledOnce();
+  });
+
   it("租约必须覆盖连接与远端 settle 的总最坏时间", () => {
     const store = new FakeStore();
     const resolver = new FakeResolver();

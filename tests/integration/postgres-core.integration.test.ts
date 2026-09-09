@@ -357,6 +357,35 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("AGS Provider 迁移覆盖六个持久边界并支持无数据回退", async () => {
+    const target = await createIsolatedMigrationTarget("ags_provider");
+    const constraints = async () =>
+      (
+        await target.pool.query<{ definition: string }>(
+          "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE connamespace=current_schema()::regnamespace AND conname LIKE '%_provider_key_check' ORDER BY conname",
+        )
+      ).rows;
+    try {
+      await migrateUp(target.pool, target.context);
+      const expanded = await constraints();
+      expect(expanded).toHaveLength(6);
+      expect(expanded.every((row) => row.definition.includes("tencent-ags"))).toBe(true);
+      await migrateDown(target.pool, {
+        ...target.context,
+        allowDestructive: true,
+        environment: "test",
+        targetVersion: 62,
+      });
+      expect((await constraints()).every((row) => !row.definition.includes("tencent-ags"))).toBe(
+        true,
+      );
+      await migrateUp(target.pool, target.context);
+      expect(await constraints()).toEqual(expanded);
+    } finally {
+      await target.close();
+    }
+  }, 120_000);
+
   it("后台聚合策略支持回滚重建和导入后的角色重绑定", async () => {
     const target = await createIsolatedMigrationTarget("admin_projection");
     const policies = () =>

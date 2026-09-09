@@ -120,3 +120,16 @@ corepack pnpm config:check:production
 ```
 
 配置错误只能输出变量名和稳定分类，不得输出值。提交前确认 `git status` 中没有 `.env`、证书、私钥、报文轨迹、数据库导出或对象存储数据。
+
+## 腾讯云 AGS
+
+将 `SANDBOX_ENABLED_PROVIDERS` 设为包含 `tencent-ags` 的逗号分隔列表；新建沙箱使用 `SANDBOX_DEFAULT_PROVIDER`。配置会在进程启动时读取，不支持请求级切换。
+
+| 变量 | 使用进程 | 规则 |
+| --- | --- | --- |
+| `TENCENT_AGS_API_KEY` | Worker、Scheduler | 启用 AGS 时必填，不回退 E2B 凭据 |
+| `TENCENT_AGS_DOMAIN` | Worker、Scheduler | 启用 AGS 时必填，仅域名，不含协议或路径 |
+| `TENCENT_AGS_TEMPLATE_ID` | Worker | 启用 AGS 时必填，对应腾讯云沙箱工具名或受支持标识 |
+| `TENCENT_AGS_SESSION_TTL_SECONDS` | Worker | 1–86400，默认 3600；有效上限还受腾讯云账号与工具限制 |
+
+AGS 采用到期销毁与主动暂停策略；部署前须完成[Provider 验收](../architecture/sandbox-providers.md#接入与验收)。现有公共进程配置仍要求 Cube 配置字段通过格式校验；仅启用 AGS 时不会装配或探测 Cube 网关。

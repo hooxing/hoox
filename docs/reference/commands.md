@@ -160,3 +160,7 @@ corepack pnpm test:production-worker:container
 ```
 
 `corepack pnpm check:production` 串联 production 配置、生产依赖漏洞扫描、供应链与许可证、发布契约和三个容器 Gate。`license:check` 是供应链检查的兼容入口，聚合 Gate 不会重复执行同一个扫描脚本。这些命令需要 Docker，但仍不能替代真实基础设施 readiness。见[生产就绪说明](../operations/production-readiness.md)。
+
+## 腾讯云 AGS 真实冒烟
+
+`pnpm test:tencent-ags:real` 从 `.env` 或进程环境读取 `TENCENT_AGS_API_KEY`、`TENCENT_AGS_DOMAIN` 和 `TENCENT_AGS_TEMPLATE_ID`，创建真实沙箱并在 finally 中清理。命令验证命令执行、文件读写、状态查询、暂停与恢复，以及恢复后的文件保留；不打印凭据。该冒烟不代替[完整 Provider 验收](../architecture/sandbox-providers.md#接入与验收)。

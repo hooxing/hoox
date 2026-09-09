@@ -206,7 +206,7 @@
 | [ADR-0174：Durable mutation 瞬时不可用的同命令重试](0174-durable-mutation-transient-unavailable-retry.md) | 已接受 | 2026-08-14 |
 | [ADR-0175：扩大 durable mutation 对端口映射恢复的覆盖窗口](0175-durable-mutation-retry-window-covers-port-mapping-recovery.md) | 已接受 | 2026-08-14 |
 | [ADR-0176：E2B Provider 首期 SDK 适配与生产启用边界](0176-e2b-provider-first-sdk-adapter.md) | 已接受（首期适配） | 2026-08-14 |
-| [ADR-0177：Sandbox Provider 身份持久化与失败关闭路由](0177-sandbox-provider-persistence-and-routing.md) | 已接受 | 2026-08-14 |
+| [ADR-0177：Sandbox Provider 身份持久化与失败关闭路由](0177-sandbox-provider-persistence-and-routing.md) | 部分已替代 | 2026-08-14 |
 | [ADR-0178：E2B ResourceFS 受控快照物化](0178-e2b-resourcefs-controlled-snapshot.md) | 已接受 | 2026-08-14 |
 | [ADR-20260815182655：使用本地不可变诊断镜像提供内部轨迹查看器](20260815182655-local-internal-trajectory-viewer.md) | 部分已替代（公开事件近似方案、Demo 部署例外） | 2026-08-15 |
 | [ADR-20260815193622：内部无损 Session 轨迹与 DeepSeek Trajectory 适配](20260815193622-lossless-internal-trajectory-and-deepseek-adapter.md) | 已接受 | 2026-08-15 |
@@ -297,5 +297,7 @@
 | [ADR-20260906211950：工具内部校验字段不进入模型契约](20260906211950-private-tool-validation-schema.md) | 已接受 | 2026-09-06 |
 
 | [ADR-20260908104231：浏览器优先的文件预览与固定版本选区引用](20260908104231-browser-file-preview-and-versioned-references.md) | 已接受 | 2026-09-08 |
+
+| [ADR-20260909174703：腾讯云 AGS 独立 Provider 与受限生命周期](20260909174703-tencent-ags-provider.md) | 已接受 | 2026-09-09 |
 
 </details>

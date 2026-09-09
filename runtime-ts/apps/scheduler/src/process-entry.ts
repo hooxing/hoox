@@ -31,6 +31,7 @@ import {
 import {
   CubeSandboxGateway,
   E2BSandboxGateway,
+  TencentAgsSandboxGateway,
   type RuntimeSandboxGateway,
   type SandboxProviderKey,
   SandboxProviderRegistry,
@@ -60,6 +61,8 @@ const schedulerEnvironmentSchema = Object.freeze({
   SANDBOX_ENABLED_PROVIDERS: stringEnvironmentField({ maxLength: 64, requiredIn: [] }),
   E2B_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   E2B_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
+  TENCENT_AGS_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
+  TENCENT_AGS_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   CUBESANDBOX_API_URL: urlEnvironmentField(),
   CUBESANDBOX_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   CUBESANDBOX_PROXY_NODE_IP: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
@@ -136,6 +139,7 @@ export interface SchedulerProcessConfiguration {
     defaultProviderKey: SandboxProviderKey;
     enabledProviderKeys: readonly SandboxProviderKey[];
     e2b?: Readonly<{ apiKey: string; domain?: string }>;
+    tencentAgs?: Readonly<{ apiKey: string; domain: string }>;
     apiUrl: string;
     apiKey?: string;
     proxyNodeIp?: string;
@@ -169,8 +173,8 @@ export interface SchedulerProcessConfiguration {
 }
 
 function parseSandboxProviderKey(value: string): SandboxProviderKey {
-  if (value === "cube" || value === "e2b") return value;
-  throw new TypeError("SANDBOX_DEFAULT_PROVIDER 只能是 cube 或 e2b");
+  if (value === "cube" || value === "e2b" || value === "tencent-ags") return value;
+  throw new TypeError("SANDBOX_DEFAULT_PROVIDER 只能是 cube、e2b 或 tencent-ags");
 }
 
 function parseEnabledSandboxProviders(value: string): readonly SandboxProviderKey[] {
@@ -227,6 +231,15 @@ export function parseSchedulerProcessEnvironment(
     ? Object.freeze({
         apiKey: requireOptionalEnvironment(parsed.values.E2B_API_KEY, "E2B_API_KEY"),
         ...(parsed.values.E2B_DOMAIN === undefined ? {} : { domain: parsed.values.E2B_DOMAIN }),
+      })
+    : undefined;
+  const tencentAgs = enabledProviderKeys.includes("tencent-ags")
+    ? Object.freeze({
+        apiKey: requireOptionalEnvironment(
+          parsed.values.TENCENT_AGS_API_KEY,
+          "TENCENT_AGS_API_KEY",
+        ),
+        domain: requireOptionalEnvironment(parsed.values.TENCENT_AGS_DOMAIN, "TENCENT_AGS_DOMAIN"),
       })
     : undefined;
   const configuredProxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
@@ -289,6 +302,7 @@ export function parseSchedulerProcessEnvironment(
       defaultProviderKey,
       enabledProviderKeys,
       ...(e2b === undefined ? {} : { e2b }),
+      ...(tencentAgs === undefined ? {} : { tencentAgs }),
       apiUrl: sandboxApiUrl,
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
         ? {}
@@ -367,6 +381,17 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
           new E2BSandboxGateway({
             apiKey: e2b.apiKey,
             ...(e2b.domain === undefined ? {} : { domain: e2b.domain }),
+            defaultOperationTimeoutMs: configuration.threadSandbox.lifecycleTimeoutMs,
+          }),
+        );
+      }
+      if (configuration.sandbox.enabledProviderKeys.includes("tencent-ags")) {
+        const tencentAgs = configuration.sandbox.tencentAgs;
+        if (tencentAgs === undefined) throw new TypeError("腾讯云 AGS Provider 配置缺失");
+        gateways.push(
+          new TencentAgsSandboxGateway({
+            apiKey: tencentAgs.apiKey,
+            domain: tencentAgs.domain,
             defaultOperationTimeoutMs: configuration.threadSandbox.lifecycleTimeoutMs,
           }),
         );

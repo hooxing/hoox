@@ -25,6 +25,15 @@ try {
   if (command.exitCode !== 0 || command.stdout !== "e2b-command-ok") {
     throw new Error("E2B command 冒烟失败");
   }
+  for (const [language, code] of [
+    ["python", "print('code-ok')"],
+    ["javascript", "console.log('code-ok')"],
+  ] as const) {
+    const output = await sandbox.runCode(code, { language });
+    if (output.error || output.stdout.join("").trim() !== "code-ok") {
+      throw new Error(`Sandbox ${language} 代码执行冒烟失败`);
+    }
+  }
   await sandbox.writeFile("/tmp/e2b-runtime-smoke.txt", "e2b-files-ok");
   if ((await sandbox.readFile("/tmp/e2b-runtime-smoke.txt")) !== "e2b-files-ok") {
     throw new Error("E2B files 冒烟失败");
@@ -44,9 +53,12 @@ try {
   if (resumedCommand.exitCode !== 0 || resumedCommand.stdout !== "e2b-connect-ok") {
     throw new Error("E2B connect 冒烟失败");
   }
-  process.stdout.write(
-    `${gateway.providerKey} create/command/files/inspect/pause/connect 冒烟通过\n`,
-  );
 } finally {
   await sandbox.kill({ ignoreNotFound: true, timeoutMs: 90_000 });
 }
+if ((await gateway.inspect(sandbox.id)) !== "not_found") {
+  throw new Error("Sandbox 销毁后仍可查询，冒烟失败");
+}
+process.stdout.write(
+  `${gateway.providerKey} create/command/code/files/inspect/pause/connect/kill 冒烟通过\n`,
+);

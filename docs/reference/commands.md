@@ -163,4 +163,4 @@ corepack pnpm test:production-worker:container
 
 ## 腾讯云 AGS 真实冒烟
 
-`pnpm test:tencent-ags:real` 从 `.env` 或进程环境读取 `TENCENT_AGS_API_KEY`、`TENCENT_AGS_DOMAIN` 和 `TENCENT_AGS_TEMPLATE_ID`，创建真实沙箱并在 finally 中清理。命令验证命令执行、文件读写、状态查询、暂停与恢复，以及恢复后的文件保留；不打印凭据。该冒烟不代替[完整 Provider 验收](../architecture/sandbox-providers.md#接入与验收)。
+`pnpm test:tencent-ags:real` 从 `.env` 或进程环境读取 `TENCENT_AGS_API_KEY`、`TENCENT_AGS_DOMAIN` 和 `TENCENT_AGS_TEMPLATE_ID`，创建真实沙箱并在 finally 中清理。命令验证命令与 Python、JavaScript 执行、文件读写、状态查询、暂停与恢复、恢复后的文件保留，以及销毁后实例不存在；不打印凭据。该冒烟不代替[完整 Provider 验收](../architecture/sandbox-providers.md#接入与验收)。

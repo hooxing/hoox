@@ -39,7 +39,7 @@ Thread 的 AGS TTL 到期按销毁处理，不承诺自动暂停或自动恢复�
 3. 在受控环境执行 `pnpm test:tencent-ags:real`，验证 create、command、files、inspect、pause、connect 和 kill，并检查恢复后文件仍可读取。
 4. 生产启用前验证：运行中 connect 是否延长实际 TTL；长任务跨 TTL；创建响应丢失后的 metadata 保存与过滤；暂停配额和恢复失败；附件、历史、技能快照及文档交付；Worker 重启与 Scheduler 回收。
 
-仓库自动化验证适配逻辑，不代表已通过腾讯云目标地域验收。真实冒烟也不覆盖上述全部生产条件。不要将已有 `e2b` Session 改记为 `tencent-ags`；不支持凭借修改域名迁移运行中实例。
+仓库自动化验证适配逻辑，不代表已通过腾讯云目标地域验收。[上海实测记录](../verification/2026-09-10-tencent-ags-smoke.md)覆盖基本生命周期、Worker 预检及 metadata 对账前提，不覆盖上述全部生产条件。不要将已有 `e2b` Session 改记为 `tencent-ags`；不支持凭借修改域名迁移运行中实例。
 
 ## 限制
 

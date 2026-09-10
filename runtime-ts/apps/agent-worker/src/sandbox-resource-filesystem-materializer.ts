@@ -15,9 +15,12 @@ const DEFAULT_MAX_FILES = 512;
 const DEFAULT_MAX_TOTAL_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MAX_SINGLE_FILE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
-// 部署主机到供应商数据面的链路可能丢包或长时间停顿：单个大请求一旦卡住就会让整轮准备失败。
-// 因此大文件拆成有界分块、每块独立重试，并用有界并发压缩总时长。
+// 部署主机到供应商数据面的链路差异很大：实测出现小请求持续成功、大请求体被静默丢弃并停满
+// 超时的情况。只做大文件分块仍会卡在第一个大分块上，因此失败后按固定倍数缩小分块重试，
+// 直到请求体足够小；每个分块独立重试，并用有界并发压缩总时长。
 const DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024;
+const CHUNK_LEVEL_COUNT = 3;
+const CHUNK_LEVEL_DIVISOR = 4;
 const DEFAULT_WRITE_ATTEMPTS = 3;
 const DEFAULT_WRITE_CONCURRENCY = 4;
 const DEFAULT_WRITE_ATTEMPT_TIMEOUT_MS = 30_000;
@@ -165,6 +168,8 @@ export class ManagedResourceFilesystemSnapshotMaterializer
     signal: AbortSignal,
   ): Promise<void> {
     const pending = [...files];
+    // 所有写入共享一个可下调的分块预算：任一文件在较小分块上成功后，其余文件直接复用。
+    const budget = { bytes: this.chunkBytes };
     let failure: unknown;
     const worker = async () => {
       for (;;) {
@@ -173,7 +178,13 @@ export class ManagedResourceFilesystemSnapshotMaterializer
         const file = pending.shift();
         if (file === undefined) return;
         try {
-          await this.writeSnapshotFile(sandbox, stagingPath(staging, file.path), file.body, signal);
+          await this.writeSnapshotFile(
+            sandbox,
+            stagingPath(staging, file.path),
+            file.body,
+            signal,
+            budget,
+          );
         } catch (error) {
           failure ??= error;
           return;
@@ -186,32 +197,46 @@ export class ManagedResourceFilesystemSnapshotMaterializer
     if (failure !== undefined) throw failure;
   }
 
+  /**
+   * 先按当前分块预算写出；写不进去就换更小的分块重试同一文件。请求体越小越可能通过链路，
+   * 而且每次失败只损失一个分块的等待时间。全部档位都失败才让整轮准备失败。
+   */
   private async writeSnapshotFile(
     sandbox: SandboxHandle,
     path: string,
     body: Uint8Array,
     signal: AbortSignal,
+    budget: { bytes: number },
   ): Promise<void> {
-    if (body.byteLength <= this.chunkBytes) {
-      await this.writeChunkWithRetry(sandbox, path, body, signal);
-      return;
+    let lastError: unknown;
+    let previousPartBytes = 0;
+    for (const level of chunkLevels(Math.min(budget.bytes, this.chunkBytes))) {
+      const partBytes = Math.min(level, body.byteLength);
+      // 降级后的档位仍然切出同样大小的请求体时跳过，避免重复一次注定相同的等待。
+      if (partBytes === previousPartBytes) continue;
+      previousPartBytes = partBytes;
+      const writes = planChunkWrites(path, body, level);
+      try {
+        for (const write of writes)
+          await this.writeChunkWithRetry(sandbox, write.path, write.body, signal);
+        if (writes.length > 1) await this.mergeChunks(sandbox, path, writes, signal);
+        budget.bytes = Math.min(budget.bytes, level);
+        return;
+      } catch (error) {
+        lastError = error;
+        await this.removeChunks(sandbox, writes);
+      }
     }
-    const parts: string[] = [];
-    for (
-      let offset = 0, index = 0;
-      offset < body.byteLength;
-      offset += this.chunkBytes, index += 1
-    ) {
-      const part = `${path}.hooxpart-${index}`;
-      await this.writeChunkWithRetry(
-        sandbox,
-        part,
-        body.subarray(offset, Math.min(offset + this.chunkBytes, body.byteLength)),
-        signal,
-      );
-      parts.push(part);
-    }
-    const quoted = parts.map(shellSingleQuote);
+    throw lastError ?? new Error("E2B ResourceFS 快照写入失败");
+  }
+
+  private async mergeChunks(
+    sandbox: SandboxHandle,
+    path: string,
+    writes: readonly ChunkWrite[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    const quoted = writes.map((write) => shellSingleQuote(write.path));
     const assembled = await sandbox.command(
       `set -eu
 cat ${quoted.join(" ")} > ${shellSingleQuote(path)}
@@ -219,6 +244,14 @@ rm -f ${quoted.join(" ")}`,
       { signal, timeoutMs: this.commandTimeoutMs },
     );
     if (assembled.exitCode !== 0) throw new Error("E2B ResourceFS 分块快照合并失败");
+  }
+
+  /** 失败档位留下的分块不能进入最终资源目录；清理是尽力而为，最终仍由 staging 兜底。 */
+  private async removeChunks(sandbox: SandboxHandle, writes: readonly ChunkWrite[]): Promise<void> {
+    const quoted = writes.map((write) => shellSingleQuote(write.path)).join(" ");
+    await sandbox
+      .command(`rm -f -- ${quoted}`, { timeoutMs: Math.min(this.commandTimeoutMs, 10_000) })
+      .catch(() => undefined);
   }
 
   private async writeChunkWithRetry(
@@ -451,6 +484,39 @@ ensure_root_link() {
 }
 ensure_root_link /history ${shellSingleQuote(historyTarget)}
 ensure_root_link /thread-files ${shellSingleQuote(threadTarget)}`;
+}
+
+interface ChunkWrite {
+  readonly path: string;
+  readonly body: Uint8Array;
+}
+
+/** 返回逐级缩小的候选分块大小；档位数量固定，保证单个文件最坏等待时间有上界。 */
+function chunkLevels(start: number): readonly number[] {
+  const levels: number[] = [];
+  for (
+    let size = Math.floor(start);
+    size >= 1 && levels.length < CHUNK_LEVEL_COUNT;
+    size = Math.floor(size / CHUNK_LEVEL_DIVISOR)
+  )
+    levels.push(size);
+  return levels;
+}
+
+function planChunkWrites(
+  path: string,
+  body: Uint8Array,
+  chunkBytes: number,
+): readonly ChunkWrite[] {
+  if (chunkBytes >= body.byteLength) return [{ path, body }];
+  const writes: ChunkWrite[] = [];
+  for (let offset = 0, index = 0; offset < body.byteLength; offset += chunkBytes, index += 1) {
+    writes.push({
+      path: `${path}.hooxpart-${index}`,
+      body: body.subarray(offset, Math.min(offset + chunkBytes, body.byteLength)),
+    });
+  }
+  return writes;
 }
 
 function stagingPath(staging: string, finalPath: string): string {

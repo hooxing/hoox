@@ -632,6 +632,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
           CUBESANDBOX_RESOURCE_VOLUME_DRIVER: "runtime-resourcefs",
           MODEL_BASE_URL: `http://127.0.0.1:${address.port}/model/v1/`,
           MODEL_API_KEY: "integration-model-key",
+          MODEL_CREDENTIAL_ENCRYPTION_KEY: "integration-model-credential-root-key",
           MODEL_ID: "deepseek-v4-flash",
           MODEL_SUPPORTS_IMAGES: "false",
           MODEL_CONTEXT_WINDOW: "1048576",

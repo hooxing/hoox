@@ -165,5 +165,14 @@ describe("后台控制面迁移", () => {
       "DROP VIEW admin_runtime_statistics;\nCREATE VIEW admin_runtime_statistics",
     );
     expect(executable53).not.toContain("CREATE OR REPLACE VIEW admin_runtime_statistics");
+
+    const migration64 = byVersion(64);
+    expect(migration64.checksum).toBe(
+      "ef2616c64165552f3474af0453940fe34b3e9174e378770bf14e56a8f6f9900e",
+    );
+    const executable64 = executableDownSql(migration64);
+    expect(executable64.indexOf("DROP POLICY runtime_profile_read")).toBeLessThan(
+      executable64.indexOf("DROP TABLE sandbox_configuration_bindings"),
+    );
   });
 });

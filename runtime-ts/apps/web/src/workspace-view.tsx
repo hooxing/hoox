@@ -1,4 +1,4 @@
-import { FileTypeIcon } from "./file-type-icon.js";
+import { filePreviewKind, readFileReferences } from "@hoox/protocol/file-references";
 import {
   Archive,
   Check,
@@ -18,8 +18,6 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { filePreviewKind, readFileReferences } from "@hoox/protocol/file-references";
-import { MessageFileReferences } from "./file-reference-view.js";
 import {
   type FormEventHandler,
   type ReactNode,
@@ -44,12 +42,14 @@ import {
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import {
   buildConversationBlocks,
-  createConversationProjector,
   buildConversationSections,
   buildRunProgress,
   type ConversationBlock,
+  createConversationProjector,
   type ToolAction,
 } from "./event-view.js";
+import { MessageFileReferences } from "./file-reference-view.js";
+import { FileTypeIcon } from "./file-type-icon.js";
 import { AssistantMarkdown } from "./markdown-view.js";
 
 /** 追加时只折叠新事件；补页、Attempt 切换或已有事件替换时才重建投影。 */
@@ -814,6 +814,46 @@ function canPreviewUserAttachment(attachment: ThreadContextAttachment): boolean 
   return new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]).has(attachment.mediaType);
 }
 
+function ImagePreviewDialog({
+  name,
+  url,
+  onClose,
+}: {
+  readonly name: string;
+  readonly url: string;
+  readonly onClose: () => void;
+}) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div
+      className="image-preview-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`图片预览：${name}`}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <button
+        type="button"
+        className="image-preview-dialog-close"
+        aria-label="关闭图片预览"
+        onClick={onClose}
+      >
+        <X size={20} aria-hidden="true" />
+      </button>
+      <img src={url} alt={name} />
+    </div>
+  );
+}
+
 function UserRequestAttachment({
   attachment,
   loadAttachmentUrl,
@@ -827,6 +867,7 @@ function UserRequestAttachment({
   attachmentRef.current = attachment;
   const [url, setUrl] = useState<string>();
   const [failed, setFailed] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   useEffect(() => {
     if (!previewable || loadAttachmentUrl === undefined) return;
@@ -864,14 +905,26 @@ function UserRequestAttachment({
           )}
         </div>
       ) : (
-        <a href={url} target="_blank" rel="noreferrer" aria-label={`查看附件 ${attachment.name}`}>
+        <button
+          type="button"
+          className="user-request-attachment-preview"
+          aria-label={`预览图片 ${attachment.name}`}
+          onClick={() => setPreviewOpen(true)}
+        >
           <img src={url} alt={attachment.name} />
-        </a>
+        </button>
       )}
       <span className="user-request-attachment-meta">
         <strong title={attachment.name}>{attachment.name}</strong>
         <small>{formatArtifactSize(attachment.sizeBytes)}</small>
       </span>
+      {previewOpen && url !== undefined && (
+        <ImagePreviewDialog
+          name={attachment.name}
+          url={url}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
     </li>
   );
 }
@@ -910,22 +963,22 @@ function UserRequestMessage({
   const collapsed = isOverflowing && !expanded;
   return (
     <article className={`message user-request${pendingInput === undefined ? "" : " is-pending"}`}>
+      {attachments.length > 0 && (
+        <ul className="user-request-attachments" aria-label="消息附件">
+          {attachments.map((attachment) => (
+            <UserRequestAttachment
+              attachment={attachment}
+              {...(loadAttachmentUrl === undefined ? {} : { loadAttachmentUrl })}
+              key={`${attachment.resourceId}:${attachment.versionId}`}
+            />
+          ))}
+        </ul>
+      )}
       <div className="message-card">
         <p ref={contentRef} className={`user-request-content${collapsed ? " is-collapsed" : ""}`}>
           {readFileReferences(text).text}
         </p>
         <MessageFileReferences text={text} />
-        {attachments.length > 0 && (
-          <ul className="user-request-attachments" aria-label="消息附件">
-            {attachments.map((attachment) => (
-              <UserRequestAttachment
-                attachment={attachment}
-                {...(loadAttachmentUrl === undefined ? {} : { loadAttachmentUrl })}
-                key={`${attachment.resourceId}:${attachment.versionId}`}
-              />
-            ))}
-          </ul>
-        )}
         {isOverflowing && (
           <button
             type="button"
@@ -1297,14 +1350,28 @@ function ComposerFileVisual({
   readonly previewUrl?: string | undefined;
 }) {
   const kind = composerFileKind(name, mediaType);
+  const [previewOpen, setPreviewOpen] = useState(false);
   return (
-    <span className={`composer-file-visual is-${kind}`} data-file-kind={kind}>
+    <>
       {previewUrl === undefined ? (
-        <FileTypeIcon name={name} mediaType={mediaType} size={24} />
+        <span className={`composer-file-visual is-${kind}`} data-file-kind={kind}>
+          <FileTypeIcon name={name} mediaType={mediaType} size={24} />
+        </span>
       ) : (
-        <img className="composer-file-preview" src={previewUrl} alt="" />
+        <button
+          type="button"
+          className={`composer-file-visual is-${kind}`}
+          data-file-kind={kind}
+          aria-label={`预览图片 ${name}`}
+          onClick={() => setPreviewOpen(true)}
+        >
+          <img className="composer-file-preview" src={previewUrl} alt="" />
+        </button>
       )}
-    </span>
+      {previewOpen && previewUrl !== undefined && (
+        <ImagePreviewDialog name={name} url={previewUrl} onClose={() => setPreviewOpen(false)} />
+      )}
+    </>
   );
 }
 

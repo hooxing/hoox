@@ -559,9 +559,22 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
     expect(counts["tencent-ags"]).toBeGreaterThan(5);
     expect(counts.cube).toBeGreaterThan(counts["tencent-ags"] ?? 0);
+    await migratorPool.query(`
+      DELETE FROM sandbox_configuration_bindings;
+      DELETE FROM sandbox_control_audits;
+      DELETE FROM sandbox_profile_probes;
+      UPDATE sandbox_control_head SET generation=0,routing_revision=NULL WHERE singleton=true;
+      DELETE FROM sandbox_routing_targets;
+      DELETE FROM sandbox_routing_revisions;
+      DELETE FROM sandbox_provider_profiles;
+    `);
+    await migratorPool.query("DELETE FROM platform_control_operators WHERE user_id IN ($1,$2)", [
+      admin.user.id,
+      viewer.user.id,
+    ]);
   }, 120000);
 
-  it("AGS Provider 迁移覆盖六个持久边界并支持无数据回退", async () => {
+  it("AGS Provider 迁移覆盖八个持久边界并支持无数据回退", async () => {
     const target = await createIsolatedMigrationTarget("ags_provider");
     const constraints = async () =>
       (
@@ -572,7 +585,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     try {
       await migrateUp(target.pool, target.context);
       const expanded = await constraints();
-      expect(expanded).toHaveLength(6);
+      expect(expanded).toHaveLength(8);
       expect(expanded.every((row) => row.definition.includes("tencent-ags"))).toBe(true);
       await migrateDown(target.pool, {
         ...target.context,

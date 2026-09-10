@@ -56,6 +56,7 @@
     "test": "corepack pnpm build && vitest run",
     "test:built": "vitest run",
     "test:cube:real": "corepack pnpm --filter @cubesandbox/sdk build && tsx runtime-ts/packages/sandbox/src/real-smoke.ts",
+    "test:tencent-ags:real": "node --env-file-if-exists=.env --import tsx runtime-ts/packages/sandbox/src/e2b-real-smoke.ts --tencent-ags",
     "test:e2b:real": "tsx runtime-ts/packages/sandbox/src/e2b-real-smoke.ts",
     "test:pi-cube:real": "corepack pnpm build && tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts",
     "test:pi-e2b:real": "corepack pnpm --filter @hoox/pi-adapter... build && node --env-file-if-exists=.env --import tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts --e2b",

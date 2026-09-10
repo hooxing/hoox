@@ -1,14 +1,15 @@
+import { runId, tenantId, threadId } from "@hoox/domain";
 import type {
   PgThreadContinuityMetrics,
   ThreadSandboxLifecycleClaim,
   ThreadSandboxLifecycleResolution,
 } from "@hoox/persistence";
-import { runId, tenantId, threadId } from "@hoox/domain";
 import {
   type SandboxGateway,
   type SandboxProviderRegistry,
   SandboxRuntimeError,
 } from "@hoox/sandbox";
+import type { ManagedSandboxGatewayResolver } from "./managed-sandbox-gateway.js";
 
 export interface ThreadSandboxLifecycleStore {
   claimNext(input: {
@@ -27,19 +28,23 @@ export class ThreadSandboxLifecycleRouterResolver {
   constructor(
     private readonly providers: Pick<SandboxProviderRegistry, "require">,
     private readonly timeoutMs: number,
+    private readonly managed?: Pick<ManagedSandboxGatewayResolver, "session">,
   ) {}
 
   async execute(claim: ThreadSandboxLifecycleClaim): Promise<ThreadSandboxLifecycleResolution> {
     try {
-      const gateway = this.providers.require(claim.providerKey);
+      const { gateway, timeoutMs } =
+        this.managed === undefined
+          ? { gateway: this.providers.require(claim.providerKey), timeoutMs: this.timeoutMs }
+          : await this.managed.session(claim);
       const sandbox = await gateway.connect(claim.providerSandboxId, {
-        timeoutMs: this.timeoutMs,
+        timeoutMs,
       });
       if (claim.effectKind === "pause") {
-        await sandbox.pause({ timeoutMs: this.timeoutMs });
+        await sandbox.pause({ timeoutMs });
         return "paused";
       }
-      await sandbox.kill({ timeoutMs: this.timeoutMs, ignoreNotFound: true });
+      await sandbox.kill({ timeoutMs, ignoreNotFound: true });
       return "terminated";
     } catch (error) {
       if (error instanceof SandboxRuntimeError && error.code === "NOT_FOUND") {
@@ -51,9 +56,12 @@ export class ThreadSandboxLifecycleRouterResolver {
 
   async reconcile(claim: ThreadSandboxLifecycleClaim): Promise<ThreadSandboxLifecycleResolution> {
     try {
-      const gateway = this.providers.require(claim.providerKey);
+      const { gateway, timeoutMs } =
+        this.managed === undefined
+          ? { gateway: this.providers.require(claim.providerKey), timeoutMs: this.timeoutMs }
+          : await this.managed.session(claim);
       const state = await gateway.inspect(claim.providerSandboxId, {
-        timeoutMs: this.timeoutMs,
+        timeoutMs,
       });
       if (state === "not_found") return "terminated";
       if (claim.effectKind === "pause") {

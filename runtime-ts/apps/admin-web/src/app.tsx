@@ -40,6 +40,7 @@ import {
 import { HOOX_APP_ICON_PATH } from "./brand.js";
 import type { AdminControlApiContract } from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
+import { SandboxConfigurationPanel } from "./sandbox-configuration-panel.js";
 import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
 
 const defaultApi = new SkillAdminApi();
@@ -943,6 +944,7 @@ const navigation: NonNullable<MenuProps["items"]> = [
     children: [
       { key: "/models", icon: <RobotOutlined />, label: "模型服务" },
       { key: "/memory", icon: <BulbOutlined />, label: "记忆服务" },
+      { key: "/sandboxes", icon: <DatabaseOutlined />, label: "沙箱服务" },
       { key: "/skills", icon: <DatabaseOutlined />, label: "Skills" },
     ],
   },
@@ -984,6 +986,7 @@ const pageMetadata: Readonly<
     title: "记忆服务",
     description: "Mem0 连接、作用域与异步链路",
   },
+  "/sandboxes": { title: "沙箱服务", description: "供应商切换、负载分配与运行策略" },
   "/skills": {
     title: "Skills",
     description: "上传、发布更新与下架技能",
@@ -1139,6 +1142,7 @@ function AdminPlatform({
               }
             />
             <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
+            <Route path="/sandboxes" element={<SandboxConfigurationPanel />} />
             <Route
               path="/settings"
               element={

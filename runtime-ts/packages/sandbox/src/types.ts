@@ -1,4 +1,4 @@
-export type SandboxProviderKey = "cube" | "e2b";
+export type SandboxProviderKey = "cube" | "e2b" | "tencent-ags";
 
 export interface OperationControl {
   signal?: AbortSignal;

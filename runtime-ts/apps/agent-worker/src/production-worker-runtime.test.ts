@@ -1,3 +1,4 @@
+import { SandboxRuntimeError } from "@hoox/sandbox";
 import type { ExecutionPhaseTiming } from "@hoox/domain";
 import type { PgClaimedRunDispatch, PgClaimedWorkerTenantAssignment } from "@hoox/persistence";
 import type { ExecutionScope, SandboxSessionRef } from "@hoox/run-contracts";
@@ -7,6 +8,7 @@ import {
   CubeSandboxSessionRegistry,
   DatabaseRunCancellation,
   E2BSandboxSessionRegistry,
+  TencentAgsSandboxSessionRegistry,
   FailClosedWorkspaceRevisionVerifier,
   ProcessShutdown,
   ProviderSandboxSessionRegistry,
@@ -1039,6 +1041,70 @@ describe("生产 Workspace revision 安全下限", () => {
     expect(command).toHaveBeenCalledOnce();
     expect(commands[0]).toContain('sudo install -d -o "$uid" -g "$gid" -m 0700 /workspace');
     expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("AGS 恢复状态未知时保留实例身份供持久对账", async () => {
+    const registry = new TencentAgsSandboxSessionRegistry(
+      { apiKey: "test-ags", domain: "ags.example.invalid" },
+      "hoox",
+      3600,
+    );
+    vi.spyOn(registry.gateway, "connect").mockRejectedValue(
+      new SandboxRuntimeError("UNKNOWN", "恢复状态未知"),
+    );
+    await expect(
+      registry.connect({
+        scope: claim().scope as ExecutionScope,
+        registryId: "registry-ags-unknown",
+        providerKey: "tencent-ags",
+        providerSandboxId: "sbi-unknown",
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "unknown",
+      event: { providerKey: "tencent-ags", sandboxId: "sbi-unknown" },
+    });
+  });
+
+  it("AGS Thread 使用到期销毁策略并完成 Workspace 初始化", async () => {
+    const commands: string[] = [];
+    const command = vi.fn(async (value: string) => {
+      commands.push(value);
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    const kill = vi.fn(async () => undefined);
+    const registry = new TencentAgsSandboxSessionRegistry(
+      { apiKey: "opaque-ags-test-key", domain: "ags.example.invalid" },
+      "base",
+      3_600,
+      90_000,
+    );
+    vi.spyOn(registry.gateway, "create").mockResolvedValue({
+      id: "sandbox-e2b-workspace-root",
+      command,
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill,
+    });
+
+    await expect(
+      registry.create({
+        scope: claim().scope as ExecutionScope,
+        registryId: "registry-e2b-workspace-root",
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: false,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+    expect(command).toHaveBeenCalledOnce();
+    expect(commands[0]).toContain('sudo install -d -o "$uid" -g "$gid" -m 0700 /workspace');
+    expect(kill).not.toHaveBeenCalled();
+    expect(registry.gateway.create).toHaveBeenCalledWith(
+      expect.objectContaining({ lifecycle: { onTimeout: "kill", autoResume: false } }),
+      expect.anything(),
+    );
+    expect(registry.defaultProviderKey).toBe("tencent-ags");
   });
 
   it("分开记录沙箱创建、连接恢复、初始化和资源准备，诊断失败不改变 ready", async () => {

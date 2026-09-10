@@ -13,6 +13,11 @@ vi.mock("@hoox/persistence", () => ({
   createPostgresPool: mocks.createPostgresPool,
   probePostgres: mocks.probePostgres,
   PgSandboxCleanupConsumerStore: class {},
+  PgSandboxConfigurationResolver: class {
+    activeProfiles() {
+      return Promise.resolve(undefined);
+    }
+  },
 }));
 
 vi.mock("@hoox/sandbox", () => ({

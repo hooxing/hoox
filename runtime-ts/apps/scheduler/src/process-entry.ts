@@ -1,10 +1,12 @@
 import { tenantId } from "@hoox/domain";
 import {
   createPostgresPool,
+  ModelProviderCredentialCipher,
   PgSandboxCleanupConsumerStore,
-  PgThreadTitleGenerationStore,
+  PgSandboxConfigurationResolver,
   PgThreadContinuityMetrics,
   PgThreadSandboxLifecycleConsumerStore,
+  PgThreadTitleGenerationStore,
   probePostgres,
 } from "@hoox/persistence";
 import {
@@ -24,27 +26,29 @@ import {
   urlEnvironmentField,
 } from "@hoox/process-runtime";
 import {
+  CubeSandboxGateway,
+  E2BSandboxGateway,
+  type RuntimeSandboxGateway,
+  resolveCubeProxyRouting,
+  type SandboxProviderKey,
+  SandboxProviderRegistry,
+  TencentAgsSandboxGateway,
+} from "@hoox/sandbox";
+import {
   OpenAiCompatibleThreadTitleGenerator,
   ThreadTitleGenerationConsumer,
   ThreadTitleGenerationPollingLoop,
 } from "@hoox/thread-title";
-import {
-  CubeSandboxGateway,
-  E2BSandboxGateway,
-  type RuntimeSandboxGateway,
-  type SandboxProviderKey,
-  SandboxProviderRegistry,
-  resolveCubeProxyRouting,
-} from "@hoox/sandbox";
+import { ManagedSandboxGatewayResolver } from "./managed-sandbox-gateway.js";
 import {
   SandboxCleanupConsumer,
-  SandboxCleanupRouterResolver,
   SandboxCleanupPollingLoop,
+  SandboxCleanupRouterResolver,
 } from "./sandbox-cleanup-consumer.js";
 import {
   ThreadSandboxLifecycleConsumer,
-  ThreadSandboxLifecycleRouterResolver,
   ThreadSandboxLifecyclePollingLoop,
+  ThreadSandboxLifecycleRouterResolver,
 } from "./thread-sandbox-lifecycle-consumer.js";
 
 const schedulerEnvironmentSchema = Object.freeze({
@@ -56,10 +60,17 @@ const schedulerEnvironmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
+  MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
+    secret: true,
+    maxLength: 8192,
+    requiredIn: [],
+  }),
   SANDBOX_DEFAULT_PROVIDER: stringEnvironmentField({ maxLength: 16, requiredIn: [] }),
   SANDBOX_ENABLED_PROVIDERS: stringEnvironmentField({ maxLength: 64, requiredIn: [] }),
   E2B_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   E2B_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
+  TENCENT_AGS_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
+  TENCENT_AGS_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   CUBESANDBOX_API_URL: urlEnvironmentField(),
   CUBESANDBOX_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   CUBESANDBOX_PROXY_NODE_IP: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
@@ -127,6 +138,7 @@ export const schedulerProcessEnvironmentKeys = Object.freeze(
 );
 
 export interface SchedulerProcessConfiguration {
+  readonly credentialEncryptionKey?: string;
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
@@ -136,6 +148,7 @@ export interface SchedulerProcessConfiguration {
     defaultProviderKey: SandboxProviderKey;
     enabledProviderKeys: readonly SandboxProviderKey[];
     e2b?: Readonly<{ apiKey: string; domain?: string }>;
+    tencentAgs?: Readonly<{ apiKey: string; domain: string }>;
     apiUrl: string;
     apiKey?: string;
     proxyNodeIp?: string;
@@ -169,8 +182,8 @@ export interface SchedulerProcessConfiguration {
 }
 
 function parseSandboxProviderKey(value: string): SandboxProviderKey {
-  if (value === "cube" || value === "e2b") return value;
-  throw new TypeError("SANDBOX_DEFAULT_PROVIDER 只能是 cube 或 e2b");
+  if (value === "cube" || value === "e2b" || value === "tencent-ags") return value;
+  throw new TypeError("SANDBOX_DEFAULT_PROVIDER 只能是 cube、e2b 或 tencent-ags");
 }
 
 function parseEnabledSandboxProviders(value: string): readonly SandboxProviderKey[] {
@@ -229,6 +242,15 @@ export function parseSchedulerProcessEnvironment(
         ...(parsed.values.E2B_DOMAIN === undefined ? {} : { domain: parsed.values.E2B_DOMAIN }),
       })
     : undefined;
+  const tencentAgs = enabledProviderKeys.includes("tencent-ags")
+    ? Object.freeze({
+        apiKey: requireOptionalEnvironment(
+          parsed.values.TENCENT_AGS_API_KEY,
+          "TENCENT_AGS_API_KEY",
+        ),
+        domain: requireOptionalEnvironment(parsed.values.TENCENT_AGS_DOMAIN, "TENCENT_AGS_DOMAIN"),
+      })
+    : undefined;
   const configuredProxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
   if (
     configuredProxyScheme !== undefined &&
@@ -281,6 +303,9 @@ export function parseSchedulerProcessEnvironment(
   }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
+    ...(parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY === undefined
+      ? {}
+      : { credentialEncryptionKey: parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY }),
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
@@ -289,6 +314,7 @@ export function parseSchedulerProcessEnvironment(
       defaultProviderKey,
       enabledProviderKeys,
       ...(e2b === undefined ? {} : { e2b }),
+      ...(tencentAgs === undefined ? {} : { tencentAgs }),
       apiUrl: sandboxApiUrl,
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
         ? {}
@@ -371,14 +397,39 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
           }),
         );
       }
+      if (configuration.sandbox.enabledProviderKeys.includes("tencent-ags")) {
+        const tencentAgs = configuration.sandbox.tencentAgs;
+        if (tencentAgs === undefined) throw new TypeError("腾讯云 AGS Provider 配置缺失");
+        gateways.push(
+          new TencentAgsSandboxGateway({
+            apiKey: tencentAgs.apiKey,
+            domain: tencentAgs.domain,
+            defaultOperationTimeoutMs: configuration.threadSandbox.lifecycleTimeoutMs,
+          }),
+        );
+      }
       const providers = new SandboxProviderRegistry(
         configuration.sandbox.defaultProviderKey,
         gateways,
       );
-      await providers.probe();
+      const managed = new ManagedSandboxGatewayResolver(
+        new PgSandboxConfigurationResolver(
+          pool,
+          configuration.credentialEncryptionKey === undefined
+            ? undefined
+            : new ModelProviderCredentialCipher(configuration.credentialEncryptionKey),
+        ),
+        providers,
+        configuration.threadSandbox.lifecycleTimeoutMs,
+      );
+      await managed.probe();
       const consumer = new SandboxCleanupConsumer(
         new PgSandboxCleanupConsumerStore(pool),
-        new SandboxCleanupRouterResolver(providers),
+        new SandboxCleanupRouterResolver(
+          providers,
+          configuration.threadSandbox.lifecycleTimeoutMs,
+          managed,
+        ),
         configuration.cleanup.workerId,
         configuration.cleanup.leaseMs,
       );
@@ -397,6 +448,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
           new ThreadSandboxLifecycleRouterResolver(
             providers,
             configuration.threadSandbox.lifecycleTimeoutMs,
+            managed,
           ),
           configuration.cleanup.workerId,
           configuration.cleanup.leaseMs,
@@ -445,7 +497,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
             name: "postgres",
             probe: () => probePostgres(pool, configuration.databaseRuntimeRole),
           }),
-          Object.freeze({ name: "sandbox-providers", probe: () => providers.probe() }),
+          Object.freeze({ name: "sandbox-providers", probe: () => managed.probe() }),
         ]),
       });
       return assembly;

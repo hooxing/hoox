@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.ps1 text eol=crlf
+# 已执行迁移保留原始字节，禁止换行归一化改变 checksum。
+runtime-ts/packages/persistence/migrations/0063_tencent_ags_provider.*.sql -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

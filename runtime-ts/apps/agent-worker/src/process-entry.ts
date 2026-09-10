@@ -43,6 +43,7 @@ import {
   PgRunDispatchOutbox,
   PgRuntimeControlConfigurationRepository,
   PgRuntimeRolloutRepository,
+  PgSandboxConfigurationResolver,
   PgScheduledTaskDueConsumer,
   PgScheduledTaskRepository,
   PgSkillFilesystemCatalog,
@@ -95,6 +96,7 @@ import {
 import { SkillRuntimeService } from "@hoox/skill";
 import { DeliverFileToolRouterFactory } from "@hoox/tool-router";
 import { SandboxDeliverFileSource } from "./deliver-file-source.js";
+import { createManagedSandboxRegistry } from "./managed-sandbox-registry.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
@@ -106,12 +108,13 @@ import {
   ProcessShutdown,
   SandboxSessionRegistryRouter,
   SystemWorkerClock,
+  TencentAgsSandboxSessionRegistry,
 } from "./production-worker-runtime.js";
 import {
   createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
-  createDevelopmentProjectRunStartupTimingMirror,
   createDevelopmentProjectRunPhaseTimingMirror,
+  createDevelopmentProjectRunStartupTimingMirror,
   withDevelopmentProjectModelWireTraceMirror,
 } from "./project-model-wire-trace.js";
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";
@@ -158,6 +161,14 @@ const workerEnvironmentSchema = Object.freeze({
   E2B_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   E2B_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   E2B_SESSION_TTL_SECONDS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 86_400,
+    requiredIn: [],
+  }),
+  TENCENT_AGS_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
+  TENCENT_AGS_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
+  TENCENT_AGS_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
+  TENCENT_AGS_SESSION_TTL_SECONDS: integerEnvironmentField({
     minimum: 1,
     maximum: 86_400,
     requiredIn: [],
@@ -314,6 +325,12 @@ export interface WorkerProcessConfiguration {
       domain?: string;
       sessionTtlSeconds: number;
     }>;
+    tencentAgs?: Readonly<{
+      apiKey: string;
+      templateId: string;
+      domain: string;
+      sessionTtlSeconds: number;
+    }>;
     apiUrl: string;
     templateId: string;
     apiKey?: string;
@@ -382,8 +399,8 @@ export interface WorkerProcessConfiguration {
 }
 
 function parseSandboxProviderKey(value: string): SandboxProviderKey {
-  if (value === "cube" || value === "e2b") return value;
-  throw new TypeError("SANDBOX_DEFAULT_PROVIDER 只能是 cube 或 e2b");
+  if (value === "cube" || value === "e2b" || value === "tencent-ags") return value;
+  throw new TypeError("SANDBOX_DEFAULT_PROVIDER 只能是 cube、e2b 或 tencent-ags");
 }
 
 function parseEnabledSandboxProviders(value: string): readonly SandboxProviderKey[] {
@@ -430,6 +447,20 @@ export function parseWorkerProcessEnvironment(
         templateId: requireOptionalEnvironment(parsed.values.E2B_TEMPLATE_ID, "E2B_TEMPLATE_ID"),
         sessionTtlSeconds: parsed.values.E2B_SESSION_TTL_SECONDS ?? 3_600,
         ...(parsed.values.E2B_DOMAIN === undefined ? {} : { domain: parsed.values.E2B_DOMAIN }),
+      })
+    : undefined;
+  const tencentAgs = enabledProviderKeys.includes("tencent-ags")
+    ? Object.freeze({
+        apiKey: requireOptionalEnvironment(
+          parsed.values.TENCENT_AGS_API_KEY,
+          "TENCENT_AGS_API_KEY",
+        ),
+        templateId: requireOptionalEnvironment(
+          parsed.values.TENCENT_AGS_TEMPLATE_ID,
+          "TENCENT_AGS_TEMPLATE_ID",
+        ),
+        sessionTtlSeconds: parsed.values.TENCENT_AGS_SESSION_TTL_SECONDS ?? 3_600,
+        domain: requireOptionalEnvironment(parsed.values.TENCENT_AGS_DOMAIN, "TENCENT_AGS_DOMAIN"),
       })
     : undefined;
   const proxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
@@ -599,6 +630,7 @@ export function parseWorkerProcessEnvironment(
       defaultProviderKey,
       enabledProviderKeys,
       ...(e2b === undefined ? {} : { e2b }),
+      ...(tencentAgs === undefined ? {} : { tencentAgs }),
       apiUrl: sandboxApiUrl,
       templateId: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_TEMPLATE_ID"),
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
@@ -974,6 +1006,10 @@ async function assembleWorkerRuntime(
       configuration,
       resourceVolume,
       resourceFilesystemMaterializer,
+      new PgSandboxConfigurationResolver(
+        pool,
+        new ModelProviderCredentialCipher(configuration.model.credentialEncryptionKey),
+      ),
     );
     const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
     const threadSandboxes = new PgThreadSandboxSessionLifecycle(
@@ -1406,6 +1442,7 @@ function createConfiguredSandboxRouter(
   configuration: WorkerProcessConfiguration,
   resourceVolume?: TenantResourceVolumePort,
   resourceFilesystemMaterializer?: ManagedResourceFilesystemSnapshotMaterializer,
+  managedResolver?: PgSandboxConfigurationResolver,
 ): SandboxSessionRegistryRouter {
   const registries = [];
   if (configuration.sandbox.enabledProviderKeys.includes("cube")) {
@@ -1448,7 +1485,37 @@ function createConfiguredSandboxRouter(
       ),
     );
   }
-  return new SandboxSessionRegistryRouter(configuration.sandbox.defaultProviderKey, registries);
+  if (configuration.sandbox.enabledProviderKeys.includes("tencent-ags")) {
+    const tencentAgs = configuration.sandbox.tencentAgs;
+    if (tencentAgs === undefined) throw new TypeError("腾讯云 AGS Provider 配置缺失");
+    registries.push(
+      new TencentAgsSandboxSessionRegistry(
+        {
+          apiKey: tencentAgs.apiKey,
+          domain: tencentAgs.domain,
+        },
+        tencentAgs.templateId,
+        tencentAgs.sessionTtlSeconds,
+        configuration.threadSandbox.lifecycleTimeoutMs,
+        resourceFilesystemMaterializer,
+      ),
+    );
+  }
+  return new SandboxSessionRegistryRouter(
+    configuration.sandbox.defaultProviderKey,
+    registries,
+    managedResolver === undefined
+      ? undefined
+      : {
+          resolver: managedResolver,
+          createRegistry: (profile) =>
+            createManagedSandboxRegistry(
+              profile,
+              configuration.sandbox.resourceVolumeDriver,
+              resourceFilesystemMaterializer,
+            ),
+        },
+  );
 }
 
 /**
@@ -1503,6 +1570,11 @@ export async function probeDevelopmentWorkerDependencies(
         driver: configuration.sandbox.resourceVolumeDriver,
         requestTimeoutMs: 5_000,
       }),
+      undefined,
+      new PgSandboxConfigurationResolver(
+        pool,
+        new ModelProviderCredentialCipher(configuration.model.credentialEncryptionKey),
+      ),
     );
     await Promise.all([
       probePostgres(pool, configuration.databaseRuntimeRole),

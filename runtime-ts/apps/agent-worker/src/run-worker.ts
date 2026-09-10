@@ -1,8 +1,8 @@
 import {
   applyTodoWrite,
-  measureExecutionPhase,
   type ExecutionPhaseTimingObserver,
   type IsoTimestamp,
+  measureExecutionPhase,
   type Run,
   type RunPersonalizationSnapshot,
   type Sha256Digest,
@@ -66,11 +66,11 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
+import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 import {
   RunPhaseTimingCollector,
   type RunPhaseTimingDiagnosticsPort,
 } from "./run-phase-diagnostics.js";
-import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 import {
   RunStartupTimingCollector,
   type RunStartupTimingDiagnosticsPort,
@@ -3160,7 +3160,8 @@ function receiptMatches(
         receipt.threadSandbox.sessionId === command.threadSandboxTerminal.sessionId &&
         receipt.threadSandbox.generation === command.threadSandboxTerminal.generation &&
         (receipt.threadSandbox.outcome === "effect_pending"
-          ? receipt.threadSandbox.effectKind === "pause" &&
+          ? (receipt.threadSandbox.effectKind === "pause" ||
+              receipt.threadSandbox.effectKind === "terminate") &&
             receipt.threadSandbox.effectId.trim().length > 0
           : receipt.threadSandbox.nextRunId.trim().length > 0);
   return (

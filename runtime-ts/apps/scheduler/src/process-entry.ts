@@ -1,10 +1,12 @@
 import { tenantId } from "@hoox/domain";
 import {
   createPostgresPool,
+  ModelProviderCredentialCipher,
   PgSandboxCleanupConsumerStore,
-  PgThreadTitleGenerationStore,
+  PgSandboxConfigurationResolver,
   PgThreadContinuityMetrics,
   PgThreadSandboxLifecycleConsumerStore,
+  PgThreadTitleGenerationStore,
   probePostgres,
 } from "@hoox/persistence";
 import {
@@ -24,28 +26,29 @@ import {
   urlEnvironmentField,
 } from "@hoox/process-runtime";
 import {
+  CubeSandboxGateway,
+  E2BSandboxGateway,
+  type RuntimeSandboxGateway,
+  resolveCubeProxyRouting,
+  type SandboxProviderKey,
+  SandboxProviderRegistry,
+  TencentAgsSandboxGateway,
+} from "@hoox/sandbox";
+import {
   OpenAiCompatibleThreadTitleGenerator,
   ThreadTitleGenerationConsumer,
   ThreadTitleGenerationPollingLoop,
 } from "@hoox/thread-title";
-import {
-  CubeSandboxGateway,
-  E2BSandboxGateway,
-  TencentAgsSandboxGateway,
-  type RuntimeSandboxGateway,
-  type SandboxProviderKey,
-  SandboxProviderRegistry,
-  resolveCubeProxyRouting,
-} from "@hoox/sandbox";
+import { ManagedSandboxGatewayResolver } from "./managed-sandbox-gateway.js";
 import {
   SandboxCleanupConsumer,
-  SandboxCleanupRouterResolver,
   SandboxCleanupPollingLoop,
+  SandboxCleanupRouterResolver,
 } from "./sandbox-cleanup-consumer.js";
 import {
   ThreadSandboxLifecycleConsumer,
-  ThreadSandboxLifecycleRouterResolver,
   ThreadSandboxLifecyclePollingLoop,
+  ThreadSandboxLifecycleRouterResolver,
 } from "./thread-sandbox-lifecycle-consumer.js";
 
 const schedulerEnvironmentSchema = Object.freeze({
@@ -57,6 +60,11 @@ const schedulerEnvironmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
+  MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
+    secret: true,
+    maxLength: 8192,
+    requiredIn: [],
+  }),
   SANDBOX_DEFAULT_PROVIDER: stringEnvironmentField({ maxLength: 16, requiredIn: [] }),
   SANDBOX_ENABLED_PROVIDERS: stringEnvironmentField({ maxLength: 64, requiredIn: [] }),
   E2B_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
@@ -130,6 +138,7 @@ export const schedulerProcessEnvironmentKeys = Object.freeze(
 );
 
 export interface SchedulerProcessConfiguration {
+  readonly credentialEncryptionKey?: string;
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
@@ -294,6 +303,9 @@ export function parseSchedulerProcessEnvironment(
   }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
+    ...(parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY === undefined
+      ? {}
+      : { credentialEncryptionKey: parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY }),
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
@@ -400,10 +412,24 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         configuration.sandbox.defaultProviderKey,
         gateways,
       );
-      await providers.probe();
+      const managed = new ManagedSandboxGatewayResolver(
+        new PgSandboxConfigurationResolver(
+          pool,
+          configuration.credentialEncryptionKey === undefined
+            ? undefined
+            : new ModelProviderCredentialCipher(configuration.credentialEncryptionKey),
+        ),
+        providers,
+        configuration.threadSandbox.lifecycleTimeoutMs,
+      );
+      await managed.probe();
       const consumer = new SandboxCleanupConsumer(
         new PgSandboxCleanupConsumerStore(pool),
-        new SandboxCleanupRouterResolver(providers),
+        new SandboxCleanupRouterResolver(
+          providers,
+          configuration.threadSandbox.lifecycleTimeoutMs,
+          managed,
+        ),
         configuration.cleanup.workerId,
         configuration.cleanup.leaseMs,
       );
@@ -422,6 +448,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
           new ThreadSandboxLifecycleRouterResolver(
             providers,
             configuration.threadSandbox.lifecycleTimeoutMs,
+            managed,
           ),
           configuration.cleanup.workerId,
           configuration.cleanup.leaseMs,
@@ -470,7 +497,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
             name: "postgres",
             probe: () => probePostgres(pool, configuration.databaseRuntimeRole),
           }),
-          Object.freeze({ name: "sandbox-providers", probe: () => providers.probe() }),
+          Object.freeze({ name: "sandbox-providers", probe: () => managed.probe() }),
         ]),
       });
       return assembly;

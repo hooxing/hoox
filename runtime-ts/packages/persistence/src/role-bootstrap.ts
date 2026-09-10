@@ -1109,11 +1109,39 @@ async function hasRuntimeSubagentConversationState(
   return result.rows[0]?.present === true;
 }
 
+const managedSandboxControlTables = [
+  "sandbox_provider_profiles",
+  "sandbox_routing_revisions",
+  "sandbox_routing_targets",
+  "sandbox_control_head",
+  "sandbox_profile_probes",
+  "sandbox_control_audits",
+] as const;
+const managedSandboxRuntimeTables = [
+  "sandbox_provider_profiles",
+  "sandbox_routing_revisions",
+  "sandbox_routing_targets",
+  "sandbox_control_head",
+] as const;
+
+async function hasManagedSandboxState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.sandbox_control_head',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
+  if (await hasManagedSandboxState(client, schema)) {
+    for (const table of managedSandboxControlTables) policy.set(table, new Set());
+    for (const table of managedSandboxRuntimeTables) policy.set(table, new Set(["SELECT"]));
+    policy.set("sandbox_configuration_bindings", new Set(["SELECT", "INSERT"]));
+  }
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
   }
@@ -2122,6 +2150,7 @@ async function assertAdminControlBoundary(
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
+  const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
     enabled
       ? [
@@ -2136,6 +2165,10 @@ async function assertAdminControlBoundary(
         ]
       : [],
   );
+  if (sandboxEnabled) {
+    for (const table of managedSandboxControlTables)
+      allowed.set(table, new Set(["SELECT", "INSERT"]));
+  }
   if (userOperationsEnabled) {
     allowed.set("admin_user_account_audits", new Set(["SELECT", "INSERT"]));
     allowed.set("user_sessions", new Set(["DELETE"]));
@@ -2188,6 +2221,8 @@ async function assertAdminControlBoundary(
         ]
       : [],
   );
+  if (sandboxEnabled)
+    updatePolicy.set("sandbox_control_head", new Set(["generation", "routing_revision"]));
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
@@ -2810,6 +2845,31 @@ async function rebindRoleScopedPolicies(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const schema = quoteIdentifier(context.schema);
+  if (await hasManagedSandboxState(client, context.schema)) {
+    for (const table of [...managedSandboxControlTables, "sandbox_configuration_bindings"]) {
+      await client.query(
+        `ALTER POLICY migrator_all ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.migratorRole)}`,
+      );
+    }
+    for (const table of managedSandboxControlTables) {
+      for (const policy of ["control_read", "control_insert"])
+        await client.query(
+          `ALTER POLICY ${policy} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.adminControlRole)}`,
+        );
+    }
+    await client.query(
+      `ALTER POLICY control_update ON ${schema}.sandbox_control_head TO ${quoteIdentifier(context.adminControlRole)}`,
+    );
+    for (const table of managedSandboxRuntimeTables.filter(
+      (table) => table !== "sandbox_provider_profiles",
+    ))
+      await client.query(
+        `ALTER POLICY runtime_read ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.runtimeRole)}`,
+      );
+    await client.query(`ALTER POLICY runtime_profile_read ON ${schema}.sandbox_provider_profiles TO ${quoteIdentifier(context.runtimeRole)};
+      ALTER POLICY runtime_binding_read ON ${schema}.sandbox_configuration_bindings TO ${quoteIdentifier(context.runtimeRole)};
+      ALTER POLICY runtime_binding_insert ON ${schema}.sandbox_configuration_bindings TO ${quoteIdentifier(context.runtimeRole)}`);
+  }
   if (await hasRunCompactionSettingsState(client, context.schema)) {
     await client.query(
       `ALTER POLICY run_compaction_settings_migrator_policy
@@ -2929,6 +2989,15 @@ async function grantAdminControlAccess(
   if (!(await hasAdminControlState(client, context.schema))) return;
   const schema = quoteIdentifier(context.schema);
   const control = quoteIdentifier(context.adminControlRole);
+  if (await hasManagedSandboxState(client, context.schema)) {
+    for (const table of managedSandboxControlTables)
+      await client.query(
+        `GRANT SELECT,INSERT ON ${schema}.${quoteIdentifier(table)} TO ${control}`,
+      );
+    await client.query(
+      `GRANT UPDATE(generation,routing_revision) ON ${schema}.sandbox_control_head TO ${control}`,
+    );
+  }
   await client.query(
     `GRANT USAGE ON SCHEMA ${schema} TO ${control};
      GRANT SELECT ON TABLE ${schema}.platform_control_operators TO ${control};
@@ -3206,6 +3275,13 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.admin_control_active_configs,
          ${schema}.admin_control_generation TO ${role};
        GRANT SELECT,INSERT ON TABLE ${schema}.run_runtime_config_snapshots TO ${role}`,
+    );
+  }
+  if (await hasManagedSandboxState(client, context.schema)) {
+    for (const table of managedSandboxRuntimeTables)
+      await client.query(`GRANT SELECT ON ${schema}.${quoteIdentifier(table)} TO ${role}`);
+    await client.query(
+      `GRANT SELECT,INSERT ON ${schema}.sandbox_configuration_bindings TO ${role}`,
     );
   }
   if (await hasRunCompactionSettingsState(client, context.schema)) {

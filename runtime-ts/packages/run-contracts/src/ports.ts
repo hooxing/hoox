@@ -4,9 +4,9 @@ import type {
   IsoTimestamp,
   ResourceId,
   ResourceVersionId,
-  RunPersonalizationSnapshot,
   Run,
   RunId,
+  RunPersonalizationSnapshot,
   RunStatus,
   Sha256Digest,
   TenantId,
@@ -898,7 +898,7 @@ export type ThreadSandboxTerminalReceiptV1 =
       readonly sessionId: string;
       readonly generation: number;
       readonly effectId: string;
-      readonly effectKind: "pause";
+      readonly effectKind: "pause" | "terminate";
     };
 
 export type ThreadSandboxAcquireResult =
@@ -917,8 +917,13 @@ export type ThreadSandboxAcquireResult =
 
 /** Provider 驱动不接触数据库；Thread lifecycle repository 独占 intent/receipt 与 lease。 */
 export interface ThreadSandboxProviderPort {
-  /** create intent 在远端调用前持久化，必须预先绑定部署级默认 Provider。 */
+  /** 未启用托管配置时使用部署级默认 Provider。 */
   readonly defaultProviderKey: SandboxProviderKey;
+  /** 在远端 create intent 前固定新实例配置；不允许在远端调用后重新选择供应商。 */
+  prepareCreate?(input: {
+    readonly scope: ExecutionScope;
+    readonly registryId: string;
+  }): Promise<{ readonly providerKey: SandboxProviderKey; readonly lifecycleTimeoutMs?: number }>;
   create(input: {
     readonly scope: ExecutionScope;
     readonly registryId: string;

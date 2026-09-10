@@ -4,10 +4,14 @@ import {
   type SandboxProviderRegistry,
   SandboxRuntimeError,
 } from "@hoox/sandbox";
+import type { ManagedSandboxGatewayResolver } from "./managed-sandbox-gateway.js";
 
 export interface SandboxCleanupResolver {
   settle(
-    input: Pick<CleanupClaim, "registryId" | "providerKey" | "providerSandboxId" | "disposition">,
+    input: Pick<
+      CleanupClaim,
+      "registryId" | "providerKey" | "providerSandboxId" | "disposition"
+    > & { readonly tenantId?: string },
   ): Promise<"settled" | "unknown">;
 }
 
@@ -31,18 +35,25 @@ export class SandboxCleanupRouterResolver implements SandboxCleanupResolver {
   constructor(
     private readonly providers: Pick<SandboxProviderRegistry, "require">,
     private readonly timeoutMs = 90_000,
+    private readonly managed?: Pick<ManagedSandboxGatewayResolver, "registry">,
   ) {}
 
   async settle(
-    input: Pick<CleanupClaim, "registryId" | "providerKey" | "providerSandboxId" | "disposition">,
+    input: Pick<
+      CleanupClaim,
+      "registryId" | "providerKey" | "providerSandboxId" | "disposition"
+    > & { readonly tenantId?: string },
   ): Promise<"settled" | "unknown"> {
     try {
-      const gateway = this.providers.require(input.providerKey);
+      const { gateway, timeoutMs } =
+        this.managed === undefined
+          ? { gateway: this.providers.require(input.providerKey), timeoutMs: this.timeoutMs }
+          : await this.managed.registry(input);
       const sandbox = await gateway.connect(input.providerSandboxId, {
-        timeoutMs: this.timeoutMs,
+        timeoutMs,
       });
-      if (input.disposition === "pause") await sandbox.pause({ timeoutMs: this.timeoutMs });
-      else await sandbox.kill({ timeoutMs: this.timeoutMs, ignoreNotFound: true });
+      if (input.disposition === "pause") await sandbox.pause({ timeoutMs });
+      else await sandbox.kill({ timeoutMs, ignoreNotFound: true });
       return "settled";
     } catch (error) {
       // close 的“不存在”意味着目标已不再占用资源；pause 不存在无法推断为已暂停。

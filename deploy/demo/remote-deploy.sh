@@ -134,6 +134,11 @@ rollback() {
 trap rollback EXIT
 
 compose pull api web admin-control admin-web trajectory scheduler worker migrate
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  --mount "type=bind,src=$shared_dir/admin-control.env,dst=/config/admin-control.env" \
+  --mount "type=bind,src=$shared_dir/worker.env,dst=/config/worker.env" \
+  --mount "type=bind,src=$shared_dir/scheduler.env,dst=/config/scheduler.env" \
+  "$image" node scripts/prepare-demo-sandbox-key.mjs
 compose up -d --force-recreate postgres minio
 compose --profile ops run --rm minio-init
 compose --profile ops run --rm migrate

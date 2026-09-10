@@ -38,6 +38,16 @@ function developmentEnvironment(): Record<string, string> {
 }
 
 describe("Scheduler 进程入口", () => {
+  it("托管沙箱使用共享加密根且凭据字段不会被环境筛选丢弃", () => {
+    const environment = {
+      ...developmentEnvironment(),
+      MODEL_CREDENTIAL_ENCRYPTION_KEY: "sandbox-placeholder-master-key-at-least-32",
+    };
+    const selected = selectSchedulerProcessEnvironment(environment);
+    expect(parseSchedulerProcessEnvironment(selected).credentialEncryptionKey).toBe(
+      environment.MODEL_CREDENTIAL_ENCRYPTION_KEY,
+    );
+  });
   it("腾讯云 AGS 与 E2B 使用独立配置，缺少 AGS 凭据时失败关闭", () => {
     const env = {
       ...productionEnvironment(),

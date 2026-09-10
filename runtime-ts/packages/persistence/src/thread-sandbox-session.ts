@@ -1,17 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type {
   ExecutionScope,
+  ThreadContinuityMetricsPort,
   ThreadSandboxAcquireResult,
   ThreadSandboxLeaseRefV1,
   ThreadSandboxProviderPort,
   ThreadSandboxSessionLifecyclePort,
   ThreadSandboxTerminalCommandV1,
   ThreadSandboxTerminalReceiptV1,
-  ThreadContinuityMetricsPort,
 } from "@hoox/run-contracts";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type { SandboxProviderKey } from "@hoox/sandbox";
 import type { Pool, PoolClient } from "pg";
+import { readSessionSandboxPolicy } from "./pg-sandbox-configuration.js";
 import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";
 
 interface SessionRow {
@@ -165,12 +166,18 @@ export async function applyThreadSandboxTerminal(
     };
   }
   const effectId = `sandbox-effect-${randomUUID()}`;
-  const operationId = `${input.attemptId}/sandbox/${input.command.sessionId}/terminal-pause`;
+  const policy = await readSessionSandboxPolicy(
+    client,
+    input.scope.tenantId,
+    input.command.sessionId,
+  );
+  const effectKind = policy?.idleAction === "kill" ? "terminate" : "pause";
+  const operationId = `${input.attemptId}/sandbox/${input.command.sessionId}/terminal-${effectKind}`;
   await client.query(
     `INSERT INTO sandbox_lifecycle_effects(
        tenant_id,effect_id,operation_id,request_digest,session_id,generation,effect_kind,state,
        run_id,attempt_id,provider_key,provider_sandbox_id,expected_session_state,created_at,updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,'pause','pending',$7,$8,$9,$10,'running',$11,$11)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6,$12,'pending',$7,$8,$9,$10,'running',$11,$11)`,
     [
       input.scope.tenantId,
       effectId,
@@ -183,6 +190,7 @@ export async function applyThreadSandboxTerminal(
       row.provider_key,
       row.provider_sandbox_id,
       input.databaseNow,
+      effectKind,
     ],
   );
   const session = await client.query(
@@ -206,7 +214,7 @@ export async function applyThreadSandboxTerminal(
     sessionId: input.command.sessionId,
     generation: input.command.generation,
     effectId,
-    effectKind: "pause",
+    effectKind,
   };
 }
 
@@ -564,7 +572,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       input.receipt.sessionId,
       input.receipt.generation,
       input.receipt.effectId,
-      "pause",
+      input.receipt.effectKind,
     ).catch(() => false);
     if (!started) return "not_owner";
     const result = await this.provider
@@ -572,7 +580,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         scope: input.scope,
         session: input.session,
         cleanupIntentId: input.receipt.effectId,
-        disposition: "pause",
+        disposition: input.receipt.effectKind === "pause" ? "pause" : "close",
       })
       .catch(() => ({ outcome: "unknown" as const }));
     const terminal = result.outcome === "settled" ? "succeeded" : "unknown";
@@ -581,7 +589,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       sessionId: input.receipt.sessionId,
       generation: input.receipt.generation,
       effectId: input.receipt.effectId,
-      effectKind: "pause",
+      effectKind: input.receipt.effectKind,
       terminal,
     }).catch(() => false);
     return terminal === "succeeded" && recorded ? "settled" : "unknown";
@@ -802,6 +810,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     const effectId = `sandbox-effect-${randomUUID()}`;
     const operationId = `${input.attemptId}/sandbox/create/${generation}`;
     try {
+      const selection = await this.provider.prepareCreate?.({ scope: input.scope, registryId });
       await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.scope.tenantId },
@@ -825,10 +834,10 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
               generation,
               input.scope.runId,
               input.attemptId,
-              this.provider.defaultProviderKey,
+              selection?.providerKey ?? this.provider.defaultProviderKey,
               `sandbox-create-claim-${randomUUID()}`,
               input.owner,
-              this.#transitionWaitMs,
+              Math.max(this.#transitionWaitMs, selection?.lifecycleTimeoutMs ?? 0),
             ],
           );
         },
@@ -1089,6 +1098,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     readonly terminal: "succeeded" | "unknown";
   }): Promise<boolean> {
     return withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
+      const policy = await readSessionSandboxPolicy(client, input.tenantId, input.sessionId);
       const resultingState =
         input.terminal === "unknown"
           ? "unknown"
@@ -1127,7 +1137,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
             input.sessionId,
             input.generation,
             input.effectId,
-            this.#pausedRetentionSeconds,
+            policy?.pausedRetentionSeconds ?? this.#pausedRetentionSeconds,
           ],
         );
         sessionRowCount = session.rowCount;
@@ -1137,8 +1147,8 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
               SET state='terminated',current_effect_id=NULL,terminated_at=clock_timestamp(),
                   updated_at=clock_timestamp()
             WHERE tenant_id=$1 AND session_id=$2 AND generation=$3
-              AND state IN ('running','paused')`,
-          [input.tenantId, input.sessionId, input.generation],
+              AND (state IN ('running','paused') OR (state='pausing' AND current_effect_id=$4))`,
+          [input.tenantId, input.sessionId, input.generation, input.effectId],
         );
         sessionRowCount = session.rowCount;
         await client.query(

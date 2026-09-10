@@ -1,9 +1,10 @@
-import { measureExecutionPhase, type ExecutionPhaseTimingObserver } from "@hoox/domain";
 import { randomUUID } from "node:crypto";
 import {
   DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
   DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
+  type ResolvedSandboxProfile,
 } from "@hoox/admin-control";
+import { type ExecutionPhaseTimingObserver, measureExecutionPhase } from "@hoox/domain";
 import type {
   PgClaimedRunDispatch,
   PgClaimedWorkerTenantAssignment,
@@ -29,8 +30,6 @@ import {
   CubeSandboxGateway,
   type E2BGatewayOptions,
   E2BSandboxGateway,
-  TencentAgsSandboxGateway,
-  type TencentAgsGatewayOptions,
   type OperationControl,
   type RuntimeSandboxGateway,
   type SandboxProviderKey,
@@ -38,6 +37,8 @@ import {
   type SandboxWorkspaceAdapterOptions,
   type SandboxWorkspacePort,
   type TenantResourceVolumePort,
+  type TencentAgsGatewayOptions,
+  TencentAgsSandboxGateway,
   type TrustedSandboxSessionCapability,
   type UncertainLifecycleEvent,
 } from "@hoox/sandbox";
@@ -686,16 +687,33 @@ function sandboxFailureCategory(error: unknown): string {
   return "unknown";
 }
 
-/** 部署级 Session Router；创建走默认 Provider，恢复与清理严格使用持久化 providerKey。 */
+export interface ManagedSandboxRegistryConfiguration {
+  readonly resolver: {
+    bind(input: {
+      tenantId: string;
+      registryId: string;
+    }): Promise<ResolvedSandboxProfile | undefined>;
+    resolve(input: {
+      tenantId: string;
+      registryId: string;
+    }): Promise<ResolvedSandboxProfile | undefined>;
+    activeProfiles(): Promise<readonly ResolvedSandboxProfile[] | undefined>;
+  };
+  readonly createRegistry: (profile: ResolvedSandboxProfile) => ProviderSandboxSessionRegistry;
+}
+
+/** 新实例按后端路由固定版本；恢复与清理使用持久绑定，未托管实例沿用部署配置。 */
 export class SandboxSessionRegistryRouter
   implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort, ThreadSandboxProviderPort
 {
   private readonly registries: ReadonlyMap<SandboxProviderKey, ProviderSandboxSessionRegistry>;
   private readonly workspaceOwners = new WeakMap<object, ProviderSandboxSessionRegistry>();
+  private readonly sessionOwners = new WeakMap<object, ProviderSandboxSessionRegistry>();
 
   constructor(
     readonly defaultProviderKey: SandboxProviderKey,
     registries: readonly ProviderSandboxSessionRegistry[],
+    private readonly managed?: ManagedSandboxRegistryConfiguration,
   ) {
     const indexed = new Map<SandboxProviderKey, ProviderSandboxSessionRegistry>();
     for (const registry of registries) {
@@ -713,49 +731,123 @@ export class SandboxSessionRegistryRouter
     return registry;
   }
 
-  probe(): Promise<void> {
-    return Promise.all([...this.registries.values()].map((registry) => registry.probe())).then(
-      () => undefined,
-    );
+  async probe(): Promise<void> {
+    const profiles = await this.managed?.resolver.activeProfiles();
+    const registries =
+      profiles === undefined
+        ? [...this.registries.values()]
+        : profiles.map((profile) => this.managedRegistry(profile));
+    return Promise.all(registries.map((registry) => registry.probe())).then(() => undefined);
   }
 
-  probeExecution(): Promise<void> {
-    return this.require(this.defaultProviderKey).probeExecution();
+  async probeExecution(): Promise<void> {
+    const profiles = await this.managed?.resolver.activeProfiles();
+    if (profiles === undefined) return this.require(this.defaultProviderKey).probeExecution();
+    for (const profile of profiles) await this.managedRegistry(profile).probeExecution();
   }
 
-  acquire(
+  private managedRegistry(profile: ResolvedSandboxProfile): ProviderSandboxSessionRegistry {
+    if (!this.managed) throw new Error("托管沙箱配置未装配");
+    const registry = this.managed.createRegistry(profile);
+    if (registry.gateway.providerKey !== profile.configuration.providerKey)
+      throw new Error("托管沙箱供应商身份不一致");
+    return registry;
+  }
+
+  async prepareCreate(input: { scope: ExecutionScope; registryId: string }) {
+    const profile = await this.managed?.resolver.bind({
+      tenantId: input.scope.tenantId,
+      registryId: input.registryId,
+    });
+    return profile === undefined
+      ? { providerKey: this.defaultProviderKey }
+      : {
+          providerKey: profile.configuration.providerKey,
+          lifecycleTimeoutMs: profile.configuration.policy.lifecycleTimeoutMs,
+        };
+  }
+
+  private async remember(
+    registry: ProviderSandboxSessionRegistry,
+    operation: Promise<SandboxAcquireResult | { readonly outcome: "not_found" }>,
+  ) {
+    const result = await operation;
+    if (result.outcome === "ready") this.sessionOwners.set(result.session, registry);
+    return result;
+  }
+
+  async acquire(
     input: Parameters<SandboxSessionRegistryPort["acquire"]>[0],
   ): Promise<SandboxAcquireResult> {
-    return this.require(this.defaultProviderKey).acquire(input);
+    if (this.managed) {
+      const registryId = `sandbox-registry-${randomUUID()}`;
+      const profile = await this.managed.resolver.bind({
+        tenantId: input.scope.tenantId,
+        registryId,
+      });
+      if (profile !== undefined) {
+        const registry = this.managedRegistry(profile);
+        const result = await this.remember(registry, registry.create({ ...input, registryId }));
+        if (result.outcome === "not_found") throw new Error("新建沙箱返回不存在");
+        return result;
+      }
+    }
+    const registry = this.require(this.defaultProviderKey);
+    const result = await this.remember(registry, registry.acquire(input));
+    if (result.outcome === "not_found") throw new Error("新建沙箱返回不存在");
+    return result;
   }
 
-  create(input: Parameters<ThreadSandboxProviderPort["create"]>[0]): Promise<SandboxAcquireResult> {
-    return this.require(this.defaultProviderKey).create(input);
+  async create(
+    input: Parameters<ThreadSandboxProviderPort["create"]>[0],
+  ): Promise<SandboxAcquireResult> {
+    const profile = await this.managed?.resolver.bind({
+      tenantId: input.scope.tenantId,
+      registryId: input.registryId,
+    });
+    const registry =
+      profile === undefined ? this.require(this.defaultProviderKey) : this.managedRegistry(profile);
+    const result = await this.remember(registry, registry.create(input));
+    if (result.outcome === "not_found") throw new Error("新建沙箱返回不存在");
+    return result;
   }
 
-  connect(
+  async connect(
     input: Parameters<ThreadSandboxProviderPort["connect"]>[0],
   ): Promise<SandboxAcquireResult | { readonly outcome: "not_found" }> {
-    return this.require(input.providerKey).connect(input);
+    const profile = await this.managed?.resolver.resolve({
+      tenantId: input.scope.tenantId,
+      registryId: input.registryId,
+    });
+    if (profile !== undefined && profile.configuration.providerKey !== input.providerKey)
+      throw new Error("持久沙箱供应商绑定不一致");
+    const registry =
+      profile === undefined ? this.require(input.providerKey) : this.managedRegistry(profile);
+    return this.remember(registry, registry.connect(input));
   }
 
   settle(
     input: Parameters<SandboxSessionRegistryPort["settle"]>[0],
   ): Promise<SandboxSettlementResult> {
-    return this.require(input.session.providerKey).settle(input);
+    return (
+      this.sessionOwners.get(input.session) ?? this.require(input.session.providerKey)
+    ).settle(input);
   }
 
   closeOrphan(
     input: Parameters<OrphanSandboxCleanupPort["closeOrphan"]>[0],
   ): Promise<SandboxSettlementResult> {
-    return this.require(input.session.providerKey).closeOrphan(input);
+    return (
+      this.sessionOwners.get(input.session) ?? this.require(input.session.providerKey)
+    ).closeOrphan(input);
   }
 
   workspaceCapability(input: {
     readonly scope: ExecutionScope;
     readonly session: SandboxSessionRef;
   }): TrustedSandboxSessionCapability {
-    const registry = this.require(input.session.providerKey);
+    const registry =
+      this.sessionOwners.get(input.session) ?? this.require(input.session.providerKey);
     const capability = registry.workspaceCapability(input);
     this.workspaceOwners.set(capability, registry);
     return capability;

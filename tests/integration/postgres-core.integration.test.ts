@@ -52,6 +52,10 @@ import {
   PgRenamePersonalThreadCommand,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import {
+  PgSandboxConfigurationResolver,
+  PgSandboxControlRepository,
+} from "../../runtime-ts/packages/persistence/src/pg-sandbox-configuration.js";
+import {
   createPostgresPool,
   type Pool,
   withTenantTransaction,
@@ -357,6 +361,206 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("托管沙箱配置验证权限、发布门禁、版本并发及实例绑定隔离", async () => {
+    const admin = await createFixture("sandbox_control_admin");
+    const viewer = await createFixture("sandbox_control_viewer");
+    const outsider = await createFixture("sandbox_control_outsider");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active'),($2,'viewer','active')",
+      [admin.user.id, viewer.user.id],
+    );
+    const cipher = new ModelProviderCredentialCipher(
+      "sandbox-test-placeholder-root-secret-at-least-32",
+    );
+    const control = new PgSandboxControlRepository(adminControlPool, cipher);
+    const resolver = new PgSandboxConfigurationResolver(runtimePool, cipher);
+    const configuration = {
+      providerKey: "tencent-ags" as const,
+      displayName: "测试沙箱",
+      endpoint: "sandbox.example.test",
+      policy: {
+        templateId: "test-template",
+        sessionTtlSeconds: 300,
+        operationTimeoutMs: 30000,
+        lifecycleTimeoutMs: 90000,
+        pausedRetentionSeconds: 600,
+        idleAction: "pause" as const,
+      },
+    };
+    const save = {
+      expectedGeneration: 0,
+      configuration,
+      apiKey: "sandbox-test-placeholder-api-key",
+    };
+    await expect(control.overview(outsider.user.id)).rejects.toMatchObject({
+      code: "NOT_AUTHORIZED",
+    });
+    await expect(control.saveProfile(viewer.user.id, save)).rejects.toMatchObject({
+      code: "NOT_AUTHORIZED",
+    });
+    expect(
+      await resolver.bind({ tenantId: admin.tenant.id, registryId: "legacy-registry" }),
+    ).toBeUndefined();
+    const profile = await control.saveProfile(admin.user.id, save);
+    expect(profile.probeStatus).toBe("untested");
+    expect(JSON.stringify(await control.overview(viewer.user.id))).not.toContain(save.apiKey);
+    await expect(control.saveProfile(admin.user.id, save)).rejects.toMatchObject({
+      code: "CONFLICT",
+    });
+    const routing = {
+      mode: "single" as const,
+      targets: [
+        { providerKey: configuration.providerKey, profileRevision: profile.revision, weight: 1 },
+      ],
+    };
+    await expect(
+      control.publishRouting(admin.user.id, { expectedGeneration: 1, configuration: routing }),
+    ).rejects.toMatchObject({ code: "PROBE_FAILED" });
+    const observed = await control.probeProfile(
+      admin.user.id,
+      configuration.providerKey,
+      profile.revision,
+      async (value, key) => {
+        expect(value.endpoint).toBe(configuration.endpoint);
+        expect(key).toBe(save.apiKey);
+      },
+    );
+    expect(observed.healthy).toBe(true);
+    await control.publishRouting(admin.user.id, { expectedGeneration: 2, configuration: routing });
+    const bound = await resolver.bind({
+      tenantId: admin.tenant.id,
+      registryId: "managed-registry",
+    });
+    expect(bound?.profileRevision).toBe(profile.revision);
+    expect(bound?.apiKey).toBe(save.apiKey);
+    expect(
+      await resolver.resolve({ tenantId: outsider.tenant.id, registryId: "managed-registry" }),
+    ).toBeUndefined();
+    const second = await control.saveProfile(admin.user.id, {
+      expectedGeneration: 3,
+      configuration: {
+        ...configuration,
+        endpoint: "other.example.test",
+        policy: { ...configuration.policy, idleAction: "kill" },
+      },
+      reuseCredentialFromRevision: profile.revision,
+    });
+    await control.probeProfile(
+      admin.user.id,
+      configuration.providerKey,
+      second.revision,
+      async () => undefined,
+    );
+    await control.publishRouting(admin.user.id, {
+      expectedGeneration: 5,
+      configuration: {
+        ...routing,
+        targets: [
+          { providerKey: configuration.providerKey, weight: 1, profileRevision: second.revision },
+        ],
+      },
+    });
+    expect(
+      (await resolver.resolve({ tenantId: admin.tenant.id, registryId: "managed-registry" }))
+        ?.configuration.endpoint,
+    ).toBe(configuration.endpoint);
+    expect(
+      (await resolver.bind({ tenantId: admin.tenant.id, registryId: "managed-registry" }))
+        ?.profileRevision,
+    ).toBe(profile.revision);
+    expect(
+      (await resolver.bind({ tenantId: admin.tenant.id, registryId: "new-registry" }))
+        ?.configuration.policy.idleAction,
+    ).toBe("kill");
+    const restarted = new PgSandboxConfigurationResolver(runtimePool, cipher);
+    expect(
+      (await restarted.resolve({ tenantId: admin.tenant.id, registryId: "managed-registry" }))
+        ?.configuration.endpoint,
+    ).toBe(configuration.endpoint);
+    await expect(
+      adminControlPool.query("UPDATE sandbox_provider_profiles SET configuration='{}'::jsonb"),
+    ).rejects.toBeDefined();
+    await expect(
+      runtimePool.query("UPDATE sandbox_control_head SET generation=100"),
+    ).rejects.toBeDefined();
+    await bootstrapRuntimeAccess(migratorPool, migrationSecurity);
+    expect((await control.overview(admin.user.id)).generation).toBe(6);
+    expect(
+      (await restarted.resolve({ tenantId: admin.tenant.id, registryId: "managed-registry" }))
+        ?.configuration.endpoint,
+    ).toBe(configuration.endpoint);
+    const concurrent = await Promise.allSettled([
+      control.saveProfile(admin.user.id, {
+        expectedGeneration: 6,
+        configuration: {
+          ...configuration,
+          providerKey: "cube",
+          endpoint: "http://cube.example.test:8080",
+          cubeProxy: { host: "proxy.example.test", port: 8443, scheme: "https" },
+        },
+      }),
+      control.saveProfile(admin.user.id, {
+        expectedGeneration: 6,
+        configuration: {
+          ...configuration,
+          providerKey: "cube",
+          endpoint: "http://cube.example.test:8080",
+          cubeProxy: { host: "proxy.example.test", port: 8443, scheme: "https" },
+        },
+      }),
+    ]);
+    expect(concurrent.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = concurrent.find((result) => result.status === "rejected");
+    expect(rejected?.status === "rejected" && rejected.reason.code).toBe("CONFLICT");
+    const cube = (await control.overview(admin.user.id)).profiles.find(
+      (value) => value.configuration.providerKey === "cube",
+    );
+    if (!cube) throw new Error("缺少测试 Cube 配置");
+    expect(cube.configuration.cubeProxy).toEqual({
+      host: "proxy.example.test",
+      port: 8443,
+      scheme: "https",
+    });
+    await control.probeProfile(admin.user.id, "cube", cube.revision, async () => undefined);
+    await control.publishRouting(admin.user.id, {
+      expectedGeneration: 8,
+      configuration: {
+        mode: "single",
+        targets: [{ providerKey: "cube", profileRevision: cube.revision, weight: 1 }],
+      },
+    });
+    expect(
+      (await resolver.bind({ tenantId: admin.tenant.id, registryId: "after-switch" }))
+        ?.configuration.providerKey,
+    ).toBe("cube");
+    expect(
+      (await restarted.resolve({ tenantId: admin.tenant.id, registryId: "managed-registry" }))
+        ?.configuration.providerKey,
+    ).toBe("tencent-ags");
+    await control.publishRouting(admin.user.id, {
+      expectedGeneration: 9,
+      configuration: {
+        mode: "weighted",
+        targets: [
+          { providerKey: "tencent-ags", profileRevision: second.revision, weight: 1 },
+          { providerKey: "cube", profileRevision: cube.revision, weight: 3 },
+        ],
+      },
+    });
+    const allocations = await Promise.all(
+      Array.from({ length: 80 }, (_, index) =>
+        resolver.bind({ tenantId: admin.tenant.id, registryId: `weighted-${index}` }),
+      ),
+    );
+    const counts: Record<string, number> = {};
+    for (const item of allocations) {
+      const providerKey = item?.configuration.providerKey ?? "missing";
+      counts[providerKey] = (counts[providerKey] ?? 0) + 1;
+    }
+    expect(counts["tencent-ags"]).toBeGreaterThan(5);
+    expect(counts.cube).toBeGreaterThan(counts["tencent-ags"] ?? 0);
+  }, 120000);
+
   it("AGS Provider 迁移覆盖六个持久边界并支持无数据回退", async () => {
     const target = await createIsolatedMigrationTarget("ags_provider");
     const constraints = async () =>

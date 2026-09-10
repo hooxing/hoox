@@ -93,7 +93,7 @@ production 示例是字段合集，不是共享 env 文件。部署平台应至�
 | 服务 | 必需类别 | 不应获得 |
 | --- | --- | --- |
 | API | PostgreSQL、Better Auth 根秘密、JWT 兼容身份、S3 下载签名、TLS/公开 origin | 模型密钥、Sandbox 执行密钥、MinIO root、迁移器凭据 |
-| Scheduler | PostgreSQL、Sandbox 生命周期、标题模型（启用时） | S3 读写密钥、主模型密钥、API JWT 私钥 |
+| Scheduler | PostgreSQL、Sandbox 生命周期、托管沙箱共享加密根、标题模型（启用时） | S3 读写密钥、主模型调用密钥、API JWT 私钥 |
 | Agent Worker | PostgreSQL、S3、Sandbox、主模型 | API 身份签名私钥、Admin 管理凭据 |
 | Admin API | 独立管理身份、Admin Control PG、与 API 同值的 Better Auth 根秘密、Skill Publisher PG 与发布对象存储凭据 | 普通 Runtime 的其他全量秘密 |
 
@@ -120,6 +120,14 @@ corepack pnpm config:check:production
 ```
 
 配置错误只能输出变量名和稳定分类，不得输出值。提交前确认 `git status` 中没有 `.env`、证书、私钥、报文轨迹、数据库导出或对象存储数据。
+
+## 后台沙箱配置
+
+后台“沙箱服务”支持管理 `cube`、`e2b`、`tencent-ags`，保存连接地址、密钥、模板和独立运行策略。E2B 与 AGS 的地址为不含协议和路径的域名；Cube 使用完整服务 URL。凭据留空可复用该供应商已有配置版本的密文，不回显密钥。
+
+管理员保存版本、测试连接后，选择单供应商或按权重分配并点击“应用分配”；新实例开始使用新配置，旧实例保持创建时的版本。测试会真实创建并释放沙箱。策略包含 TTL、操作超时、创建/恢复超时、暂停保留时间和空闲暂停/销毁，边界见 [Sandbox Provider](../architecture/sandbox-providers.md#后台配置与分配)。
+
+Admin Control API、Worker 和 Scheduler 必须使用同一个稳定的 `MODEL_CREDENTIAL_ENCRYPTION_KEY`。该根密钥同时保护模型、记忆和沙箱凭据，需要备份；Scheduler 不应接收主模型调用密钥作为替代。未配置加密根的 Scheduler 在需要读取加密沙箱配置时失败关闭。历史环境配置继续用于尚未托管的实例；从新建池移除供应商不应删除其历史连接配置。
 
 ## 腾讯云 AGS
 

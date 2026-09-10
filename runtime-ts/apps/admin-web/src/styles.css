@@ -3015,6 +3015,75 @@ a {
   overflow-x: auto;
 }
 
+.sandbox-configuration .control-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.sandbox-configuration fieldset {
+  border: 0;
+  padding: 0;
+  margin: 16px 0 0;
+  min-width: 0;
+}
+
+.sandbox-configuration p {
+  color: #66736b;
+  line-height: 1.7;
+}
+
+.sandbox-configuration button,
+.sandbox-configuration select {
+  min-height: 38px;
+  border: 1px solid #dce2de;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font: inherit;
+}
+
+.sandbox-configuration button {
+  cursor: pointer;
+}
+
+.sandbox-configuration button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.sandbox-configuration .table-scroll {
+  overflow-x: auto;
+  margin-top: 16px;
+}
+
+.sandbox-configuration td {
+  vertical-align: middle;
+}
+
+.sandbox-configuration td:first-child {
+  min-width: 72px;
+}
+
+.sandbox-configuration td:last-child {
+  white-space: nowrap;
+  font: inherit;
+}
+
+.sandbox-configuration td:last-child button {
+  margin-left: 12px;
+}
+
+.sandbox-configuration input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+.sandbox-configuration td input[type="number"] {
+  width: 84px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

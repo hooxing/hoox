@@ -70,6 +70,16 @@ describe("后端沙箱配置", () => {
     ).toThrow();
   });
   it("单供应商切换只选择明确目标", () => {
+    const cubeProxy = { host: "proxy.example.test", port: 8443, scheme: "https" as const };
+    expect(
+      normalizeSandboxProviderProfile({
+        ...profile,
+        providerKey: "cube",
+        endpoint: "https://cube.example.test",
+        cubeProxy,
+      }).cubeProxy,
+    ).toEqual(cubeProxy);
+    expect(() => normalizeSandboxProviderProfile({ ...profile, cubeProxy })).toThrow();
     const target = routing.targets[1];
     expect(selectSandboxRoutingTarget({ mode: "single", targets: [target] }, "allocation")).toEqual(
       target,

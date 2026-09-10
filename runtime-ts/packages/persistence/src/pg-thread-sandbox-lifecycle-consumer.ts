@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type { SandboxProviderKey } from "@hoox/sandbox";
 import type { Pool } from "pg";
+import { readSessionSandboxPolicy } from "./pg-sandbox-configuration.js";
 import { withTenantTransaction } from "./postgres.js";
 
 export interface ThreadSandboxLifecycleClaim {
@@ -303,6 +304,7 @@ export class PgThreadSandboxLifecycleConsumerStore {
         );
         let sessionRowCount: number | null;
         if (resolution === "paused") {
+          const policy = await readSessionSandboxPolicy(client, claim.tenantId, claim.sessionId);
           const session = await client.query(
             `UPDATE thread_sandbox_sessions
                 SET state='paused',current_effect_id=NULL,paused_at=clock_timestamp(),
@@ -315,7 +317,7 @@ export class PgThreadSandboxLifecycleConsumerStore {
               claim.sessionId,
               claim.generation,
               claim.effectId,
-              this.pausedRetentionSeconds,
+              policy?.pausedRetentionSeconds ?? this.pausedRetentionSeconds,
             ],
           );
           sessionRowCount = session.rowCount;

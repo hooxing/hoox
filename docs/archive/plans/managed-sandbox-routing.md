@@ -1,8 +1,8 @@
 # 后台 Sandbox 配置与 Demo 验收
 
-状态：进行中。目标是后台管理配置、切换或同时分配多个供应商、按供应商配置运行策略，完整验证后部署 Demo。
+状态：已完成。目标是后台管理配置、切换或同时分配多个供应商、按供应商配置运行策略，完整验证后部署 Demo；全部实施与验收项已收口，当前行为见 [Sandbox Provider](../../architecture/sandbox-providers.md)。
 
-决策见 [后端管理 Sandbox 供应商配置](../decisions/20260910005916-managed-sandbox-routing.md)。当前运行契约仍以 [Sandbox Provider](../architecture/sandbox-providers.md) 为准；本计划中的未完成项不代表已支持。
+决策见 [后端管理 Sandbox 供应商配置](../../decisions/20260910005916-managed-sandbox-routing.md)。当前运行契约仍以 [Sandbox Provider](../../architecture/sandbox-providers.md) 为准；本计划中的未完成项不代表已支持。
 
 ## 实施与验收
 
@@ -15,8 +15,8 @@
 - [x] 提交并通过 CI，部署 Demo；验证管理界面与真实任务，Scheduler 按策略暂停工作区。
 - [x] 在 Demo 发布托管供应商配置，验收托管路径的实例版本绑定、切换与按权重分配。
 - [x] 定位腾讯云 AGS 真实任务失败原因：受控快照物化逐文件串行写、单个大请求停顿即整轮失败。
-- [ ] 在香港地域新建 AGS 沙箱工具并在 Demo 复验真实任务：上海地域从部署主机到数据面的路径在约 20 余次请求后停止投递，三级降级到 256KiB 仍无法通过，详见[验收记录](../verification/2026-09-10-managed-sandbox-routing.md#后续定位ags-失败是部署主机到数据面的链路问题)。该步骤需要在腾讯云控制台登录后创建地域内的沙箱工具。
+- [x] 在香港地域新建 AGS 沙箱工具并在 Demo 复验真实任务：香港 `hoox-ags-hk` 从 Demo 后台探测 8.8 秒，真实任务返回 `42` 与 `Linux`；随后 E2B + AGS 香港 1:1 权重分配在 3 个新会话上分布为 2:1，三个任务全部成功。上海地域从该部署主机到数据面的路径不可用，不作为新建池目标。
 
-证据见[托管 Sandbox 供应商路由验收](../verification/2026-09-10-managed-sandbox-routing.md)；腾讯云 AGS 接入期实测见[腾讯云 AGS 上海实测](../verification/2026-09-10-tencent-ags-smoke.md)。
+证据见[托管 Sandbox 供应商路由验收](../../verification/2026-09-10-managed-sandbox-routing.md)；腾讯云 AGS 接入期实测见[腾讯云 AGS 上海实测](../../verification/2026-09-10-tencent-ags-smoke.md)。
 
 本地 PG、MinIO 和既有 Sandbox 继续通过 uu 映射使用，不在此电脑另起基础设施。测试和日志不得泄漏配置凭据。

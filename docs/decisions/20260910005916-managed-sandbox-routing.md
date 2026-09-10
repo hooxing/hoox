@@ -1,6 +1,6 @@
 # 后端管理 Sandbox 供应商配置与版本固定
 
-- 状态：已接受。2026-09-10 随 Demo 发布部署；Demo 尚未发布托管配置。
+- 状态：已接受。2026-09-10 随 Demo 发布部署，并已发布托管供应商配置：E2B 单供应商；AGS 探测通过但因资源配置吞吐未加入新实例池。
 - 部分替代：[0177](0177-sandbox-provider-persistence-and-routing.md) 和 [AGS 接入](20260909174703-tencent-ags-provider.md) 中仅通过部署环境配置新实例供应商的结论
 - 保留：供应商身份隔离、UNKNOWN 对账、禁止跨供应商重放副作用、ResourceFS 安全边界
 

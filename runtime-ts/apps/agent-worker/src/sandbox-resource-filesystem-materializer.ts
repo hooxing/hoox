@@ -15,6 +15,12 @@ const DEFAULT_MAX_FILES = 512;
 const DEFAULT_MAX_TOTAL_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MAX_SINGLE_FILE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
+// 部署主机到供应商数据面的链路可能丢包或长时间停顿：单个大请求一旦卡住就会让整轮准备失败。
+// 因此大文件拆成有界分块、每块独立重试，并用有界并发压缩总时长。
+const DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024;
+const DEFAULT_WRITE_ATTEMPTS = 3;
+const DEFAULT_WRITE_CONCURRENCY = 4;
+const DEFAULT_WRITE_ATTEMPT_TIMEOUT_MS = 30_000;
 const MAX_SKILL_DEPTH = 258;
 const CONTROL_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 
@@ -37,6 +43,10 @@ interface SnapshotLimits {
   readonly maxTotalBytes?: number;
   readonly maxSingleFileBytes?: number;
   readonly commandTimeoutMs?: number;
+  readonly chunkBytes?: number;
+  readonly writeAttempts?: number;
+  readonly writeConcurrency?: number;
+  readonly writeAttemptTimeoutMs?: number;
 }
 
 interface ManagedResourceFilesystemDependencies {
@@ -59,6 +69,10 @@ export class ManagedResourceFilesystemSnapshotMaterializer
   private readonly maxTotalBytes: number;
   private readonly maxSingleFileBytes: number;
   private readonly commandTimeoutMs: number;
+  private readonly chunkBytes: number;
+  private readonly writeAttempts: number;
+  private readonly writeConcurrency: number;
+  private readonly writeAttemptTimeoutMs: number;
 
   constructor(
     private readonly dependencies: ManagedResourceFilesystemDependencies,
@@ -75,6 +89,22 @@ export class ManagedResourceFilesystemSnapshotMaterializer
       limits.commandTimeoutMs,
       DEFAULT_COMMAND_TIMEOUT_MS,
       "命令超时",
+    );
+    this.chunkBytes = positiveLimit(limits.chunkBytes, DEFAULT_CHUNK_BYTES, "分块字节数");
+    this.writeAttempts = positiveLimit(
+      limits.writeAttempts,
+      DEFAULT_WRITE_ATTEMPTS,
+      "写入尝试次数",
+    );
+    this.writeConcurrency = positiveLimit(
+      limits.writeConcurrency,
+      DEFAULT_WRITE_CONCURRENCY,
+      "写入并发度",
+    );
+    this.writeAttemptTimeoutMs = positiveLimit(
+      limits.writeAttemptTimeoutMs,
+      DEFAULT_WRITE_ATTEMPT_TIMEOUT_MS,
+      "写入单次超时",
     );
   }
 
@@ -102,13 +132,7 @@ export class ManagedResourceFilesystemSnapshotMaterializer
         input.signal,
         this.commandTimeoutMs,
       );
-      for (const file of snapshot.files) {
-        assertNotAborted(input.signal);
-        await input.sandbox.writeFile(stagingPath(staging, file.path), file.body, {
-          signal: input.signal,
-          timeoutMs: this.commandTimeoutMs,
-        });
-      }
+      await this.writeSnapshotFiles(input.sandbox, staging, snapshot.files, input.signal);
       await verifyFiles(
         input.sandbox,
         staging,
@@ -128,6 +152,93 @@ export class ManagedResourceFilesystemSnapshotMaterializer
         .catch(() => undefined);
       throw error;
     }
+  }
+
+  /**
+   * 有界并发写出全部快照文件。任一次写入在重试后仍失败就让其余写入自然收尾，再抛出首个失败，
+   * 避免清理 staging 之后仍有写入落回远端目录。
+   */
+  private async writeSnapshotFiles(
+    sandbox: SandboxHandle,
+    staging: string,
+    files: readonly SnapshotFile[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    const pending = [...files];
+    let failure: unknown;
+    const worker = async () => {
+      for (;;) {
+        if (failure !== undefined) return;
+        assertNotAborted(signal);
+        const file = pending.shift();
+        if (file === undefined) return;
+        try {
+          await this.writeSnapshotFile(sandbox, stagingPath(staging, file.path), file.body, signal);
+        } catch (error) {
+          failure ??= error;
+          return;
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(this.writeConcurrency, pending.length) }, () => worker()),
+    );
+    if (failure !== undefined) throw failure;
+  }
+
+  private async writeSnapshotFile(
+    sandbox: SandboxHandle,
+    path: string,
+    body: Uint8Array,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (body.byteLength <= this.chunkBytes) {
+      await this.writeChunkWithRetry(sandbox, path, body, signal);
+      return;
+    }
+    const parts: string[] = [];
+    for (
+      let offset = 0, index = 0;
+      offset < body.byteLength;
+      offset += this.chunkBytes, index += 1
+    ) {
+      const part = `${path}.hooxpart-${index}`;
+      await this.writeChunkWithRetry(
+        sandbox,
+        part,
+        body.subarray(offset, Math.min(offset + this.chunkBytes, body.byteLength)),
+        signal,
+      );
+      parts.push(part);
+    }
+    const quoted = parts.map(shellSingleQuote);
+    const assembled = await sandbox.command(
+      `set -eu
+cat ${quoted.join(" ")} > ${shellSingleQuote(path)}
+rm -f ${quoted.join(" ")}`,
+      { signal, timeoutMs: this.commandTimeoutMs },
+    );
+    if (assembled.exitCode !== 0) throw new Error("E2B ResourceFS 分块快照合并失败");
+  }
+
+  private async writeChunkWithRetry(
+    sandbox: SandboxHandle,
+    path: string,
+    body: Uint8Array,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const timeoutMs = Math.min(this.writeAttemptTimeoutMs, this.commandTimeoutMs);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= this.writeAttempts; attempt += 1) {
+      assertNotAborted(signal);
+      try {
+        await sandbox.writeFile(path, body, { signal, timeoutMs });
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError ?? new Error("E2B ResourceFS 快照写入失败");
   }
 
   private async buildSnapshot(

@@ -38,7 +38,15 @@ function resource(pathName: string, body: Uint8Array): ResourceFilesystemFile {
   });
 }
 
-function harness(input: { readonly maxFiles?: number } = {}) {
+function harness(
+  input: {
+    readonly maxFiles?: number;
+    readonly chunkBytes?: number;
+    readonly writeAttempts?: number;
+    readonly writeConcurrency?: number;
+    readonly writeAttemptTimeoutMs?: number;
+  } = {},
+) {
   const resourceBody = new TextEncoder().encode("resource-body");
   const skillBody = new TextEncoder().encode("skill-body");
   const writes: { path: string; body: Uint8Array }[] = [];
@@ -145,6 +153,67 @@ describe("E2B ResourceFS 受控快照物化", () => {
       "ensure_root_link /thread-files '/resources/.thread-files/thread-e2b-resourcefs/files'",
     );
     expect(JSON.stringify({ paths, commands: h.commands })).not.toContain("opaque-e2b-key");
+  });
+
+  it("大文件拆成有界分块写入，再在远端合并为最终路径", async () => {
+    const h = harness({ chunkBytes: 4, writeConcurrency: 1 });
+    await h.materializer.materialize({
+      scope,
+      sandbox: h.sandbox,
+      signal: new AbortController().signal,
+    });
+
+    const writes = h.writes.filter((item) => item.path.includes(".hooxpart-"));
+    expect(writes.length).toBeGreaterThan(0);
+    const resourceParts = writes
+      .filter((item) => item.path.includes("/resource-e2b/version-e2b/资料.txt.hooxpart-"))
+      .sort((left, right) => left.path.localeCompare(right.path));
+    expect(resourceParts.length).toBe(Math.ceil(13 / 4));
+    const assembled = Buffer.concat(resourceParts.map((item) => Buffer.from(item.body))).toString();
+    expect(assembled).toBe("resource-body");
+    // 最终路径只能由远端合并产生，不能由一次大请求直接写出。
+    expect(h.writes.some((item) => item.path.endsWith("/version-e2b/资料.txt"))).toBe(false);
+    expect(h.commands.join("\n")).toContain("cat ");
+    expect(h.commands.join("\n")).toContain("rm -f ");
+  });
+
+  it("写入瞬时失败会重试并最终成功", async () => {
+    const h = harness({ writeAttempts: 3, writeConcurrency: 1 });
+    const inner = h.sandbox.writeFile.getMockImplementation();
+    if (inner === undefined) throw new Error("测试夹具缺少 writeFile 实现");
+    let failedOnce = false;
+    h.sandbox.writeFile.mockImplementation(async (path: string, body: string | Uint8Array) => {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new Error("数据面停顿");
+      }
+      return inner(path, body);
+    });
+
+    await h.materializer.materialize({
+      scope,
+      sandbox: h.sandbox,
+      signal: new AbortController().signal,
+    });
+
+    expect(failedOnce).toBe(true);
+    expect(h.sandbox.writeFile.mock.calls.length).toBeGreaterThan(h.writes.length);
+  });
+
+  it("写入重试耗尽后失败关闭并清理 staging", async () => {
+    const h = harness({ writeAttempts: 2, writeConcurrency: 1 });
+    h.sandbox.writeFile.mockRejectedValue(new Error("数据面停顿"));
+
+    await expect(
+      h.materializer.materialize({
+        scope,
+        sandbox: h.sandbox,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("数据面停顿");
+
+    expect(h.sandbox.writeFile).toHaveBeenCalledTimes(2);
+    expect(h.commands.join("\n")).toContain("rm -rf --");
   });
 
   it("超过快照文件上限时在写远端前失败关闭", async () => {

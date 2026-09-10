@@ -2095,6 +2095,19 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       );
       expect(stored.rows[0]?.state).toBe(idleAction === "pause" ? "paused" : "terminated");
       if (idleAction === "pause") expect(Number(stored.rows[0]?.retention)).toBeCloseTo(123, 1);
+      await migrator.query("DELETE FROM sandbox_configuration_bindings WHERE routing_revision=$1", [
+        profileRevision,
+      ]);
+      await migrator.query("DELETE FROM sandbox_routing_targets WHERE routing_revision=$1", [
+        profileRevision,
+      ]);
+      await migrator.query("DELETE FROM sandbox_routing_revisions WHERE revision=$1", [
+        profileRevision,
+      ]);
+      await migrator.query(
+        "DELETE FROM sandbox_provider_profiles WHERE provider_key='cube' AND revision=$1",
+        [profileRevision],
+      );
     },
   );
 

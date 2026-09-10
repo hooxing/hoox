@@ -299,6 +299,8 @@
 | [ADR-20260908104231：浏览器优先的文件预览与固定版本选区引用](20260908104231-browser-file-preview-and-versioned-references.md) | 已接受 | 2026-09-08 |
 
 | [ADR-20260909174703：腾讯云 AGS 独立 Provider 与受限生命周期](20260909174703-tencent-ags-provider.md) | 部分已替代 | 2026-09-09 |
-| [后端管理 Sandbox 供应商配置与版本固定](20260910005916-managed-sandbox-routing.md) | 已接受（实施中） | 2026-09-10 |
+| [后端管理 Sandbox 供应商配置与版本固定](20260910005916-managed-sandbox-routing.md) | 已接受 | 2026-09-10 |
+| [ResourceFS 受控快照的分块重试与有界并发写入](20260910191159-resourcefs-snapshot-chunked-write.md) | 已接受 | 2026-09-10 |
+| [受控快照分块在链路失败时自动降级](20260910202709-resourcefs-snapshot-adaptive-chunk-downshift.md) | 已接受 | 2026-09-10 |
 
 </details>

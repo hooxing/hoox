@@ -15,7 +15,7 @@
 - [x] 提交并通过 CI，部署 Demo；验证管理界面与真实任务，Scheduler 按策略暂停工作区。
 - [x] 在 Demo 发布托管供应商配置，验收托管路径的实例版本绑定、切换与按权重分配。
 - [x] 定位腾讯云 AGS 真实任务失败原因：受控快照物化逐文件串行写、单个大请求停顿即整轮失败。
-- [ ] 在 Demo 复验 AGS 真实任务；通过后把 AGS 加入新实例池，恢复多供应商分配。
+- [ ] 在香港地域新建 AGS 沙箱工具并在 Demo 复验真实任务：上海地域从部署主机到数据面的路径在约 20 余次请求后停止投递，详见[验收记录](../verification/2026-09-10-managed-sandbox-routing.md#后续定位ags-失败是部署主机到数据面的链路问题)。
 
 证据见[托管 Sandbox 供应商路由验收](../verification/2026-09-10-managed-sandbox-routing.md)；腾讯云 AGS 接入期实测见[腾讯云 AGS 上海实测](../verification/2026-09-10-tencent-ags-smoke.md)。
 

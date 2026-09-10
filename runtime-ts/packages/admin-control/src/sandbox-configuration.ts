@@ -15,6 +15,11 @@ export interface SandboxProviderProfile {
   readonly providerKey: ManagedSandboxProviderKey;
   readonly displayName: string;
   readonly endpoint: string;
+  readonly cubeProxy?: {
+    readonly host: string;
+    readonly port: number;
+    readonly scheme: "http" | "https";
+  };
   readonly credentialConfigured: boolean;
   readonly policy: SandboxProviderPolicy;
 }
@@ -23,6 +28,21 @@ export interface SandboxProviderProfileRevision {
   readonly revision: number;
   readonly configuration: SandboxProviderProfile;
   readonly createdAt: string;
+  readonly probeStatus: "untested" | "healthy" | "failed";
+}
+
+export interface SaveSandboxProviderProfile {
+  readonly expectedGeneration: number;
+  readonly configuration: Omit<SandboxProviderProfile, "credentialConfigured">;
+  readonly apiKey?: string;
+  readonly reuseCredentialFromRevision?: number;
+}
+
+export interface ResolvedSandboxProfile {
+  readonly profileRevision: number;
+  readonly routingRevision: number;
+  readonly configuration: SandboxProviderProfile;
+  readonly apiKey?: string;
 }
 
 export interface SandboxRoutingTarget {
@@ -40,6 +60,23 @@ export interface SandboxControlConfiguration {
   readonly generation: number;
   readonly routing: SandboxRoutingConfiguration | undefined;
   readonly profiles: readonly SandboxProviderProfileRevision[];
+}
+
+export interface SandboxControlServicePort {
+  overview(userId: string): Promise<SandboxControlConfiguration>;
+  saveProfile(
+    userId: string,
+    input: SaveSandboxProviderProfile,
+  ): Promise<SandboxProviderProfileRevision>;
+  publishRouting(
+    userId: string,
+    input: { expectedGeneration: number; configuration: SandboxRoutingConfiguration },
+  ): Promise<void>;
+  probeProfile(
+    userId: string,
+    providerKey: ManagedSandboxProviderKey,
+    revision: number,
+  ): Promise<{ healthy: boolean; durationMs: number }>;
 }
 
 export function normalizeSandboxProviderProfile(
@@ -70,18 +107,36 @@ export function normalizeSandboxProviderProfile(
   }
   if (typeof input.credentialConfigured !== "boolean") throw new TypeError("沙箱凭据状态无效");
   const policy = input.policy;
+  const proxy = input.cubeProxy;
+  if (
+    proxy &&
+    (providerKey !== "cube" ||
+      !/^[a-z0-9.-]+$/i.test(proxy.host) ||
+      !["http", "https"].includes(proxy.scheme))
+  )
+    throw new TypeError("Cube 代理地址无效");
   if (!policy || !["pause", "kill"].includes(policy.idleAction))
     throw new TypeError("沙箱空闲策略无效");
   return Object.freeze({
     providerKey,
     displayName,
     endpoint,
+    ...(proxy
+      ? {
+          cubeProxy: Object.freeze({
+            host: text(proxy.host, 253),
+            port: integer(proxy.port, 1, 65535),
+            scheme: proxy.scheme,
+          }),
+        }
+      : {}),
     credentialConfigured: input.credentialConfigured,
     policy: Object.freeze({
       templateId: text(policy.templateId, 255),
       sessionTtlSeconds: integer(policy.sessionTtlSeconds, 1, 86400),
       operationTimeoutMs: integer(policy.operationTimeoutMs, 1000, 600000),
-      lifecycleTimeoutMs: integer(policy.lifecycleTimeoutMs, 1000, 600000),
+      // Scheduler 一次连接加一次生命周期调用必须落在最短 210 秒租约内，预留 30 秒写回。
+      lifecycleTimeoutMs: integer(policy.lifecycleTimeoutMs, 1000, 90000),
       pausedRetentionSeconds: integer(policy.pausedRetentionSeconds, 0, 2592000),
       idleAction: policy.idleAction,
     }),

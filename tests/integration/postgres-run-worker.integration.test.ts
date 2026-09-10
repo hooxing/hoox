@@ -1,5 +1,11 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+  InMemoryCredentialStore,
+} from "@earendil-works/pi-ai";
+import {
   createPersonalTenant,
   createRun,
   createThread,
@@ -33,17 +39,7 @@ import {
   runtimeMutationDigest,
 } from "@hoox/run-contracts/mutation-protocol";
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
-import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
-import { performWorkerMaintenance } from "../../runtime-ts/apps/agent-worker/src/worker-maintenance.js";
-import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createModels } from "@earendil-works/pi-ai";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import {
-  PgRunEventWakeListener,
-  RUN_EVENT_WAKE_CHANNEL,
-  runEventWakeKey,
-} from "../../runtime-ts/packages/persistence/src/pg-run-event-wake.js";
-import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
 import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
 import {
@@ -53,6 +49,7 @@ import {
   FakeRecoveryMetrics,
   FakeRevisionVerifier,
 } from "../../runtime-ts/apps/agent-worker/src/testing/fakes.js";
+import { performWorkerMaintenance } from "../../runtime-ts/apps/agent-worker/src/worker-maintenance.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
@@ -62,6 +59,7 @@ import {
   CubeSandboxCleanupResolver,
   SandboxCleanupConsumer,
 } from "../../runtime-ts/apps/scheduler/src/sandbox-cleanup-consumer.js";
+import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
 import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
@@ -75,6 +73,11 @@ import {
   PgRunDispatchCreation,
   PgRunDispatchOutbox,
 } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
+import {
+  PgRunEventWakeListener,
+  RUN_EVENT_WAKE_CHANNEL,
+  runEventWakeKey,
+} from "../../runtime-ts/packages/persistence/src/pg-run-event-wake.js";
 import {
   PgBackedSandboxSessionRegistry,
   PgExecutionPersistence,
@@ -100,6 +103,7 @@ import {
   withTenantTransaction,
   withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
 import {
   isThreadV2ReadEnabled,
@@ -1690,316 +1694,139 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     expect(injected.rejectionCount()).toBe(1);
   });
 
-  it("阶段 5 在真实 PG 并发 terminal/follow-up 只产生 handoff 或 pause intent，且复用同一 Sandbox", async () => {
-    const f = await serialQueueFixture(`sandbox-session-${suffix}`);
-    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
-    const sandboxPersistence = new PgExecutionPersistence(runtime, {
-      threadSandboxSessionReuseEnabled: true,
-      threadSandboxHandoffLeaseMs: 30_000,
-    });
-    const gateway = new FakeSandboxGateway();
-    const lifecycle = new PgThreadSandboxSessionLifecycle(
-      runtime,
-      fakeThreadSandboxProvider(gateway),
-      { pausedRetentionSeconds: 600, transitionWaitMs: 1_000 },
-    );
-    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
-    const runA = createRun({ id: runId(`sandbox-a-${suffix}`), thread: f.thread, now });
-    const runB = createRun({ id: runId(`sandbox-b-${suffix}`), thread: f.thread, now });
-    await expect(
-      creation.createQueuedRun({
-        scope: f.tenantScope,
-        run: runA,
-        thread: f.thread,
-        inputText: "Sandbox Session 输入 1",
-        idempotency: {
-          key: `sandbox-session-key-${suffix}-0`,
-          requestHash: requestDigest("Sandbox Session 输入 1"),
-        },
-      }),
-    ).resolves.toMatchObject({ outcome: "created" });
+  it.each(["pause", "kill"] as const)(
+    "阶段 5 并发 handoff 与绑定配置的 %s 终态策略",
+    async (idleAction) => {
+      const caseSuffix = `${suffix}-${idleAction}`;
+      const f = await serialQueueFixture(`sandbox-session-${caseSuffix}`);
+      const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+      const sandboxPersistence = new PgExecutionPersistence(runtime, {
+        threadSandboxSessionReuseEnabled: true,
+        threadSandboxHandoffLeaseMs: 30_000,
+      });
+      const gateway = new FakeSandboxGateway();
+      const lifecycle = new PgThreadSandboxSessionLifecycle(
+        runtime,
+        fakeThreadSandboxProvider(gateway),
+        { pausedRetentionSeconds: 600, transitionWaitMs: 1_000 },
+      );
+      const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+      const runA = createRun({ id: runId(`sandbox-a-${caseSuffix}`), thread: f.thread, now });
+      const runB = createRun({ id: runId(`sandbox-b-${caseSuffix}`), thread: f.thread, now });
+      await expect(
+        creation.createQueuedRun({
+          scope: f.tenantScope,
+          run: runA,
+          thread: f.thread,
+          inputText: "Sandbox Session 输入 1",
+          idempotency: {
+            key: `sandbox-session-key-${caseSuffix}-0`,
+            requestHash: requestDigest("Sandbox Session 输入 1"),
+          },
+        }),
+      ).resolves.toMatchObject({ outcome: "created" });
 
-    const dispatchA = (
-      await runDispatchOutbox.claim({
-        tenantId: f.tenantScope.tenantId,
-        dispatcherId: "sandbox-session-dispatcher-a",
-        limit: 10,
-        leaseMilliseconds: 30_000,
-      })
-    )[0];
-    if (dispatchA === undefined) throw new Error("Run A dispatch 缺失");
-    const claimedA = await sandboxPersistence.claim({
-      scope: dispatchA.scope as ExecutionScope,
-      workerId: "sandbox-session-worker-a",
-      leaseDurationMs: 30_000,
-    });
-    if (claimedA.outcome !== "claimed") throw new Error("Run A claim 失败");
-    await runDispatchOutbox.acknowledge({ claim: dispatchA, outcome: "dispatched" });
-    const acquiredA = await lifecycle.acquire({
-      scope: claimedA.fence.scope,
-      attemptId: claimedA.snapshot.attempt.attemptId,
-      owner: "sandbox-session-worker-a",
-      leaseDurationMs: 30_000,
-      signal: new AbortController().signal,
-      requiresResourceFilesystem: false,
-    });
-    if (acquiredA.outcome !== "ready") throw new Error("Run A Sandbox acquire 失败");
-    expect(acquiredA).toMatchObject({ source: "cold_created", requiresMaterialization: true });
-    expect(acquiredA.resourceFilesystemMounted).toBe(false);
-    await expect(
-      lifecycle.attestMaterialized({
+      const dispatchA = (
+        await runDispatchOutbox.claim({
+          tenantId: f.tenantScope.tenantId,
+          dispatcherId: "sandbox-session-dispatcher-a",
+          limit: 10,
+          leaseMilliseconds: 30_000,
+        })
+      )[0];
+      if (dispatchA === undefined) throw new Error("Run A dispatch 缺失");
+      const claimedA = await sandboxPersistence.claim({
+        scope: dispatchA.scope as ExecutionScope,
+        workerId: "sandbox-session-worker-a",
+        leaseDurationMs: 30_000,
+      });
+      if (claimedA.outcome !== "claimed") throw new Error("Run A claim 失败");
+      await runDispatchOutbox.acknowledge({ claim: dispatchA, outcome: "dispatched" });
+      const acquiredA = await lifecycle.acquire({
         scope: claimedA.fence.scope,
         attemptId: claimedA.snapshot.attempt.attemptId,
-        lease: acquiredA.lease,
-      }),
-    ).resolves.toBe("attested");
+        owner: "sandbox-session-worker-a",
+        leaseDurationMs: 30_000,
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: false,
+      });
+      if (acquiredA.outcome !== "ready") throw new Error("Run A Sandbox acquire 失败");
+      expect(acquiredA).toMatchObject({ source: "cold_created", requiresMaterialization: true });
+      expect(acquiredA.resourceFilesystemMounted).toBe(false);
+      await expect(
+        lifecycle.attestMaterialized({
+          scope: claimedA.fence.scope,
+          attemptId: claimedA.snapshot.attempt.attemptId,
+          lease: acquiredA.lease,
+        }),
+      ).resolves.toBe("attested");
 
-    const revision = workspaceRevisionId(`sandbox-revision-${suffix}`);
-    const manifestDigest = "e".repeat(64);
-    await withTenantTransaction(runtime, f.tenantScope, async (client) => {
-      await client.query(
-        `INSERT INTO workspace_revisions(
+      const revision = workspaceRevisionId(`sandbox-revision-${caseSuffix}`);
+      const manifestDigest = "e".repeat(64);
+      await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+        await client.query(
+          `INSERT INTO workspace_revisions(
            tenant_id,workspace_id,id,thread_id,revision_number,parent_revision_id,
            created_by_run_id,lease_epoch,object_key,digest,created_at
          ) VALUES ($1,$2,$3,$4,1,NULL,$5,$6,NULL,$7,clock_timestamp())`,
-        [
-          f.tenantScope.tenantId,
-          f.workspace.id,
-          revision,
-          f.thread.id,
-          runA.id,
-          claimedA.fence.workspaceLease.epoch,
-          manifestDigest,
-        ],
-      );
-      await client.query(
-        `INSERT INTO workspace_revision_manifests(
+          [
+            f.tenantScope.tenantId,
+            f.workspace.id,
+            revision,
+            f.thread.id,
+            runA.id,
+            claimedA.fence.workspaceLease.epoch,
+            manifestDigest,
+          ],
+        );
+        await client.query(
+          `INSERT INTO workspace_revision_manifests(
            tenant_id,workspace_id,revision_id,thread_id,schema_version,manifest_digest,
            entry_count,total_bytes
          ) VALUES ($1,$2,$3,$4,1,$5,0,0)`,
-        [f.tenantScope.tenantId, f.workspace.id, revision, f.thread.id, manifestDigest],
-      );
-      await client.query(
-        `UPDATE workspaces SET current_revision_number=1,current_revision_id=$3,
+          [f.tenantScope.tenantId, f.workspace.id, revision, f.thread.id, manifestDigest],
+        );
+        await client.query(
+          `UPDATE workspaces SET current_revision_number=1,current_revision_id=$3,
              updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND id=$2`,
-        [f.tenantScope.tenantId, f.workspace.id, revision],
-      );
-      await client.query(
-        `UPDATE execution_attempts SET current_revision_id=$3,updated_at=clock_timestamp()
+          [f.tenantScope.tenantId, f.workspace.id, revision],
+        );
+        await client.query(
+          `UPDATE execution_attempts SET current_revision_id=$3,updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND attempt_id=$2`,
-        [f.tenantScope.tenantId, claimedA.snapshot.attempt.attemptId, revision],
-      );
-    });
+          [f.tenantScope.tenantId, claimedA.snapshot.attempt.attemptId, revision],
+        );
+      });
 
-    expect(
-      await sandboxPersistence.mutate(
-        signed({
-          idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/running-sandbox`,
-          fence: claimedA.fence,
-          expectedAttemptVersion: 0,
-          nextAttemptStatus: "running",
-          events: [],
-          outbox: [],
-        }),
-      ),
-    ).toMatchObject({ outcome: "applied" });
-    expect(
-      await sandboxPersistence.mutate(
-        signed({
-          idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/finalizing-sandbox`,
-          fence: claimedA.fence,
-          expectedAttemptVersion: 1,
-          nextAttemptStatus: "finalizing",
-          nextStage: "finalizing",
-          events: [],
-          outbox: [],
-        }),
-      ),
-    ).toMatchObject({ outcome: "applied" });
-    const terminalACommand = signed({
-      idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/terminal-sandbox`,
-      fence: claimedA.fence,
-      expectedAttemptVersion: 2,
-      nextAttemptStatus: "succeeded",
-      nextStage: "finished",
-      nextRunStatus: "succeeded",
-      events: [],
-      outbox: [],
-      releaseFences: true,
-      threadSandboxTerminal: {
-        schemaVersion: 1,
-        sessionId: acquiredA.lease.sessionId,
-        generation: acquiredA.lease.generation,
-        leaseId: acquiredA.lease.leaseId,
-        leaseToken: acquiredA.lease.leaseToken,
-      },
-    });
-    const [terminalA, queuedB] = await Promise.all([
-      sandboxPersistence.mutate(terminalACommand),
-      creation.createQueuedRun({
-        scope: f.tenantScope,
-        run: runB,
-        thread: f.thread,
-        inputText: "Sandbox Session 输入 2",
-        idempotency: {
-          key: `sandbox-session-key-${suffix}-1`,
-          requestHash: requestDigest("Sandbox Session 输入 2"),
-        },
-      }),
-    ]);
-    expect(queuedB).toMatchObject({ outcome: "created" });
-    if (terminalA.outcome !== "applied") throw new Error("Run A terminal 失败");
-    const firstSandboxReceipt = terminalA.receipt.threadSandbox;
-    if (firstSandboxReceipt === undefined) throw new Error("Run A Sandbox terminal receipt 缺失");
-    expect(["handed_off", "effect_pending"]).toContain(firstSandboxReceipt.outcome);
-
-    const handoffState = await withTenantTransaction(runtime, f.tenantScope, async (client) => {
-      const session = await client.query<{
-        state: string;
-        materialized_revision_id: string | null;
-        materialization_attested: boolean;
-      }>(
-        `SELECT state,materialized_revision_id,materialization_attested
-           FROM thread_sandbox_sessions WHERE tenant_id=$1 AND session_id=$2`,
-        [f.tenantScope.tenantId, acquiredA.lease.sessionId],
-      );
-      const leases = await client.query<{
-        run_id: string | null;
-        attempt_id: string | null;
-        active_count: string;
-      }>(
-        `SELECT min(run_id) AS run_id,min(attempt_id) AS attempt_id,count(*)::text AS active_count
-           FROM thread_sandbox_leases
-          WHERE tenant_id=$1 AND session_id=$2 AND released_at IS NULL`,
-        [f.tenantScope.tenantId, acquiredA.lease.sessionId],
-      );
-      const queue = await client.query<{ active_count: string }>(
-        `SELECT count(*)::text AS active_count FROM thread_follow_up_queue
-          WHERE tenant_id=$1 AND thread_id=$2 AND state='active'`,
-        [f.tenantScope.tenantId, f.thread.id],
-      );
-      return { session: session.rows[0], leases: leases.rows[0], queue: queue.rows[0] };
-    });
-    expect(handoffState.session).toEqual({
-      state: firstSandboxReceipt.outcome === "handed_off" ? "running" : "pausing",
-      materialized_revision_id: revision,
-      materialization_attested: true,
-    });
-    expect(handoffState.leases).toEqual(
-      firstSandboxReceipt.outcome === "handed_off"
-        ? { run_id: runB.id, attempt_id: null, active_count: "1" }
-        : { run_id: null, attempt_id: null, active_count: "0" },
-    );
-    expect(handoffState.queue?.active_count).toBe("1");
-    if (firstSandboxReceipt.outcome === "effect_pending") {
-      await expect(
-        lifecycle.completeTerminalEffect({
-          scope: claimedA.fence.scope,
-          session: acquiredA.session,
-          receipt: firstSandboxReceipt,
-        }),
-      ).resolves.toBe("settled");
-    }
-
-    const dispatchB = (
-      await runDispatchOutbox.claim({
-        tenantId: f.tenantScope.tenantId,
-        dispatcherId: "sandbox-session-dispatcher-b",
-        limit: 10,
-        leaseMilliseconds: 30_000,
-      })
-    )[0];
-    if (dispatchB === undefined) throw new Error("Run B dispatch 缺失");
-    expect(dispatchB.scope.baseRevisionId).toBe(revision);
-    const claimedB = await sandboxPersistence.claim({
-      scope: dispatchB.scope as ExecutionScope,
-      workerId: "sandbox-session-worker-b",
-      leaseDurationMs: 30_000,
-    });
-    if (claimedB.outcome !== "claimed") throw new Error("Run B claim 失败");
-    await runDispatchOutbox.acknowledge({ claim: dispatchB, outcome: "dispatched" });
-    const acquiredB = await lifecycle.acquire({
-      scope: claimedB.fence.scope,
-      attemptId: claimedB.snapshot.attempt.attemptId,
-      owner: "sandbox-session-worker-b",
-      leaseDurationMs: 30_000,
-      signal: new AbortController().signal,
-      requiresResourceFilesystem: false,
-    });
-    if (acquiredB.outcome !== "ready") throw new Error("Run B Sandbox acquire 失败");
-    expect(acquiredB).toMatchObject({
-      source: firstSandboxReceipt.outcome === "handed_off" ? "running_handoff" : "paused_resumed",
-      requiresMaterialization: false,
-      resourceFilesystemMounted: false,
-      session: { providerSandboxId: acquiredA.session.providerSandboxId },
-      lease: { sessionId: acquiredA.lease.sessionId, generation: acquiredA.lease.generation },
-    });
-    expect(gateway.sandboxes.size).toBe(1);
-    await withTenantTransaction(runtime, f.tenantScope, (client) =>
-      client.query(
-        `UPDATE thread_sandbox_leases
-            SET expires_at=clock_timestamp()+interval '100 milliseconds',updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND released_at IS NULL`,
-        [f.tenantScope.tenantId, acquiredB.lease.sessionId, acquiredB.lease.leaseId],
-      ),
-    );
-    const renewedB = await sandboxPersistence.inspectAndRenew({
-      fence: claimedB.fence,
-      leaseDurationMs: 30_000,
-    });
-    if (renewedB.outcome !== "active") throw new Error("Run B heartbeat 续租失败");
-    await expect(
-      withTenantTransaction(runtime, f.tenantScope, (client) =>
-        client.query<{ lease_renewed: boolean }>(
-          `SELECT expires_at > clock_timestamp()+interval '20 seconds' AS lease_renewed
-             FROM thread_sandbox_leases
-            WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND released_at IS NULL`,
-          [f.tenantScope.tenantId, acquiredB.lease.sessionId, acquiredB.lease.leaseId],
+      expect(
+        await sandboxPersistence.mutate(
+          signed({
+            idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/running-sandbox`,
+            fence: claimedA.fence,
+            expectedAttemptVersion: 0,
+            nextAttemptStatus: "running",
+            events: [],
+            outbox: [],
+          }),
         ),
-      ),
-    ).resolves.toMatchObject({ rows: [{ lease_renewed: true }] });
-    const otherTenant = await serialQueueFixture(`sandbox-other-tenant-${suffix}`);
-    const crossTenantReplay = await withTenantTransaction(
-      runtime,
-      otherTenant.tenantScope,
-      (client) =>
-        client.query(
-          `SELECT session_id FROM thread_sandbox_sessions WHERE provider_sandbox_id=$1`,
-          [acquiredA.session.providerSandboxId],
+      ).toMatchObject({ outcome: "applied" });
+      expect(
+        await sandboxPersistence.mutate(
+          signed({
+            idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/finalizing-sandbox`,
+            fence: claimedA.fence,
+            expectedAttemptVersion: 1,
+            nextAttemptStatus: "finalizing",
+            nextStage: "finalizing",
+            events: [],
+            outbox: [],
+          }),
         ),
-    );
-    expect(crossTenantReplay.rowCount).toBe(0);
-
-    expect(
-      await sandboxPersistence.mutate(
-        signed({
-          idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/running-sandbox`,
-          fence: renewedB.fence,
-          expectedAttemptVersion: 0,
-          nextAttemptStatus: "running",
-          events: [],
-          outbox: [],
-        }),
-      ),
-    ).toMatchObject({ outcome: "applied" });
-    expect(
-      await sandboxPersistence.mutate(
-        signed({
-          idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/finalizing-sandbox`,
-          fence: renewedB.fence,
-          expectedAttemptVersion: 1,
-          nextAttemptStatus: "finalizing",
-          nextStage: "finalizing",
-          events: [],
-          outbox: [],
-        }),
-      ),
-    ).toMatchObject({ outcome: "applied" });
-    const terminalB = await sandboxPersistence.mutate(
-      signed({
-        idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/terminal-sandbox`,
-        fence: renewedB.fence,
+      ).toMatchObject({ outcome: "applied" });
+      const terminalACommand = signed({
+        idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/terminal-sandbox`,
+        fence: claimedA.fence,
         expectedAttemptVersion: 2,
         nextAttemptStatus: "succeeded",
         nextStage: "finished",
@@ -2009,43 +1836,267 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         releaseFences: true,
         threadSandboxTerminal: {
           schemaVersion: 1,
-          sessionId: acquiredB.lease.sessionId,
-          generation: acquiredB.lease.generation,
-          leaseId: acquiredB.lease.leaseId,
-          leaseToken: acquiredB.lease.leaseToken,
+          sessionId: acquiredA.lease.sessionId,
+          generation: acquiredA.lease.generation,
+          leaseId: acquiredA.lease.leaseId,
+          leaseToken: acquiredA.lease.leaseToken,
         },
-      }),
-    );
-    if (terminalB.outcome !== "applied") throw new Error("Run B terminal 失败");
-    const pauseReceipt = terminalB.receipt.threadSandbox;
-    if (pauseReceipt?.outcome !== "effect_pending") throw new Error("pause intent 缺失");
-    await expect(
-      withTenantTransaction(runtime, f.tenantScope, async (client) => {
-        const session = await client.query<{ state: string; current_effect_id: string | null }>(
-          `SELECT state,current_effect_id FROM thread_sandbox_sessions
+      });
+      const [terminalA, queuedB] = await Promise.all([
+        sandboxPersistence.mutate(terminalACommand),
+        creation.createQueuedRun({
+          scope: f.tenantScope,
+          run: runB,
+          thread: f.thread,
+          inputText: "Sandbox Session 输入 2",
+          idempotency: {
+            key: `sandbox-session-key-${caseSuffix}-1`,
+            requestHash: requestDigest("Sandbox Session 输入 2"),
+          },
+        }),
+      ]);
+      expect(queuedB).toMatchObject({ outcome: "created" });
+      if (terminalA.outcome !== "applied") throw new Error("Run A terminal 失败");
+      const firstSandboxReceipt = terminalA.receipt.threadSandbox;
+      if (firstSandboxReceipt === undefined) throw new Error("Run A Sandbox terminal receipt 缺失");
+      expect(["handed_off", "effect_pending"]).toContain(firstSandboxReceipt.outcome);
+
+      const handoffState = await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+        const session = await client.query<{
+          state: string;
+          materialized_revision_id: string | null;
+          materialization_attested: boolean;
+        }>(
+          `SELECT state,materialized_revision_id,materialization_attested
+           FROM thread_sandbox_sessions WHERE tenant_id=$1 AND session_id=$2`,
+          [f.tenantScope.tenantId, acquiredA.lease.sessionId],
+        );
+        const leases = await client.query<{
+          run_id: string | null;
+          attempt_id: string | null;
+          active_count: string;
+        }>(
+          `SELECT min(run_id) AS run_id,min(attempt_id) AS attempt_id,count(*)::text AS active_count
+           FROM thread_sandbox_leases
+          WHERE tenant_id=$1 AND session_id=$2 AND released_at IS NULL`,
+          [f.tenantScope.tenantId, acquiredA.lease.sessionId],
+        );
+        const queue = await client.query<{ active_count: string }>(
+          `SELECT count(*)::text AS active_count FROM thread_follow_up_queue
+          WHERE tenant_id=$1 AND thread_id=$2 AND state='active'`,
+          [f.tenantScope.tenantId, f.thread.id],
+        );
+        return { session: session.rows[0], leases: leases.rows[0], queue: queue.rows[0] };
+      });
+      expect(handoffState.session).toEqual({
+        state: firstSandboxReceipt.outcome === "handed_off" ? "running" : "pausing",
+        materialized_revision_id: revision,
+        materialization_attested: true,
+      });
+      expect(handoffState.leases).toEqual(
+        firstSandboxReceipt.outcome === "handed_off"
+          ? { run_id: runB.id, attempt_id: null, active_count: "1" }
+          : { run_id: null, attempt_id: null, active_count: "0" },
+      );
+      expect(handoffState.queue?.active_count).toBe("1");
+      if (firstSandboxReceipt.outcome === "effect_pending") {
+        await expect(
+          lifecycle.completeTerminalEffect({
+            scope: claimedA.fence.scope,
+            session: acquiredA.session,
+            receipt: firstSandboxReceipt,
+          }),
+        ).resolves.toBe("settled");
+      }
+
+      const dispatchB = (
+        await runDispatchOutbox.claim({
+          tenantId: f.tenantScope.tenantId,
+          dispatcherId: "sandbox-session-dispatcher-b",
+          limit: 10,
+          leaseMilliseconds: 30_000,
+        })
+      )[0];
+      if (dispatchB === undefined) throw new Error("Run B dispatch 缺失");
+      expect(dispatchB.scope.baseRevisionId).toBe(revision);
+      const claimedB = await sandboxPersistence.claim({
+        scope: dispatchB.scope as ExecutionScope,
+        workerId: "sandbox-session-worker-b",
+        leaseDurationMs: 30_000,
+      });
+      if (claimedB.outcome !== "claimed") throw new Error("Run B claim 失败");
+      await runDispatchOutbox.acknowledge({ claim: dispatchB, outcome: "dispatched" });
+      const acquiredB = await lifecycle.acquire({
+        scope: claimedB.fence.scope,
+        attemptId: claimedB.snapshot.attempt.attemptId,
+        owner: "sandbox-session-worker-b",
+        leaseDurationMs: 30_000,
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: false,
+      });
+      if (acquiredB.outcome !== "ready") throw new Error("Run B Sandbox acquire 失败");
+      expect(acquiredB).toMatchObject({
+        source: firstSandboxReceipt.outcome === "handed_off" ? "running_handoff" : "paused_resumed",
+        requiresMaterialization: false,
+        resourceFilesystemMounted: false,
+        session: { providerSandboxId: acquiredA.session.providerSandboxId },
+        lease: { sessionId: acquiredA.lease.sessionId, generation: acquiredA.lease.generation },
+      });
+      expect(gateway.sandboxes.size).toBe(1);
+      await withTenantTransaction(runtime, f.tenantScope, (client) =>
+        client.query(
+          `UPDATE thread_sandbox_leases
+            SET expires_at=clock_timestamp()+interval '100 milliseconds',updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND released_at IS NULL`,
+          [f.tenantScope.tenantId, acquiredB.lease.sessionId, acquiredB.lease.leaseId],
+        ),
+      );
+      const renewedB = await sandboxPersistence.inspectAndRenew({
+        fence: claimedB.fence,
+        leaseDurationMs: 30_000,
+      });
+      if (renewedB.outcome !== "active") throw new Error("Run B heartbeat 续租失败");
+      await expect(
+        withTenantTransaction(runtime, f.tenantScope, (client) =>
+          client.query<{ lease_renewed: boolean }>(
+            `SELECT expires_at > clock_timestamp()+interval '20 seconds' AS lease_renewed
+             FROM thread_sandbox_leases
+            WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND released_at IS NULL`,
+            [f.tenantScope.tenantId, acquiredB.lease.sessionId, acquiredB.lease.leaseId],
+          ),
+        ),
+      ).resolves.toMatchObject({ rows: [{ lease_renewed: true }] });
+      const otherTenant = await serialQueueFixture(`sandbox-other-tenant-${caseSuffix}`);
+      const crossTenantReplay = await withTenantTransaction(
+        runtime,
+        otherTenant.tenantScope,
+        (client) =>
+          client.query(
+            `SELECT session_id FROM thread_sandbox_sessions WHERE provider_sandbox_id=$1`,
+            [acquiredA.session.providerSandboxId],
+          ),
+      );
+      expect(crossTenantReplay.rowCount).toBe(0);
+
+      expect(
+        await sandboxPersistence.mutate(
+          signed({
+            idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/running-sandbox`,
+            fence: renewedB.fence,
+            expectedAttemptVersion: 0,
+            nextAttemptStatus: "running",
+            events: [],
+            outbox: [],
+          }),
+        ),
+      ).toMatchObject({ outcome: "applied" });
+      expect(
+        await sandboxPersistence.mutate(
+          signed({
+            idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/finalizing-sandbox`,
+            fence: renewedB.fence,
+            expectedAttemptVersion: 1,
+            nextAttemptStatus: "finalizing",
+            nextStage: "finalizing",
+            events: [],
+            outbox: [],
+          }),
+        ),
+      ).toMatchObject({ outcome: "applied" });
+      // 为已有测试实例补齐托管绑定夹具，单独验证终态事务读取的策略与默认值不同。
+      const profileRevision = idleAction === "pause" ? 700001 : 700002;
+      const configuration = {
+        providerKey: "cube",
+        displayName: "测试沙箱",
+        endpoint: "http://cube.example.test",
+        credentialConfigured: false,
+        policy: {
+          templateId: "test-template",
+          sessionTtlSeconds: 300,
+          operationTimeoutMs: 30000,
+          lifecycleTimeoutMs: 30000,
+          pausedRetentionSeconds: 123,
+          idleAction,
+        },
+      };
+      await migrator.query(
+        "INSERT INTO sandbox_provider_profiles(provider_key,revision,configuration,created_by) VALUES('cube',$1,$2,$3)",
+        [profileRevision, configuration, f.user.id],
+      );
+      await migrator.query(
+        "INSERT INTO sandbox_routing_revisions(revision,mode,created_by) VALUES($1,'single',$2)",
+        [profileRevision, f.user.id],
+      );
+      await migrator.query(
+        "INSERT INTO sandbox_routing_targets(routing_revision,provider_key,profile_revision,weight) VALUES($1,'cube',$1,1)",
+        [profileRevision],
+      );
+      await migrator.query(
+        "INSERT INTO sandbox_configuration_bindings(tenant_id,registry_id,routing_revision,provider_key,profile_revision) VALUES($1,$2,$3,'cube',$3)",
+        [f.tenantScope.tenantId, acquiredB.session.registryId, profileRevision],
+      );
+      const terminalB = await sandboxPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/terminal-sandbox`,
+          fence: renewedB.fence,
+          expectedAttemptVersion: 2,
+          nextAttemptStatus: "succeeded",
+          nextStage: "finished",
+          nextRunStatus: "succeeded",
+          events: [],
+          outbox: [],
+          releaseFences: true,
+          threadSandboxTerminal: {
+            schemaVersion: 1,
+            sessionId: acquiredB.lease.sessionId,
+            generation: acquiredB.lease.generation,
+            leaseId: acquiredB.lease.leaseId,
+            leaseToken: acquiredB.lease.leaseToken,
+          },
+        }),
+      );
+      if (terminalB.outcome !== "applied") throw new Error("Run B terminal 失败");
+      const pauseReceipt = terminalB.receipt.threadSandbox;
+      if (pauseReceipt?.outcome !== "effect_pending") throw new Error("pause intent 缺失");
+      await expect(
+        withTenantTransaction(runtime, f.tenantScope, async (client) => {
+          const session = await client.query<{ state: string; current_effect_id: string | null }>(
+            `SELECT state,current_effect_id FROM thread_sandbox_sessions
             WHERE tenant_id=$1 AND session_id=$2`,
-          [f.tenantScope.tenantId, acquiredB.lease.sessionId],
-        );
-        const lease = await client.query<{ active_count: string }>(
-          `SELECT count(*)::text AS active_count FROM thread_sandbox_leases
+            [f.tenantScope.tenantId, acquiredB.lease.sessionId],
+          );
+          const lease = await client.query<{ active_count: string }>(
+            `SELECT count(*)::text AS active_count FROM thread_sandbox_leases
             WHERE tenant_id=$1 AND session_id=$2 AND released_at IS NULL`,
+            [f.tenantScope.tenantId, acquiredB.lease.sessionId],
+          );
+          return { session: session.rows[0], activeLeases: lease.rows[0]?.active_count };
+        }),
+      ).resolves.toEqual({
+        session: { state: "pausing", current_effect_id: pauseReceipt.effectId },
+        activeLeases: "0",
+      });
+      await expect(
+        lifecycle.completeTerminalEffect({
+          scope: renewedB.fence.scope,
+          session: acquiredB.session,
+          receipt: pauseReceipt,
+        }),
+      ).resolves.toBe("settled");
+      expect(pauseReceipt.effectKind).toBe(idleAction === "pause" ? "pause" : "terminate");
+      await expect(gateway.inspect(acquiredB.session.providerSandboxId)).resolves.toBe(
+        idleAction === "pause" ? "paused" : "not_found",
+      );
+      const stored = await withTenantTransaction(runtime, f.tenantScope, async (client) =>
+        client.query<{ state: string; retention: string }>(
+          "SELECT state,extract(epoch FROM retention_expires_at-paused_at)::text AS retention FROM thread_sandbox_sessions WHERE tenant_id=$1 AND session_id=$2",
           [f.tenantScope.tenantId, acquiredB.lease.sessionId],
-        );
-        return { session: session.rows[0], activeLeases: lease.rows[0]?.active_count };
-      }),
-    ).resolves.toEqual({
-      session: { state: "pausing", current_effect_id: pauseReceipt.effectId },
-      activeLeases: "0",
-    });
-    await expect(
-      lifecycle.completeTerminalEffect({
-        scope: renewedB.fence.scope,
-        session: acquiredB.session,
-        receipt: pauseReceipt,
-      }),
-    ).resolves.toBe("settled");
-    await expect(gateway.inspect(acquiredB.session.providerSandboxId)).resolves.toBe("paused");
-  });
+        ),
+      );
+      expect(stored.rows[0]?.state).toBe(idleAction === "pause" ? "paused" : "terminated");
+      if (idleAction === "pause") expect(Number(stored.rows[0]?.retention)).toBeCloseTo(123, 1);
+    },
+  );
 
   it("Thread Sandbox 的附件能力升级会退役无挂载 Session 并冷建新 generation", async () => {
     const f = await serialQueueFixture(`sandbox-capability-${suffix}`);

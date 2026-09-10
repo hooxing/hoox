@@ -15,7 +15,11 @@
 
 ## 首次主机准备
 
-Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 production 构建推断。数据库、身份、S3、Sandbox 和 Worker 运行参数由部署配置管理，管理台不提供通用部署配置编辑器。配置项存在不等于外部服务可达，仍需完成部署预检；模型与记忆日常保存、旧 Run 生效边界见[配置参考](../reference/configuration.md)。
+Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 production 构建推断。数据库、身份和 S3 仍由部署配置管理；沙箱供应商与运行策略可在后台管理，环境配置保留为未托管实例的回退连接。配置项存在不等于外部服务可达，仍需完成部署预检；模型、记忆与沙箱的生效边界见[配置参考](../reference/configuration.md)。
+
+启用后台沙箱配置前，`admin-control.env`、`worker.env` 和 `scheduler.env` 必须具有相同的稳定 `MODEL_CREDENTIAL_ENCRYPTION_KEY`。部署不得生成新的随机值覆盖已有加密根，否则旧实例凭据和配置将无法恢复。
+
+发布脚本在迁移前核对 Admin Control 与 Worker 的现有有效加密根，并为缺失显式配置的进程固化同一个原值，包括 Scheduler。已有值不一致时失败关闭，不轮换密钥；该维护容器禁用网络，只挂载三个配置文件，日志不输出凭据。
 
 目标主机必须预装 Docker Engine、Docker Compose、Nginx 和 Certbot。部署用户必须可直接访问 Docker socket，并可无密码执行 `nginx -t`、安装 Nginx 配置和 reload。
 

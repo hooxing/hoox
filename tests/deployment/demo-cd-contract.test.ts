@@ -78,6 +78,7 @@ describe("Demo 持续部署契约", () => {
     expect(dockerfile).toContain("CI=true");
     expect(dockerfile).toContain("COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./");
     expect(dockerfile).toContain("COPY third_party/pi ./licenses/third-party/pi");
+    expect(dockerfile).toContain("COPY scripts/prepare-demo-sandbox-key.mjs");
     expect(dockerfile).not.toContain("anthropic-skills-pptx");
   });
 
@@ -141,6 +142,11 @@ describe("Demo 持续部署契约", () => {
   it("发布初始化后台管理员，失败时回滚应用与基础服务且兼容旧发布", () => {
     const deploy = source("deploy/demo/remote-deploy.sh");
     expect(deploy).toContain("admin-control.env");
+    expect(deploy).toContain("node scripts/prepare-demo-sandbox-key.mjs");
+    expect(deploy).toContain("--network none");
+    expect(deploy.indexOf("prepare-demo-sandbox-key.mjs")).toBeLessThan(
+      deploy.indexOf("compose --profile ops run --rm migrate"),
+    );
     expect(deploy).toContain("DEMO_ADMIN_USER_ID");
     expect(deploy).toContain("platform_control_operators");
     expect(deploy).toContain("platform_skill_operators");

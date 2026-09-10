@@ -6,8 +6,8 @@ import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { describe, expect, it, vi } from "vitest";
 import {
   CubeThreadSandboxLifecycleResolver,
-  ThreadSandboxLifecycleRouterResolver,
   ThreadSandboxLifecycleConsumer,
+  ThreadSandboxLifecycleRouterResolver,
   type ThreadSandboxLifecycleStore,
 } from "./thread-sandbox-lifecycle-consumer.js";
 
@@ -54,6 +54,32 @@ class FakeStore implements ThreadSandboxLifecycleStore {
 }
 
 describe("Thread Sandbox lifecycle consumer", () => {
+  it("托管回收使用旧实例绑定的网关和超时，读取失败时不调用默认供应商", async () => {
+    const pause = vi.fn(async () => undefined);
+    const kill = vi.fn(async () => undefined);
+    const connect = vi.fn(async () => ({ pause, kill }));
+    const inspect = vi.fn(async () => "paused" as const);
+    const session = vi.fn(async () => ({
+      gateway: { connect, inspect } as never,
+      timeoutMs: 45000,
+    }));
+    const requireProvider = vi.fn(() => {
+      throw new Error("不应使用活动默认供应商");
+    });
+    const resolver = new ThreadSandboxLifecycleRouterResolver({ require: requireProvider }, 90000, {
+      session,
+    });
+    const old = claim({ providerKey: "tencent-ags" });
+    await expect(resolver.execute(old)).resolves.toBe("paused");
+    expect(connect).toHaveBeenCalledWith(old.providerSandboxId, { timeoutMs: 45000 });
+    await expect(resolver.reconcile(old)).resolves.toBe("paused");
+    await expect(resolver.execute({ ...old, effectKind: "terminate" })).resolves.toBe("terminated");
+    expect(kill).toHaveBeenCalledWith({ timeoutMs: 45000, ignoreNotFound: true });
+    session.mockRejectedValue(new Error("配置不可用"));
+    await expect(resolver.execute(old)).resolves.toBe("unknown");
+    expect(requireProvider).not.toHaveBeenCalled();
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
   it("AGS 生命周期只路由到持久 Provider，过渡态保留 unknown", async () => {
     const pause = vi.fn(async () => undefined);
     const connect = vi.fn(async () => ({ pause }));

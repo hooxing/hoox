@@ -18,6 +18,7 @@ import {
   ModelProviderCredentialCipher,
   PgAdminControlRepository,
   PgIdentityConfigurationRepository,
+  PgSandboxControlRepository,
   PgSkillPublicationAuthorization,
   PgSkillPublicationRepository,
   probePostgres,
@@ -29,6 +30,7 @@ import {
   type ServiceAssemblyFactory,
   startServiceProcess,
 } from "@hoox/process-runtime";
+import { probeConfiguredSandbox } from "@hoox/sandbox";
 import { SkillPublicationService } from "@hoox/skill";
 import { type AdminControlApiAppOptions, createAdminControlApiApp } from "./app.js";
 import { createIdentityAdminService } from "./identity-configuration.js";
@@ -140,7 +142,30 @@ async function assembleRealService(
     const controlPostgresProbe = () => probePostgres(controlPool, input.expectedRole);
     const skillPostgresProbe = () => probePostgres(skillPublisherPool, input.expectedPublisherRole);
     const objectStorageProbe = () => probeS3StableSkillPublisher(activePublisher);
+    const sandboxRepository = new PgSandboxControlRepository(
+      controlPool,
+      new ModelProviderCredentialCipher(configuration.providerSecrets.modelCredentialEncryptionKey),
+    );
     const dependencies = {
+      sandbox: {
+        overview: sandboxRepository.overview.bind(sandboxRepository),
+        saveProfile: sandboxRepository.saveProfile.bind(sandboxRepository),
+        publishRouting: sandboxRepository.publishRouting.bind(sandboxRepository),
+        probeProfile: (
+          userId: string,
+          providerKey: Parameters<typeof sandboxRepository.probeProfile>[1],
+          revision: number,
+        ) =>
+          sandboxRepository.probeProfile(userId, providerKey, revision, async (profile, apiKey) =>
+            probeConfiguredSandbox({
+              providerKey: profile.providerKey,
+              endpoint: profile.endpoint,
+              ...(profile.cubeProxy === undefined ? {} : { cubeProxy: profile.cubeProxy }),
+              ...(apiKey === undefined ? {} : { apiKey }),
+              ...profile.policy,
+            }),
+          ),
+      },
       auth: input.auth,
       identity: createIdentityAdminService({
         repository: new PgIdentityConfigurationRepository(controlPool),

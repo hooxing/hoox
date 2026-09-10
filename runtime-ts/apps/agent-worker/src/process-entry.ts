@@ -43,6 +43,7 @@ import {
   PgRunDispatchOutbox,
   PgRuntimeControlConfigurationRepository,
   PgRuntimeRolloutRepository,
+  PgSandboxConfigurationResolver,
   PgScheduledTaskDueConsumer,
   PgScheduledTaskRepository,
   PgSkillFilesystemCatalog,
@@ -95,6 +96,7 @@ import {
 import { SkillRuntimeService } from "@hoox/skill";
 import { DeliverFileToolRouterFactory } from "@hoox/tool-router";
 import { SandboxDeliverFileSource } from "./deliver-file-source.js";
+import { createManagedSandboxRegistry } from "./managed-sandbox-registry.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
@@ -103,16 +105,16 @@ import {
   CubeSandboxSessionRegistry,
   DatabaseRunCancellation,
   E2BSandboxSessionRegistry,
-  TencentAgsSandboxSessionRegistry,
   ProcessShutdown,
   SandboxSessionRegistryRouter,
   SystemWorkerClock,
+  TencentAgsSandboxSessionRegistry,
 } from "./production-worker-runtime.js";
 import {
   createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
-  createDevelopmentProjectRunStartupTimingMirror,
   createDevelopmentProjectRunPhaseTimingMirror,
+  createDevelopmentProjectRunStartupTimingMirror,
   withDevelopmentProjectModelWireTraceMirror,
 } from "./project-model-wire-trace.js";
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";
@@ -1004,6 +1006,10 @@ async function assembleWorkerRuntime(
       configuration,
       resourceVolume,
       resourceFilesystemMaterializer,
+      new PgSandboxConfigurationResolver(
+        pool,
+        new ModelProviderCredentialCipher(configuration.model.credentialEncryptionKey),
+      ),
     );
     const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
     const threadSandboxes = new PgThreadSandboxSessionLifecycle(
@@ -1436,6 +1442,7 @@ function createConfiguredSandboxRouter(
   configuration: WorkerProcessConfiguration,
   resourceVolume?: TenantResourceVolumePort,
   resourceFilesystemMaterializer?: ManagedResourceFilesystemSnapshotMaterializer,
+  managedResolver?: PgSandboxConfigurationResolver,
 ): SandboxSessionRegistryRouter {
   const registries = [];
   if (configuration.sandbox.enabledProviderKeys.includes("cube")) {
@@ -1494,7 +1501,21 @@ function createConfiguredSandboxRouter(
       ),
     );
   }
-  return new SandboxSessionRegistryRouter(configuration.sandbox.defaultProviderKey, registries);
+  return new SandboxSessionRegistryRouter(
+    configuration.sandbox.defaultProviderKey,
+    registries,
+    managedResolver === undefined
+      ? undefined
+      : {
+          resolver: managedResolver,
+          createRegistry: (profile) =>
+            createManagedSandboxRegistry(
+              profile,
+              configuration.sandbox.resourceVolumeDriver,
+              resourceFilesystemMaterializer,
+            ),
+        },
+  );
 }
 
 /**
@@ -1549,6 +1570,11 @@ export async function probeDevelopmentWorkerDependencies(
         driver: configuration.sandbox.resourceVolumeDriver,
         requestTimeoutMs: 5_000,
       }),
+      undefined,
+      new PgSandboxConfigurationResolver(
+        pool,
+        new ModelProviderCredentialCipher(configuration.model.credentialEncryptionKey),
+      ),
     );
     await Promise.all([
       probePostgres(pool, configuration.databaseRuntimeRole),

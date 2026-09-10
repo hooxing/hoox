@@ -32,7 +32,7 @@ const modelRevision = {
   },
 };
 
-function fixture() {
+function fixture(sandbox?: AdminControlApiDependencies["sandbox"]) {
   const auth: AuthContextResolver = {
     resolve: vi.fn(async (input) =>
       input.authorization === "Bearer admin" ? { userId: userId("user_admin") } : undefined,
@@ -170,6 +170,7 @@ function fixture() {
     identity,
     publications,
     app: createAdminControlApiApp({
+      ...(sandbox === undefined ? {} : { sandbox }),
       auth,
       control,
       modelCatalog,
@@ -181,6 +182,107 @@ function fixture() {
 }
 
 describe("后台控制 API", () => {
+  it("沙箱接口保护身份、严格校验策略且不回显写入密钥", async () => {
+    const configuration = {
+      providerKey: "tencent-ags" as const,
+      displayName: "腾讯云",
+      endpoint: "sandbox.example.test",
+      credentialConfigured: true,
+      policy: {
+        templateId: "template-test",
+        sessionTtlSeconds: 300,
+        operationTimeoutMs: 30000,
+        lifecycleTimeoutMs: 60000,
+        pausedRetentionSeconds: 123,
+        idleAction: "pause" as const,
+      },
+    };
+    const revision = {
+      revision: 1,
+      configuration,
+      createdAt: "2026-09-10T00:00:00.000Z",
+      probeStatus: "healthy" as const,
+    };
+    const sandbox = {
+      overview: vi.fn(async () => ({ generation: 1, routing: undefined, profiles: [revision] })),
+      saveProfile: vi.fn(async () => ({ ...revision, apiKey: "sandbox-secret-placeholder" })),
+      publishRouting: vi.fn(async () => undefined),
+      probeProfile: vi.fn(async () => ({ healthy: true, durationMs: 1000 })),
+    };
+    const { app } = fixture(sandbox);
+    const headers = { authorization: "Bearer admin" };
+    const path = "/v1/admin/control/sandbox";
+    expect((await app.inject({ method: "GET", url: path })).statusCode).toBe(401);
+    expect(sandbox.overview).not.toHaveBeenCalled();
+    expect((await app.inject({ method: "GET", url: path, headers })).statusCode).toBe(200);
+    const { credentialConfigured: _state, ...writeConfiguration } = configuration;
+    const response = await app.inject({
+      method: "PUT",
+      url: `${path}/profiles`,
+      headers,
+      payload: {
+        expectedGeneration: 1,
+        configuration: writeConfiguration,
+        apiKey: "sandbox-secret-placeholder",
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain("sandbox-secret-placeholder");
+    expect(sandbox.saveProfile).toHaveBeenCalledWith(
+      "user_admin",
+      expect.objectContaining({ apiKey: "sandbox-secret-placeholder" }),
+    );
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `${path}/profiles`,
+          headers,
+          payload: {
+            expectedGeneration: 1,
+            configuration: {
+              ...writeConfiguration,
+              policy: { ...configuration.policy, lifecycleTimeoutMs: 90001 },
+            },
+          },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `${path}/routing`,
+          headers,
+          payload: {
+            expectedGeneration: 1,
+            configuration: {
+              mode: "single",
+              targets: [{ providerKey: "tencent-ags", profileRevision: 1, weight: 1 }],
+            },
+          },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (await app.inject({ method: "POST", url: `${path}/profiles/tencent-ags/1/probe`, headers }))
+        .statusCode,
+    ).toBe(200);
+    expect(sandbox.probeProfile).toHaveBeenCalledWith("user_admin", "tencent-ags", 1);
+    sandbox.probeProfile.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return { healthy: true, durationMs: 150 };
+    });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    app.server.setTimeout(50);
+    const slowProbe = await fetch(`${address}${path}/profiles/tencent-ags/1/probe`, {
+      method: "POST",
+      headers,
+    });
+    expect(slowProbe.status).toBe(200);
+    expect(await slowProbe.json()).toMatchObject({ data: { healthy: true, durationMs: 150 } });
+    await app.close();
+  });
   it("在同一管理 API 实例提供 Skill 发布路由并复用管理身份", async () => {
     const { app, publications } = fixture();
     const response = await app.inject({

@@ -8,6 +8,19 @@ import {
 const example = readFileSync(new URL("../deploy/production.env.example", import.meta.url), "utf8");
 
 describe("production 部署配置契约", () => {
+  it("AGS 示例凭据必须使用占位值且诊断不回显密钥", () => {
+    const secret = "ags-private-canary";
+    const issues = validateProductionEnvironmentExample(
+      example.replace(
+        "TENCENT_AGS_API_KEY=replace-with-tencent-ags-api-key",
+        `TENCENT_AGS_API_KEY=${secret}`,
+      ),
+    );
+    expect(issues.length).toBeGreaterThan(0);
+    expect(issues.join(" ")).toContain("TENCENT_AGS_API_KEY");
+    expect(issues.join(" ")).not.toContain(secret);
+  });
+
   it("完整样例只使用占位凭据，且不包含 development 身份", () => {
     expect(expectedProductionEnvironmentKeys).not.toContain("DEV_AUTH_ENABLED");
     expect(expectedProductionEnvironmentKeys).toEqual(

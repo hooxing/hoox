@@ -38,6 +38,37 @@ function developmentEnvironment(): Record<string, string> {
 }
 
 describe("Scheduler 进程入口", () => {
+  it("托管沙箱使用共享加密根且凭据字段不会被环境筛选丢弃", () => {
+    const environment = {
+      ...developmentEnvironment(),
+      MODEL_CREDENTIAL_ENCRYPTION_KEY: "sandbox-placeholder-master-key-at-least-32",
+    };
+    const selected = selectSchedulerProcessEnvironment(environment);
+    expect(parseSchedulerProcessEnvironment(selected).credentialEncryptionKey).toBe(
+      environment.MODEL_CREDENTIAL_ENCRYPTION_KEY,
+    );
+  });
+  it("腾讯云 AGS 与 E2B 使用独立配置，缺少 AGS 凭据时失败关闭", () => {
+    const env = {
+      ...productionEnvironment(),
+      SANDBOX_DEFAULT_PROVIDER: "tencent-ags",
+      SANDBOX_ENABLED_PROVIDERS: "e2b,tencent-ags",
+      E2B_API_KEY: "test-e2b",
+      TENCENT_AGS_API_KEY: "test-ags",
+      TENCENT_AGS_DOMAIN: "ags.example.invalid",
+    };
+    expect(parseSchedulerProcessEnvironment(env).sandbox).toMatchObject({
+      defaultProviderKey: "tencent-ags",
+      enabledProviderKeys: ["e2b", "tencent-ags"],
+      tencentAgs: { apiKey: "test-ags", domain: "ags.example.invalid" },
+      e2b: { apiKey: "test-e2b" },
+    });
+    const { TENCENT_AGS_API_KEY: _key, ...missingKey } = env;
+    expect(() => parseSchedulerProcessEnvironment(missingKey)).toThrow("TENCENT_AGS_API_KEY");
+    const { TENCENT_AGS_DOMAIN: _domain, ...missingDomain } = env;
+    expect(() => parseSchedulerProcessEnvironment(missingDomain)).toThrow("TENCENT_AGS_DOMAIN");
+  });
+
   it("development 允许使用受控装配启动常驻 Scheduler", async () => {
     const running = await startSchedulerProcess({
       environment: developmentEnvironment(),

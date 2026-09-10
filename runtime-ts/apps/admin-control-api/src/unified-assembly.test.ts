@@ -31,6 +31,20 @@ vi.mock("@hoox/persistence", () => ({
   probePostgres: mocks.probePostgres,
   probeS3StableSkillPublisher: mocks.probePublisher,
   ModelProviderCredentialCipher: class {},
+  PgSandboxControlRepository: class {
+    overview() {
+      return Promise.resolve({ generation: 0, profiles: [] });
+    }
+    saveProfile() {
+      return Promise.resolve();
+    }
+    publishRouting() {
+      return Promise.resolve();
+    }
+    probeProfile() {
+      return Promise.resolve({ healthy: true, durationMs: 1 });
+    }
+  },
   PgAdminControlRepository: class {
     constructor(pool: unknown) {
       mocks.adminRepositoryConstructed(pool);

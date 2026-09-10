@@ -6,6 +6,7 @@ import {
   digestControlRequest,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
+  type SandboxControlServicePort,
 } from "@hoox/admin-control";
 import type { AuthContextResolver } from "@hoox/api";
 import {
@@ -37,14 +38,23 @@ import {
   ProbeControlRevisionRequestSchema,
   type PublishControlRevisionRequest,
   PublishControlRevisionRequestSchema,
+  type PublishSandboxRoutingRequest,
+  PublishSandboxRoutingRequestSchema,
   RuntimeSettingsRevisionListSuccessEnvelopeSchema,
   RuntimeSettingsRevisionSuccessEnvelopeSchema,
+  SandboxControlSuccessSchema,
+  SandboxProbeSuccessSchema,
+  type SandboxProfilePath,
+  SandboxProfilePathSchema,
+  SandboxProfileSuccessSchema,
   type SaveMemoryProviderConfigurationRequest,
   SaveMemoryProviderConfigurationRequestSchema,
   type SaveModelProviderConfigurationRequest,
   SaveModelProviderConfigurationRequestSchema,
   type SaveRuntimeSettingsConfigurationRequest,
   SaveRuntimeSettingsConfigurationRequestSchema,
+  type SaveSandboxProfileRequest,
+  SaveSandboxProfileRequestSchema,
   type UpdateIdentityAdminConfigurationRequest,
   UpdateIdentityAdminConfigurationRequestSchema,
   type UpdatePlatformUserStatusRequest,
@@ -94,6 +104,7 @@ type ControlServiceContract = Pick<
 >;
 
 export interface AdminControlApiDependencies {
+  readonly sandbox?: SandboxControlServicePort;
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
   readonly identity: IdentityAdminService;
@@ -182,6 +193,64 @@ export function createAdminControlApiApp(
     { schema: { response: responseSchemas(AdminControlOverviewSuccessEnvelopeSchema) } },
     async (request) => success(request, await dependencies.control.overview(await actor(request))),
   );
+  if (dependencies.sandbox) {
+    const sandbox = dependencies.sandbox;
+    app.get(
+      "/v1/admin/control/sandbox",
+      { schema: { response: responseSchemas(SandboxControlSuccessSchema) } },
+      async (request) => success(request, await sandbox.overview(await actor(request))),
+    );
+    app.put<{ Body: SaveSandboxProfileRequest }>(
+      "/v1/admin/control/sandbox/profiles",
+      {
+        preValidation: async (request) => requireJson(request),
+        schema: {
+          body: SaveSandboxProfileRequestSchema,
+          response: responseSchemas(SandboxProfileSuccessSchema),
+        },
+      },
+      async (request) =>
+        success(request, await sandbox.saveProfile(await actor(request), request.body)),
+    );
+    app.put<{ Body: PublishSandboxRoutingRequest }>(
+      "/v1/admin/control/sandbox/routing",
+      {
+        preValidation: async (request) => requireJson(request),
+        schema: {
+          body: PublishSandboxRoutingRequestSchema,
+          response: responseSchemas(SandboxControlSuccessSchema),
+        },
+      },
+      async (request) => {
+        const userId = await actor(request);
+        await sandbox.publishRouting(userId, request.body);
+        return success(request, await sandbox.overview(userId));
+      },
+    );
+    app.post<{ Params: SandboxProfilePath }>(
+      "/v1/admin/control/sandbox/profiles/:providerKey/:revision/probe",
+      {
+        handlerTimeout: 600000,
+        onRequest: async (request) => {
+          // 真实创建、暂停和恢复期间没有响应字节，连接空闲期限必须覆盖探测期限。
+          request.raw.socket?.setTimeout?.(600000);
+        },
+        schema: {
+          params: SandboxProfilePathSchema,
+          response: responseSchemas(SandboxProbeSuccessSchema),
+        },
+      },
+      async (request) =>
+        success(
+          request,
+          await sandbox.probeProfile(
+            await actor(request),
+            request.params.providerKey,
+            request.params.revision,
+          ),
+        ),
+    );
+  }
   app.get(
     "/v1/admin/control/identity",
     { schema: { response: responseSchemas(IdentityAdminConfigurationSuccessEnvelopeSchema) } },

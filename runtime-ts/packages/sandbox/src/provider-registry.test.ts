@@ -5,7 +5,7 @@ import {
   type RuntimeSandboxGateway,
 } from "./index.js";
 
-function gateway(providerKey: "cube" | "e2b"): RuntimeSandboxGateway {
+function gateway(providerKey: "cube" | "e2b" | "tencent-ags"): RuntimeSandboxGateway {
   return {
     providerKey,
     probe: vi.fn(async () => undefined),
@@ -13,6 +13,15 @@ function gateway(providerKey: "cube" | "e2b"): RuntimeSandboxGateway {
 }
 
 describe("Sandbox Provider Registry", () => {
+  it("腾讯云与 E2B 同时注册时保持恢复路由隔离", () => {
+    const e2b = gateway("e2b");
+    const ags = gateway("tencent-ags");
+    const registry = new SandboxProviderRegistry("tencent-ags", [e2b, ags]);
+    expect(registry.default()).toBe(ags);
+    expect(registry.require("e2b")).toBe(e2b);
+    expect(registry.require("tencent-ags")).toBe(ags);
+  });
+
   it("按部署默认值与显式 providerKey 返回同一个已注册 gateway", async () => {
     const cube = gateway("cube");
     const e2b = gateway("e2b");

@@ -4,9 +4,21 @@
 
 ## 当前支持
 
-Hoox 当前支持 `cube` 和 `e2b` 两种 `SandboxProviderKey`。Worker 与 Scheduler 在进程启动时根据 `SANDBOX_DEFAULT_PROVIDER` 和 `SANDBOX_ENABLED_PROVIDERS` 构造部署级注册表；默认 Provider 必须已启用，重复或未知 Provider 直接拒绝启动。
+Hoox 当前支持 `cube`、`e2b` 和 `tencent-ags` 三种 `SandboxProviderKey`。后台“沙箱服务”管理供应商连接、模板和策略，支持单供应商切换或按权重分配新实例。尚未发布后台路由时，Worker 与 Scheduler 沿用 `SANDBOX_DEFAULT_PROVIDER` 和 `SANDBOX_ENABLED_PROVIDERS` 构造的部署注册表；部署默认 Provider 必须已启用，重复或未知 key 拒绝启动。
 
-Provider 选择来自可信部署配置和持久化 Session 身份，不接受用户或单次 Run 动态指定。注册表不进行跨 Provider 自动故障转移：远端结果未知时必须由同一 Provider 和持久身份对账，不能在另一 Provider 上盲目重放外部副作用。
+Provider 选择来自可信后台路由或部署配置，不接受业务用户或模型指定。注册表不进行跨 Provider 自动故障转移：远端结果未知时必须由同一 Provider 和持久身份对账，不能在另一 Provider 上盲目重放外部副作用。
+
+## 后台配置与分配
+
+Cube 使用独立代理时，在供应商配置中填写代理主机、端口和协议。该代理配置随版本绑定到实例；未填写时不继承 SDK 的进程级代理环境变量。
+
+管理员保存供应商时生成不可变版本，密钥加密保存，读取接口只返回是否已配置。每个版本独立设置连接地址、模板、实例 TTL、操作超时、生命周期超时、暂停保留时间以及任务结束后暂停或销毁的策略。生命周期超时上限为 90 秒，保证 Scheduler 的连接和生命周期调用落在最短 210 秒清理租约内并保留写回预算。
+
+保存后执行“测试连接”，通过真实模板的命令、文件、所选暂停恢复策略及清理检查，才可应用分配。配置保存和路由发布使用版本冲突检查，过期页面不能覆盖新配置。单供应商模式选择一个版本；多供应商模式对新实例按权重分配，例如 1:3 约分担 25%:75%。权重是长期新建比例，不是实时并发配额，也不自动根据延迟调整。
+
+Worker 在远端创建意图之前将选中的版本持久绑定到 registry 身份。已有会话的恢复、Workspace 能力、终态处理及 Scheduler 清理继续使用绑定版本；切换路由或从新建池移除供应商不会迁移旧实例。后台读取或凭据解密失败时失败关闭，不自动退回环境默认供应商。配置与绑定保留供恢复和审计，不能删除仍有远端实例引用的版本。
+
+任务连续 handoff 优先复用当前实例；没有后续任务时按绑定版本生成 pause 或 terminate 意图。暂停保留时间同样固定于版本。各供应商的 TTL 能力仍由适配层决定，空闲策略不等于到期自动暂停。接入步骤和加密根要求见[配置参考](../reference/configuration.md#后台沙箱配置)。
 
 ## 统一能力
 
@@ -24,8 +36,25 @@ Thread Sandbox Session 持久保存 Provider key、远端身份、generation、�
 
 CubeSandbox 通过受控只读 Volume 暴露 ResourceFS。E2B 不具备相同 Volume 能力，Worker 在安全边界内物化固定 ResourceFS 快照。两条路径都必须保持 `/history`、`/thread-files` 和 `/resources` 的模型可见契约，不向 Sandbox 暴露对象存储键、数据库身份或宿主机任意路径。
 
+## 腾讯云 AGS
+
+`tencent-ags` 复用 E2B 协议，但使用独立持久身份和部署配置，允许与 E2B 官方服务同时启用。Worker 和 Scheduler 都需要 `TENCENT_AGS_API_KEY`、`TENCENT_AGS_DOMAIN`；Worker 还需要 `TENCENT_AGS_TEMPLATE_ID`，并使用独立的 `TENCENT_AGS_SESSION_TTL_SECONDS`（默认 3600 秒）。域名不含协议或路径。配置值见[配置参考](../reference/configuration.md#腾讯云-ags)。
+
+AGS 的 ResourceFS 采用 E2B 受控快照路径，Workspace 初始化要求普通执行用户可受控使用 sudo；模板必须具备 Python 3、Node.js、标准文件工具，以及任务需要的文档生成依赖。不得用 Cube Volume 参数代替腾讯 CFS 挂载。
+
+Thread 的 AGS TTL 到期按销毁处理，不承诺自动暂停或自动恢复。Scheduler 仍可主动暂停，后续 connect 恢复已暂停实例。网关优先读取 `metadata["x-ags-sandbox-state"]`：过渡态、暂停失败、恢复失败及未知新状态返回 unknown，连接前阻止复用；连接返回后还需确认 running。暂停冲突进入既有 UNKNOWN 对账，不无界重试。持久化 Workspace Revision 仍是恢复事实源；到期后未持久化的文件和进程可能丢失。
+
+### 接入与验收
+
+1. 在腾讯云目标地域创建 API Key 和兼容 E2B 的沙箱工具，模板包含上述执行依赖。腾讯云模板名、启动命令、健康检查和执行用户须在目标环境验证。
+2. 执行 `pnpm db:setup` 应用 Provider 身份迁移；配置 `SANDBOX_ENABLED_PROVIDERS` 包含 `tencent-ags`，按需设置 `SANDBOX_DEFAULT_PROVIDER=tencent-ags`。Worker 与 Scheduler 同步部署，旧 Provider 保持启用直到其存量清理完成。
+3. 在受控环境执行 `pnpm test:tencent-ags:real`，验证 create、command、files、inspect、pause、connect 和 kill，并检查恢复后文件仍可读取。
+4. 生产启用前验证：运行中 connect 是否延长实际 TTL；长任务跨 TTL；创建响应丢失后的 metadata 保存与过滤；暂停配额和恢复失败；附件、历史、技能快照及文档交付；Worker 重启与 Scheduler 回收。
+
+仓库自动化验证适配逻辑，不代表已通过腾讯云目标地域验收。[上海实测记录](../verification/2026-09-10-tencent-ags-smoke.md)覆盖基本生命周期、Worker 预检及 metadata 对账前提，不覆盖上述全部生产条件。不要将已有 `e2b` Session 改记为 `tencent-ags`；不支持凭借修改域名迁移运行中实例。
+
 ## 限制
 
-- 只支持 `cube` 和 `e2b`；新增 Provider 需要扩展受限 key、实现完整网关、持久身份恢复、Scheduler 路由、真实冒烟和供应链证据。
+- 支持 `cube`、`e2b` 和 `tencent-ags`；新增 Provider 需要扩展受限 key、实现完整网关、持久身份恢复、Scheduler 路由、真实冒烟和供应链证据。
 - 仓库 Gate 不等于目标环境 readiness；Provider TTL、容量、账单、代理、证书和故障恢复必须在目标部署中验收。
 - 自动故障转移不属于当前契约。

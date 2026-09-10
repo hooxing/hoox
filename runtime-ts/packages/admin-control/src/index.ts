@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 export * from "./run-compaction-settings.js";
+export * from "./sandbox-configuration.js";
 
 export type ControlOperatorRole = "viewer" | "operator" | "admin";
 export type ControlRevisionStatus = "draft" | "active" | "retired";

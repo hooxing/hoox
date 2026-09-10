@@ -14,10 +14,14 @@ import type {
   PlatformUserSummaryDto,
   ProbeControlRevisionRequest,
   PublishControlRevisionRequest,
+  PublishSandboxRoutingRequest,
   RuntimeSettingsRevisionDto,
+  SandboxControlDto,
+  SandboxProfileRevisionDto,
   SaveMemoryProviderConfigurationRequest,
   SaveModelProviderConfigurationRequest,
   SaveRuntimeSettingsConfigurationRequest,
+  SaveSandboxProfileRequest,
   UpdateIdentityAdminConfigurationRequest,
   UpdatePlatformUserStatusRequest,
 } from "@hoox/protocol";
@@ -50,6 +54,23 @@ function messageFor(status: number): string {
 }
 
 export class AdminControlApi {
+  sandboxOverview(): Promise<SandboxControlDto> {
+    return this.request("/sandbox");
+  }
+  saveSandboxProfile(input: SaveSandboxProfileRequest): Promise<SandboxProfileRevisionDto> {
+    return this.request("/sandbox/profiles", { method: "PUT", body: JSON.stringify(input) });
+  }
+  publishSandboxRouting(input: PublishSandboxRoutingRequest): Promise<SandboxControlDto> {
+    return this.request("/sandbox/routing", { method: "PUT", body: JSON.stringify(input) });
+  }
+  probeSandboxProfile(
+    providerKey: string,
+    revision: number,
+  ): Promise<{ healthy: boolean; durationMs: number }> {
+    return this.request(`/sandbox/profiles/${encodeURIComponent(providerKey)}/${revision}/probe`, {
+      method: "POST",
+    });
+  }
   private readonly pendingIdempotencyKeys = new Map<string, string>();
 
   constructor(

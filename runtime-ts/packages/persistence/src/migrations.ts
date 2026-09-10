@@ -22,6 +22,7 @@ interface Migration {
 const historicalDownChecksums = Object.freeze({
   adminControlPlane: "799aee36463d5520efd57b03de3619678387d92024ed6c85f46dae54f6d019f8",
   adminUserOperations: "80a8293017276bedb2eda063e3ecd0c33a635d46810245a02d8a249cdee5ac7a",
+  managedSandboxConfiguration: "ef2616c64165552f3474af0453940fe34b3e9174e378770bf14e56a8f6f9900e",
   modelUsageMetrics: "93d9244d34e54403e187867916f4a4ecc3b7f5ab856e17a2e1b26060fdbe1f54",
 });
 
@@ -131,7 +132,7 @@ function replaceHistoricalDownFragment(
 }
 
 /**
- * 0050/0052/0053 的已发布 down SQL 存在 PostgreSQL 依赖顺序问题。迁移文件本身必须保持
+ * 0050/0052/0053/0064 的已发布 down SQL 存在 PostgreSQL 依赖顺序问题。迁移文件本身必须保持
  * 不可变以匹配生产 checksum；仅在执行已知指纹的破坏性回退时修复语句顺序。
  */
 export function executableDownSql(source: Migration): string {
@@ -170,6 +171,18 @@ export function executableDownSql(source: Migration): string {
       source,
       /CREATE OR REPLACE VIEW admin_runtime_statistics/u,
       "DROP VIEW admin_runtime_statistics;\nCREATE VIEW admin_runtime_statistics",
+    );
+  }
+  if (
+    source.version === 64 &&
+    source.name === "managed_sandbox_configuration" &&
+    source.checksum === historicalDownChecksums.managedSandboxConfiguration
+  ) {
+    return replaceHistoricalDownFragment(
+      source,
+      /DROP TABLE sandbox_configuration_bindings;/u,
+      "DROP POLICY runtime_profile_read ON sandbox_provider_profiles;\n" +
+        "DROP TABLE sandbox_configuration_bindings;",
     );
   }
   return source.downSql;

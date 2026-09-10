@@ -16,6 +16,7 @@
     "@hoox/persistence": "workspace:*",
     "@hoox/process-runtime": "workspace:*",
     "@hoox/protocol": "workspace:*",
+    "@hoox/sandbox": "workspace:*",
     "@hoox/skill": "workspace:*",
     "@hoox/skill-admin-api": "workspace:*",
     "@sinclair/typebox": "0.34.52",

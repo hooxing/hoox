@@ -56,6 +56,29 @@ describe("Agent Worker 进程入口", () => {
     vi.unstubAllGlobals();
   });
 
+  it("腾讯云 AGS 与 E2B 使用独立配置，缺少 AGS 凭据时失败关闭", () => {
+    const env = {
+      ...productionEnvironment(),
+      SANDBOX_DEFAULT_PROVIDER: "tencent-ags",
+      SANDBOX_ENABLED_PROVIDERS: "e2b,tencent-ags",
+      E2B_API_KEY: "test-e2b",
+      E2B_TEMPLATE_ID: "base",
+      TENCENT_AGS_API_KEY: "test-ags",
+      TENCENT_AGS_DOMAIN: "ags.example.invalid",
+      TENCENT_AGS_TEMPLATE_ID: "hoox",
+    };
+    expect(parseWorkerProcessEnvironment(env).sandbox).toMatchObject({
+      defaultProviderKey: "tencent-ags",
+      enabledProviderKeys: ["e2b", "tencent-ags"],
+      tencentAgs: { apiKey: "test-ags", domain: "ags.example.invalid" },
+      e2b: { apiKey: "test-e2b" },
+    });
+    const { TENCENT_AGS_API_KEY: _key, ...missingKey } = env;
+    expect(() => parseWorkerProcessEnvironment(missingKey)).toThrow("TENCENT_AGS_API_KEY");
+    const { TENCENT_AGS_DOMAIN: _domain, ...missingDomain } = env;
+    expect(() => parseWorkerProcessEnvironment(missingDomain)).toThrow("TENCENT_AGS_DOMAIN");
+  });
+
   it("production 在解析最早边界拒绝继承的 Node TLS/代理覆盖", () => {
     expect(() =>
       parseWorkerProcessEnvironment({

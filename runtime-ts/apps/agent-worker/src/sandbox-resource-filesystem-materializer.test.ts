@@ -156,7 +156,7 @@ describe("E2B ResourceFS 受控快照物化", () => {
   });
 
   it("大文件拆成有界分块写入，再在远端合并为最终路径", async () => {
-    const h = harness({ chunkBytes: 4, writeConcurrency: 1 });
+    const h = harness({ chunkBytes: 4, writeConcurrency: 1, writeAttempts: 1 });
     await h.materializer.materialize({
       scope,
       sandbox: h.sandbox,
@@ -201,7 +201,7 @@ describe("E2B ResourceFS 受控快照物化", () => {
   });
 
   it("写入重试耗尽后失败关闭并清理 staging", async () => {
-    const h = harness({ writeAttempts: 2, writeConcurrency: 1 });
+    const h = harness({ writeAttempts: 2, writeConcurrency: 1, chunkBytes: 16 });
     h.sandbox.writeFile.mockRejectedValue(new Error("数据面停顿"));
 
     await expect(
@@ -212,8 +212,42 @@ describe("E2B ResourceFS 受控快照物化", () => {
       }),
     ).rejects.toThrow("数据面停顿");
 
-    expect(h.sandbox.writeFile).toHaveBeenCalledTimes(2);
+    // 16、4、1 字节三档，每档两次尝试；全部失败才关闭。
+    expect(h.sandbox.writeFile).toHaveBeenCalledTimes(6);
     expect(h.commands.join("\n")).toContain("rm -rf --");
+  });
+
+  it("大分块停摆后自动降级到更小分块并成功", async () => {
+    const h = harness({ writeAttempts: 1, writeConcurrency: 1, chunkBytes: 8 });
+    const inner = h.sandbox.writeFile.getMockImplementation();
+    if (inner === undefined) throw new Error("测试夹具缺少 writeFile 实现");
+    const stalled: string[] = [];
+    h.sandbox.writeFile.mockImplementation(async (path: string, body: string | Uint8Array) => {
+      const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
+      // 只让 8 字节档位停摆，模拟大请求体被链路静默丢弃。
+      if (bytes.byteLength === 8) {
+        stalled.push(path);
+        throw new Error("数据面停顿");
+      }
+      return inner(path, body);
+    });
+
+    await h.materializer.materialize({
+      scope,
+      sandbox: h.sandbox,
+      signal: new AbortController().signal,
+    });
+
+    expect(stalled.length).toBeGreaterThan(0);
+    const written = h.writes.filter((item) => item.path.includes("/version-e2b/资料.txt"));
+    const parts = written
+      .filter((item) => item.path.includes(".hooxpart-"))
+      .sort((left, right) => left.path.localeCompare(right.path));
+    expect(parts.length).toBeGreaterThan(1);
+    expect(Buffer.concat(parts.map((item) => Buffer.from(item.body))).toString()).toBe(
+      "resource-body",
+    );
+    expect(h.commands.join("\n")).toContain("cat ");
   });
 
   it("超过快照文件上限时在写远端前失败关闭", async () => {

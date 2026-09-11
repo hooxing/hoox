@@ -1361,7 +1361,6 @@ function ComposerFileVisual({
         <button
           type="button"
           className={`composer-file-visual is-${kind}`}
-          data-file-kind={kind}
           aria-label={`预览图片 ${name}`}
           onClick={() => setPreviewOpen(true)}
         >

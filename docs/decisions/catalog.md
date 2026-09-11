@@ -302,5 +302,6 @@
 | [后端管理 Sandbox 供应商配置与版本固定](20260910005916-managed-sandbox-routing.md) | 已接受 | 2026-09-10 |
 | [ResourceFS 受控快照的分块重试与有界并发写入](20260910191159-resourcefs-snapshot-chunked-write.md) | 已接受 | 2026-09-10 |
 | [受控快照分块在链路失败时自动降级](20260910202709-resourcefs-snapshot-adaptive-chunk-downshift.md) | 已接受 | 2026-09-10 |
+| [ADR-20260911162421：MCP 与外部工具接入采用发布期固化与 Run 快照](20260911162421-mcp-and-external-tool-integration-boundary.md) | 提议 | 2026-09-11 |
 
 </details>

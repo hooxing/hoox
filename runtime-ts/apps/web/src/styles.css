@@ -2005,10 +2005,6 @@ h2 {
   background: transparent;
 }
 .composer-file button.composer-file-visual {
-  width: 46px;
-  min-width: 46px;
-  height: 46px;
-  min-height: 46px;
   margin: 0;
   cursor: zoom-in;
 }

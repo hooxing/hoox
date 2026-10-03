@@ -69,6 +69,7 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 
 ```bash
 curl --fail https://hoox.aisay.cc/
+curl --fail https://hoox.aisay.cc/app
 curl --fail https://hoox.aisay.cc/api/ready
 curl --fail https://hoox.aisay.cc/admin/
 curl --fail https://hoox.aisay.cc/trajectory/
@@ -81,7 +82,7 @@ docker compose --project-name hoox-demo \
   -f /opt/hoox-demo/current/docker-compose.yml ps
 ```
 
-未登录访问 `/admin/` 与 `/trajectory/` 应成功加载不含敏感数据的页面外壳；未携带 Hoox Bearer 的 `/v1/admin/` 与 `/trajectory/api/` 必须返回 `401`。在同源工作台使用 Demo 管理员账号登录后，再打开 `/admin/` 和 `/trajectory/`，后台应能读取管理数据，轨迹页应能读取稳定轨迹数据 epoch 中自启用后的 Run/Attempt。还应创建 Thread、触发一次 Run，并确认 Worker 能消费同一 Tenant 的 dispatch，且轨迹页出现对应记录。账号密码保存在运维人员的受限凭据文件中，不得复制到 issue、PR、Actions 日志或本页。
+`/` 展示公开介绍页，首页的工作台入口应跳转到 `/app`；两条路径均应支持直接访问和刷新。未登录访问 `/admin/` 与 `/trajectory/` 应成功加载不含敏感数据的页面外壳；未携带 Hoox Bearer 的 `/v1/admin/` 与 `/trajectory/api/` 必须返回 `401`。在同源工作台使用 Demo 管理员账号登录后，再打开 `/admin/` 和 `/trajectory/`，后台应能读取管理数据，轨迹页应能读取稳定轨迹数据 epoch 中自启用后的 Run/Attempt。还应创建 Thread、触发一次 Run，并确认 Worker 能消费同一 Tenant 的 dispatch，且轨迹页出现对应记录。账号密码保存在运维人员的受限凭据文件中，不得复制到 issue、PR、Actions 日志或本页。
 
 ## 失败与回滚
 

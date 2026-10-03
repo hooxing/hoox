@@ -1,10 +1,11 @@
 export * from "./agent-control-tools.js";
+export * from "./automation-update-tool.js";
 export * from "./collapse-process-for-final-answer-tool.js";
 export * from "./deepseek-v4-model.js";
 export * from "./deepseek-v4-tokenizer.js";
 export * from "./deliver-file-tool.js";
-export * from "./openai-compatible-provider.js";
 export * from "./events.js";
+export * from "./openai-compatible-provider.js";
 export {
   assertPiSessionCapabilityManifest,
   assessSafePiSessionContext,
@@ -21,10 +22,10 @@ export {
   type PiSessionDiagnostics,
   type TrustedPiModelContextCapability,
 } from "./pi-session.js";
+export type { ToolCallingMode } from "./ptc-tools.js";
 export * from "./rollout-recovery.js";
 export * from "./runtime-compaction.js";
 export * from "./skill-tool.js";
 export * from "./thread-history.js";
 export * from "./todo-write-tool.js";
 export * from "./tools.js";
-export * from "./automation-update-tool.js";

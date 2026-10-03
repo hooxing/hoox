@@ -53,6 +53,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 - `MODEL_BASE_URL`、`MODEL_API_KEY` 和 `MODEL_ID` 定义没有 active 后台配置时的兼容回退模型。
 - 日常 Provider 密钥在后台模型页面写入；“保存并使用”由服务端一次原子保存并启用，列表中的“使用”切换已保存供应商。已有托管模型快照继续固定旧 Run 的配置与密钥，新配置只影响之后首次建立模型配置快照的 Run。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 是 Admin API 与 Worker 共享的稳定加密根，production 至少 32 字节且不能用于调用模型。
+- 后台“运行设置”可选工具调用模式：`native`（正常、默认）或 `ptc`（实验）。模式在 Worker 首次建立 Run 配置快照时固定，已有快照及该 Run 的子 Agent/恢复不受切换影响；缺字段的旧配置使用正常模式。PTC 的执行、审计和限制见[工具调用模式](../architecture/tool-calling-modes.md)。
 - Context window、最大输出和图片能力是显式可信配置，不能只依赖模型名称猜测。
 - Thread Context、Compaction、Sandbox 复用和 Subagent 功能使用独立 feature flag。
 - 新 Run 的压缩参数优先采用后台“运行设置”，未保存时使用 Worker 部署回退。部署字段分别为 `THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT`（默认 `80`）、`THREAD_CONTEXT_COMPACTION_TARGET_PERCENT`（默认 `55`）、`THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS`（默认 `4096`）、`THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS`（省略时使用部署 `MODEL_MAX_OUTPUT_TOKENS`）、`THREAD_CONTEXT_COMPACTION_TIMEOUT_MS`（默认 `60000`）。示例文件的显式值是部署样例，不改变省略时的解析默认值。
@@ -72,7 +73,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 ### 后台管理
 
-- 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、身份、统计与 Skill 路由共用管理身份。“运行设置”在 `/settings` 配置并发和上下文压缩参数，一次保存生效；尚未保存时页面展示推荐默认值，并明确标识未保存。数据库、端口、部署角色与平台根秘密保留在部署配置。
+- 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、身份、统计与 Skill 路由共用管理身份。“运行设置”在 `/settings` 配置工具调用模式、并发和上下文压缩参数，一次保存生效；尚未保存时页面展示推荐默认值，并明确标识未保存。数据库、端口、部署角色与平台根秘密保留在部署配置。
 - “身份与登录”配置保存后动态生效；页面不要求填写原因或理解版本，服务端仍执行并发检查并自动记录审计。Provider、SMTP 与短信秘密只返回已配置状态，不回显明文。
 - 模型 Provider 的 API Key 是写入型字段：首次配置必填，编辑时可保留旧密钥或替换。多个已保存供应商可分别使用或测试；“测试已保存配置”只验证已保存的默认模型，不测试未保存输入。模型能力高级设置保留显式覆盖，页面不展示内部版本或原因输入。
 - 记忆页可独立配置 Mem0 API Key、开关、地址与超时，不要求先配置模型。密钥加密保存、不回显，留空保留现有密钥；保存后对尚未建立运行快照的新任务生效，无需重启。新部署的作用域秘密由平台稳定主密钥独立派生；已有 `MEM0_SCOPE_HMAC_KEY` 优先沿用，接管 API Key 后仍必须保留，以免改变已有记忆标识。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 同时保护模型和记忆密钥，必须稳定并备份。

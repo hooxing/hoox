@@ -172,26 +172,9 @@ function safeSessionOptions(
     readonly loadRecovery: unknown;
   },
 ): CreateSafePiSessionOptions {
-  return {
-    model: options.model,
-    modelContext: options.modelContext,
-    modelRuntime: options.modelRuntime,
-    ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
-    ...(options.prepareSandboxTool === undefined
-      ? {}
-      : { prepareSandboxTool: options.prepareSandboxTool }),
-    authorizeToolEffect: options.authorizeToolEffect,
-    createToolObservationRecorder: options.createToolObservationRecorder,
-    ...(options.untrustedPromptContent === undefined
-      ? {}
-      : { untrustedPromptContent: options.untrustedPromptContent }),
-    ...(options.personalizationPromptContent === undefined
-      ? {}
-      : { personalizationPromptContent: options.personalizationPromptContent }),
-    ...(options.deliverFileToolRouter === undefined
-      ? {}
-      : { deliverFileToolRouter: options.deliverFileToolRouter }),
-  };
+  // 恢复必须保留与新建会话相同的权限和续行边界，只剔除恢复仓储端口。
+  const { loadRecovery: _loadRecovery, ...sessionOptions } = options;
+  return sessionOptions;
 }
 
 function recoverToolObservation(

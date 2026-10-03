@@ -61,6 +61,7 @@ import {
 } from "./deliver-file-tool.js";
 import { subscribeBufferedRuntimeEvents } from "./event-buffer.js";
 import { mapPiEvent, type PiAgentEvent, type RuntimeAgentEvent } from "./events.js";
+import { createPtcTool, type PtcToolEvent, type ToolCallingMode } from "./ptc-tools.js";
 import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
 import {
   assertThreadActiveHistory,
@@ -183,6 +184,7 @@ class PiSessionControllerImpl implements PiSessionController {
   readonly #agent: Agent;
   readonly #listeners = new Set<(event: PiAgentEvent) => void>();
   readonly #stopAgentEvents: () => void;
+  readonly #stopToolEvents: () => void;
   readonly #eventSubscriptions = new Set<() => void>();
   readonly #diagnostics: () => PiSessionDiagnostics;
   readonly #admitInput: (text: string) => void;
@@ -208,9 +210,13 @@ class PiSessionControllerImpl implements PiSessionController {
     providerFailure: DeferredProviderFailure,
     checkpoint: () => { readonly messages: readonly AgentMessage[] },
     rollback: (checkpoint: { readonly messages: readonly AgentMessage[] }) => void,
+    subscribeToolEvents: (listener: (event: PtcToolEvent) => void) => () => void,
   ) {
     this.#agent = agent;
     this.#stopAgentEvents = agent.subscribe((event) => this.#emit(event));
+    this.#stopToolEvents = subscribeToolEvents((event) =>
+      this.#emit({ type: "runtime_tool_event", event }),
+    );
     this.#diagnostics = diagnostics;
     this.#admitInput = admitInput;
     this.#providerFailure = providerFailure;
@@ -294,6 +300,7 @@ class PiSessionControllerImpl implements PiSessionController {
   dispose(): void {
     for (const unsubscribe of this.#eventSubscriptions) unsubscribe();
     this.#stopAgentEvents();
+    this.#stopToolEvents();
     this.#listeners.clear();
     this.#agent.abort();
   }
@@ -407,6 +414,15 @@ function bindModelContextCapability(
 }
 
 export interface CreateSafePiSessionOptions {
+  /** Run 固定的工具编排模式；缺字段保持正常模式。 */
+  toolCallingMode?: ToolCallingMode;
+  /** 外层程序先形成模型调用事实，内部工具再独立进入受控执行审计。 */
+  preparePtcProgram?: (callId: string) => Promise<void>;
+  preparePtcTool?: (call: {
+    readonly callId: string;
+    readonly toolName: string;
+    readonly parentCallId: string;
+  }) => Promise<void>;
   model: Model<Api>;
   modelContext: TrustedPiModelContextCapability;
   modelRuntime: Models;
@@ -621,6 +637,7 @@ export async function createSafePiSession(
       agent.clearAllQueues();
       agent.state.messages = [...checkpoint.messages];
     },
+    material.subscribeToolEvents,
   );
 }
 
@@ -815,7 +832,19 @@ function toPiHistoryMessage(
 }
 
 function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
+  if (
+    options.toolCallingMode !== undefined &&
+    options.toolCallingMode !== "native" &&
+    options.toolCallingMode !== "ptc"
+  )
+    throw new TypeError("工具调用模式无效");
+  const toolEventListeners = new Set<(event: PtcToolEvent) => void>();
   let toolContinuationRejected = false;
+  const assertContinuationAllowed = () => {
+    if (toolContinuationRejected)
+      throw new ModelContinuationRejectedError("tool_observation_incomplete");
+    options.assertModelRequestAllowed?.();
+  };
   const sandboxTarget =
     options.prepareSandboxTool === undefined
       ? options.sandbox
@@ -840,7 +869,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   const selectedSandboxTools = observedSandboxTools.tools.filter((tool) =>
     isEnabled(tool.name as DelegablePiToolName),
   );
-  const customTools = [
+  const nativeTools = [
     ...selectedSandboxTools,
     ...(enabled === undefined
       ? [createCollapseProcessForFinalAnswerPiTool(observedSandboxTools.recordControlledReceipt)]
@@ -884,6 +913,49 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
           observedSandboxTools.recordControlledReceipt,
         )),
   ];
+  const preparePtcProgram = options.preparePtcProgram;
+  const preparePtcTool = options.preparePtcTool;
+  if (
+    options.toolCallingMode === "ptc" &&
+    (preparePtcProgram === undefined || preparePtcTool === undefined)
+  )
+    throw new TypeError("PTC 模式缺少受控开始与内部审计能力");
+  const customTools =
+    options.toolCallingMode !== "ptc" ||
+    preparePtcProgram === undefined ||
+    preparePtcTool === undefined
+      ? nativeTools
+      : [
+          createPtcTool({
+            // 折叠工具依赖模型直接发出的独占 turn 标记；内部调用不能伪造这一展示事实。
+            tools: nativeTools.filter(
+              (tool) => tool.name !== "collapse_process_for_final_answer",
+            ) as AgentTool[],
+            emit: (event) => {
+              for (const listener of toolEventListeners) listener(event);
+            },
+            prepareProgram: preparePtcProgram,
+            prepareTool: preparePtcTool,
+            ensureReceipt: async (callId, name, outcome) => {
+              if (
+                (await observedSandboxTools.outputs.readControlledReceipt({
+                  toolCallId: callId,
+                  toolName: name,
+                })) !== undefined
+              )
+                return;
+              const result = await observedSandboxTools.recordControlledReceipt(
+                callId,
+                name,
+                outcome,
+              );
+              if (result.outcome !== "recorded" && result.outcome !== "replayed")
+                throw new Error("PTC 内部回执未能持久化");
+            },
+            recordProgramReceipt: observedSandboxTools.recordControlledReceipt,
+            assertContinuationAllowed,
+          }),
+        ];
   // 能力清单从即将传给 Pi 的同一组真实工具派生，不能维护第二份易漂移的硬编码列表。
   const builtPrompt = buildRuntimeSystemPrompt({
     schemaVersion: 1,
@@ -909,10 +981,12 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     customTools,
     builtPrompt,
     serializedToolDefinitions,
-    assertModelRequestAllowed: () => {
-      if (toolContinuationRejected) {
-        throw new ModelContinuationRejectedError("tool_observation_incomplete");
-      }
+    assertModelRequestAllowed: assertContinuationAllowed,
+    subscribeToolEvents: (listener: (event: PtcToolEvent) => void) => {
+      toolEventListeners.add(listener);
+      return () => {
+        toolEventListeners.delete(listener);
+      };
     },
   };
 }

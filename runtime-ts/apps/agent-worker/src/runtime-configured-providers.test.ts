@@ -45,6 +45,31 @@ function snapshot(revision: number, maxTokens = 8192): RuntimeControlConfigurati
   };
 }
 
+function toolModeSnapshot(toolCallingMode?: "native" | "ptc"): RuntimeControlConfigurationSnapshot {
+  return {
+    ...snapshot(2),
+    runtimeSettings: {
+      revision: 1,
+      versionToken: 1,
+      status: "active",
+      probeStatus: "healthy",
+      createdBy: "user_admin",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      updatedAt: "2026-08-19T00:00:00.000Z",
+      configuration: {
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
+        compactionSoftLimitPercent: 80,
+        compactionTargetPercent: 55,
+        compactionRecentUserTokens: 4096,
+        compactionMaxOutputTokens: 4096,
+        compactionTimeoutMs: 60_000,
+        ...(toolCallingMode === undefined ? {} : { toolCallingMode }),
+      },
+    },
+  };
+}
+
 function memorySnapshot(enabled: boolean): RuntimeControlConfigurationSnapshot {
   return {
     ...snapshot(3),
@@ -142,6 +167,71 @@ describe("Run 固定运行配置", () => {
     expect(build).toHaveBeenCalledTimes(2);
     expect(build).toHaveBeenNthCalledWith(1, snapshot(2), first);
     expect(build).toHaveBeenNthCalledWith(2, snapshot(2), second);
+  });
+
+  it("相同模型与压缩参数在 native 和 PTC 模式分别缓存，回到原模式复用原工厂", async () => {
+    const session = { dispose() {} } as Awaited<ReturnType<AgentSessionFactoryPort["create"]>>;
+    const native = toolModeSnapshot("native");
+    const ptc = toolModeSnapshot("ptc");
+    const nativeFactory = { create: vi.fn(async () => session) };
+    const ptcFactory = { create: vi.fn(async () => session) };
+    const build = vi.fn(async (configuration: RuntimeControlConfigurationSnapshot | undefined) =>
+      configuration?.runtimeSettings?.configuration.toolCallingMode === "ptc"
+        ? ptcFactory
+        : nativeFactory,
+    );
+    const factory = new RuntimeConfiguredSessionFactory(
+      {
+        resolveForRun: vi
+          .fn()
+          .mockResolvedValueOnce(native)
+          .mockResolvedValueOnce(ptc)
+          .mockResolvedValueOnce(native)
+          .mockResolvedValueOnce(ptc),
+      },
+      { resolveForRun: async () => deploymentSettings },
+      deploymentSettings,
+      8192,
+      build,
+    );
+    const inputs = ["run-native-a", "run-ptc-a", "run-native-b", "run-ptc-b"].map(createInput);
+    for (const input of inputs) await factory.create(input);
+
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(build).toHaveBeenNthCalledWith(1, native, deploymentSettings);
+    expect(build).toHaveBeenNthCalledWith(2, ptc, deploymentSettings);
+    expect(nativeFactory.create.mock.calls).toEqual([[inputs[0]], [inputs[2]]]);
+    expect(ptcFactory.create.mock.calls).toEqual([[inputs[1]], [inputs[3]]]);
+  });
+
+  it.each([
+    { name: "旧快照没有运行设置", legacy: snapshot(2) },
+    { name: "旧运行设置没有 toolCallingMode", legacy: toolModeSnapshot() },
+  ])("$name 时与显式 native 共用缓存，不与 PTC 共用", async ({ legacy }) => {
+    const session = { dispose() {} } as Awaited<ReturnType<AgentSessionFactoryPort["create"]>>;
+    const native = toolModeSnapshot("native");
+    const ptc = toolModeSnapshot("ptc");
+    const build = vi.fn(async () => ({ create: async () => session }));
+    const factory = new RuntimeConfiguredSessionFactory(
+      {
+        resolveForRun: vi
+          .fn()
+          .mockResolvedValueOnce(legacy)
+          .mockResolvedValueOnce(native)
+          .mockResolvedValueOnce(ptc)
+          .mockResolvedValueOnce(legacy),
+      },
+      { resolveForRun: async () => deploymentSettings },
+      deploymentSettings,
+      8192,
+      build,
+    );
+    for (const run of ["run-legacy", "run-native", "run-ptc", "run-legacy-resume"])
+      await factory.create(createInput(run));
+
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(build).toHaveBeenNthCalledWith(1, legacy, deploymentSettings);
+    expect(build).toHaveBeenNthCalledWith(2, ptc, deploymentSettings);
   });
 
   it("新 Run 按固定模型裁剪预算，恢复时保持仓储已保存的实际预算", async () => {

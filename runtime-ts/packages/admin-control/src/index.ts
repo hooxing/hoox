@@ -50,6 +50,7 @@ export const DEFAULT_WORKER_MAX_CONCURRENT_RUNS = 20;
 export const DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT = 2;
 
 export interface RuntimeSettingsConfiguration {
+  readonly toolCallingMode?: "native" | "ptc";
   readonly workerMaxConcurrentRuns: number;
   readonly userMaxConcurrentRunsPerTenant: number;
   readonly compactionSoftLimitPercent: number;
@@ -544,11 +545,17 @@ export function normalizeStoredMemoryProviderConfiguration(
 
 export function normalizeRuntimeSettingsConfiguration(
   input: RuntimeSettingsConfiguration,
-): RuntimeSettingsConfiguration {
+): RuntimeSettingsConfiguration & { readonly toolCallingMode: "native" | "ptc" } {
+  // 旧修订缺少字段时保持正常模式；非法值不能静默回退。
+  const toolCallingMode = input.toolCallingMode === undefined ? "native" : input.toolCallingMode;
+  if (toolCallingMode !== "native" && toolCallingMode !== "ptc") {
+    throw new TypeError("工具调用模式必须为 native 或 ptc");
+  }
   const softLimit = boundedInteger(input.compactionSoftLimitPercent, "压缩软上限", 50, 95);
   const target = boundedInteger(input.compactionTargetPercent, "压缩目标", 20, 90);
   if (target >= softLimit) throw new TypeError("压缩目标必须低于软上限");
   return Object.freeze({
+    toolCallingMode,
     workerMaxConcurrentRuns: boundedInteger(
       input.workerMaxConcurrentRuns,
       "单 Worker 并行 Run 上限",
@@ -633,7 +640,16 @@ export class AdminControlService {
         : { runtimeEnvironment: this.runtimeEnvironment }),
       ...(activeModel === undefined ? {} : { activeModel: redactedModelRevision(activeModel) }),
       ...(activeMemory === undefined ? {} : { activeMemory: redactedMemoryRevision(activeMemory) }),
-      ...(activeRuntimeSettings === undefined ? {} : { activeRuntimeSettings }),
+      ...(activeRuntimeSettings === undefined
+        ? {}
+        : {
+            activeRuntimeSettings: {
+              ...activeRuntimeSettings,
+              configuration: normalizeRuntimeSettingsConfiguration(
+                activeRuntimeSettings.configuration,
+              ),
+            },
+          }),
       statistics,
       deploymentSettings: this.deploymentSettings,
     });
@@ -651,7 +667,10 @@ export class AdminControlService {
 
   async listRuntimeSettings(actorUserId: string) {
     requireRole(await this.repository.resolveRole(actorUserId), ["viewer", "operator", "admin"]);
-    return await this.repository.listRuntimeSettings(actorUserId);
+    return (await this.repository.listRuntimeSettings(actorUserId)).map((revision) => ({
+      ...revision,
+      configuration: normalizeRuntimeSettingsConfiguration(revision.configuration),
+    }));
   }
 
   async listAudits(actorUserId: string, limit = 100) {

@@ -85,6 +85,7 @@ const runtimeRolloutTables = new Set([
   "runtime_rollout_checkpoints",
   "runtime_rollout_checkpoint_commands",
 ]);
+const runtimePtcDispatchTables = new Set(["runtime_ptc_dispatches"]);
 const runtimeAgentControlTables = new Set([
   "runtime_agent_threads",
   "runtime_agent_turns",
@@ -264,6 +265,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["artifact_publications", new Set(["SELECT", "INSERT"])],
   ["artifact_publication_settlements", new Set(["SELECT", "INSERT"])],
   ["artifact_publication_commands", new Set(["SELECT", "INSERT"])],
+  ["runtime_ptc_dispatches", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_streams", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_entries", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_append_commands", new Set(["SELECT", "INSERT"])],
@@ -321,6 +323,21 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 ]);
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
+  [
+    "runtime_ptc_dispatches",
+    new Set([
+      "result_idempotency_key",
+      "result_digest",
+      "result_body",
+      "is_truncated",
+      "blob_reference_id",
+      "blob_state",
+      "blob_purpose",
+      "blob_sha256",
+      "blob_size",
+      "completed_at",
+    ]),
+  ],
   [
     "user_personalization_settings",
     new Set(["content", "apply_to_team_tasks", "version", "updated_at"]),
@@ -1035,6 +1052,14 @@ async function hasRuntimeRolloutState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
+async function hasRuntimePtcDispatchState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.runtime_ptc_dispatches', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasScheduledTaskState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.scheduled_tasks', $1::text)) IS NOT NULL
@@ -1201,6 +1226,9 @@ async function activeTablePolicy(
   }
   if (!(await hasRuntimeRolloutState(client, schema))) {
     for (const table of runtimeRolloutTables) policy.delete(table);
+  }
+  if (!(await hasRuntimePtcDispatchState(client, schema))) {
+    for (const table of runtimePtcDispatchTables) policy.delete(table);
   }
   if (!(await hasRuntimeAgentControlState(client, schema))) {
     for (const table of runtimeAgentControlTables) policy.delete(table);
@@ -1388,6 +1416,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasRuntimeRolloutState(client, schema))) {
     for (const table of runtimeRolloutTables) policy.delete(table);
+  }
+  if (!(await hasRuntimePtcDispatchState(client, schema))) {
+    for (const table of runtimePtcDispatchTables) policy.delete(table);
   }
   if (!(await hasRuntimeAgentControlState(client, schema))) {
     for (const table of runtimeAgentControlTables) policy.delete(table);
@@ -3366,6 +3397,15 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.runtime_rollout_checkpoints,
          ${schema}.runtime_rollout_checkpoint_commands
        TO ${role}`,
+    );
+  }
+  if (await hasRuntimePtcDispatchState(client, context.schema)) {
+    // 开始身份不可更新；Runtime 只能补齐结果列，不能删除或截断审计日志。
+    await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.runtime_ptc_dispatches TO ${role}`);
+    await client.query(
+      `GRANT UPDATE(result_idempotency_key,result_digest,result_body,is_truncated,
+         blob_reference_id,blob_state,blob_purpose,blob_sha256,blob_size,completed_at)
+         ON TABLE ${schema}.runtime_ptc_dispatches TO ${role}`,
     );
   }
   if (await hasRuntimeAgentControlState(client, context.schema)) {

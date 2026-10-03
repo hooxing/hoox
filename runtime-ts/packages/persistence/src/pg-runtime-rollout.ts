@@ -1,3 +1,9 @@
+import { createHash } from "node:crypto";
+import {
+  assertControlledToolObservation,
+  encodeControlledToolReceipt,
+  parseControlledToolReceipt,
+} from "@hoox/context-policy";
 import type {
   RolloutCompatibilityIdentity,
   RolloutScope,
@@ -10,7 +16,6 @@ import type {
 import { agentThreadId, isoTimestamp, sha256Digest, userId } from "@hoox/domain";
 import type { ExecutionFence } from "@hoox/run-contracts";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
-import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import {
@@ -68,6 +73,69 @@ export interface AppendRolloutInput {
   readonly context: TrustedRolloutContext;
   readonly idempotencyKey: string;
   readonly entries: readonly RolloutEntryDraft[];
+}
+
+export interface AppendPtcToolCallInput {
+  readonly context: TrustedRolloutContext;
+  readonly idempotencyKey: string;
+  readonly toolCallId: string;
+  readonly parentToolCallId: string;
+  readonly toolName: string;
+}
+
+export interface AppendPtcToolResultInput {
+  readonly context: TrustedRolloutContext;
+  readonly idempotencyKey: string;
+  readonly toolCallId: string;
+  readonly parentToolCallId: string;
+  readonly body: Readonly<Record<string, unknown>>;
+  readonly isTruncated: boolean;
+  readonly blob: NonNullable<RolloutEntryDraft["blob"]>;
+}
+
+export interface RuntimePtcDispatch {
+  readonly toolCallId: string;
+  readonly parentToolCallId: string;
+  readonly toolName: string;
+  readonly startedAt: string;
+  readonly runClaimToken: string;
+  readonly runClaimEpoch: number;
+  readonly workspaceLeaseEpoch: number;
+  readonly result?: {
+    readonly body: Readonly<Record<string, unknown>>;
+    readonly isTruncated: boolean;
+    readonly completedAt: string;
+    readonly blob: NonNullable<RolloutEntryDraft["blob"]> & {
+      readonly kind: "stable";
+      readonly purpose: "trace";
+      readonly incarnationId: string;
+      readonly physicalObjectKey: string;
+    };
+  };
+}
+
+interface PtcDispatchRow extends QueryResultRow {
+  readonly tool_call_id: string;
+  readonly parent_tool_call_id: string;
+  readonly tool_name: string;
+  readonly thread_id: string;
+  readonly run_id: string;
+  readonly attempt_id: string;
+  readonly agent_thread_id: string;
+  readonly start_idempotency_key: string;
+  readonly start_digest: string;
+  readonly started_at: Date;
+  readonly run_claim_token: string;
+  readonly run_claim_epoch: string;
+  readonly workspace_lease_epoch: string;
+  readonly result_idempotency_key: string | null;
+  readonly result_digest: string | null;
+  readonly result_body: Readonly<Record<string, unknown>> | null;
+  readonly is_truncated: boolean | null;
+  readonly blob_reference_id: string | null;
+  readonly blob_sha256: string | null;
+  readonly blob_size: string | null;
+  readonly completed_at: Date | null;
 }
 
 export interface WriteCheckpointInput {
@@ -278,6 +346,132 @@ async function lockActiveExecutionFence(
     ],
   );
   return result.rowCount === 1;
+}
+
+function assertPtcInput(input: AppendPtcToolCallInput | AppendPtcToolResultInput): void {
+  assertContext(input.context);
+  if (!KEY.test(input.idempotencyKey)) throw new TypeError("PTC 幂等键格式无效");
+  assertIdentifier(input.toolCallId, "PTC Tool call ID");
+  assertIdentifier(input.parentToolCallId, "PTC 父 Tool call ID");
+  if (input.toolCallId === input.parentToolCallId)
+    throw new TypeError("PTC 内层调用不能以自身为父调用");
+}
+
+function samePtcScope(row: PtcDispatchRow, context: TrustedRolloutContext): boolean {
+  return (
+    row.thread_id === context.scope.threadId &&
+    row.run_id === context.scope.runId &&
+    row.attempt_id === context.scope.attemptId &&
+    row.agent_thread_id === context.scope.agentThreadId &&
+    row.run_claim_token === context.fence.runClaim.token &&
+    Number(row.run_claim_epoch) === context.fence.runClaim.epoch &&
+    Number(row.workspace_lease_epoch) === context.fence.workspaceLease.epoch
+  );
+}
+
+function assertPtcReceipt(
+  body: Readonly<Record<string, unknown>>,
+  blob: NonNullable<RolloutEntryDraft["blob"]>,
+  isTruncated: boolean,
+): { readonly toolName: string } {
+  assertJsonRecord(body.receipt, "PTC 固定受控回执");
+  const receipt = body.receipt;
+  if (
+    typeof receipt.toolName !== "string" ||
+    (receipt.outcome !== "succeeded" && receipt.outcome !== "failed")
+  ) {
+    throw new TypeError("PTC 结果不是固定受控回执");
+  }
+  const encoded = encodeControlledToolReceipt(receipt.toolName, receipt.outcome);
+  if (
+    body.schemaVersion !== 2 ||
+    body.toolName !== receipt.toolName ||
+    digestCanonical(receipt) !== digestCanonical(JSON.parse(encoded)) ||
+    body.receiptSha256 !== blob.sha256 ||
+    body.receiptBytes !== blob.size ||
+    blob.sha256 !== createHash("sha256").update(encoded).digest("hex") ||
+    blob.size !== Buffer.byteLength(encoded, "utf8") ||
+    digestCanonical(body.traceBlob) !== digestCanonical({ referenceId: blob.referenceId })
+  ) {
+    throw new TypeError("PTC 回执与 stable trace 身份不匹配");
+  }
+  const allowedKeys = new Set([
+    "schemaVersion",
+    "toolName",
+    "receiptSha256",
+    "receiptBytes",
+    "receipt",
+    "traceBlob",
+    "truncation",
+    "observation",
+  ]);
+  assertJsonRecord(body.truncation, "PTC 回执截断元数据");
+  const truncation = body.truncation;
+  if (
+    Object.keys(body).some((key) => !allowedKeys.has(key)) ||
+    typeof body.observation !== "string" ||
+    truncation.isTruncated !== isTruncated ||
+    typeof truncation.modelVisibleBytes !== "number" ||
+    (truncation.reason !== undefined && typeof truncation.reason !== "string") ||
+    Object.keys(truncation).some(
+      (key) => !["isTruncated", "reason", "modelVisibleBytes"].includes(key),
+    )
+  ) {
+    throw new TypeError("PTC journal 只允许固定受控回执与有界投影");
+  }
+  assertControlledToolObservation({
+    receipt: parseControlledToolReceipt(encoded),
+    observation: body.observation,
+    isTruncated,
+    modelVisibleBytes: truncation.modelVisibleBytes,
+    ...(truncation.reason === undefined ? {} : { reason: truncation.reason as string }),
+  });
+  return { toolName: receipt.toolName };
+}
+
+function mapPtcDispatch(
+  row: PtcDispatchRow & {
+    readonly incarnation_id: string | null;
+    readonly physical_object_key: string | null;
+  },
+): RuntimePtcDispatch {
+  let result: RuntimePtcDispatch["result"];
+  if (row.result_body !== null) {
+    if (
+      row.is_truncated === null ||
+      row.completed_at === null ||
+      row.blob_reference_id === null ||
+      row.blob_sha256 === null ||
+      row.blob_size === null ||
+      row.incarnation_id === null ||
+      row.physical_object_key === null
+    )
+      throw new Error("PTC journal 回执缺少 stable trace 身份");
+    result = Object.freeze({
+      body: Object.freeze(row.result_body),
+      isTruncated: row.is_truncated,
+      completedAt: row.completed_at.toISOString(),
+      blob: Object.freeze({
+        referenceId: row.blob_reference_id,
+        sha256: sha256Digest(row.blob_sha256),
+        size: Number(row.blob_size),
+        kind: "stable",
+        purpose: "trace",
+        incarnationId: row.incarnation_id,
+        physicalObjectKey: row.physical_object_key,
+      }),
+    });
+  }
+  return Object.freeze({
+    toolCallId: row.tool_call_id,
+    parentToolCallId: row.parent_tool_call_id,
+    toolName: row.tool_name,
+    startedAt: row.started_at.toISOString(),
+    runClaimToken: row.run_claim_token,
+    runClaimEpoch: Number(row.run_claim_epoch),
+    workspaceLeaseEpoch: Number(row.workspace_lease_epoch),
+    ...(result === undefined ? {} : { result }),
+  });
 }
 
 function mapEntry(row: EntryRow): RuntimeRolloutEntry {
@@ -629,6 +823,248 @@ export class PgRuntimeRolloutRepository {
       row.skill_manifest_hash === input.compatibility.skillManifestHash
       ? "already_exists"
       : "conflict";
+  }
+
+  /** 开始事实必须先提交才能 dispatch；内层调用不消耗 Rollout sequence。 */
+  async appendPtcToolCall(input: AppendPtcToolCallInput): Promise<RolloutWriteResult<void>> {
+    assertPtcInput(input);
+    assertIdentifier(input.toolName, "PTC Tool 名称");
+    const commandDigest = digestCanonical({
+      schemaVersion: 1,
+      toolCallId: input.toolCallId,
+      parentToolCallId: input.parentToolCallId,
+      toolName: input.toolName,
+    });
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        async (client) => {
+          if (!(await lockActiveExecutionFence(client, input.context)))
+            return { outcome: "not_authorized" };
+          const parentSequence = await this.lockOpenPtcParent(
+            client,
+            input.context,
+            input.parentToolCallId,
+          );
+          if (parentSequence === undefined) return { outcome: "conflict" };
+          // Provider 可跨 Run/Attempt 复用调用 ID；完整 stream scope 内必须命中同一开始事实。
+          const existing = await client.query<PtcDispatchRow>(
+            `SELECT * FROM runtime_ptc_dispatches WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3
+               AND attempt_id=$4 AND agent_thread_id=$5 AND (tool_call_id=$6 OR start_idempotency_key=$7)`,
+            [...scopeParams(input.context), input.toolCallId, input.idempotencyKey],
+          );
+          if (existing.rows.length > 0) {
+            const row = existing.rows[0];
+            return existing.rows.length === 1 &&
+              row !== undefined &&
+              samePtcScope(row, input.context) &&
+              row.tool_call_id === input.toolCallId &&
+              row.start_idempotency_key === input.idempotencyKey &&
+              row.start_digest === commandDigest
+              ? { outcome: "replayed", value: undefined }
+              : { outcome: "conflict" };
+          }
+          await client.query(
+            `INSERT INTO runtime_ptc_dispatches(
+              tenant_id,thread_id,run_id,attempt_id,agent_thread_id,workspace_id,root_run_id,base_revision_id,
+              run_claim_token,run_claim_epoch,workspace_lease_epoch,tool_call_id,parent_tool_call_id,
+              parent_sequence,tool_name,start_idempotency_key,start_digest
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+            [
+              ...scopeParams(input.context),
+              input.context.fence.scope.workspaceId,
+              input.context.fence.scope.rootRunId,
+              input.context.fence.scope.baseRevisionId ?? null,
+              input.context.fence.runClaim.token,
+              input.context.fence.runClaim.epoch,
+              input.context.fence.workspaceLease.epoch,
+              input.toolCallId,
+              input.parentToolCallId,
+              parentSequence,
+              input.toolName,
+              input.idempotencyKey,
+              commandDigest,
+            ],
+          );
+          return { outcome: "created", value: undefined };
+        },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "记录 PTC 内层调用开始");
+    }
+  }
+
+  /** 只补齐已有开始事实的固定受控回执；未知结果不能自行合成 succeeded。 */
+  async appendPtcToolResult(input: AppendPtcToolResultInput): Promise<RolloutWriteResult<void>> {
+    assertPtcInput(input);
+    const draft = normalizeDraft({
+      kind: "tool_result",
+      toolCallId: input.toolCallId,
+      body: input.body,
+      isTruncated: input.isTruncated,
+      blob: input.blob,
+    });
+    const blob = draft.blob;
+    if (blob === undefined) throw new TypeError("PTC 回执必须引用 stable trace Blob");
+    const receipt = assertPtcReceipt(draft.body, blob, input.isTruncated);
+    const commandDigest = digestCanonical({
+      schemaVersion: 1,
+      toolCallId: input.toolCallId,
+      parentToolCallId: input.parentToolCallId,
+      body: draft.body,
+      isTruncated: draft.isTruncated,
+      blob,
+    });
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        async (client) => {
+          if (!(await lockActiveExecutionFence(client, input.context)))
+            return { outcome: "not_authorized" };
+          if (
+            (await this.lockOpenPtcParent(client, input.context, input.parentToolCallId)) ===
+            undefined
+          ) {
+            return { outcome: "conflict" };
+          }
+          const existing = await client.query<PtcDispatchRow>(
+            `SELECT * FROM runtime_ptc_dispatches WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3
+               AND attempt_id=$4 AND agent_thread_id=$5 AND tool_call_id=$6 FOR UPDATE`,
+            [...scopeParams(input.context), input.toolCallId],
+          );
+          const row = existing.rows[0];
+          if (row === undefined) return { outcome: "not_found" };
+          if (
+            !samePtcScope(row, input.context) ||
+            row.parent_tool_call_id !== input.parentToolCallId ||
+            row.tool_name !== receipt.toolName
+          )
+            return { outcome: "conflict" };
+          if (row.result_digest !== null) {
+            return row.result_idempotency_key === input.idempotencyKey &&
+              row.result_digest === commandDigest
+              ? { outcome: "replayed", value: undefined }
+              : { outcome: "conflict" };
+          }
+          const key = await client.query(
+            `SELECT 1 FROM runtime_ptc_dispatches WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3
+               AND attempt_id=$4 AND agent_thread_id=$5 AND result_idempotency_key=$6`,
+            [...scopeParams(input.context), input.idempotencyKey],
+          );
+          if (key.rowCount !== 0) return { outcome: "conflict" };
+          // FK 在提交时重新约束 stable/trace 引用，不能只信任上传端口返回的身份。
+          await client.query(
+            `UPDATE runtime_ptc_dispatches SET result_idempotency_key=$7,result_digest=$8,
+              result_body=$9::jsonb,is_truncated=$10,blob_reference_id=$11,blob_state='stable',
+              blob_purpose='trace',blob_sha256=$12,blob_size=$13,completed_at=clock_timestamp()
+             WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 AND attempt_id=$4 AND agent_thread_id=$5
+               AND tool_call_id=$6 AND result_digest IS NULL`,
+            [
+              ...scopeParams(input.context),
+              input.toolCallId,
+              input.idempotencyKey,
+              commandDigest,
+              JSON.stringify(draft.body),
+              draft.isTruncated,
+              blob.referenceId,
+              blob.sha256,
+              blob.size,
+            ],
+          );
+          return { outcome: "created", value: undefined };
+        },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "记录 PTC 内层受控回执");
+    }
+  }
+
+  /**
+   * 只读核对某个父调用的 journal，允许诊断已失效栅栏；仅验证当前成员与 scope 所有权。
+   * 开始而无结果的记录代表未知，绝不授权重放内部副作用，也不进入模型或 Thread 历史。
+   */
+  async listPtcDispatchesByParent(input: {
+    readonly context: TrustedRolloutContext;
+    readonly parentToolCallId: string;
+  }): Promise<
+    | { readonly outcome: "loaded"; readonly dispatches: readonly RuntimePtcDispatch[] }
+    | { readonly outcome: "not_authorized" }
+  > {
+    assertContext(input.context);
+    assertIdentifier(input.parentToolCallId, "PTC 父 Tool call ID");
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        async (client) => {
+          const authorized = await client.query(
+            `SELECT 1 FROM runtime_rollout_streams stream
+               JOIN threads thread_state ON thread_state.tenant_id=stream.tenant_id AND thread_state.id=stream.thread_id
+               JOIN memberships member ON member.tenant_id=stream.tenant_id
+                 AND member.user_id=thread_state.created_by_user_id AND member.status='active'
+               JOIN execution_attempts attempt ON attempt.tenant_id=stream.tenant_id AND attempt.attempt_id=stream.attempt_id
+              WHERE stream.tenant_id=$1 AND stream.thread_id=$2 AND stream.run_id=$3 AND stream.attempt_id=$4
+                AND stream.agent_thread_id=$5 AND member.user_id=$6 AND stream.workspace_id=$7
+                AND stream.root_run_id=$8 AND attempt.base_revision_id IS NOT DISTINCT FROM $9`,
+            [
+              ...scopeParams(input.context),
+              input.context.userId,
+              input.context.fence.scope.workspaceId,
+              input.context.fence.scope.rootRunId,
+              input.context.fence.scope.baseRevisionId ?? null,
+            ],
+          );
+          if (authorized.rowCount !== 1) return { outcome: "not_authorized" };
+          const result = await client.query<
+            PtcDispatchRow & {
+              incarnation_id: string | null;
+              physical_object_key: string | null;
+            }
+          >(
+            `SELECT dispatch.*,blob.incarnation_id,blob.physical_object_key FROM runtime_ptc_dispatches dispatch
+               LEFT JOIN blob_references blob ON blob.tenant_id=dispatch.tenant_id
+                 AND blob.reference_id=dispatch.blob_reference_id
+              WHERE dispatch.tenant_id=$1 AND dispatch.thread_id=$2 AND dispatch.run_id=$3
+                AND dispatch.attempt_id=$4 AND dispatch.agent_thread_id=$5 AND dispatch.parent_tool_call_id=$6
+              ORDER BY dispatch.started_at,dispatch.tool_call_id`,
+            [...scopeParams(input.context), input.parentToolCallId],
+          );
+          return {
+            outcome: "loaded",
+            dispatches: Object.freeze(result.rows.map(mapPtcDispatch)),
+          };
+        },
+        { isolationLevel: "REPEATABLE READ", readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "核对 PTC 内层调用日志");
+    }
+  }
+
+  private async lockOpenPtcParent(
+    client: PoolClient,
+    context: TrustedRolloutContext,
+    parentToolCallId: string,
+  ): Promise<string | undefined> {
+    const params = scopeParams(context);
+    // 与外层 append 共用流锁：父调用闭合与 journal 写入必须形成唯一线性化顺序。
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      params.join("\u001f"),
+    ]);
+    const tail = await client.query<EntryRow>(
+      `SELECT sequence,kind,tool_call_id,body FROM runtime_rollout_entries
+        WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 AND attempt_id=$4 AND agent_thread_id=$5
+        ORDER BY sequence DESC LIMIT 1`,
+      params,
+    );
+    const row = tail.rows[0];
+    return row?.kind === "tool_call" &&
+      row.tool_call_id === parentToolCallId &&
+      (row.body as Record<string, unknown>).toolName === "run_code"
+      ? row.sequence
+      : undefined;
   }
 
   async append(

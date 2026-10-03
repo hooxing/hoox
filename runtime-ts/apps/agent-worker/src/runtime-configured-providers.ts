@@ -61,6 +61,7 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       maxOutputTokens: Math.min(savedCompactionSettings.maxOutputTokens, modelMaxOutputTokens),
     };
     const key = [
+      snapshot?.runtimeSettings?.configuration.toolCallingMode ?? "native",
       snapshot?.model?.configuration.providerKey ?? "deployment",
       snapshot?.model?.revision ?? 0,
       compactionSettings.softLimitPercent,

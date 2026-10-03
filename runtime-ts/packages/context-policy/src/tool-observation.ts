@@ -37,6 +37,7 @@ export interface ToolObservationRolloutPort {
     readonly binding: ToolObservationBinding;
     readonly idempotencyKey: string;
     readonly toolCallId: string;
+    readonly parentToolCallId?: string;
     readonly toolName: string;
   }): Promise<{
     readonly outcome: "created" | "replayed" | "conflict" | "unavailable" | "unknown";
@@ -45,6 +46,7 @@ export interface ToolObservationRolloutPort {
     readonly binding: ToolObservationBinding;
     readonly idempotencyKey: string;
     readonly toolCallId: string;
+    readonly parentToolCallId?: string;
     readonly body: Readonly<Record<string, unknown>>;
     readonly isTruncated: boolean;
     readonly blob: { readonly referenceId: string; readonly sha256: string; readonly size: number };
@@ -72,6 +74,7 @@ export interface ToolObservationInput {
   readonly binding: ToolObservationBinding;
   readonly idempotencyKey: string;
   readonly toolCallId: string;
+  readonly parentToolCallId?: string;
   readonly toolName: string;
 }
 
@@ -261,6 +264,7 @@ export class ToolObservationPipeline {
       binding: input.binding,
       idempotencyKey: `${input.idempotencyKey}.rollout`,
       toolCallId: input.toolCallId,
+      ...(input.parentToolCallId === undefined ? {} : { parentToolCallId: input.parentToolCallId }),
       body,
       isTruncated: rendered.isTruncated,
       blob: { referenceId: persisted.referenceId, sha256, size: bytes.byteLength },
@@ -279,6 +283,12 @@ function isPersistedTrace(
 }
 
 function assertInput(input: ToolObservationInput): void {
+  if (
+    input.parentToolCallId !== undefined &&
+    (!SAFE_ID.test(input.parentToolCallId) || input.parentToolCallId === input.toolCallId)
+  ) {
+    throw new TypeError("PTC 父 Tool call ID 格式无效");
+  }
   for (const [label, value] of [
     ["Tenant ID", input.binding.tenantId],
     ["Thread ID", input.binding.threadId],

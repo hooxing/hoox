@@ -42,7 +42,11 @@ function fixture(sandbox?: AdminControlApiDependencies["sandbox"]) {
     overview: vi.fn(),
     listModelProviders: vi.fn(async () => [modelRevision]),
     listMemoryProviders: vi.fn(async () => []),
-    listRuntimeSettings: vi.fn(async () => []),
+    listRuntimeSettings: vi.fn(
+      async (): Promise<
+        Awaited<ReturnType<AdminControlApiDependencies["control"]["listRuntimeSettings"]>>
+      > => [],
+    ),
     listAudits: vi.fn(async () => []),
     listUsers: vi.fn(async () => ({
       total: 1,
@@ -465,6 +469,112 @@ describe("后台控制 API", () => {
       { ...configuration, expectedGeneration: 0 },
     );
     expect(response.json().data.status).toBe("active");
+    await app.close();
+  });
+
+  it("运行设置 API 正常与 PTC 往返，保存与读取都保留模式字段", async () => {
+    const { app, control } = fixture();
+    const configuration = {
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 80,
+      compactionTargetPercent: 55,
+      compactionRecentUserTokens: 4096,
+      compactionMaxOutputTokens: 4096,
+      compactionTimeoutMs: 60000,
+    };
+    for (const [index, toolCallingMode] of (["native", "ptc", "native"] as const).entries()) {
+      const revision = {
+        ...modelRevision,
+        revision: index + 1,
+        status: "active" as const,
+        configuration: { ...configuration, toolCallingMode },
+      };
+      control.saveRuntimeSettingsConfiguration.mockResolvedValueOnce(revision);
+      const payload = { ...revision.configuration, expectedGeneration: index };
+      const response = await app.inject({
+        method: "PUT",
+        url: "/v1/admin/control/runtime-settings/current",
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "idempotency-key": `settings-mode-${index}`,
+        },
+        payload,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.configuration.toolCallingMode).toBe(toolCallingMode);
+      expect(control.saveRuntimeSettingsConfiguration).toHaveBeenLastCalledWith(
+        expect.objectContaining({ actorUserId: "user_admin" }),
+        payload,
+      );
+      control.listRuntimeSettings.mockResolvedValueOnce([revision]);
+      const read = await app.inject({
+        method: "GET",
+        url: "/v1/admin/control/runtime-settings",
+        headers: { authorization: "Bearer admin" },
+      });
+      expect(read.statusCode).toBe(200);
+      expect(read.json().data.items[0].configuration.toolCallingMode).toBe(toolCallingMode);
+    }
+    await app.close();
+  });
+
+  it.each([null, "", "PTC", "auto", 1, false])(
+    "API 拒绝非法工具调用模式 %s",
+    async (toolCallingMode) => {
+      const { app, control } = fixture();
+      const response = await app.inject({
+        method: "PUT",
+        url: "/v1/admin/control/runtime-settings/current",
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "idempotency-key": "settings-invalid-mode",
+        },
+        payload: {
+          workerMaxConcurrentRuns: 20,
+          userMaxConcurrentRunsPerTenant: 2,
+          compactionSoftLimitPercent: 80,
+          compactionTargetPercent: 55,
+          compactionRecentUserTokens: 4096,
+          compactionMaxOutputTokens: 4096,
+          compactionTimeoutMs: 60000,
+          toolCallingMode,
+          expectedGeneration: 0,
+        },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(control.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
+      await app.close();
+    },
+  );
+
+  it.each(["未登录", "缺少幂等键"])("PTC 保存仍拒绝%s", async (invalidContext) => {
+    const { app, control } = fixture();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/control/runtime-settings/current",
+      headers: {
+        "content-type": "application/json",
+        ...(invalidContext === "未登录"
+          ? { "idempotency-key": "settings-auth-mode" }
+          : { authorization: "Bearer admin" }),
+      },
+      payload: {
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
+        compactionSoftLimitPercent: 80,
+        compactionTargetPercent: 55,
+        compactionRecentUserTokens: 4096,
+        compactionMaxOutputTokens: 4096,
+        compactionTimeoutMs: 60000,
+        toolCallingMode: "ptc",
+        expectedGeneration: 0,
+      },
+    });
+    expect(response.statusCode).toBe(invalidContext === "未登录" ? 401 : 400);
+    expect(control.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
     await app.close();
   });
 

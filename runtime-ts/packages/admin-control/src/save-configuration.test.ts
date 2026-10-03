@@ -89,7 +89,7 @@ describe("管理员直接保存", () => {
     expect(repository.listModelProviders).not.toHaveBeenCalled();
     expect(repository.saveRuntimeSettingsConfiguration).toHaveBeenCalledWith({
       ...context,
-      command: { ...command, reason: "保存并使用运行设置" },
+      command: { ...command, toolCallingMode: "native", reason: "保存并使用运行设置" },
     });
     await expect(
       service.saveRuntimeSettingsConfiguration(context, {

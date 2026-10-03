@@ -194,3 +194,132 @@ describe("PostgreSQL Tool Observation adapter", () => {
     expect(called).toBe(false);
   });
 });
+
+describe("PTC journal 分流", () => {
+  it("有父 ID 的开始和结果只进 journal，不调用 native append", async () => {
+    const native: unknown[] = [];
+    const starts: unknown[] = [];
+    const results: unknown[] = [];
+    const repository = {
+      append: async (input: unknown) => {
+        native.push(input);
+        return { outcome: "created", value: [] } as const;
+      },
+      appendPtcToolCall: async (input: unknown) => {
+        starts.push(input);
+        return { outcome: "created", value: undefined } as const;
+      },
+      appendPtcToolResult: async (input: unknown) => {
+        results.push(input);
+        return { outcome: "created", value: undefined } as const;
+      },
+    };
+    const adapter = new PgToolObservationRolloutAdapter(repository, context);
+    expect(
+      await adapter.appendToolCall({
+        binding,
+        idempotencyKey: "ptc.start",
+        toolCallId: command.toolCallId,
+        toolName: "read",
+        parentToolCallId: "outer_call",
+      }),
+    ).toEqual({ outcome: "created" });
+    expect(await adapter.appendToolResult({ ...command, parentToolCallId: "outer_call" })).toEqual({
+      outcome: "created",
+    });
+    expect(native).toHaveLength(0);
+    expect(starts[0]).toMatchObject({
+      parentToolCallId: "outer_call",
+      toolName: "read",
+      toolCallId: command.toolCallId,
+    });
+    expect(results[0]).toMatchObject({
+      parentToolCallId: "outer_call",
+      body: command.body,
+      blob: command.blob,
+    });
+  });
+
+  it("缺失 PTC 能力不能静默写回 Rollout", async () => {
+    let calls = 0;
+    const adapter = new PgToolObservationRolloutAdapter(
+      {
+        append: async () => {
+          calls += 1;
+          return { outcome: "created", value: [] } as const;
+        },
+      },
+      context,
+    );
+    expect(await adapter.appendToolResult({ ...command, parentToolCallId: "outer_call" })).toEqual({
+      outcome: "unavailable",
+    });
+    expect(calls).toBe(0);
+  });
+
+  it("journal committed-but-unknown 以同对象同键收敛且冻结嵌套正文", async () => {
+    for (const kind of ["call", "result"]) {
+      const calls: unknown[] = [];
+      const write = async (input: unknown) => {
+        calls.push(input);
+        if (calls.length === 1) throw new PersistenceError("UNAVAILABLE", "提交结果未知");
+        return { outcome: "replayed", value: undefined } as const;
+      };
+      const adapter = new PgToolObservationRolloutAdapter(
+        {
+          append: async () => {
+            throw new Error("内层不得进入 Rollout");
+          },
+          appendPtcToolCall: write,
+          appendPtcToolResult: write,
+        },
+        context,
+      );
+      const result =
+        kind === "call"
+          ? await adapter.appendToolCall({
+              binding,
+              idempotencyKey: "ptc.start",
+              toolCallId: command.toolCallId,
+              toolName: "read",
+              parentToolCallId: "outer_call",
+            })
+          : await adapter.appendToolResult({ ...command, parentToolCallId: "outer_call" });
+      expect(result).toEqual({ outcome: "replayed" });
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toBe(calls[1]);
+      expect(Object.isFrozen(calls[0])).toBe(true);
+      expect(Object.isFrozen((calls[0] as { body: unknown }).body)).toBe(true);
+    }
+  });
+
+  it("journal 授权失效与约束错误不伪装成功；连续未知不合成结果", async () => {
+    for (const outcome of ["not_authorized", "not_found", "conflict"] as const) {
+      const adapter = new PgToolObservationRolloutAdapter(
+        {
+          append: async () => ({ outcome: "created", value: [] }) as const,
+          appendPtcToolResult: async () => ({ outcome }),
+        },
+        context,
+      );
+      expect(
+        await adapter.appendToolResult({ ...command, parentToolCallId: "outer_call" }),
+      ).toEqual({ outcome: "conflict" });
+    }
+    let calls = 0;
+    const adapter = new PgToolObservationRolloutAdapter(
+      {
+        append: async () => ({ outcome: "created", value: [] }) as const,
+        appendPtcToolResult: async () => {
+          calls += 1;
+          throw new PersistenceError("UNAVAILABLE", "结果未知");
+        },
+      },
+      context,
+    );
+    expect(await adapter.appendToolResult({ ...command, parentToolCallId: "outer_call" })).toEqual({
+      outcome: "unknown",
+    });
+    expect(calls).toBe(4);
+  });
+});

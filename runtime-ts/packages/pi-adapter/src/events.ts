@@ -1,7 +1,16 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 
 /** settled 由 Runtime 在底层完成及事务回滚后补发，不把 agent_end 当作空闲屏障。 */
-export type PiAgentEvent = AgentEvent | { type: "agent_settled" };
+export type PiAgentEvent =
+  | AgentEvent
+  | { type: "agent_settled" }
+  | {
+      type: "runtime_tool_event";
+      event: Extract<
+        RuntimeAgentEvent,
+        { type: "tool.started" | "tool.updated" | "tool.completed" }
+      >;
+    };
 import type { TodoSnapshot } from "@hoox/domain";
 
 export type ToolPresentation = {
@@ -25,7 +34,13 @@ export type RuntimeAgentEvent =
   | { type: "thinking.completed" }
   | { type: "message.delta"; delta: string }
   | { type: "message.completed"; stopReason: "stop" | "length" | "toolUse" }
-  | { type: "tool.started"; callId: string; name: string; presentation?: ToolPresentation }
+  | {
+      type: "tool.started";
+      callId: string;
+      name: string;
+      presentation?: ToolPresentation;
+      parentCallId?: string;
+    }
   | { type: "tool.updated"; callId: string; name: string }
   | { type: "tool.completed"; callId: string; name: string; isError: boolean }
   | { type: "finalization.started"; callId: string }
@@ -91,6 +106,8 @@ export type RuntimeAgentEvent =
 /** Pi 事件属于可替换内核协议；此处转换后，上层不需要依赖 Pi 的事件结构。 */
 export function mapPiEvent(event: PiAgentEvent): RuntimeAgentEvent | undefined {
   switch (event.type) {
+    case "runtime_tool_event":
+      return event.event;
     case "agent_start":
       return { type: "agent.started" };
     case "agent_settled":

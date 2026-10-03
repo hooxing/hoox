@@ -26,14 +26,6 @@ export const bookMessages: readonly ThreadContextMessage[] = [
       },
     ],
   },
-  {
-    sequence: 2,
-    role: "assistant",
-    runId: bookRun.id,
-    createdAt,
-    phase: "final_answer",
-    text: "已通读全书并整理完成，为你准备了 **两份思维导图**。\n\n- **HTML 交互导图**：展开与折叠、缩放与平移，在浏览器中探索全书结构。\n- **Markdown 大纲**：导入思维导图工具，继续编辑与整理。\n\n从分工与价值、资本积累，到经济史、政治经济学体系与财政学，梳理全书五篇的核心脉络。",
-  },
 ];
 export const bookArtifacts: readonly Artifact[] = [
   {

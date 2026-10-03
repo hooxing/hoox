@@ -67,7 +67,9 @@ describe("Hoox 项目身份契约", () => {
     expect(readText("README.md")).toContain("# Hoox");
     expect(readText("README.md")).toContain("**Hoox** —— 你说，它做。");
     expect(readText("README.md")).toContain("hoox.aisay.cc");
-    expect(readText("runtime-ts/apps/web/index.html")).toContain("<title>Hoox 工作台</title>");
+    expect(readText("runtime-ts/apps/web/index.html")).toContain(
+      "<title>Hoox — 你说，它做。</title>",
+    );
     expect(readText("runtime-ts/apps/admin-web/index.html")).toContain(
       "<title>Hoox 技能发布管理台</title>",
     );

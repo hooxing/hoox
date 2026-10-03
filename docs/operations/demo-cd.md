@@ -13,6 +13,16 @@
 - Worker 与 Trajectory 共享固定数据 epoch 的跨发布轨迹卷：Worker 可写，查看器只读。应用发布、回滚和旧 release 目录清理都继续挂载并保留同一轨迹历史。
 - Demo 使用 development 装配以复用单机入口，但必须同时设置 `DEMO_PUBLIC_ACCESS_ENABLED=true`、`DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc`、`DEMO_ADMIN_USER_ID=<Demo 管理员用户 ID>` 和 `DEV_AUTH_ENABLED=false`。固定开发身份、缺失管理员用户、明文 origin 和非回环 API 监听都会在解析期失败。
 
+## 用户 Web 入口
+
+- `/` 为公开介绍页，不读取登录状态，不请求用户 API。
+- `/app` 与 `/app/` 为工作台入口；登录、OAuth 回调与同源身份存储沿用工作台契约。旧根路径带 `error` 的登录回调仍进入工作台。
+- 首页与工作台使用同一个 Vite 构建和 Demo 镜像，静态服务通过 SPA 回退提供工作台路径；Nginx 与发布流程无需额外服务或路由配置。
+- 安装后的 PWA 从 `/app` 启动。既有身份存储键不变，首页不会清除会话、草稿或任务。
+- 《国富论》展示使用真实工作台组件与经授权的任务、文件名称及编辑摘要，不加载线上任务，不保存原始生产响应、账户信息或模型日志；案例以本地流式回放呈现，进入可见区域后播放一次，可暂停或重播；离屏或切换标签页时暂停，减少动态效果偏好下直接展示结果。交付卡片为只读，没有指向私有文件的下载链接。
+
+入口选择及兼容取舍见 [ADR-20261003184949](../decisions/20261003184949-public-home-and-workspace-entry.md)。
+
 ## 首次主机准备
 
 Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 production 构建推断。数据库、身份和 S3 仍由部署配置管理；沙箱供应商与运行策略可在后台管理，环境配置保留为未托管实例的回退连接。配置项存在不等于外部服务可达，仍需完成部署预检；模型、记忆与沙箱的生效边界见[配置参考](../reference/configuration.md)。
@@ -59,6 +69,7 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 
 ```bash
 curl --fail https://hoox.aisay.cc/
+curl --fail https://hoox.aisay.cc/app
 curl --fail https://hoox.aisay.cc/api/ready
 curl --fail https://hoox.aisay.cc/admin/
 curl --fail https://hoox.aisay.cc/trajectory/
@@ -71,7 +82,7 @@ docker compose --project-name hoox-demo \
   -f /opt/hoox-demo/current/docker-compose.yml ps
 ```
 
-未登录访问 `/admin/` 与 `/trajectory/` 应成功加载不含敏感数据的页面外壳；未携带 Hoox Bearer 的 `/v1/admin/` 与 `/trajectory/api/` 必须返回 `401`。在同源工作台使用 Demo 管理员账号登录后，再打开 `/admin/` 和 `/trajectory/`，后台应能读取管理数据，轨迹页应能读取稳定轨迹数据 epoch 中自启用后的 Run/Attempt。还应创建 Thread、触发一次 Run，并确认 Worker 能消费同一 Tenant 的 dispatch，且轨迹页出现对应记录。账号密码保存在运维人员的受限凭据文件中，不得复制到 issue、PR、Actions 日志或本页。
+`/` 展示公开介绍页，首页的工作台入口应跳转到 `/app`；两条路径均应支持直接访问和刷新。未登录访问 `/admin/` 与 `/trajectory/` 应成功加载不含敏感数据的页面外壳；未携带 Hoox Bearer 的 `/v1/admin/` 与 `/trajectory/api/` 必须返回 `401`。在同源工作台使用 Demo 管理员账号登录后，再打开 `/admin/` 和 `/trajectory/`，后台应能读取管理数据，轨迹页应能读取稳定轨迹数据 epoch 中自启用后的 Run/Attempt。还应创建 Thread、触发一次 Run，并确认 Worker 能消费同一 Tenant 的 dispatch，且轨迹页出现对应记录。账号密码保存在运维人员的受限凭据文件中，不得复制到 issue、PR、Actions 日志或本页。
 
 ## 失败与回滚
 

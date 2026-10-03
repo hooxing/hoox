@@ -18,7 +18,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { createRoot } from "react-dom/client";
 import "./file-preview.css";
 import {
   appendFileReferences,
@@ -1987,6 +1986,3 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
     />
   );
 }
-
-const rootElement = document.getElementById("root");
-if (rootElement !== null) createRoot(rootElement).render(<App />);

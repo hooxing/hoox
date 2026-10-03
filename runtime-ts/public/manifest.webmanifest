@@ -1,7 +1,7 @@
 {
   "name": "Hoox 工作台",
   "short_name": "Hoox",
-  "start_url": ".",
+  "start_url": "/app",
   "display": "standalone",
   "background_color": "#FAF9F8",
   "theme_color": "#177654",

@@ -151,7 +151,7 @@ Scheduler 是完整开发拓扑的必需进程，负责 Sandbox cleanup、生命
 
 | 服务 | 默认地址 |
 | --- | --- |
-| 用户 Web | `http://127.0.0.1:4173` |
+| 用户工作台 | `http://127.0.0.1:4173/app` |
 | API live | `http://127.0.0.1:3001/live` |
 | API ready | `http://127.0.0.1:3001/ready` |
 | Admin Web | `http://127.0.0.1:4174` |

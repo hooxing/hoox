@@ -7,6 +7,7 @@ import { expect, it } from "vitest";
 
 it("Demo 静态入口以可执行模块类型提供 PDF Worker，保留 nosniff", async () => {
   const root = await mkdtemp(join(tmpdir(), "hoox-static-test-"));
+  await writeFile(join(root, "index.html"), "<!doctype html><title>Hoox</title>");
   const module = 'export const worker = "pdf";';
   await writeFile(join(root, "pdf.worker.mjs"), module);
   const child = spawn(process.execPath, ["scripts/demo-static-server.mjs"], {
@@ -43,6 +44,13 @@ it("Demo 静态入口以可执行模块类型提供 PDF Worker，保留 nosniff"
     expect(response.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await response.text()).toBe(module);
+    for (const path of ["/", "/app", "/app/", "/?error=access_denied"]) {
+      const page = await fetch(`http://127.0.0.1:${port}${path}`);
+      expect(page.status).toBe(200);
+      expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(page.headers.get("cache-control")).toBe("no-cache");
+      expect(await page.text()).toContain("<title>Hoox</title>");
+    }
     const head = await fetch(url, { method: "HEAD" });
     expect(head.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
     expect(await head.text()).toBe("");

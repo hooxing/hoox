@@ -315,14 +315,14 @@ if (-not $allReady) {
 }
 
 if (-not $NoBrowser) {
-  Start-Process "http://127.0.0.1:4173"
+  Start-Process "http://127.0.0.1:4173/app"
   if ($startSkillServices) {
     Start-Process "http://127.0.0.1:4174"
   }
 }
 
 Write-Host "开发环境已全部启动。" -ForegroundColor Green
-Write-Host "主 Web：http://127.0.0.1:4173"
+Write-Host "主工作台：http://127.0.0.1:4173/app"
 Write-Host "API：$apiBaseUrl"
 if ($startSkillServices) {
   Write-Host "Admin Web：http://127.0.0.1:4174"

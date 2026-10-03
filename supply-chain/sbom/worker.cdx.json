@@ -34,7 +34,7 @@
       },
       {
         "name": "hoox:lockfile-sha256",
-        "value": "b7b45937db3993ed8be90df8348e2e769778a121bdbec0811bde3b41d7b51b2d"
+        "value": "a82a15c3e0b438643ea32611b2664f01c5f1a0999f5af03a6b67771372bde790"
       }
     ]
   },
@@ -2161,10 +2161,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/brace-expansion@5.0.9",
+      "bom-ref": "pkg:npm/brace-expansion@5.0.12",
       "name": "brace-expansion",
-      "version": "5.0.9",
-      "purl": "pkg:npm/brace-expansion@5.0.9",
+      "version": "5.0.12",
+      "purl": "pkg:npm/brace-expansion@5.0.12",
       "licenses": [
         {
           "license": {
@@ -2921,10 +2921,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/nodemailer@9.1.1",
+      "bom-ref": "pkg:npm/nodemailer@10.0.9",
       "name": "nodemailer",
-      "version": "9.1.1",
-      "purl": "pkg:npm/nodemailer@9.1.1",
+      "version": "10.0.9",
+      "purl": "pkg:npm/nodemailer@10.0.9",
       "licenses": [
         {
           "license": {
@@ -3541,10 +3541,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/undici@6.28.0",
+      "bom-ref": "pkg:npm/undici@6.28.1",
       "name": "undici",
-      "version": "6.28.0",
-      "purl": "pkg:npm/undici@6.28.0",
+      "version": "6.28.1",
+      "purl": "pkg:npm/undici@6.28.1",
       "licenses": [
         {
           "license": {
@@ -3561,10 +3561,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/undici@8.10.0",
+      "bom-ref": "pkg:npm/undici@8.10.2",
       "name": "undici",
-      "version": "8.10.0",
-      "purl": "pkg:npm/undici@8.10.0",
+      "version": "8.10.2",
+      "purl": "pkg:npm/undici@8.10.2",
       "licenses": [
         {
           "license": {
@@ -3870,7 +3870,7 @@
         "pkg:npm/better-call@1.4.0",
         "pkg:npm/bignumber.js@9.3.1",
         "pkg:npm/bowser@2.14.1",
-        "pkg:npm/brace-expansion@5.0.9",
+        "pkg:npm/brace-expansion@5.0.12",
         "pkg:npm/buffer-equal-constant-time@1.0.1",
         "pkg:npm/chalk@5.6.2",
         "pkg:npm/chownr@3.0.0",
@@ -3908,7 +3908,7 @@
         "pkg:npm/nanostores@1.5.2",
         "pkg:npm/node-domexception@1.0.0",
         "pkg:npm/node-fetch@3.3.2",
-        "pkg:npm/nodemailer@9.1.1",
+        "pkg:npm/nodemailer@10.0.9",
         "pkg:npm/openai@6.26.0",
         "pkg:npm/openapi-fetch@0.14.1",
         "pkg:npm/openapi-typescript-helpers@0.0.15",
@@ -3939,8 +3939,8 @@
         "pkg:npm/tslib@2.8.1",
         "pkg:npm/typebox@1.1.38",
         "pkg:npm/undici-types@6.21.0",
-        "pkg:npm/undici@6.28.0",
-        "pkg:npm/undici@8.10.0",
+        "pkg:npm/undici@6.28.1",
+        "pkg:npm/undici@8.10.2",
         "pkg:npm/vscode-languageserver-textdocument@1.0.12",
         "pkg:npm/vscode-languageserver-types@3.18.0",
         "pkg:npm/web-streams-polyfill@3.3.3",

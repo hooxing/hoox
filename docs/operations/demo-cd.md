@@ -13,6 +13,16 @@
 - Worker 与 Trajectory 共享固定数据 epoch 的跨发布轨迹卷：Worker 可写，查看器只读。应用发布、回滚和旧 release 目录清理都继续挂载并保留同一轨迹历史。
 - Demo 使用 development 装配以复用单机入口，但必须同时设置 `DEMO_PUBLIC_ACCESS_ENABLED=true`、`DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc`、`DEMO_ADMIN_USER_ID=<Demo 管理员用户 ID>` 和 `DEV_AUTH_ENABLED=false`。固定开发身份、缺失管理员用户、明文 origin 和非回环 API 监听都会在解析期失败。
 
+## 用户 Web 入口
+
+- `/` 为公开介绍页，不读取登录状态，不请求用户 API。
+- `/app` 与 `/app/` 为工作台入口；登录、OAuth 回调与同源身份存储沿用工作台契约。旧根路径带 `error` 的登录回调仍进入工作台。
+- 首页与工作台使用同一个 Vite 构建和 Demo 镜像，静态服务通过 SPA 回退提供工作台路径；Nginx 与发布流程无需额外服务或路由配置。
+- 安装后的 PWA 从 `/app` 启动。既有身份存储键不变，首页不会清除会话、草稿或任务。
+- 《国富论》展示使用真实工作台组件与经授权的任务、文件名称及编辑摘要，不加载线上任务，不保存原始生产响应、账户信息或模型日志；交付卡片为只读，没有指向私有文件的下载链接。
+
+入口选择及兼容取舍见 [ADR-20261003184949](../decisions/20261003184949-public-home-and-workspace-entry.md)。
+
 ## 首次主机准备
 
 Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 production 构建推断。数据库、身份和 S3 仍由部署配置管理；沙箱供应商与运行策略可在后台管理，环境配置保留为未托管实例的回退连接。配置项存在不等于外部服务可达，仍需完成部署预检；模型、记忆与沙箱的生效边界见[配置参考](../reference/configuration.md)。

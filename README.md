@@ -11,7 +11,7 @@
 
 > **Hoox** —— 你说，它做。
 
-Hoox 计划使用 hoox.aisay.cc 作为公开入口；域名上线仍需单独完成 DNS、TLS、反向代理和生产身份配置。
+公开入口：[Hoox](https://hoox.aisay.cc/) · [工作台](https://hoox.aisay.cc/app)。首页介绍产品与开源能力；工作台需要登录。演示环境不替代生产就绪验收。
 
 Hoox 是一个面向可靠执行的多租户 Agent Runtime。它把对话、运行、工作区、沙箱、资源与最终交付物组织成可持久化、可恢复、可审计的执行系统，而不是把 Agent 简化为一次模型调用。
 
@@ -90,7 +90,7 @@ corepack pnpm dev:identity:provision
 .\scripts\start-development.ps1 -CoreOnly
 ```
 
-脚本会预检外部依赖，启动 API、Agent Worker、Scheduler 和 Web，并打开 `http://127.0.0.1:4173`。Skill 管理面可通过 `-IncludeSkill` 显式启用。
+脚本会预检外部依赖，启动 API、Agent Worker、Scheduler 和 Web，并打开 `http://127.0.0.1:4173/app`。Skill 管理面可通过 `-IncludeSkill` 显式启用。
 
 ### 验证工程基线
 

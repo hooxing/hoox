@@ -1198,8 +1198,10 @@ export function InlineArtifactDelivery({
   artifacts,
   onPreview,
   onDownload,
+  readOnly = false,
 }: {
   readonly artifacts: readonly Artifact[];
+  readonly readOnly?: boolean;
   readonly onPreview: (artifactId: string) => void;
   readonly onDownload: (artifactId: string) => void;
 }) {
@@ -1226,34 +1228,36 @@ export function InlineArtifactDelivery({
                   : ` · ${formatArtifactSize(artifact.sizeBytes)}`}
               </small>
             </div>
-            <fieldset className="artifact-actions">
-              <legend className="sr-only">{artifact.name} 操作</legend>
-              {(filePreviewKind(artifact.name, artifact.mediaType) !== undefined ||
-                canPreviewArtifact(artifact.mediaType)) && (
+            {!readOnly && (
+              <fieldset className="artifact-actions">
+                <legend className="sr-only">{artifact.name} 操作</legend>
+                {(filePreviewKind(artifact.name, artifact.mediaType) !== undefined ||
+                  canPreviewArtifact(artifact.mediaType)) && (
+                  <button
+                    type="button"
+                    className="artifact-action-button"
+                    title="预览产物"
+                    aria-label={`预览 ${artifact.name}`}
+                    disabled={artifact.status !== "published"}
+                    onClick={() => onPreview(artifact.id)}
+                  >
+                    <Eye size={16} />
+                    <span>预览</span>
+                  </button>
+                )}
                 <button
                   type="button"
-                  className="artifact-action-button"
-                  title="预览产物"
-                  aria-label={`预览 ${artifact.name}`}
+                  className="artifact-action-button is-primary"
+                  title="下载产物"
+                  aria-label={`下载 ${artifact.name}`}
                   disabled={artifact.status !== "published"}
-                  onClick={() => onPreview(artifact.id)}
+                  onClick={() => onDownload(artifact.id)}
                 >
-                  <Eye size={16} />
-                  <span>预览</span>
+                  <Download size={16} />
+                  <span>下载</span>
                 </button>
-              )}
-              <button
-                type="button"
-                className="artifact-action-button is-primary"
-                title="下载产物"
-                aria-label={`下载 ${artifact.name}`}
-                disabled={artifact.status !== "published"}
-                onClick={() => onDownload(artifact.id)}
-              >
-                <Download size={16} />
-                <span>下载</span>
-              </button>
-            </fieldset>
+              </fieldset>
+            )}
           </li>
         ))}
       </ul>

@@ -281,6 +281,7 @@ describe("Hoox 品牌资产", () => {
       expect(html).toContain('href="/brand/apple-touch-icon-180.png"');
     }
     expect(webHtml).toContain('href="/manifest.webmanifest"');
+    expect(manifest).toContain('"start_url": "/app"');
     expect(manifest).toContain('"src": "brand/pwa-icon-192.png"');
     expect(manifest).toContain('"src": "brand/pwa-icon-512.png"');
     expect(manifest).toContain('"src": "brand/pwa-icon-maskable-512.png"');

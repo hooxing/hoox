@@ -19,6 +19,7 @@ describe("Windows development 一键启动脚本", () => {
     expect(script).toContain("runtime-ts\\apps\\agent-worker\\dist\\development-main.js");
     expect(script).toContain("runtime-ts\\apps\\scheduler\\dist\\development-main.js");
     expect(script).toContain("@hoox/web");
+    expect(script).toContain('Start-Process "http://127.0.0.1:4173/app"');
 
     expect(script).not.toContain("docker compose");
     expect(script).not.toContain("pnpm install");

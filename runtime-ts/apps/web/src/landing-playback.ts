@@ -15,8 +15,8 @@ const steps = [
     text: "正在构建交互导图，支持展开、缩放与平移。",
   },
 ] as const;
-export const playbackTickMs = 80;
-const stepDurationMs = 3_600;
+export const playbackTickMs = 32;
+const stepDurationMs = 1_280;
 export const playbackDurationMs = steps.length * stepDurationMs;
 
 // 这是公开案例的编辑回放，不读取真实 Run，也不将生产思考日志作为展示数据。

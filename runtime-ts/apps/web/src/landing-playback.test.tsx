@@ -72,6 +72,21 @@ const click = async (label: string) => {
 };
 
 describe("公开案例的本地流式回放", () => {
+  it("四秒内完成三个阶段，保留流式输出与末尾交付边界", () => {
+    expect(playbackDurationMs).toBe(3_840);
+    expect(bookPlaybackFrame(256).finished).toBe(false);
+    expect(
+      bookPlaybackFrame(256).events.find((event) => event.type === "message.delta")?.payload,
+    ).toEqual({ delta: "正在读取资料，梳" });
+    expect(
+      bookPlaybackFrame(1_280).events.filter((event) => event.type === "tool.started"),
+    ).toHaveLength(2);
+    expect(
+      bookPlaybackFrame(2_560).events.filter((event) => event.type === "tool.started"),
+    ).toHaveLength(3);
+    expect(bookPlaybackFrame(3_808).finished).toBe(false);
+    expect(bookPlaybackFrame(3_840).finished).toBe(true);
+  });
   it("进入可见区域才逐步输出，完成后交付文件，不访问用户 API", async () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
@@ -83,7 +98,7 @@ describe("公开案例的本地流式回放", () => {
     await advance(1_000);
     expect(container.querySelector(".landing-transcript")?.textContent).toBe(initial);
     await show();
-    await advance(640);
+    await advance(256);
     expect(container.querySelector(".agent-answer-block")?.textContent).toBe("正在读取资料，梳");
     expect(container.querySelector(".inline-artifact-delivery")).toBeNull();
     await advance(playbackDurationMs);

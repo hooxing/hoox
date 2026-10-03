@@ -14,7 +14,7 @@
     "@hoox/protocol": "workspace:*",
     "@hoox/skill": "workspace:*",
     "@sinclair/typebox": "0.34.52",
-    "fastify": "5.12.1"
+    "fastify": "5.12.5"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

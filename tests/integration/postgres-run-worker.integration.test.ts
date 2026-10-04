@@ -59,9 +59,15 @@ import {
   CubeSandboxCleanupResolver,
   SandboxCleanupConsumer,
 } from "../../runtime-ts/apps/scheduler/src/sandbox-cleanup-consumer.js";
+import {
+  AdminControlService,
+  digestControlRequest,
+} from "../../runtime-ts/packages/admin-control/src/index.js";
 import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
 import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
+import { PgAdminControlRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
@@ -617,6 +623,229 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     );
     await admin?.end();
   });
+
+  it("0067 受限控制角色保存工具模式、恢复历史配置并拒绝非法直写", async () => {
+    // 全局 generation 与运行设置不能影响同套件的 Worker 和历史迁移回退用例。
+    const isolatedSchema = `it_rw_tool_mode_${suffix}`;
+    if (!safePgIdentifier.test(isolatedSchema)) throw new Error("工具模式测试 Schema 名称无效");
+    // 迁移角色只能拥有一个 Schema，隔离用例不能复用主套件的迁移角色。
+    const isolatedMigratorRole = `it_rw_tool_mg_${suffix}`;
+    if (!safePgIdentifier.test(isolatedMigratorRole) || !safePgIdentifier.test(databaseName)) {
+      throw new Error("工具模式测试迁移角色或数据库名称无效");
+    }
+    const isolatedMigratorPassword = randomBytes(24).toString("hex");
+    const migrationUrl = new URL(bootstrapUrl);
+    migrationUrl.username = isolatedMigratorRole;
+    migrationUrl.password = isolatedMigratorPassword;
+    let isolatedDatabasePrepared = false;
+    // CI 未公开控制角色密码；仅用管理连接建立会话，所有业务 SQL 均以受限角色执行。
+    const controlUrl = new URL(adminUrl);
+    controlUrl.searchParams.set(
+      "options",
+      `-c role=${adminControlRole} -c search_path=${isolatedSchema}`,
+    );
+    const isolatedMigrator = createPostgresPool({
+      connectionString: migrationUrl.toString(),
+      schema: isolatedSchema,
+      maxConnections: 2,
+    });
+    const control = createPostgresPool({
+      connectionString: controlUrl.toString(),
+      maxConnections: 4,
+    });
+    const actorUserId = `tool-mode-admin-${suffix}`;
+    const historicalConfiguration = {
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 80,
+      compactionTargetPercent: 50,
+      compactionRecentUserTokens: 2048,
+      compactionMaxOutputTokens: 4096,
+      compactionTimeoutMs: 30_000,
+    };
+    const context = (action: string) => ({
+      actorUserId,
+      idempotencyKey: `tool-mode-${action}-${suffix}`,
+      requestDigest: requestDigest(action),
+    });
+    const cipher = new ModelProviderCredentialCipher("integration-tool-mode-key-at-least-32-bytes");
+    const createService = () => {
+      const repository = new PgAdminControlRepository(control, cipher);
+      return new AdminControlService(
+        repository,
+        repository,
+        { probeModel: async () => undefined, probeMemory: async () => undefined },
+        [],
+      );
+    };
+    // FORCE RLS 对迁移角色同样生效；仅夹具准备与全量事实观察使用管理连接，业务 mutation 仍走受限控制角色。
+    const readFacts = async () => ({
+      revisions: (
+        await admin.query(
+          `SELECT * FROM "${isolatedSchema}".admin_control_config_revisions ORDER BY object_kind,object_key,revision`,
+        )
+      ).rows,
+      migrations: (
+        await admin.query(
+          `SELECT * FROM "${isolatedSchema}".runtime_schema_migrations ORDER BY version`,
+        )
+      ).rows,
+    });
+    try {
+      await withTransaction(admin, async (client) => {
+        await client.query(`CREATE ROLE "${isolatedMigratorRole}" LOGIN PASSWORD '${isolatedMigratorPassword}'
+          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedMigratorRole}";
+          CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedMigratorRole}"`);
+      });
+      isolatedDatabasePrepared = true;
+      await migrateUp(isolatedMigrator, {
+        runtimeRole,
+        migratorRole: isolatedMigratorRole,
+        skillPublisherRole,
+        workerCoordinatorRole,
+        teamCoordinatorRole,
+        adminControlRole,
+        schema: isolatedSchema,
+      });
+      const identity = await control.query<{
+        readonly current_user: string;
+        readonly schema: string;
+        readonly rolsuper: boolean;
+        readonly rolbypassrls: boolean;
+      }>(
+        "SELECT current_user,current_schema() AS schema,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
+      );
+      expect(identity.rows[0]).toEqual({
+        current_user: adminControlRole,
+        schema: isolatedSchema,
+        rolsuper: false,
+        rolbypassrls: false,
+      });
+      await admin.query(
+        `INSERT INTO "${isolatedSchema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
+        [actorUserId],
+      );
+      await admin.query(
+        `INSERT INTO "${isolatedSchema}".platform_control_operators(user_id,role,status) VALUES($1,'admin','active')`,
+        [actorUserId],
+      );
+      const insertRevisionSql = `INSERT INTO admin_control_config_revisions(
+        object_kind,object_key,revision,configuration,configuration_digest,created_by
+      ) VALUES('runtime_settings','global',$1,$2::jsonb,$3,$4)`;
+      await withTransaction(control, async (client) => {
+        await client.query("SELECT set_config('app.user_id',$1,true)", [actorUserId]);
+        await client.query(insertRevisionSql, [
+          1,
+          JSON.stringify(historicalConfiguration),
+          digestControlRequest(historicalConfiguration),
+          actorUserId,
+        ]);
+      });
+      const service = createService();
+      const repository = new PgAdminControlRepository(control, cipher);
+      const [historicalRevision] = await repository.listRuntimeSettings(actorUserId);
+      expect(historicalRevision).toMatchObject({
+        revision: 1,
+        status: "draft",
+        configuration: { ...historicalConfiguration, toolCallingMode: "native" },
+      });
+      const activateHistorical = async (action: string) => {
+        const current = (await repository.listRuntimeSettings(actorUserId)).find(
+          (revision) => revision.revision === 1,
+        );
+        if (current === undefined) throw new Error("历史运行设置 Revision 缺失");
+        return await service.publish(context(action), {
+          kind: "runtime_settings",
+          objectKey: "global",
+          revision: 1,
+          command: { expectedVersionToken: current.versionToken, reason: "恢复历史运行设置" },
+        });
+      };
+      await activateHistorical("activate-historical");
+      expect((await createService().overview(actorUserId)).activeRuntimeSettings).toMatchObject({
+        revision: 1,
+        status: "active",
+        configuration: { ...historicalConfiguration, toolCallingMode: "native" },
+      });
+      for (const toolCallingMode of ["native", "ptc"] as const) {
+        const before = await service.overview(actorUserId);
+        const saved = await service.saveRuntimeSettingsConfiguration(context(toolCallingMode), {
+          ...historicalConfiguration,
+          toolCallingMode,
+          expectedGeneration: before.generation,
+        });
+        expect(saved).toMatchObject({
+          status: "active",
+          configuration: { ...historicalConfiguration, toolCallingMode },
+        });
+        const recovered = await createService().overview(actorUserId);
+        expect(recovered.generation).toBe(before.generation + 1);
+        expect(recovered.activeRuntimeSettings).toEqual(saved);
+        const stored = await admin.query<{ readonly configuration: unknown }>(
+          `SELECT configuration FROM "${isolatedSchema}".admin_control_config_revisions WHERE object_kind='runtime_settings' AND object_key='global' AND revision=$1`,
+          [saved.revision],
+        );
+        expect(stored.rows[0]?.configuration).toEqual({
+          ...historicalConfiguration,
+          toolCallingMode,
+        });
+      }
+      const factsBeforeRejections = await readFacts();
+      const invalidConfigurations = [
+        ...["auto", null, 1, {}, [], true].map((toolCallingMode) => ({
+          ...historicalConfiguration,
+          toolCallingMode,
+        })),
+        { ...historicalConfiguration, toolCallingMode: "native", unexpectedSetting: true },
+        { ...historicalConfiguration, unexpectedSetting: true },
+      ];
+      await withTransaction(control, async (client) => {
+        await client.query("SELECT set_config('app.user_id',$1,true)", [actorUserId]);
+        for (const configuration of invalidConfigurations) {
+          // CHECK 失败会中止 PostgreSQL 事务；每个非法值必须独立恢复后再验证下一个。
+          await client.query("SAVEPOINT invalid_runtime_settings");
+          try {
+            await expect(
+              client.query(insertRevisionSql, [
+                100,
+                JSON.stringify(configuration),
+                digestControlRequest(configuration),
+                actorUserId,
+              ]),
+            ).rejects.toMatchObject({
+              code: "23514",
+              constraint: "admin_control_configuration_shape",
+            });
+          } finally {
+            await client.query("ROLLBACK TO SAVEPOINT invalid_runtime_settings");
+            await client.query("RELEASE SAVEPOINT invalid_runtime_settings");
+          }
+        }
+      });
+      expect(await readFacts()).toEqual(factsBeforeRejections);
+      await activateHistorical("reactivate-historical");
+      const retired = await repository.listRuntimeSettings(actorUserId);
+      expect(retired.filter((revision) => revision.status === "retired")).toHaveLength(2);
+      const historicalStored = await admin.query<{ readonly configuration: unknown }>(
+        `SELECT configuration FROM "${isolatedSchema}".admin_control_config_revisions WHERE object_kind='runtime_settings' AND revision=1`,
+      );
+      expect(historicalStored.rows[0]?.configuration).toEqual(historicalConfiguration);
+      expect((await createService().overview(actorUserId)).activeRuntimeSettings).toMatchObject({
+        revision: 1,
+        status: "active",
+        configuration: { ...historicalConfiguration, toolCallingMode: "native" },
+      });
+    } finally {
+      await control.end();
+      await isolatedMigrator.end();
+      if (isolatedDatabasePrepared) {
+        await admin.query(`DROP SCHEMA IF EXISTS "${isolatedSchema}" CASCADE;
+          REVOKE ALL PRIVILEGES ON DATABASE "${databaseName}" FROM "${isolatedMigratorRole}";
+          DROP ROLE "${isolatedMigratorRole}"`);
+      }
+    }
+  }, 90_000);
 
   it("0014 journal 保持 completed 单调，manifest 外键、RLS 与 runtime ACL 均受约束", async () => {
     const f = await fixture(`workspace-manifest-contract-${suffix}`);

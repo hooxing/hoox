@@ -253,6 +253,165 @@ describe("PTC 真实 QuickJS WASM 执行", () => {
     expect(callTool).toHaveBeenCalledTimes(6);
   });
 
+  it.each(["EXEC_TIMEOUT", "TOOL_FAILED", "HOST_UNKNOWN"])(
+    "真实 WASM 不透传构造器输入的任意 message：%s",
+    async (code) => {
+      const failure = projectToolFailure(new Error(JSON.stringify({ code })));
+      const error = new PtcToolCallError("fail", { code, message: "宿主诊断占位" });
+      const callTool = vi.fn(async (name: string) => {
+        if (name === "fail") throw error;
+        return { ok: true };
+      });
+      const result = await run(
+        `
+        let failure;
+        try { await tools.fail({}); } catch (error) {
+          failure = {code: error.code, message: error.message, toolName: error.toolName};
+        }
+        return {failure, next: await tools.ok({})};
+        `,
+        { toolNames: ["fail", "ok"], callTool },
+      );
+      expect(result.value).toEqual({
+        failure: { ...failure, toolName: "fail" },
+        next: { ok: true },
+      });
+      expect(JSON.stringify(result)).not.toContain("宿主诊断占位");
+      expect(callTool.mock.calls.map(([name]) => name)).toEqual(["fail", "ok"]);
+    },
+  );
+
+  it("真实 WASM 只用私有登记，忽略公开字段篡改与子类/实例 getter", async () => {
+    const hook = vi.fn(() => {
+      throw new Error("不应读取宿主异常属性");
+    });
+    const original = {
+      code: "EXEC_TIMEOUT",
+      get message() {
+        return hook();
+      },
+    };
+    const modified = new PtcToolCallError("fail", original);
+    Object.assign(modified, {
+      message: "宿主诊断占位",
+      failure: { code: "HOST_UNKNOWN", message: "宿主诊断占位" },
+      toolName: "宿主诊断占位",
+      stdout: "宿主诊断占位",
+      stderr: "宿主诊断占位",
+      details: "宿主诊断占位",
+    });
+    const accessor = new PtcToolCallError("fail", original);
+    for (const key of ["message", "failure", "toolName", "stack", "details", "toJSON"])
+      Object.defineProperty(accessor, key, { get: hook });
+    class HostileSubclass extends PtcToolCallError {}
+    const subclass = new HostileSubclass("fail", original);
+    for (const key of ["message", "failure", "toolName", "stack", "toJSON"]) {
+      Reflect.deleteProperty(subclass, key);
+      Object.defineProperty(HostileSubclass.prototype, key, { get: hook });
+    }
+    const errors = [modified, accessor, subclass];
+    const callTool = vi.fn(async (name: string) => {
+      if (name === "fail") throw errors.shift();
+      return { ok: true };
+    });
+    const result = await run(
+      `
+      const failures = [];
+      for (let i = 0; i < 3; i++) {
+        try { await tools.fail({}); } catch (error) {
+          failures.push({
+            code: error.code, message: error.message, toolName: error.toolName,
+            stack: typeof error.stack === "string" ? error.stack : "",
+            extras: [error.stdout, error.stderr, error.details, error.failure, error.toJSON]
+              .map(value => typeof value)
+          });
+        }
+      }
+      return {failures, next: await tools.ok({})};
+      `,
+      { toolNames: ["fail", "ok"], callTool },
+    );
+    const guest = result.value as { failures: unknown[]; next: unknown };
+    expect(guest.failures).toHaveLength(3);
+    for (const failure of guest.failures)
+      expect(failure).toMatchObject({
+        code: "EXEC_TIMEOUT",
+        message: "命令执行超时，请检查任务状态",
+        toolName: "fail",
+        extras: Array(5).fill("undefined"),
+      });
+    expect(guest.next).toEqual({ ok: true });
+    expect(JSON.stringify(result)).not.toContain("宿主诊断占位");
+    expect(hook).not.toHaveBeenCalled();
+    expect(callTool.mock.calls.map(([name]) => name)).toEqual(["fail", "fail", "fail", "ok"]);
+  });
+
+  it("真实 WASM 将伪造 prototype、克隆和代理当作普通未知错误，不读取任何字段", async () => {
+    const hook = vi.fn(() => {
+      throw new Error("不应执行宿主访问器或 trap");
+    });
+    const forged = Object.create(PtcToolCallError.prototype, {
+      message: { get: hook },
+      failure: { get: hook },
+      toolName: { get: hook },
+    });
+    const forgedData = Object.assign(Object.create(PtcToolCallError.prototype), {
+      message: "宿主诊断占位",
+      failure: { code: "EXEC_TIMEOUT", message: "宿主诊断占位" },
+      toolName: "宿主诊断占位",
+    });
+    const actual = new PtcToolCallError("fail", { code: "EXEC_TIMEOUT", message: "宿主诊断占位" });
+    const fakeError = new Error("宿主诊断占位");
+    Object.setPrototypeOf(fakeError, PtcToolCallError.prototype);
+    class HostileSubclass extends PtcToolCallError {}
+    const fakeSubclass = Object.create(HostileSubclass.prototype, {
+      message: { get: hook },
+      failure: { get: hook },
+      toolName: { get: hook },
+    });
+    const prototypeProxy = new Error();
+    Object.setPrototypeOf(prototypeProxy, new Proxy({}, { get: hook, getPrototypeOf: hook }));
+    const revoked = Proxy.revocable(actual, {});
+    revoked.revoke();
+    const errors: unknown[] = [
+      forged,
+      forgedData,
+      fakeError,
+      fakeSubclass,
+      Object.create(actual),
+      prototypeProxy,
+      new Proxy(actual, { get: hook, getPrototypeOf: hook }),
+      revoked.proxy,
+    ];
+    const callTool = vi.fn(async (name: string) => {
+      if (name === "fail") throw errors.shift();
+      return { ok: true };
+    });
+    const result = await run(
+      `
+      const failures = [];
+      for (let i = 0; i < 8; i++) {
+        try { await tools.fail({}); } catch (error) {
+          failures.push({code: error.code, message: error.message, toolName: error.toolName});
+        }
+      }
+      return {failures, next: await tools.ok({})};
+      `,
+      { toolNames: ["fail", "ok"], callTool },
+    );
+    expect(result.value).toEqual({
+      failures: Array(8).fill({
+        code: "TOOL_FAILED",
+        message: "PTC 工具调用失败",
+        toolName: "fail",
+      }),
+      next: { ok: true },
+    });
+    expect(JSON.stringify(result)).not.toContain("宿主诊断占位");
+    expect(hook).not.toHaveBeenCalled();
+    expect(callTool).toHaveBeenCalledTimes(9);
+  });
+
   it("用户异常和语法错误均拒绝，不执行宿主转换方法", async () => {
     await expect(run("return }")).rejects.toThrow(/语法|执行/);
     await expect(

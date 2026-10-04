@@ -212,4 +212,22 @@ jobs:
           SELECT 'mode' AS category,configuration->>'toolCallingMode' AS mode FROM admin_control_config_revisions r JOIN admin_control_active_configs a USING(object_kind,object_key,revision) WHERE object_kind='runtime_settings';
           COMMIT;
           SQL
+          docker compose --project-name hoox-demo --env-file /opt/hoox-demo/shared/compose.env -f /opt/hoox-demo/current/docker-compose.yml run --rm --no-deps -T --entrypoint node worker --input-type=module <<'JS'
+          import { selectWorkerProcessEnvironment, parseWorkerProcessEnvironment, probeDevelopmentWorkerDependencies, createOpenAiCompatibleModel, createOpenAiCompatibleModelContextCapability } from './runtime-ts/apps/agent-worker/dist/process-entry.js';
+          let stage='parse';
+          try {
+            const config=parseWorkerProcessEnvironment(selectWorkerProcessEnvironment(process.env));
+            console.log('diagnostic parse=success');
+            stage='model-context';
+            const {modelRuntime,model}=await createOpenAiCompatibleModel(config.model);
+            await createOpenAiCompatibleModelContextCapability(modelRuntime,model);
+            console.log('diagnostic model-context=success');
+            stage='preflight';
+            await probeDevelopmentWorkerDependencies(config);
+            console.log('diagnostic preflight=success');
+          } catch(error) {
+            const frames=String(error.stack??'').split('\n').slice(1).map(line=>line.match(/([a-zA-Z0-9_-]+\.(?:js|mjs|ts):\d+:\d+)/)?.[1]).filter(Boolean).slice(0,8);
+            console.log(JSON.stringify({stage,errorType:['Error','TypeError','EnvironmentConfigurationError'].includes(error.name)?error.name:'other',sqlstate:/^[0-9A-Z]{5}$/.test(error.code??'')?error.code:null,frames}));
+          }
+          JS
           REMOTE

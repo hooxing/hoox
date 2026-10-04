@@ -66,7 +66,7 @@ function deploy(mode: string) {
       MOCK_LOG: log,
     },
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: mode === "worker-never-started" ? 60_000 : 15_000,
   });
   if (result.error) throw result.error;
   return {
@@ -77,8 +77,8 @@ function deploy(mode: string) {
   };
 }
 
-// Git Bash 的多进程验收在全量并发时可能超过默认 5 秒；子进程仍受 15 秒硬超时约束。
-describe("Demo 远端发布失败恢复", { timeout: 20_000 }, () => {
+// Git Bash 的 60 轮启动探测在并发负载下较慢；不启动场景受 60 秒硬超时约束，其余场景为 15 秒。
+describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
   it("共享配置缺失时不启动或回滚应用，也不改发布配置", () => {
     const result = deploy("missing-config");
     expect(result.status, result.stderr).toBe(2);
@@ -104,6 +104,18 @@ describe("Demo 远端发布失败恢复", { timeout: 20_000 }, () => {
       expect(readdirSync(join(result.root, "tmp"))).toEqual([]);
     }
   });
+
+  it.each(["worker-restarting", "worker-never-started"])(
+    "%s 即使 API 就绪也拒绝候选发布并恢复上一镜像",
+    (mode) => {
+      const result = deploy(mode);
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain("Demo Worker");
+      expect(result.stdout).not.toContain("Hoox Demo 发布完成：candidate");
+      expect(result.log.match(/ stop api web scheduler worker/gu)).toHaveLength(1);
+      expect(result.composeEnv).toContain("HOOX_DEMO_IMAGE=test/previous@sha256:previous");
+    },
+  );
 
   it("发布成功时清理临时凭据且不触发回滚", () => {
     const result = deploy("success");

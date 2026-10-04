@@ -6,6 +6,7 @@ import type { Mem0PlatformMemoryProvider } from "@hoox/memory";
 import type { AgentSessionFactoryPort } from "@hoox/run-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
+  resolveRuntimeModelProbeConfiguration,
   RuntimeConfiguredMemoryProvider,
   RuntimeConfiguredSessionFactory,
 } from "./runtime-configured-providers.js";
@@ -392,4 +393,76 @@ describe("Run 固定运行配置", () => {
       }
     },
   );
+});
+
+function modelConfiguration(revision: number) {
+  const configuration = snapshot(revision).model?.configuration;
+  if (configuration === undefined) throw new Error("测试模型配置缺失");
+  return configuration;
+}
+
+describe("Worker 模型启动探针配置", () => {
+  const deployment = {
+    baseUrl: "https://fallback.example.invalid/v1",
+    apiKey: "expired-fallback-test-key",
+    modelId: "fallback-model",
+    supportsImages: false,
+    contextWindow: 32_000,
+    maxOutputTokens: 4096,
+  };
+
+  it("已托管模型优先于过期的部署回退模型，预算来自默认模型", async () => {
+    const configuration = modelConfiguration(3);
+    await expect(
+      resolveRuntimeModelProbeConfiguration(deployment, {
+        resolveActiveModelConfiguration: async () => ({ configuration, apiKey: "active-test-key" }),
+      }),
+    ).resolves.toEqual({
+      baseUrl: configuration.baseUrl,
+      apiKey: "active-test-key",
+      modelId: "model-3",
+      supportsImages: false,
+      contextWindow: 128_000,
+      maxOutputTokens: 8192,
+    });
+  });
+
+  it("没有已发布模型时保留部署探针，包括身份与预算", async () => {
+    await expect(
+      resolveRuntimeModelProbeConfiguration(deployment, {
+        resolveActiveModelConfiguration: async () => undefined,
+      }),
+    ).resolves.toBe(deployment);
+  });
+
+  it("每次探针读取当前配置，不缓存切换前的模型", async () => {
+    const configurations = {
+      resolveActiveModelConfiguration: vi
+        .fn()
+        .mockResolvedValueOnce({
+          configuration: modelConfiguration(1),
+          apiKey: "test-1",
+        })
+        .mockResolvedValueOnce({
+          configuration: modelConfiguration(2),
+          apiKey: "test-2",
+        }),
+    };
+    expect((await resolveRuntimeModelProbeConfiguration(deployment, configurations)).modelId).toBe(
+      "model-1",
+    );
+    expect((await resolveRuntimeModelProbeConfiguration(deployment, configurations)).modelId).toBe(
+      "model-2",
+    );
+  });
+
+  it("已发布配置读取或解密失败时失败关闭，不探测旧凭据", async () => {
+    await expect(
+      resolveRuntimeModelProbeConfiguration(deployment, {
+        resolveActiveModelConfiguration: async () => {
+          throw new Error("MODEL_CREDENTIAL_UNAVAILABLE");
+        },
+      }),
+    ).rejects.toThrow("MODEL_CREDENTIAL_UNAVAILABLE");
+  });
 });

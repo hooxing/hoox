@@ -628,11 +628,16 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     // 全局 generation 与运行设置不能影响同套件的 Worker 和历史迁移回退用例。
     const isolatedSchema = `it_rw_tool_mode_${suffix}`;
     if (!safePgIdentifier.test(isolatedSchema)) throw new Error("工具模式测试 Schema 名称无效");
-    const migrationUrl = new URL(bootstrapUrl);
-    if (!preprovisionedDatabase) {
-      migrationUrl.username = migratorRole;
-      migrationUrl.password = migratorPassword;
+    // 迁移角色只能拥有一个 Schema，隔离用例不能复用主套件的迁移角色。
+    const isolatedMigratorRole = `it_rw_tool_mg_${suffix}`;
+    if (!safePgIdentifier.test(isolatedMigratorRole) || !safePgIdentifier.test(databaseName)) {
+      throw new Error("工具模式测试迁移角色或数据库名称无效");
     }
+    const isolatedMigratorPassword = randomBytes(24).toString("hex");
+    const migrationUrl = new URL(bootstrapUrl);
+    migrationUrl.username = isolatedMigratorRole;
+    migrationUrl.password = isolatedMigratorPassword;
+    let isolatedDatabasePrepared = false;
     // CI 未公开控制角色密码；仅用管理连接建立会话，所有业务 SQL 均以受限角色执行。
     const controlUrl = new URL(adminUrl);
     controlUrl.searchParams.set(
@@ -684,10 +689,16 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ).rows,
     });
     try {
-      await admin.query(`CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${migratorRole}"`);
+      await withTransaction(admin, async (client) => {
+        await client.query(`CREATE ROLE "${isolatedMigratorRole}" LOGIN PASSWORD '${isolatedMigratorPassword}'
+          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedMigratorRole}";
+          CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedMigratorRole}"`);
+      });
+      isolatedDatabasePrepared = true;
       await migrateUp(isolatedMigrator, {
         runtimeRole,
-        migratorRole,
+        migratorRole: isolatedMigratorRole,
         skillPublisherRole,
         workerCoordinatorRole,
         teamCoordinatorRole,
@@ -825,7 +836,11 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     } finally {
       await control.end();
       await isolatedMigrator.end();
-      await admin.query(`DROP SCHEMA IF EXISTS "${isolatedSchema}" CASCADE`);
+      if (isolatedDatabasePrepared) {
+        await admin.query(`DROP SCHEMA IF EXISTS "${isolatedSchema}" CASCADE;
+          REVOKE ALL PRIVILEGES ON DATABASE "${databaseName}" FROM "${isolatedMigratorRole}";
+          DROP ROLE "${isolatedMigratorRole}"`);
+      }
     }
   }, 90_000);
 

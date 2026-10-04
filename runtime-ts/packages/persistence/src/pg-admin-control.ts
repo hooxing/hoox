@@ -1249,9 +1249,10 @@ const activeConfigurationSql = `
          memory.object_key AS memory_key,memory.revision::text AS memory_revision,
          memory_revision.configuration AS memory_configuration,
          memory_revision.created_by AS memory_created_by,memory_revision.created_at AS memory_created_at,
-         NULL::text AS settings_key,NULL::text AS settings_revision,
-         NULL::jsonb AS settings_configuration,
-         NULL::text AS settings_created_by,NULL::timestamptz AS settings_created_at
+         settings.object_key AS settings_key,settings.revision::text AS settings_revision,
+         settings_revision.configuration AS settings_configuration,
+         settings_revision.created_by AS settings_created_by,
+         settings_revision.created_at AS settings_created_at
     FROM admin_control_generation generation
     LEFT JOIN admin_control_active_configs model ON model.object_kind='model_provider'
     LEFT JOIN admin_control_config_revisions model_revision
@@ -1261,6 +1262,12 @@ const activeConfigurationSql = `
     LEFT JOIN admin_control_config_revisions memory_revision
       ON memory_revision.object_kind=memory.object_kind AND memory_revision.object_key=memory.object_key
      AND memory_revision.revision=memory.revision
+    LEFT JOIN admin_control_active_configs settings
+      ON settings.object_kind='runtime_settings' AND settings.object_key='global'
+    LEFT JOIN admin_control_config_revisions settings_revision
+      ON settings_revision.object_kind=settings.object_kind
+     AND settings_revision.object_key=settings.object_key
+     AND settings_revision.revision=settings.revision
    WHERE generation.singleton='global'`;
 
 function snapshotRevision<T extends Configuration>(input: {
@@ -1282,15 +1289,37 @@ function snapshotRevision<T extends Configuration>(input: {
   });
 }
 
+function resolveRuntimeModelConfiguration(
+  row: Pick<ActiveConfigurationRow, "model_key" | "model_configuration">,
+  credentialCipher: ModelProviderCredentialCipher,
+  legacyModelApiKey?: string,
+): { readonly configuration: ModelProviderConfiguration; readonly apiKey: string } {
+  const configuration = mapConfiguration(
+    "model_provider",
+    row.model_configuration,
+  ) as ModelProviderConfiguration;
+  const rawModel = row.model_configuration as Record<string, unknown>;
+  const encryptedCredential = rawModel.credential;
+  const apiKey = isEncryptedModelProviderCredential(encryptedCredential)
+    ? credentialCipher.decrypt(row.model_key as string, encryptedCredential)
+    : rawModel.secretRef === "deployment:model" && encryptedCredential === undefined
+      ? legacyModelApiKey
+      : undefined;
+  if (apiKey === undefined) throw new Error("MODEL_CREDENTIAL_UNAVAILABLE");
+  return Object.freeze({ configuration, apiKey });
+}
+
 function mapRuntimeSnapshot(
   row: ActiveConfigurationRow,
   credentialCipher: ModelProviderCredentialCipher,
   legacyModelApiKey?: string,
 ): RuntimeControlConfigurationSnapshot {
-  const modelConfiguration =
+  const model =
     row.model_configuration === null
       ? undefined
-      : mapConfiguration("model_provider", row.model_configuration);
+      : resolveRuntimeModelConfiguration(row, credentialCipher, legacyModelApiKey);
+  const modelConfiguration = model?.configuration;
+  const modelApiKey = model?.apiKey;
   const memoryConfiguration =
     row.memory_configuration === null
       ? undefined
@@ -1299,13 +1328,6 @@ function mapRuntimeSnapshot(
     row.settings_configuration === null
       ? undefined
       : mapConfiguration("runtime_settings", row.settings_configuration);
-  const rawModel = row.model_configuration as Record<string, unknown> | null;
-  const encryptedCredential = rawModel?.credential;
-  const modelApiKey = isEncryptedModelProviderCredential(encryptedCredential)
-    ? credentialCipher.decrypt(row.model_key as string, encryptedCredential)
-    : legacyModelApiKey;
-  if (modelConfiguration !== undefined && modelApiKey === undefined)
-    throw new Error("MODEL_CREDENTIAL_UNAVAILABLE");
   const rawMemory = row.memory_configuration as Record<string, unknown> | null;
   const memoryCredential = rawMemory?.credential;
   const memoryApiKey = isEncryptedModelProviderCredential(memoryCredential)
@@ -1367,6 +1389,31 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
     private readonly credentialCipher: ModelProviderCredentialCipher,
     private readonly legacyModelApiKey?: string,
   ) {}
+
+  /** 只读当前已发布模型，不创建 Run 快照；仅无 active 时返回 undefined，坏凭据不回退。 */
+  async resolveActiveModelConfiguration(): Promise<
+    { readonly configuration: ModelProviderConfiguration; readonly apiKey: string } | undefined
+  > {
+    try {
+      const result = await this.pool.query<
+        Pick<ActiveConfigurationRow, "model_key" | "model_configuration">
+      >(
+        `SELECT active.object_key AS model_key,revision.configuration AS model_configuration
+           FROM admin_control_active_configs active
+           LEFT JOIN admin_control_config_revisions revision
+             ON revision.object_kind=active.object_kind
+            AND revision.object_key=active.object_key
+            AND revision.revision=active.revision
+          WHERE active.object_kind='model_provider'`,
+      );
+      const row = result.rows[0];
+      return row === undefined
+        ? undefined
+        : resolveRuntimeModelConfiguration(row, this.credentialCipher, this.legacyModelApiKey);
+    } catch (error) {
+      throw mapPersistenceError(error, "读取已发布模型配置");
+    }
+  }
 
   async resolveActiveRuntimeSettings(): Promise<RuntimeSettingsConfiguration | undefined> {
     try {

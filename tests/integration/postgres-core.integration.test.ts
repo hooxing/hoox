@@ -3277,3 +3277,302 @@ describe("PostgreSQL Run 压缩参数快照", () => {
     }
   });
 });
+
+describe("PostgreSQL Runtime 模型与模式快照", () => {
+  async function createConfigurationFixture(suffix: string) {
+    const fixture = await createFixture(suffix);
+    const tenants = [fixture.scope.tenantId];
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [fixture.user.id],
+    );
+    const cipher = new ModelProviderCredentialCipher("integration-runtime-root-at-least-32-bytes");
+    const repository = new PgAdminControlRepository(adminControlPool, cipher);
+    const service = new AdminControlService(
+      repository,
+      repository,
+      { probeModel: async () => undefined, probeMemory: async () => undefined },
+      [],
+    );
+    const runtime = new PgRuntimeControlConfigurationRepository(runtimePool, cipher);
+    const context = (key: string) => ({
+      actorUserId: fixture.user.id,
+      idempotencyKey: `${suffix}-${key}`,
+      requestDigest: "a".repeat(64),
+    });
+    const saveModel = async (modelId: string) =>
+      await service.saveModelConfiguration(context(modelId), {
+        providerKey: "runtime-main",
+        displayName: "Runtime 测试模型",
+        protocol: "openai-compatible",
+        baseUrl: "https://model.example.invalid/v1",
+        apiKey: `integration-${modelId}-api-key`,
+        defaultModelId: modelId,
+        models: [
+          {
+            id: modelId,
+            name: modelId,
+            enabled: true,
+            reasoning: false,
+            input: ["text"],
+            contextWindow: 128_000,
+            maxTokens: 8_192,
+          },
+        ],
+        expectedGeneration: await repository.generation(fixture.user.id),
+      });
+    const newRun = async (key: string) => {
+      const next = await createFixture(`${suffix}_${key}`);
+      tenants.push(next.scope.tenantId);
+      return { tenantId: next.scope.tenantId, runId: next.run.id };
+    };
+    const close = async () => {
+      await migratorPool.query(
+        "DELETE FROM run_runtime_config_snapshots WHERE tenant_id=ANY($1::text[])",
+        [tenants],
+      );
+      await migratorPool.query("DELETE FROM admin_control_audits WHERE actor_user_id=$1", [
+        fixture.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM admin_control_commands WHERE actor_user_id=$1", [
+        fixture.user.id,
+      ]);
+      await migratorPool.query(
+        "DELETE FROM admin_control_activation_events WHERE actor_user_id=$1",
+        [fixture.user.id],
+      );
+      await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
+        fixture.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM admin_control_provider_probes WHERE actor_user_id=$1", [
+        fixture.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM admin_control_config_revisions WHERE created_by=$1", [
+        fixture.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM platform_control_operators WHERE user_id=$1", [
+        fixture.user.id,
+      ]);
+    };
+    return { fixture, cipher, repository, service, runtime, context, saveModel, newRun, close };
+  }
+
+  it("受限 runtime 角色只读当前 active 模型，不创建快照、不解析记忆且切换后重新读取", async () => {
+    const test = await createConfigurationFixture("active_model_read");
+    try {
+      const role = await runtimePool.query(
+        "SELECT current_user AS role,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
+      );
+      expect(role.rows).toEqual([{ role: runtimeRole, rolsuper: false, rolbypassrls: false }]);
+      await expect(test.runtime.resolveActiveModelConfiguration()).resolves.toBeUndefined();
+      const snapshotsBefore = await migratorPool.query(
+        "SELECT count(*)::text AS total FROM run_runtime_config_snapshots",
+      );
+      const first = await test.saveModel("active-a");
+      const otherCipher = new ModelProviderCredentialCipher(
+        "integration-other-runtime-root-at-least-32-bytes",
+      );
+      const memoryRepository = new PgAdminControlRepository(adminControlPool, otherCipher);
+      const memoryService = new AdminControlService(
+        memoryRepository,
+        memoryRepository,
+        { probeModel: async () => undefined, probeMemory: async () => undefined },
+        [],
+      );
+      await memoryService.saveMemoryConfiguration(test.context("memory-other-key"), {
+        providerKey: "active-memory",
+        displayName: "不应读取的记忆配置",
+        providerKind: "mem0",
+        baseUrl: "https://memory.example.invalid/",
+        apiSecretRef: "managed:memory-api",
+        scopeSecretRef: "platform:memory-scope",
+        requestTimeoutMs: 10000,
+        enabled: true,
+        apiKey: "integration-memory-other-key",
+        expectedGeneration: await test.repository.generation(test.fixture.user.id),
+      });
+      await expect(test.runtime.resolveActiveModelConfiguration()).resolves.toEqual({
+        configuration: first.configuration,
+        apiKey: "integration-active-a-api-key",
+      });
+      await expect(
+        new PgRuntimeControlConfigurationRepository(
+          runtimePool,
+          test.cipher,
+        ).resolveActiveModelConfiguration(),
+      ).resolves.toEqual({
+        configuration: first.configuration,
+        apiKey: "integration-active-a-api-key",
+      });
+      const second = await test.saveModel("active-b");
+      await expect(test.runtime.resolveActiveModelConfiguration()).resolves.toEqual({
+        configuration: second.configuration,
+        apiKey: "integration-active-b-api-key",
+      });
+      const snapshotsAfter = await migratorPool.query(
+        "SELECT count(*)::text AS total FROM run_runtime_config_snapshots",
+      );
+      expect(snapshotsAfter.rows).toEqual(snapshotsBefore.rows);
+      await expect(
+        runtimePool.query(
+          "UPDATE admin_control_active_configs SET reason='禁止写入' WHERE object_kind='model_provider'",
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+    } finally {
+      await test.close();
+    }
+  });
+
+  it("active 模型解密失败或缺失凭据必须抛错，不能返回无配置或采用部署回退", async () => {
+    const test = await createConfigurationFixture("active_model_bad");
+    try {
+      const saved = await test.saveModel("bad-active");
+      const wrongCipher = new ModelProviderCredentialCipher(
+        "integration-wrong-runtime-root-at-least-32-bytes",
+      );
+      const reader = new PgRuntimeControlConfigurationRepository(
+        runtimePool,
+        wrongCipher,
+        "integration-deployment-fallback-key",
+      );
+      await expect(reader.resolveActiveModelConfiguration()).rejects.toMatchObject({
+        code: "UNEXPECTED",
+        message: "读取已发布模型配置失败",
+      });
+      await migratorPool.query(
+        `UPDATE admin_control_config_revisions
+            SET configuration=jsonb_set(configuration,'{credential}',$1::jsonb)
+          WHERE object_kind='model_provider' AND object_key='runtime-main' AND revision=$2`,
+        [
+          JSON.stringify(test.cipher.encrypt("different-provider", "integration-bad-aad-key")),
+          saved.revision,
+        ],
+      );
+      await expect(
+        new PgRuntimeControlConfigurationRepository(
+          runtimePool,
+          test.cipher,
+          "integration-deployment-fallback-key",
+        ).resolveActiveModelConfiguration(),
+      ).rejects.toMatchObject({ code: "UNEXPECTED" });
+      await migratorPool.query(
+        `UPDATE admin_control_config_revisions
+            SET configuration=(configuration-'credential') || '{"secretRef":"deployment:model"}'::jsonb
+          WHERE object_kind='model_provider' AND object_key='runtime-main' AND revision=$1`,
+        [saved.revision],
+      );
+      await expect(test.runtime.resolveActiveModelConfiguration()).rejects.toMatchObject({
+        code: "UNEXPECTED",
+      });
+      const legacyReader = new PgRuntimeControlConfigurationRepository(
+        runtimePool,
+        test.cipher,
+        "integration-legacy-model-api-key",
+      );
+      await expect(legacyReader.resolveActiveModelConfiguration()).resolves.toMatchObject({
+        configuration: { defaultModelId: "bad-active", credentialConfigured: false },
+        apiKey: "integration-legacy-model-api-key",
+      });
+      const snapshots = await withTenantTransaction(runtimePool, test.fixture.scope, (client) =>
+        client.query("SELECT run_id FROM run_runtime_config_snapshots"),
+      );
+      expect(snapshots.rows).toHaveLength(0);
+    } finally {
+      await test.close();
+    }
+  });
+
+  it("真实 PG 新 Run 绑定 PTC revision，切换 native 后新 Run 生效且重建仓储恢复旧模式", async () => {
+    const test = await createConfigurationFixture("mode_snapshot");
+    try {
+      await test.saveModel("mode-model");
+      const emptyInput = { tenantId: test.fixture.scope.tenantId, runId: test.fixture.run.id };
+      const emptySnapshot = await test.runtime.resolveForRun(emptyInput);
+      expect(emptySnapshot?.runtimeSettings).toBeUndefined();
+      const settings = {
+        workerMaxConcurrentRuns: 4,
+        userMaxConcurrentRunsPerTenant: 2,
+        toolCallingMode: "ptc",
+        compactionSoftLimitPercent: 90,
+        compactionTargetPercent: 65,
+        compactionRecentUserTokens: 2048,
+        compactionMaxOutputTokens: 1024,
+        compactionTimeoutMs: 45000,
+      } as const;
+      const ptc = await test.service.saveRuntimeSettingsConfiguration(test.context("ptc"), {
+        ...settings,
+        expectedGeneration: await test.repository.generation(test.fixture.user.id),
+      });
+      const ptcInput = await test.newRun("ptc");
+      const ptcSnapshot = await test.runtime.resolveForRun(ptcInput);
+      expect(ptcSnapshot?.runtimeSettings).toMatchObject({
+        revision: ptc.revision,
+        configuration: { toolCallingMode: "ptc" },
+      });
+      const stored = await withTenantTransaction(runtimePool, ptcInput, (client) =>
+        client.query(
+          `SELECT runtime_settings_object_kind,runtime_settings_object_key,runtime_settings_revision::text
+           FROM run_runtime_config_snapshots WHERE tenant_id=$1 AND run_id=$2`,
+          [ptcInput.tenantId, ptcInput.runId],
+        ),
+      );
+      expect(stored.rows).toEqual([
+        {
+          runtime_settings_object_kind: "runtime_settings",
+          runtime_settings_object_key: "global",
+          runtime_settings_revision: String(ptc.revision),
+        },
+      ]);
+      const native = await test.service.saveRuntimeSettingsConfiguration(test.context("native"), {
+        ...settings,
+        toolCallingMode: "native",
+        expectedGeneration: await test.repository.generation(test.fixture.user.id),
+      });
+      const nativeInput = await test.newRun("native");
+      const nativeSnapshot = await test.runtime.resolveForRun(nativeInput);
+      expect(nativeSnapshot?.runtimeSettings).toMatchObject({
+        revision: native.revision,
+        configuration: { toolCallingMode: "native" },
+      });
+      const restored = new PgRuntimeControlConfigurationRepository(runtimePool, test.cipher);
+      await expect(restored.resolveForRun(ptcInput)).resolves.toEqual(ptcSnapshot);
+      await expect(restored.resolveForRun(nativeInput)).resolves.toEqual(nativeSnapshot);
+      await expect(restored.resolveForRun(emptyInput)).resolves.toEqual(emptySnapshot);
+      expect(
+        (await restored.resolveForRun(emptyInput))?.runtimeSettings?.configuration
+          .toolCallingMode ?? "native",
+      ).toBe("native");
+      const emptyStored = await withTenantTransaction(runtimePool, emptyInput, (client) =>
+        client.query(
+          `SELECT runtime_settings_object_kind,runtime_settings_object_key,runtime_settings_revision
+           FROM run_runtime_config_snapshots WHERE tenant_id=$1 AND run_id=$2`,
+          [emptyInput.tenantId, emptyInput.runId],
+        ),
+      );
+      expect(emptyStored.rows).toEqual([
+        {
+          runtime_settings_object_kind: null,
+          runtime_settings_object_key: null,
+          runtime_settings_revision: null,
+        },
+      ]);
+      await migratorPool.query(
+        `UPDATE admin_control_config_revisions SET configuration=configuration-'toolCallingMode'
+          WHERE object_kind='runtime_settings' AND object_key='global' AND revision=$1`,
+        [native.revision],
+      );
+      await test.service.saveRuntimeSettingsConfiguration(test.context("ptc-again"), {
+        ...settings,
+        expectedGeneration: await test.repository.generation(test.fixture.user.id),
+      });
+      const legacySnapshot = await new PgRuntimeControlConfigurationRepository(
+        runtimePool,
+        test.cipher,
+      ).resolveForRun(nativeInput);
+      expect(legacySnapshot?.runtimeSettings?.revision).toBe(native.revision);
+      expect(legacySnapshot?.runtimeSettings?.configuration.toolCallingMode).toBe("native");
+    } finally {
+      await test.close();
+    }
+  });
+});

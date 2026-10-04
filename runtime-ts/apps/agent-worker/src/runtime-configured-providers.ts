@@ -1,5 +1,6 @@
 import {
   defaultModelConfiguration,
+  type ModelProviderConfiguration,
   type RunCompactionSettings,
   type RunCompactionSettingsPort,
   type RuntimeControlConfigurationPort,
@@ -15,6 +16,37 @@ import {
   type RetrievedMemory,
 } from "@hoox/memory";
 import type { AgentSessionFactoryPort, WorkerAgentSessionPort } from "@hoox/run-contracts";
+
+export interface RuntimeModelProbeConfiguration {
+  readonly baseUrl: string;
+  readonly apiKey: string;
+  readonly modelId: string;
+  readonly supportsImages: boolean;
+  readonly contextWindow: number;
+  readonly maxOutputTokens: number;
+}
+
+/** 探测当前可供新 Run 使用的模型；已发布配置读取或解密失败时不得回退到部署凭据。 */
+export async function resolveRuntimeModelProbeConfiguration(
+  deployment: RuntimeModelProbeConfiguration,
+  configurations: {
+    resolveActiveModelConfiguration(): Promise<
+      { readonly configuration: ModelProviderConfiguration; readonly apiKey: string } | undefined
+    >;
+  },
+): Promise<RuntimeModelProbeConfiguration> {
+  const active = await configurations.resolveActiveModelConfiguration();
+  if (active === undefined) return deployment;
+  const model = defaultModelConfiguration(active.configuration);
+  return {
+    baseUrl: active.configuration.baseUrl,
+    apiKey: active.apiKey,
+    modelId: model.id,
+    supportsImages: model.input.includes("image"),
+    contextWindow: model.contextWindow,
+    maxOutputTokens: model.maxTokens,
+  };
+}
 
 type SessionCreateInput = Parameters<AgentSessionFactoryPort["create"]>[0];
 

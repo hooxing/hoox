@@ -1259,6 +1259,7 @@ async function assembleWorkerRuntime(
           threadContinuityMetrics,
         );
         return deploymentSessions.withModel({
+          toolCallingMode: snapshot?.runtimeSettings?.configuration.toolCallingMode ?? "native",
           model: dynamicModel.model,
           modelRuntime: dynamicModel.modelRuntime,
           modelContext: dynamicModelContext,

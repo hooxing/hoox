@@ -33,6 +33,7 @@ import {
   providerVisibleUserInputTokens,
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
+  type ToolCallingMode,
 } from "@hoox/pi-adapter";
 import {
   assertRunSkillSnapshot,
@@ -183,10 +184,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       recordStarted(call: {
         readonly toolCallId: string;
         readonly toolName: string;
+        readonly parentToolCallId?: string;
       }): Promise<ToolObservationResult["outcome"]>;
       record(call: {
         readonly toolCallId: string;
         readonly toolName: string;
+        readonly parentToolCallId?: string;
       }): Promise<ToolObservationResult>;
     },
     private readonly artifactAuthorizationIssuer?: ArtifactExecutionAuthorizationIssuerPort,
@@ -219,12 +222,14 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       readonly mutation: ScheduledTaskMutation;
     }) => Promise<ScheduledTask>,
     private readonly modelUsageMetrics?: ModelUsageMetricsPort,
+    private readonly toolCallingMode: ToolCallingMode = "native",
   ) {
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
   }
 
   /** 复用工具、持久化和恢复边界，只替换由 Run 固定配置决定的模型相关能力。 */
   withModel(input: {
+    readonly toolCallingMode?: ToolCallingMode;
     readonly model: Model<Api>;
     readonly modelRuntime: Models;
     readonly modelContext: TrustedPiModelContextCapability;
@@ -255,6 +260,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       this.internalTrajectoryDiagnostics,
       this.updateScheduledTask,
       this.modelUsageMetrics,
+      input.toolCallingMode ?? this.toolCallingMode,
     );
   }
 
@@ -364,6 +370,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       return result ?? history;
     };
     const startedToolCalls = new Map<string, string>();
+    const ptcParents = new Map<string, string>();
+    const parentBinding = (callId: string): { readonly parentToolCallId?: string } => {
+      const parentToolCallId = ptcParents.get(callId);
+      return parentToolCallId === undefined ? {} : { parentToolCallId };
+    };
     const invalidToolCalls = new Set<string>();
     const effectAuthorizationRequested = new Set<string>();
     const sandboxPreparationRequested = new Set<string>();
@@ -455,7 +466,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         recorded = await measureExecutionPhase(
           input.phaseTiming,
           "tool_call_persist",
-          async () => observationRecorder?.recordStarted(call),
+          async () =>
+            observationRecorder?.recordStarted({ ...call, ...parentBinding(call.toolCallId) }),
           call,
         );
       } catch {
@@ -522,7 +534,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         throw new Error("Pi 工具 Sandbox 准备缺少匹配的 tool.started");
       }
       sandboxPreparationRequested.add(call.callId);
-      await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
+      if (!durableToolCalls.has(call.callId))
+        await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
       try {
         return await measureExecutionPhase(
           input.phaseTiming,
@@ -629,12 +642,16 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             apply: async (request: {
               readonly callId: string;
               readonly arguments: AutomationUpdateToolArguments;
+              readonly signal?: AbortSignal;
             }) => {
               await authorizeStartedTool({
                 callId: request.callId,
                 toolName: "automation_update",
                 argsDigest: digestCanonical(request.arguments),
               });
+              // 授权等待不是副作用开始；等待中取消或丢失续行许可后不得启动写入。
+              sessionMaterial.assertModelRequestAllowed();
+              if (request.signal?.aborted) throw new Error("定时任务工具已取消");
               return updateScheduledTask({
                 tenantId: input.scope.tenantId,
                 threadId: input.scope.threadId,
@@ -667,6 +684,23 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       },
     };
     const sessionMaterial = {
+      toolCallingMode: this.toolCallingMode,
+      preparePtcProgram: async (callId: string) => {
+        await recordStartedTool({ toolCallId: callId, toolName: "run_code" });
+      },
+      preparePtcTool: async (call: {
+        readonly callId: string;
+        readonly toolName: string;
+        readonly parentCallId: string;
+      }) => {
+        if (
+          this.toolCallingMode !== "ptc" ||
+          ptcParents.get(call.callId) !== call.parentCallId ||
+          !durableToolCalls.has(call.parentCallId)
+        )
+          throw new Error("PTC 子调用缺少受控父调用");
+        await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
+      },
       ...(input.phaseTiming === undefined ? {} : { phaseTiming: input.phaseTiming }),
       model: this.model,
       modelContext: this.modelContext,
@@ -689,7 +723,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         const recorder = this.createObservationRecorder(input, outputs);
         observationRecorder = recorder;
         return {
-          record: async (call: { readonly toolCallId: string; readonly toolName: string }) => {
+          record: async (call: {
+            readonly toolCallId: string;
+            readonly toolName: string;
+            readonly parentToolCallId?: string;
+          }) => {
             try {
               // schema 级错误与 Router 在许可前拒绝都不会进入 authorizer；在失败
               // tool_result 前补齐 durable tool_call，但不消费外部副作用许可。
@@ -697,7 +735,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               const result = await measureExecutionPhase(
                 input.phaseTiming,
                 "tool_receipt_persist",
-                () => recorder.record(call),
+                () => recorder.record({ ...call, ...parentBinding(call.toolCallId) }),
                 { toolCallId: call.toolCallId, toolName: call.toolName },
               );
               if (result.outcome !== "recorded" && result.outcome !== "replayed") {
@@ -1001,6 +1039,17 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         invalidToolCalls.add(event.callId);
         return;
       }
+      if (event.parentCallId !== undefined) {
+        if (
+          this.toolCallingMode !== "ptc" ||
+          startedToolCalls.get(event.parentCallId) !== "run_code" ||
+          !durableToolCalls.has(event.parentCallId)
+        ) {
+          invalidToolCalls.add(event.callId);
+          return;
+        }
+        ptcParents.set(event.callId, event.parentCallId);
+      }
       startedToolCalls.set(event.callId, event.name);
     });
     return {
@@ -1084,7 +1133,13 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               event.type === "tool.updated" ||
               event.type === "tool.completed")
           ) {
-            listener({ ...event, callId: runtimeCallId(event.callId) });
+            listener({
+              ...event,
+              callId: runtimeCallId(event.callId),
+              ...(event.type === "tool.started" && event.parentCallId !== undefined
+                ? { parentCallId: runtimeCallId(event.parentCallId) }
+                : {}),
+            });
             return;
           }
           listener(event);
@@ -1094,6 +1149,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         unsubscribeTrajectory?.();
         unsubscribeToolGate();
         startedToolCalls.clear();
+        ptcParents.clear();
         invalidToolCalls.clear();
         effectAuthorizationRequested.clear();
         sandboxPreparationRequested.clear();
@@ -1189,21 +1245,35 @@ export function createDurableObservationRecorderFactory(
       dependencies.policy,
     );
     return {
-      recordStarted: async (call: { readonly toolCallId: string; readonly toolName: string }) => {
+      recordStarted: async (call: {
+        readonly toolCallId: string;
+        readonly toolName: string;
+        readonly parentToolCallId?: string;
+      }) => {
         const result = await dependencies.rollout.appendToolCall({
           binding: rolloutBinding,
           idempotencyKey: `attempt.${input.attemptId}.tool.${call.toolCallId}.call`,
           toolCallId: call.toolCallId,
           toolName: call.toolName,
+          ...(call.parentToolCallId === undefined
+            ? {}
+            : { parentToolCallId: call.parentToolCallId }),
         });
         return result.outcome === "created" ? "recorded" : result.outcome;
       },
-      record: (call: { readonly toolCallId: string; readonly toolName: string }) =>
+      record: (call: {
+        readonly toolCallId: string;
+        readonly toolName: string;
+        readonly parentToolCallId?: string;
+      }) =>
         pipeline.record({
           binding: rolloutBinding,
           idempotencyKey: `attempt.${input.attemptId}.tool.${call.toolCallId}`,
           toolCallId: call.toolCallId,
           toolName: call.toolName,
+          ...(call.parentToolCallId === undefined
+            ? {}
+            : { parentToolCallId: call.parentToolCallId }),
         }),
     };
   };

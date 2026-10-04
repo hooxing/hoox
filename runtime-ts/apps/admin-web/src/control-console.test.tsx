@@ -4,6 +4,7 @@ import type {
   MemoryProviderRevisionDto,
   ModelProviderRevisionDto,
   PiModelCatalogModelDto,
+  RuntimeSettingsRevisionDto,
 } from "@hoox/protocol";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -246,11 +247,99 @@ describe("统一平台管理导航", () => {
       compactionMaxOutputTokens: 4096,
       compactionTimeoutMs: 60000,
     });
+    expect(vi.mocked(api.saveRuntimeSettingsConfiguration).mock.calls[0]?.[0].toolCallingMode).toBe(
+      "native",
+    );
     expect(api.createRuntimeSettingsDraft).not.toHaveBeenCalled();
     expect(api.publish).not.toHaveBeenCalled();
     act(() => root.unmount());
     container.remove();
   });
+  it.each(["native", "ptc", undefined] as const)(
+    "运行设置读取模式 %s，并支持正常与 PTC 保存往返",
+    async (initialMode) => {
+      const api = fixture();
+      let active: RuntimeSettingsRevisionDto = {
+        revision: 1,
+        versionToken: 1,
+        status: "active",
+        probeStatus: "untested",
+        createdBy: "user_admin",
+        createdAt: "2026-10-04T00:00:00.000Z",
+        updatedAt: "2026-10-04T00:00:00.000Z",
+        configuration: {
+          workerMaxConcurrentRuns: 20,
+          userMaxConcurrentRunsPerTenant: 2,
+          compactionSoftLimitPercent: 80,
+          compactionTargetPercent: 55,
+          compactionRecentUserTokens: 4096,
+          compactionMaxOutputTokens: 4096,
+          compactionTimeoutMs: 60000,
+          ...(initialMode === undefined ? {} : { toolCallingMode: initialMode }),
+        },
+      };
+      vi.mocked(api.overview).mockImplementation(async () => ({
+        ...overview,
+        generation: active.revision,
+        activeRuntimeSettings: active,
+      }));
+      vi.mocked(api.saveRuntimeSettingsConfiguration).mockImplementation(async (input) => {
+        const { expectedGeneration: _generation, ...configuration } = input;
+        active = { ...active, revision: active.revision + 1, configuration };
+        return active;
+      });
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      act(() => root.render(<App controlApi={api} />));
+      await settle();
+      act(() => navigationItem(container, "运行设置").click());
+      await settle();
+      const modeSelect = () =>
+        requiredControl(
+          container.querySelector<HTMLSelectElement>('select[name="toolCallingMode"]'),
+          "工具调用模式",
+        );
+      expect(modeSelect().value).toBe(initialMode ?? "native");
+      expect(container.querySelector('label[for="runtime-tool-calling-mode"]')?.textContent).toBe(
+        "工具调用模式",
+      );
+      expect(
+        Array.from(modeSelect().options).map((option) => [option.value, option.textContent]),
+      ).toEqual([
+        ["native", "正常模式"],
+        ["ptc", "PTC 模式（实验）"],
+      ]);
+      const description = document.getElementById(
+        modeSelect().getAttribute("aria-describedby") ?? "",
+      );
+      expect(description?.textContent).toContain("首次建立 Run 配置快照时固定");
+      expect(description?.textContent).toContain("已有快照的 Run 执行和恢复均保持原模式");
+      for (const toolCallingMode of ["ptc", "native"] as const) {
+        const expectedGeneration = active.revision;
+        act(() => {
+          modeSelect().value = toolCallingMode;
+          modeSelect().dispatchEvent(new Event("change", { bubbles: true }));
+          container
+            .querySelector("form")
+            ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        });
+        await settle();
+        expect(api.saveRuntimeSettingsConfiguration).toHaveBeenLastCalledWith(
+          expect.objectContaining({ toolCallingMode, expectedGeneration }),
+        );
+        expect(modeSelect().value).toBe(toolCallingMode);
+        expect(modeSelect().disabled).toBe(false);
+        expect(modeSelect().closest("fieldset")?.disabled).toBe(false);
+      }
+      expect(api.saveRuntimeSettingsConfiguration).toHaveBeenCalledTimes(2);
+      expect(api.createRuntimeSettingsDraft).not.toHaveBeenCalled();
+      expect(api.publish).not.toHaveBeenCalled();
+      act(() => root.unmount());
+      container.remove();
+    },
+  );
+
   it("工作台展示真实指标，隐藏内部配置和版本信息", async () => {
     const api = fixture();
     const container = document.createElement("div");

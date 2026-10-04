@@ -1064,6 +1064,20 @@ function RuntimeSettingsWorkspace({
       >
         <input type="hidden" name="expectedGeneration" value={overview?.generation ?? 0} />
         <fieldset disabled={busy || overview === undefined}>
+          <label htmlFor="runtime-tool-calling-mode">工具调用模式</label>
+          <select
+            id="runtime-tool-calling-mode"
+            name="toolCallingMode"
+            aria-describedby="runtime-tool-calling-mode-description"
+            defaultValue={configuration?.toolCallingMode ?? "native"}
+          >
+            <option value="native">正常模式</option>
+            <option value="ptc">PTC 模式（实验）</option>
+          </select>
+          <p id="runtime-tool-calling-mode-description">
+            工具调用模式在 Worker 首次建立 Run 配置快照时固定；已有快照的 Run
+            执行和恢复均保持原模式。
+          </p>
           <div className="form-grid">
             {runtimeSettingFields.slice(0, 2).map(([name, label, min, max, fallback]) => (
               <label key={name}>
@@ -1320,6 +1334,7 @@ export function AdminControlConsole({
           onSave={(form) =>
             operation(() =>
               api.saveRuntimeSettingsConfiguration({
+                toolCallingMode: form.get("toolCallingMode") === "ptc" ? "ptc" : "native",
                 workerMaxConcurrentRuns: number(form, "workerMaxConcurrentRuns"),
                 userMaxConcurrentRunsPerTenant: number(form, "userMaxConcurrentRunsPerTenant"),
                 compactionSoftLimitPercent: number(form, "compactionSoftLimitPercent"),

@@ -303,6 +303,7 @@
 | [ResourceFS 受控快照的分块重试与有界并发写入](20260910191159-resourcefs-snapshot-chunked-write.md) | 已接受 | 2026-09-10 |
 | [受控快照分块在链路失败时自动降级](20260910202709-resourcefs-snapshot-adaptive-chunk-downshift.md) | 已接受 | 2026-09-10 |
 | [ADR-20260911162421：MCP 与外部工具接入采用发布期固化与 Run 快照](20260911162421-mcp-and-external-tool-integration-boundary.md) | 提议 | 2026-09-11 |
+| [ADR-20261003011415：PTC 模式与独立受控调用日志](20261003011415-ptc-mode-and-durable-dispatch-journal.md) | 已接受（测试分支实验） | 2026-10-03 |
 | [公开首页与工作台分离入口](20261003184949-public-home-and-workspace-entry.md) | 已接受 | 2026-10-03 |
 
 </details>

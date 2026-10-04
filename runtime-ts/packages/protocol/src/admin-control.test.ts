@@ -4,11 +4,38 @@ import {
   CreateModelProviderDraftRequestSchema,
   ModelProviderControlRevisionRequestSchema,
   PlatformUserPageDtoSchema,
+  RuntimeSettingsConfigurationDtoSchema,
   RuntimeStatisticsDtoSchema,
+  SaveRuntimeSettingsConfigurationRequestSchema,
   UpdatePlatformUserStatusRequestSchema,
 } from "./admin-control.js";
 
 describe("后台运营协议", () => {
+  it.each(["native", "ptc", undefined, null, "", "PTC", "auto", 1, false])(
+    "运行设置协议校验工具调用模式 %s",
+    (toolCallingMode) => {
+      const configuration = {
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
+        compactionSoftLimitPercent: 80,
+        compactionTargetPercent: 55,
+        compactionRecentUserTokens: 4096,
+        compactionMaxOutputTokens: 4096,
+        compactionTimeoutMs: 60000,
+        ...(toolCallingMode === undefined ? {} : { toolCallingMode }),
+      };
+      const valid =
+        toolCallingMode === undefined || toolCallingMode === "native" || toolCallingMode === "ptc";
+      expect(Value.Check(RuntimeSettingsConfigurationDtoSchema, configuration)).toBe(valid);
+      expect(
+        Value.Check(SaveRuntimeSettingsConfigurationRequestSchema, {
+          ...configuration,
+          expectedGeneration: 0,
+        }),
+      ).toBe(valid);
+    },
+  );
+
   it("模型配置允许正常大小写且保存、测试和切换均不接收变更原因", () => {
     const draft = {
       providerKey: "DeepSeek",

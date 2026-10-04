@@ -1,6 +1,11 @@
 import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
-import { projectToolFailure, PtcToolCallError } from "./tool-failure.js";
+import {
+  projectToolFailure,
+  PtcToolCallError,
+  readPtcToolCallError,
+  type ToolFailure,
+} from "./tool-failure.js";
 
 const unknownFailure = {
   code: "TOOL_FAILED",
@@ -77,6 +82,9 @@ describe("工具失败安全投影", () => {
     expect(failure).toEqual(projectToolFailure(new Error(JSON.stringify({ code }))));
     expect(JSON.stringify(failure)).not.toContain("宿主诊断占位");
     expect(Object.isFrozen(failure)).toBe(true);
+    const wrapped = new PtcToolCallError("fail", { code, message: "宿主诊断占位" });
+    expect(wrapped.message).toBe(failure.message);
+    expect(readPtcToolCallError(wrapped)).toEqual({ toolName: "fail", failure });
   });
 
   it("参数无效的 PTC 错误使用固定提示", () => {
@@ -190,5 +198,145 @@ describe("工具失败安全投影", () => {
     failure.message = "宿主诊断占位";
     expect(error.failure.message).toBe("命令执行超时，请检查任务状态");
     expect(JSON.stringify(error)).not.toContain("宿主诊断占位");
+  });
+  it("构造器不读取输入 message/getter/toJSON，仅规范化自有 code 数据字段", () => {
+    const hook = vi.fn(() => {
+      throw new Error("不应执行宿主钩子");
+    });
+    const failure = {
+      code: "EXEC_TIMEOUT",
+      get message() {
+        return hook();
+      },
+      toJSON: hook,
+    };
+    const error = new PtcToolCallError("fail", failure);
+    expect(readPtcToolCallError(error)).toEqual({
+      toolName: "fail",
+      failure: { code: "EXEC_TIMEOUT", message: "命令执行超时，请检查任务状态" },
+    });
+    expect(error.message).toBe("命令执行超时，请检查任务状态");
+    const inherited: ToolFailure = Object.create(null, {
+      message: { get: hook },
+    });
+    Object.setPrototypeOf(inherited, {
+      get code() {
+        return hook();
+      },
+    });
+    const revoked = Proxy.revocable(failure, {});
+    revoked.revoke();
+    const inputs: unknown[] = [
+      undefined,
+      null,
+      42,
+      "EXEC_TIMEOUT",
+      {},
+      {
+        code: "TOOL_FAILED",
+        get message() {
+          return hook();
+        },
+      },
+      {
+        code: "HOST_UNKNOWN",
+        get message() {
+          return hook();
+        },
+      },
+      {
+        get code() {
+          return hook();
+        },
+        get message() {
+          return hook();
+        },
+      },
+      {
+        code: { toString: hook },
+        get message() {
+          return hook();
+        },
+      },
+      inherited,
+      Object.assign([], { code: "EXEC_TIMEOUT", message: "宿主诊断占位" }),
+      Object.assign(() => {}, { code: "EXEC_TIMEOUT", message: "宿主诊断占位" }),
+      new Proxy(failure, { get: hook, getOwnPropertyDescriptor: hook, getPrototypeOf: hook }),
+      revoked.proxy,
+    ];
+    for (const input of inputs) {
+      const wrapped = new PtcToolCallError("fail", input as ToolFailure);
+      expect(wrapped.message).toBe(unknownFailure.message);
+      expect(readPtcToolCallError(wrapped)).toEqual({ toolName: "fail", failure: unknownFailure });
+    }
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it("只读私有登记，公开属性篡改或子类访问器不影响规范化快照", () => {
+    const hook = vi.fn(() => {
+      throw new Error("不应读取公开异常属性");
+    });
+    class HostileSubclass extends PtcToolCallError {}
+    const error = new HostileSubclass("fail", { code: "EXEC_TIMEOUT", message: "宿主诊断占位" });
+    const expected = {
+      toolName: "fail",
+      failure: { code: "EXEC_TIMEOUT", message: "命令执行超时，请检查任务状态" },
+    };
+    const registered = readPtcToolCallError(error);
+    expect(registered).toEqual(expected);
+    expect(Object.isFrozen(registered)).toBe(true);
+    expect(Object.isFrozen(registered?.failure)).toBe(true);
+    Object.assign(error, {
+      message: "宿主诊断占位",
+      failure: { code: "HOST_UNKNOWN", message: "宿主诊断占位" },
+      toolName: "宿主诊断占位",
+    });
+    expect(readPtcToolCallError(error)).toEqual(expected);
+    for (const key of ["message", "failure", "toolName", "stack", "toJSON"]) {
+      Reflect.deleteProperty(error, key);
+      Object.defineProperty(HostileSubclass.prototype, key, { get: hook });
+    }
+    expect(readPtcToolCallError(error)).toEqual(expected);
+    Object.setPrototypeOf(error, null);
+    expect(readPtcToolCallError(error)).toEqual(expected);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it("不信任伪造原型、克隆或代理身份，查询不执行任何 trap/访问器", () => {
+    const hook = vi.fn(() => {
+      throw new Error("不应执行宿主钩子");
+    });
+    const actual = new PtcToolCallError("fail", { code: "EXEC_TIMEOUT", message: "宿主诊断占位" });
+    const forged = Object.create(PtcToolCallError.prototype, {
+      message: { get: hook },
+      failure: { get: hook },
+      toolName: { get: hook },
+    });
+    const fakeError = new Error("宿主诊断占位");
+    Object.setPrototypeOf(fakeError, PtcToolCallError.prototype);
+    const proxy = new Proxy(actual, {
+      get: hook,
+      getPrototypeOf: hook,
+      getOwnPropertyDescriptor: hook,
+    });
+    const revoked = Proxy.revocable(actual, {});
+    revoked.revoke();
+    const prototypeProxy = Object.create(new Proxy({}, { getPrototypeOf: hook, get: hook }));
+    for (const error of [
+      forged,
+      fakeError,
+      Object.create(actual),
+      proxy,
+      revoked.proxy,
+      prototypeProxy,
+      undefined,
+      null,
+      42,
+      "宿主诊断占位",
+      Symbol("占位"),
+      () => {},
+    ])
+      expect(readPtcToolCallError(error)).toBeUndefined();
+    expect(hook).not.toHaveBeenCalled();
   });
 });

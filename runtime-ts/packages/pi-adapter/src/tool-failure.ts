@@ -62,6 +62,27 @@ const FAILURE_MESSAGES = new Map<string, string>([
   ["PTC_TOOL_INVALID_ARGUMENTS", "PTC 工具参数无效，请检查参数"],
 ]);
 
+type ControlledPtcToolCallError = {
+  readonly toolName: string;
+  readonly failure: ToolFailure;
+};
+
+// 私有登记是唯一可信来源；原型、公开属性和子类都不能伪造或更改桥接结果。
+const CONTROLLED_ERRORS = new WeakMap<object, ControlledPtcToolCallError>();
+
+function failureForCode(code: unknown): ToolFailure {
+  if (typeof code !== "string" || code === "TOOL_FAILED") return UNKNOWN_FAILURE;
+  const message = FAILURE_MESSAGES.get(code);
+  return message === undefined ? UNKNOWN_FAILURE : Object.freeze({ code, message });
+}
+
+/** 只查询私有登记；未登记值返回 undefined，不访问属性或遍历原型。 */
+export function readPtcToolCallError(error: unknown): ControlledPtcToolCallError | undefined {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function")
+    return undefined;
+  return CONTROLLED_ERRORS.get(error);
+}
+
 /** 只读取真实 Error 的自有 message 数据字段；固定提示不包含任何宿主诊断。 */
 export function projectToolFailure(error: unknown): ToolFailure {
   if (types.isProxy(error) || !types.isNativeError(error)) return UNKNOWN_FAILURE;
@@ -76,23 +97,37 @@ export function projectToolFailure(error: unknown): ToolFailure {
     if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded))
       return UNKNOWN_FAILURE;
     const code: unknown = Object.getOwnPropertyDescriptor(decoded, "code")?.value;
-    if (typeof code !== "string") return UNKNOWN_FAILURE;
-    const message = FAILURE_MESSAGES.get(code);
-    return message === undefined ? UNKNOWN_FAILURE : Object.freeze({ code, message });
+    return failureForCode(code);
   } catch {
     return UNKNOWN_FAILURE;
   }
 }
 
-/** 标记已经投影的工具失败；不保存原始异常或诊断字段。 */
+/** 仅从输入的自有 code 数据字段规范化并登记；不读取输入 message 或保存原始诊断。 */
 export class PtcToolCallError extends Error {
   readonly toolName: string;
   readonly failure: ToolFailure;
 
   constructor(name: string, failure: ToolFailure) {
-    super(failure.message);
-    this.name = "PtcToolCallError";
-    this.toolName = name;
-    this.failure = Object.freeze({ code: failure.code, message: failure.message });
+    const descriptor =
+      typeof failure === "object" &&
+      failure !== null &&
+      !types.isProxy(failure) &&
+      !Array.isArray(failure)
+        ? Object.getOwnPropertyDescriptor(failure, "code")
+        : undefined;
+    const normalized = failureForCode(
+      descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined,
+    );
+    super(normalized.message);
+    Object.defineProperty(this, "name", {
+      value: "PtcToolCallError",
+      writable: true,
+      configurable: true,
+    });
+    const toolName = typeof name === "string" ? name : "";
+    this.toolName = toolName;
+    this.failure = normalized;
+    CONTROLLED_ERRORS.set(this, Object.freeze({ toolName, failure: normalized }));
   }
 }

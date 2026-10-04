@@ -57,7 +57,7 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 4. 以现有管理员用户 ID 或安全占位值启动 API、用户 Web 与只读 Trajectory，验证本机探针后生成 root-only Admin Control Bearer Token 配置，再原子安装不含 HTTP Basic 的 Nginx 配置。
 5. 通过公开 HTTPS Better Auth 路径注册 Demo 账号。该账号是部署脚本托管的固定演示管理员，脚本在受限数据库连接中将其邮箱状态幂等标记为已验证，再使用同一账号登录并交换 Hoox Session；普通用户仍必须通过 SMTP 验证码完成邮箱验证。随后查询其用户与个人 Tenant，将用户幂等提升为有效平台控制管理员和 Skill 发布管理员。发布脚本只在 `0600` 临时 curl 配置中保存本次验收使用的 Hoox access token。
 6. 将实际管理员用户同时注入 API 与 Admin Control，将个人 Tenant 注入 Scheduler 与 Worker，并强制重建这些应用容器及 Trajectory。API 以该用户 ID 作为 Demo 后台与轨迹会话闸门；Worker 默认把诊断镜像写入跨发布共享轨迹卷。
-7. 检查七个应用服务持续运行、用户端 readiness、后台 readiness、后台与轨迹页面外壳、无会话后台及轨迹 API 的 `401`，以及带管理员 Hoox 会话的后台概览和轨迹列表 API，再切换 `/opt/hoox-demo/current`。只保留最近五个 release 目录；轨迹卷不随 release 目录清理。
+7. 检查七个应用服务持续运行，并确认 Worker 无重启且已完成依赖探测、启动消费循环；Worker 启动失败或超过两分钟仍未完成时触发应用镜像回退，API readiness 成功不能替代 Worker 验收。随后检查用户端 readiness、后台 readiness、后台与轨迹页面外壳、无会话后台及轨迹 API 的 `401`，以及带管理员 Hoox 会话的后台概览和轨迹列表 API，再切换 `/opt/hoox-demo/current`。只保留最近五个 release 目录；轨迹卷不随 release 目录清理。
 
 发布工作流串行执行，不会为新提交取消正在迁移或恢复的发布。提交新鲜度以发布前最后一次 GitHub API 核验为准；核验后到发布完成期间仍可能出现新提交，新提交通过 CI 后再发布。首次引入门禁前的旧 SHA 不包含门禁脚本，重跑对应旧工作流可能直接失败，应等待当前 `main` CI 或从 `main` 手工重试。
 

@@ -26,7 +26,17 @@ docker() {
   elif [[ "$*" == *' ps -q '* ]]; then
     printf 'test-container\n'
   elif [[ "$1" == inspect ]]; then
-    printf 'true\n'
+    if [[ "$*" == *'RestartCount'* ]]; then
+      if [[ "$MOCK_MODE" == worker-restarting ]]; then
+        printf 'true|3\n'
+      else
+        printf 'true|0\n'
+      fi
+    else
+      printf 'true\n'
+    fi
+  elif [[ "$1" == logs && "$MOCK_MODE" != worker-never-started ]]; then
+    printf 'Agent Worker 开发进程已启动\n'
   fi
 }
 

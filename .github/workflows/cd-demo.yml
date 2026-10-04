@@ -214,6 +214,8 @@ jobs:
           SQL
           docker compose --project-name hoox-demo --env-file /opt/hoox-demo/shared/compose.env -f /opt/hoox-demo/current/docker-compose.yml run --rm --no-deps -T --entrypoint node worker --input-type=module <<'JS'
           import { selectWorkerProcessEnvironment, parseWorkerProcessEnvironment, probeDevelopmentWorkerDependencies, createOpenAiCompatibleModel, createOpenAiCompatibleModelContextCapability } from './runtime-ts/apps/agent-worker/dist/process-entry.js';
+          import { createPostgresPool, ModelProviderCredentialCipher } from '@hoox/persistence';
+          import { defaultModelConfiguration } from '@hoox/admin-control';
           let stage='parse';
           try {
             const config=parseWorkerProcessEnvironment(selectWorkerProcessEnvironment(process.env));
@@ -225,6 +227,20 @@ jobs:
             const endpoint=new URL('models',config.model.baseUrl.endsWith('/')?config.model.baseUrl:config.model.baseUrl+'/');
             const response=await fetch(endpoint,{headers:{authorization:'Bearer '+config.model.apiKey},signal:AbortSignal.timeout(5000)});
             console.log(JSON.stringify({diagnostic:'deployment-model-probe',status:response.status}));
+            stage='active-model';
+            const pool=createPostgresPool({connectionString:config.databaseUrl,schema:config.databaseSchema,expectedRuntimeRole:config.databaseRuntimeRole,applicationName:'hoox-readonly-model-diagnostic'});
+            try {
+              const result=await pool.query("SELECT r.object_key,r.configuration FROM admin_control_active_configs a JOIN admin_control_config_revisions r USING(object_kind,object_key,revision) WHERE a.object_kind='model_provider'");
+              if(result.rows[0]) {
+                const row=result.rows[0];
+                const key=row.configuration.credential?new ModelProviderCredentialCipher(config.model.credentialEncryptionKey).decrypt(row.object_key,row.configuration.credential):config.model.apiKey;
+                const current=new URL('models',row.configuration.baseUrl.endsWith('/')?row.configuration.baseUrl:row.configuration.baseUrl+'/');
+                const activeResponse=await fetch(current,{headers:{authorization:'Bearer '+key},signal:AbortSignal.timeout(5000)});
+                let listed=false;
+                if(activeResponse.ok) { const body=await activeResponse.json(); listed=Array.isArray(body.data)&&body.data.some(model=>model.id===row.configuration.defaultModelId); }
+                console.log(JSON.stringify({diagnostic:'active-model-probe',status:activeResponse.status,defaultModelListed:listed}));
+              } else console.log('diagnostic active-model=absent');
+            } finally { await pool.end(); }
             stage='preflight';
             await probeDevelopmentWorkerDependencies(config);
             console.log('diagnostic preflight=success');

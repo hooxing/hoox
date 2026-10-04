@@ -214,8 +214,8 @@ jobs:
           SQL
           docker compose --project-name hoox-demo --env-file /opt/hoox-demo/shared/compose.env -f /opt/hoox-demo/current/docker-compose.yml run --rm --no-deps -T --entrypoint node worker --input-type=module <<'JS'
           import { selectWorkerProcessEnvironment, parseWorkerProcessEnvironment, probeDevelopmentWorkerDependencies, createOpenAiCompatibleModel, createOpenAiCompatibleModelContextCapability } from './runtime-ts/apps/agent-worker/dist/process-entry.js';
-          import { createPostgresPool, ModelProviderCredentialCipher } from '@hoox/persistence';
-          import { defaultModelConfiguration } from '@hoox/admin-control';
+          import { createPostgresPool, ModelProviderCredentialCipher } from './runtime-ts/packages/persistence/dist/index.js';
+          import { defaultModelConfiguration } from './runtime-ts/packages/admin-control/dist/index.js';
           let stage='parse';
           try {
             const config=parseWorkerProcessEnvironment(selectWorkerProcessEnvironment(process.env));

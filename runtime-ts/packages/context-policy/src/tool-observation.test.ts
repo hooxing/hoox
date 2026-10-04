@@ -4,8 +4,8 @@ import {
   assertControlledToolObservation,
   encodeControlledToolReceipt,
   parseControlledToolReceipt,
-  ToolObservationPipeline,
   type StableTraceBlobIdentity,
+  ToolObservationPipeline,
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
 } from "./tool-observation.js";
@@ -190,5 +190,29 @@ describe("Tool Observation Blob 截断切片", () => {
         modelVisibleBytes: bytes - 1,
       }),
     ).toThrow("未截断");
+  });
+});
+
+describe("PTC Observation 父调用传递", () => {
+  it("向持久化端口原样传递父 ID，native 不新增该字段", async () => {
+    const { subject, rollout } = pipeline();
+    const native = input("");
+    expect((await subject.record(native)).outcome).toBe("recorded");
+    expect(rollout.calls[0]).not.toHaveProperty("parentToolCallId");
+    expect((await subject.record({ ...native, parentToolCallId: "outer_run_code" })).outcome).toBe(
+      "recorded",
+    );
+    expect(rollout.calls[1]?.parentToolCallId).toBe("outer_run_code");
+  });
+
+  it("父 ID 不合法或自关联时不上传 Blob、不写 journal", async () => {
+    const { subject, traces, rollout } = pipeline();
+    for (const parentToolCallId of ["", "../escape", callId]) {
+      await expect(subject.record({ ...input(""), parentToolCallId })).rejects.toThrow(
+        "PTC 父 Tool call ID",
+      );
+    }
+    expect(traces.calls).toHaveLength(0);
+    expect(rollout.calls).toHaveLength(0);
   });
 });

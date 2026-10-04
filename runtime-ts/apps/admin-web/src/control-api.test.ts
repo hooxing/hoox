@@ -179,31 +179,35 @@ describe("后台控制 Web API", () => {
     );
   });
 
-  it("运行设置直接 PUT 当前配置并带幂等键", async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(response({ data: { status: "active" } }));
-    const api = new AdminControlApi(fetcher, "/v1/admin/control", () => "runtime-save-key");
-    const input = {
-      workerMaxConcurrentRuns: 20,
-      userMaxConcurrentRunsPerTenant: 2,
-      compactionSoftLimitPercent: 80,
-      compactionTargetPercent: 55,
-      compactionRecentUserTokens: 4096,
-      compactionMaxOutputTokens: 4096,
-      compactionTimeoutMs: 60000,
-      expectedGeneration: 0,
-    };
-    await api.saveRuntimeSettingsConfiguration(input);
-    expect(fetcher).toHaveBeenCalledExactlyOnceWith(
-      "/v1/admin/control/runtime-settings/current",
-      expect.objectContaining({ method: "PUT" }),
-    );
-    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual(input);
-    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe(
-      "runtime-save-key",
-    );
-  });
+  it.each(["native", "ptc", undefined] as const)(
+    "运行设置模式 %s 直接 PUT 当前配置并带幂等键",
+    async (toolCallingMode) => {
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(response({ data: { status: "active" } }));
+      const api = new AdminControlApi(fetcher, "/v1/admin/control", () => "runtime-save-key");
+      const input = {
+        ...(toolCallingMode === undefined ? {} : { toolCallingMode }),
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
+        compactionSoftLimitPercent: 80,
+        compactionTargetPercent: 55,
+        compactionRecentUserTokens: 4096,
+        compactionMaxOutputTokens: 4096,
+        compactionTimeoutMs: 60000,
+        expectedGeneration: 0,
+      };
+      await api.saveRuntimeSettingsConfiguration(input);
+      expect(fetcher).toHaveBeenCalledExactlyOnceWith(
+        "/v1/admin/control/runtime-settings/current",
+        expect.objectContaining({ method: "PUT" }),
+      );
+      expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual(input);
+      expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe(
+        "runtime-save-key",
+      );
+    },
+  );
 
   it("并发保存冲突提示刷新，不暴露内部版本", async () => {
     const api = new AdminControlApi(vi.fn<typeof fetch>(async () => response({}, 409)));

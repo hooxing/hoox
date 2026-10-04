@@ -20,6 +20,28 @@ Worker 首次为 Run 解析运行配置时持久化快照；尚未建立快照�
 
 只有日志和最终 return 自动进入模型结果；中间工具数据不会逐次进入模型 Rollout。程序故意打印或返回的数据仍会进入模型上下文，因此 PTC 不是自动脱敏器。
 
+## 用户可见工具信息与错误处理
+
+正常和 PTC 共用 `pi-adapter` 的受限展示投影与工作台组件。文件调用显示操作和相对工作目录的路径，命令调用显示 `user_facing_purpose`，技能调用显示技能名，协作和定时任务显示受控操作名称。外层程序显示“编排工具调用”；内部调用分别保留开始、运行、完成和失败状态。外层程序成功不会把已捕获的子调用失败改成成功。
+
+展示事件只包含明确允许的摘要和长度受限的字段，不包含完整参数、程序源码、命令、消息正文或业务输出。用途和文件名不是自动脱敏结果，调用方不得将凭据写入这些可见字段。展示事件不会逐次进入模型 Rollout，也不能把路径、用途等动态事实注入固定提示词或工具 Schema。历史事件没有摘要或诊断字段时采用通用状态，不回填旧事件。
+
+失败事件的 `failure` 包含安全 `code` 与固定中文 `message`；未知异常使用 `TOOL_FAILED` 和通用提示，不透出异常栈、底层日志或诊断字段。PTC 程序捕获受控工具错误后可以读取 `error.code`、`error.toolName` 与 `error.message`：
+
+```javascript
+try {
+  await tools.read({ path: "/workspace/example-missing.txt" });
+} catch (error) {
+  console.log({ code: error.code, toolName: error.toolName });
+}
+```
+
+工具报错不保证副作用尚未发生；是否再次调用必须结合任务状态和受控审计判断，不自动重试。持久化未知仍会阻断程序续行，不能通过捕获错误绕过。
+
+所有 PTC 工具调用都传一个 JSON 对象，无参调用也写成 `tools.list_agents({})`。`exec_command` 的非零退出码保留在 `result.details.exit_code`，不是工具异常的判据；不要用 `; true` 掩盖退出码。`wait_agent` 后续读取使用返回的 `nextAfterSequence`，重复传 0 会重放历史；消息追加的时序与 steer 行为见[智能体协作](agent-collaboration.md)。
+
+新增或修改工具时必须同时设计模型出口和用户展示，维护用途/对象投影、安全失败及历史兼容测试。长期选择见[工具用户展示契约决策](../decisions/20261004184828-tool-user-presentation-contract.md)。
+
 ## durable 子调用与恢复
 
 外层 `run_code` 继续形成 Rollout 的 `tool_call → tool_result` 对。每个内部调用在真实 `tool.started` 后、任何授权和副作用前持久化自己的开始事实，且逐次使用原工具授权、Sandbox 准备和受控回执，不共享外层许可。

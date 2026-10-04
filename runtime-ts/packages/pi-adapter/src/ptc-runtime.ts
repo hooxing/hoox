@@ -6,6 +6,7 @@ import {
   type QuickJSHandle,
   type QuickJSRuntime,
 } from "quickjs-emscripten";
+import { readPtcToolCallError } from "./tool-failure.js";
 
 export interface PtcProgramInput {
   code: string;
@@ -436,10 +437,24 @@ export async function runPtcProgram(input: PtcProgramInput): Promise<PtcProgramR
           let value: unknown;
           try {
             value = await input.callTool(call.name, call.args);
-          } catch {
+          } catch (cause) {
             if (!check()) {
-              const error = vm.newError("PTC 工具调用失败");
+              // 只信任私有登记，不读取异常公开字段，也不让原型链触发宿主访问器或 Proxy。
+              const controlled = readPtcToolCallError(cause);
+              const error = vm.newError(controlled?.failure.message ?? "PTC 工具调用失败");
               try {
+                const code = vm.newString(controlled?.failure.code ?? "TOOL_FAILED");
+                try {
+                  vm.setProp(error, "code", code);
+                } finally {
+                  code.dispose();
+                }
+                const toolName = vm.newString(controlled?.toolName ?? call.name);
+                try {
+                  vm.setProp(error, "toolName", toolName);
+                } finally {
+                  toolName.dispose();
+                }
                 call.deferred.reject(error);
               } finally {
                 error.dispose();

@@ -215,7 +215,7 @@ jobs:
           docker compose --project-name hoox-demo --env-file /opt/hoox-demo/shared/compose.env -f /opt/hoox-demo/current/docker-compose.yml run --rm --no-deps -T --entrypoint node worker --input-type=module <<'JS'
           import { selectWorkerProcessEnvironment, parseWorkerProcessEnvironment, probeDevelopmentWorkerDependencies, createOpenAiCompatibleModel, createOpenAiCompatibleModelContextCapability } from './runtime-ts/apps/agent-worker/dist/process-entry.js';
           import { createPostgresPool, ModelProviderCredentialCipher } from './runtime-ts/packages/persistence/dist/index.js';
-          import { defaultModelConfiguration } from './runtime-ts/packages/admin-control/dist/index.js';
+          import { defaultModelConfiguration, normalizeStoredModelProviderConfiguration } from './runtime-ts/packages/admin-control/dist/index.js';
           let stage='parse';
           try {
             const config=parseWorkerProcessEnvironment(selectWorkerProcessEnvironment(process.env));
@@ -237,7 +237,7 @@ jobs:
                 const current=new URL('models',row.configuration.baseUrl.endsWith('/')?row.configuration.baseUrl:row.configuration.baseUrl+'/');
                 const activeResponse=await fetch(current,{headers:{authorization:'Bearer '+key},signal:AbortSignal.timeout(5000)});
                 let listed=false;
-                if(activeResponse.ok) { const body=await activeResponse.json(); listed=Array.isArray(body.data)&&body.data.some(model=>model.id===row.configuration.defaultModelId); }
+                if(activeResponse.ok) { const body=await activeResponse.json(); listed=Array.isArray(body.data)&&body.data.some(model=>model.id===normalizeStoredModelProviderConfiguration({...row.configuration,credentialConfigured:!!row.configuration.credential}).defaultModelId); }
                 console.log(JSON.stringify({diagnostic:'active-model-probe',status:activeResponse.status,defaultModelListed:listed}));
               } else console.log('diagnostic active-model=absent');
             } finally { await pool.end(); }

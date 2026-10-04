@@ -678,14 +678,17 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         [],
       );
     };
+    // FORCE RLS 对迁移角色同样生效；仅夹具准备与全量事实观察使用管理连接，业务 mutation 仍走受限控制角色。
     const readFacts = async () => ({
       revisions: (
-        await isolatedMigrator.query(
-          "SELECT * FROM admin_control_config_revisions ORDER BY object_kind,object_key,revision",
+        await admin.query(
+          `SELECT * FROM "${isolatedSchema}".admin_control_config_revisions ORDER BY object_kind,object_key,revision`,
         )
       ).rows,
       migrations: (
-        await isolatedMigrator.query("SELECT * FROM runtime_schema_migrations ORDER BY version")
+        await admin.query(
+          `SELECT * FROM "${isolatedSchema}".runtime_schema_migrations ORDER BY version`,
+        )
       ).rows,
     });
     try {
@@ -719,12 +722,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         rolsuper: false,
         rolbypassrls: false,
       });
-      await isolatedMigrator.query(
-        "INSERT INTO app_users(id,created_at) VALUES($1,clock_timestamp())",
+      await admin.query(
+        `INSERT INTO "${isolatedSchema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
         [actorUserId],
       );
-      await isolatedMigrator.query(
-        "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      await admin.query(
+        `INSERT INTO "${isolatedSchema}".platform_control_operators(user_id,role,status) VALUES($1,'admin','active')`,
         [actorUserId],
       );
       const insertRevisionSql = `INSERT INTO admin_control_config_revisions(
@@ -779,8 +782,8 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         const recovered = await createService().overview(actorUserId);
         expect(recovered.generation).toBe(before.generation + 1);
         expect(recovered.activeRuntimeSettings).toEqual(saved);
-        const stored = await isolatedMigrator.query<{ readonly configuration: unknown }>(
-          "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='runtime_settings' AND object_key='global' AND revision=$1",
+        const stored = await admin.query<{ readonly configuration: unknown }>(
+          `SELECT configuration FROM "${isolatedSchema}".admin_control_config_revisions WHERE object_kind='runtime_settings' AND object_key='global' AND revision=$1`,
           [saved.revision],
         );
         expect(stored.rows[0]?.configuration).toEqual({
@@ -824,8 +827,8 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       await activateHistorical("reactivate-historical");
       const retired = await repository.listRuntimeSettings(actorUserId);
       expect(retired.filter((revision) => revision.status === "retired")).toHaveLength(2);
-      const historicalStored = await isolatedMigrator.query<{ readonly configuration: unknown }>(
-        "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='runtime_settings' AND revision=1",
+      const historicalStored = await admin.query<{ readonly configuration: unknown }>(
+        `SELECT configuration FROM "${isolatedSchema}".admin_control_config_revisions WHERE object_kind='runtime_settings' AND revision=1`,
       );
       expect(historicalStored.rows[0]?.configuration).toEqual(historicalConfiguration);
       expect((await createService().overview(actorUserId)).activeRuntimeSettings).toMatchObject({

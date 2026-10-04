@@ -236,9 +236,9 @@ jobs:
                 const key=row.configuration.credential?new ModelProviderCredentialCipher(config.model.credentialEncryptionKey).decrypt(row.object_key,row.configuration.credential):config.model.apiKey;
                 const current=new URL('models',row.configuration.baseUrl.endsWith('/')?row.configuration.baseUrl:row.configuration.baseUrl+'/');
                 const activeResponse=await fetch(current,{headers:{authorization:'Bearer '+key},signal:AbortSignal.timeout(5000)});
-                let listed=false;
-                if(activeResponse.ok) { const body=await activeResponse.json(); listed=Array.isArray(body.data)&&body.data.some(model=>model.id===normalizeStoredModelProviderConfiguration({...row.configuration,credentialConfigured:!!row.configuration.credential}).defaultModelId); }
-                console.log(JSON.stringify({diagnostic:'active-model-probe',status:activeResponse.status,defaultModelListed:listed}));
+                let listed=false; let catalog=[]; const configuredModel=normalizeStoredModelProviderConfiguration({...row.configuration,credentialConfigured:!!row.configuration.credential}).defaultModelId;
+                if(activeResponse.ok) { const body=await activeResponse.json(); listed=Array.isArray(body.data)&&body.data.some(model=>model.id===configuredModel); catalog=Array.isArray(body.data)?body.data.map(model=>model.id).filter(id=>typeof id==='string'&&/^[a-zA-Z0-9._/-]{1,100}$/.test(id)).slice(0,20):[]; }
+                console.log(JSON.stringify({diagnostic:'active-model-probe',status:activeResponse.status,defaultModelListed:listed,configuredModel:/^[a-zA-Z0-9._/-]{1,100}$/.test(configuredModel)?configuredModel:'other',catalog}));
               } else console.log('diagnostic active-model=absent');
             } finally { await pool.end(); }
             stage='preflight';

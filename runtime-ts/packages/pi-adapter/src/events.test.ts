@@ -1,6 +1,6 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { mapPiEvent } from "./events.js";
+import { mapPiEvent, projectToolPresentation } from "./events.js";
 
 describe("Pi 运行事件映射", () => {
   it("从真实工具参数生成受限的用户可读展示信息", () => {
@@ -131,5 +131,89 @@ describe("Pi 运行事件映射", () => {
       ],
     });
     expect(JSON.stringify(mapped)).not.toContain("iVBORw0KGgo");
+  });
+});
+
+describe("工具展示与安全失败投影", () => {
+  it.each([
+    [
+      "read",
+      { path: "/workspace/reports/a.md", content: "private-body" },
+      { action: "read", title: "reports/a.md" },
+    ],
+    [
+      "edit",
+      { path: "/workspace/a.md", oldText: "private-body" },
+      { action: "edit", title: "a.md" },
+    ],
+    [
+      "exec_command",
+      { cmd: "private-command", user_facing_purpose: "检查环境" },
+      { action: "command", title: "检查环境" },
+    ],
+    ["run_code", { code: "private-source" }, { action: "other", title: "编排工具调用" }],
+    ["skill", { skill: "pdf", args: "private-body" }, { action: "read", title: "加载技能 pdf" }],
+    ["spawn_agent", { instruction: "private-body" }, { action: "other", title: "启动协作任务" }],
+    ["send_message", { message: "private-body" }, { action: "other", title: "发送协作消息" }],
+    ["automation_update", { prompt: "private-body" }, { action: "other", title: "管理定时任务" }],
+  ] as const)("%s 的正常与 PTC 共用投影只含展示字段", (name, args, presentation) => {
+    expect(projectToolPresentation(name, args)).toEqual(presentation);
+    expect(
+      mapPiEvent({ type: "tool_execution_start", toolCallId: "call", toolName: name, args }),
+    ).toEqual({ type: "tool.started", callId: "call", name, presentation });
+  });
+  it("缺少用途不回退到命令，未知名称不猜参数", () => {
+    expect(projectToolPresentation("exec_command", { cmd: "private-command" })).toEqual({
+      action: "command",
+    });
+    expect(projectToolPresentation("toString", { title: "private-body" })).toBeUndefined();
+    expect(projectToolPresentation("unknown", { path: "private-body" })).toBeUndefined();
+    expect(
+      projectToolPresentation("read", { path: `/workspace/${"a".repeat(300)}` })?.title,
+    ).toHaveLength(240);
+  });
+  it.each([true, false])("正常模式终态只在失败时附加受限诊断：%s", (isError) => {
+    const result = mapPiEvent({
+      type: "tool_execution_end",
+      toolCallId: "call",
+      toolName: "read",
+      isError,
+      result: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              code: "READ_NOT_FOUND",
+              message: "private-provider-error",
+              details: { secret: "private-secret" },
+            }),
+          },
+        ],
+        details: { secret: "private-secret" },
+      },
+    });
+    expect(result).toEqual({
+      type: "tool.completed",
+      callId: "call",
+      name: "read",
+      isError,
+      ...(isError
+        ? { failure: { code: "READ_NOT_FOUND", message: "指定文件或目录不存在，请检查路径" } }
+        : {}),
+    });
+    expect(JSON.stringify(result)).not.toContain("private-");
+  });
+  it("未知正常模式错误不透传宿主诊断", () => {
+    expect(
+      mapPiEvent({
+        type: "tool_execution_end",
+        toolCallId: "call",
+        toolName: "sample",
+        isError: true,
+        result: { content: [{ type: "text", text: "private-secret" }], details: {} },
+      }),
+    ).toMatchObject({
+      failure: { code: "TOOL_FAILED", message: "工具调用失败，请根据任务状态检查后再决定是否重试" },
+    });
   });
 });

@@ -1,4 +1,5 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
+import { projectToolFailure, type ToolFailure } from "./tool-failure.js";
 
 /** settled 由 Runtime 在底层完成及事务回滚后补发，不把 agent_end 当作空闲屏障。 */
 export type PiAgentEvent =
@@ -42,7 +43,13 @@ export type RuntimeAgentEvent =
       parentCallId?: string;
     }
   | { type: "tool.updated"; callId: string; name: string }
-  | { type: "tool.completed"; callId: string; name: string; isError: boolean }
+  | {
+      type: "tool.completed";
+      callId: string;
+      name: string;
+      isError: boolean;
+      failure?: ToolFailure;
+    }
   | { type: "finalization.started"; callId: string }
   | {
       type: "finalization.cancelled";
@@ -173,6 +180,17 @@ export function mapPiEvent(event: PiAgentEvent): RuntimeAgentEvent | undefined {
         callId: event.toolCallId,
         name: event.toolName,
         isError: event.isError,
+        ...(event.isError
+          ? {
+              failure: projectToolFailure(
+                new Error(
+                  event.result.content.find(
+                    (item: { type: string; text?: string }) => item.type === "text",
+                  )?.text ?? "",
+                ),
+              ),
+            }
+          : {}),
       };
     case "turn_end": {
       if (event.message.role !== "assistant") return undefined;
@@ -242,7 +260,11 @@ export function mapPiEvent(event: PiAgentEvent): RuntimeAgentEvent | undefined {
   }
 }
 
-function projectToolPresentation(name: string, unsafeArgs: unknown): ToolPresentation | undefined {
+/** 两种模式共用白名单投影；禁止把程序、命令、消息正文和完整参数放入公开事件。 */
+export function projectToolPresentation(
+  name: string,
+  unsafeArgs: unknown,
+): ToolPresentation | undefined {
   const args =
     typeof unsafeArgs === "object" && unsafeArgs !== null
       ? (unsafeArgs as Readonly<Record<string, unknown>>)
@@ -271,6 +293,23 @@ function projectToolPresentation(name: string, unsafeArgs: unknown): ToolPresent
     const title = safeText(args?.name, 255) ?? workspacePath(args?.path);
     return { action: "deliver", ...(title === undefined ? {} : { title }) };
   }
+  if (name === "run_code") return { action: "other", title: "编排工具调用" };
+  if (name === "skill") {
+    const skill = safeText(args?.skill, 128);
+    return { action: "read", title: skill === undefined ? "加载技能" : `加载技能 ${skill}` };
+  }
+  const collaborationTitles: Readonly<Record<string, string>> = {
+    list_agents: "查看协作智能体",
+    spawn_agent: "启动协作任务",
+    wait_agent: "等待协作任务",
+    send_message: "发送协作消息",
+    followup_task: "追加协作任务",
+    interrupt_agent: "中断协作任务",
+  };
+  const collaborationTitle = Object.hasOwn(collaborationTitles, name)
+    ? collaborationTitles[name]
+    : undefined;
+  if (collaborationTitle !== undefined) return { action: "other", title: collaborationTitle };
   if (name === "todo_write") return { action: "other", title: "更新任务清单" };
   if (name === "automation_update") return { action: "other", title: "管理定时任务" };
   if (name === "publish_artifact") {

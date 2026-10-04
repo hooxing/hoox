@@ -222,6 +222,9 @@ jobs:
             const {modelRuntime,model}=await createOpenAiCompatibleModel(config.model);
             await createOpenAiCompatibleModelContextCapability(modelRuntime,model);
             console.log('diagnostic model-context=success');
+            const endpoint=new URL('models',config.model.baseUrl.endsWith('/')?config.model.baseUrl:config.model.baseUrl+'/');
+            const response=await fetch(endpoint,{headers:{authorization:'Bearer '+config.model.apiKey},signal:AbortSignal.timeout(5000)});
+            console.log(JSON.stringify({diagnostic:'deployment-model-probe',status:response.status}));
             stage='preflight';
             await probeDevelopmentWorkerDependencies(config);
             console.log('diagnostic preflight=success');

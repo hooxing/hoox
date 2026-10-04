@@ -45,6 +45,7 @@ export type ConversationBlock =
       readonly type: "tool";
       readonly action: ToolAction;
       readonly title?: string;
+      readonly failure?: { readonly code: string; readonly message: string };
       readonly status: "running" | "completed" | "failed";
       readonly callId: string;
     }
@@ -190,6 +191,15 @@ function toolPresentationTitle(payload: Readonly<Record<string, unknown>> | unde
   return text(presentation?.title);
 }
 
+function toolFailure(payload: Readonly<Record<string, unknown>> | undefined) {
+  const failure = object(payload?.failure);
+  const code = text(failure?.code);
+  const message = text(failure?.message);
+  return code !== undefined && /^[A-Z][A-Z0-9_]{0,79}$/u.test(code) && message !== undefined
+    ? { code, message }
+    : undefined;
+}
+
 /**
  * 保留模型回复、思考与工具调用的原始先后关系；callId 只用于更新对应工具块。
  */
@@ -316,6 +326,7 @@ export function createConversationProjector() {
             : event.type === "tool.completed"
               ? "completed"
               : "running";
+        const failure = status === "failed" ? toolFailure(payload) : undefined;
         if (index === undefined) {
           const title = toolPresentationTitle(payload);
           tools.set(callId, blocks.length);
@@ -326,6 +337,7 @@ export function createConversationProjector() {
             status,
             callId,
             ...(title === undefined ? {} : { title }),
+            ...(failure === undefined ? {} : { failure }),
           });
         } else {
           const block = blocks[index];
@@ -335,6 +347,7 @@ export function createConversationProjector() {
               ...block,
               status,
               ...(title === undefined ? {} : { title }),
+              ...(failure === undefined ? {} : { failure }),
             };
           }
         }

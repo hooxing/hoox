@@ -1576,6 +1576,18 @@ h2 {
   min-width: 14px;
   color: #668072;
 }
+.tool-activity {
+  flex-wrap: wrap;
+}
+.tool-failure-detail {
+  flex-basis: 100%;
+  padding-left: 24px;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.tool-failure-detail code {
+  font-size: 12px;
+}
 .tool-activity strong {
   overflow: hidden;
   color: #555c58;

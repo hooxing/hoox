@@ -3,7 +3,8 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ToolObservationResult } from "@hoox/context-policy";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import type { RuntimeAgentEvent } from "./events.js";
+import { projectToolPresentation, type RuntimeAgentEvent } from "./events.js";
+import { PtcToolCallError, projectToolFailure, type ToolFailure } from "./tool-failure.js";
 import { runPtcProgram } from "./ptc-runtime.js";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";
 
@@ -32,7 +33,8 @@ export function buildPtcSdk(
     "当前使用 PTC 模式。模型只能直接调用 run_code；Harness 中提及的业务工具必须在程序里通过 tools[工具名](参数) 调用。",
     "PTC 模式不提供可选的最终答复过程折叠标记。图片结果是程序数据，不会自动作为模型视觉输入。",
     "每次程序都是独立的纯计算环境，只提供 tools 和 console.log；没有 process、require、文件、网络或其他宿主 IO。程序结束后变量不保留。",
-    "工具返回 { content, details }；content 是文本或图片内容块，details 是工具提供的结构化结果。工具失败会抛错，可用 try/catch 处理；已发生的副作用不会回滚。",
+    "工具返回 { content, details }；content 是文本或图片内容块，details 是工具提供的结构化结果。工具失败会抛错，可用 try/catch 读取安全的 error.code、error.toolName 和 error.message；已发生的副作用不会回滚，不能盲目重试。",
+    "每次调用必须传 JSON 参数对象；无参数工具也传 {}。exec_command 非零退出通过结果 details.exit_code 判断，不要追加 ; true 掩盖真实状态。命令有助于用户理解时填写 user_facing_purpose；不要把凭据或完整命令写进说明。",
     "内部调用按提交顺序串行执行。不要把未 await 的调用当作后台任务。只打印或返回解决任务所需的结果，避免把全部中间数据放回模型上下文。",
     "默认执行上限为 30 秒、64 次工具调用、64 KiB 程序输出；执行时间包含等待工具的时间。超时后等待已开始调用收束，不会自动重跑。",
     "以下是 tools 命名空间的固定能力说明与参数 JSON Schema：",
@@ -120,10 +122,18 @@ export function createPtcTool(input: {
             const tool = byName.get(name);
             if (tool === undefined) throw new Error("PTC 工具不存在");
             const callId = `ptc.${createHash("sha256").update(parentCallId).digest("hex")}.${++ordinal}`;
-            input.emit({ type: "tool.started", callId, name, parentCallId });
+            const presentation = projectToolPresentation(name, rawArgs);
+            input.emit({
+              type: "tool.started",
+              callId,
+              name,
+              parentCallId,
+              ...(presentation === undefined ? {} : { presentation }),
+            });
             // durable 开始必须先于任何工具实现；外层 run_code 的许可不能替代子调用许可。
             await input.prepareTool({ callId, toolName: name, parentCallId });
             let isError = true;
+            let failure: ToolFailure | undefined;
             try {
               if (programAbort.signal.aborted) throw new Error("PTC 程序已取消");
               const prepared =
@@ -131,7 +141,7 @@ export function createPtcTool(input: {
                   ? rawArgs
                   : await tool.prepareArguments(rawArgs);
               if (tool.prepareArguments === undefined && !Value.Check(tool.parameters, prepared))
-                throw new TypeError("PTC 工具参数不符合 Schema");
+                throw new Error(JSON.stringify({ code: "PTC_TOOL_INVALID_ARGUMENTS" }));
               input.assertContinuationAllowed();
               if (programAbort.signal.aborted) throw new Error("PTC 程序已取消");
               const result: AgentToolResult<unknown> = await tool.execute(
@@ -143,9 +153,18 @@ export function createPtcTool(input: {
               input.assertContinuationAllowed();
               isError = false;
               return result;
+            } catch (error) {
+              failure = projectToolFailure(error);
+              throw new PtcToolCallError(name, failure);
             } finally {
               await input.ensureReceipt(callId, name, isError ? "failed" : "succeeded");
-              input.emit({ type: "tool.completed", callId, name, isError });
+              input.emit({
+                type: "tool.completed",
+                callId,
+                name,
+                isError,
+                ...(failure === undefined ? {} : { failure }),
+              });
             }
           },
         });

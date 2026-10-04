@@ -365,7 +365,7 @@ describe("PiWorkerSessionFactory PTC 模式", () => {
     const childGate = Promise.withResolvers<void>();
     const test = await fixture({
       constructorMode: "ptc",
-      code: firstCommand,
+      code: 'return await tools.exec_command({ cmd: "echo ptc-first", user_facing_purpose: "验证命令执行链路" });',
       beforeStarted: (call) =>
         call.toolName === "run_code" ? parentGate.promise : childGate.promise,
     });
@@ -433,6 +433,7 @@ describe("PiWorkerSessionFactory PTC 模式", () => {
       callId: child.toolCallId,
       name: "exec_command",
       parentCallId: parentId,
+      presentation: { action: "command", title: "验证命令执行链路" },
     });
     expect(toolPermits(test)).toEqual([
       expect.objectContaining({

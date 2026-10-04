@@ -167,3 +167,49 @@ jobs:
           fi
           exit "$status"
           EOF
+
+  diagnose:
+    name: 临时只读排队诊断
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/fix-ptc-queued-run'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    environment: demo
+    steps:
+      - name: 只读观测服务与队列
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEMO_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEMO_SSH_KNOWN_HOSTS }}
+          SSH_HOST: ${{ secrets.DEMO_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEMO_SSH_USER }}
+        run: |
+          set -Eeuo pipefail
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" >"$HOME/.ssh/hoox-demo"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >"$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/hoox-demo" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/hoox-demo" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          for service in worker scheduler api; do
+            docker inspect --format "service=$service state={{.State.Status}} restarting={{.State.Restarting}} restarts={{.RestartCount}} started={{.State.StartedAt}}" "hoox-demo-$service-1"
+          done
+          for service in worker scheduler; do
+            for message in '进程已启动' '进程启动失败' 'PERSISTENCE_UNAVAILABLE'; do
+              count=$(docker logs --since 2h --tail 1000 "hoox-demo-$service-1" 2>&1 | grep -c "$message" || true)
+              printf '%s log_category=%s count=%s\n' "$service" "$message" "$count"
+            done
+          done
+          docker exec -i hoox-demo-postgres-1 sh -c 'exec psql -X --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1' <<'SQL'
+          BEGIN READ ONLY;
+          SET LOCAL statement_timeout='10s';
+          SELECT format('SET LOCAL search_path TO %I',n.nspname) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relname='run_dispatch_outbox';
+          \gexec
+          SELECT 'runs' AS category,status,count(*) FROM runs GROUP BY status ORDER BY status;
+          SELECT 'outbox' AS category,state,count(*),min(created_at) AS oldest,max(updated_at) AS latest,max(dispatch_attempts) AS max_attempts, sum(dispatch_attempts) AS attempts FROM run_dispatch_outbox GROUP BY state ORDER BY state;
+          SELECT 'outbox_error' AS category,CASE WHEN last_error_code IN ('PERSISTENCE_UNAVAILABLE','LEASE_BUSY','RUN_TERMINAL','RUNTIME_UNAVAILABLE') THEN last_error_code WHEN last_error_code IS NULL THEN 'none' ELSE 'other' END AS code,count(*) FROM run_dispatch_outbox WHERE state IN ('ready','claimed') GROUP BY 2;
+          SELECT 'assignment' AS category,state,count(*),min(next_attempt_at),max(updated_at),max(generation),count(*) FILTER(WHERE lease_expires_at<clock_timestamp()) AS expired FROM worker_tenant_assignments GROUP BY state;
+          SELECT 'queued_snapshot' AS category,count(*) AS queued,count(s.run_id) AS snapshots,count(s.runtime_settings_revision) AS settings_snapshots FROM runs r LEFT JOIN run_runtime_config_snapshots s ON s.tenant_id=r.tenant_id AND s.run_id=r.id WHERE r.status='queued';
+          SELECT 'mode' AS category,configuration->>'toolCallingMode' AS mode FROM admin_control_config_revisions r JOIN admin_control_active_configs a USING(object_kind,object_key,revision) WHERE object_kind='runtime_settings';
+          COMMIT;
+          SQL
+          REMOTE

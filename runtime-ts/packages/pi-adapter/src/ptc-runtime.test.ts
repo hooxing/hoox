@@ -1,6 +1,7 @@
 import { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type PtcProgramInput, runPtcProgram } from "./ptc-runtime.js";
+import { projectToolFailure, PtcToolCallError } from "./tool-failure.js";
 
 const noTools = async (): Promise<unknown> => {
   throw new Error("不应调用工具");
@@ -135,6 +136,121 @@ describe("PTC 真实 QuickJS WASM 执行", () => {
     await expect(run("await tools.fail({});", { toolNames: ["fail"], callTool })).rejects.toThrow(
       /未捕获/,
     );
+  });
+
+  it.each(["EXEC_TIMEOUT", "READ_NOT_FOUND", "PTC_TOOL_INVALID_ARGUMENTS", "HOST_UNKNOWN"])(
+    "真实 WASM 可捕获受控工具失败 %s，读取 code/toolName 后继续调用",
+    async (code) => {
+      const hostError = new Error(
+        JSON.stringify({
+          code,
+          message: "宿主诊断占位",
+          stdout: "宿主诊断占位",
+          stderr: "宿主诊断占位",
+          stack: "宿主诊断占位",
+          details: { token: "宿主诊断占位" },
+        }),
+      );
+      const failure = projectToolFailure(hostError);
+      const wrapped = new PtcToolCallError("fail", failure);
+      Object.assign(wrapped, {
+        cause: hostError,
+        stdout: "宿主诊断占位",
+        stderr: "宿主诊断占位",
+        details: { token: "宿主诊断占位" },
+        stack: "宿主诊断占位",
+      });
+      const callTool = vi.fn(async (name: string) => {
+        if (name === "fail") throw wrapped;
+        return { ok: true };
+      });
+      const result = await run(
+        `
+        let failure;
+        try { await tools.fail({}); } catch (error) {
+          failure = {
+            code: error.code, message: error.message, toolName: error.toolName,
+            isError: error instanceof Error,
+            ownKeys: Object.getOwnPropertyNames(error).sort(),
+            extras: [error.cause, error.stdout, error.stderr, error.details, error.failure,
+              error.toJSON].map(value => typeof value),
+            stack: typeof error.stack === "string" ? error.stack : ""
+          };
+        }
+        return {failure, next: await tools.ok({})};
+        `,
+        { toolNames: ["fail", "ok"], callTool },
+      );
+      expect(result.value).toMatchObject({
+        failure: {
+          ...failure,
+          toolName: "fail",
+          isError: true,
+          extras: Array(6).fill("undefined"),
+        },
+        next: { ok: true },
+      });
+      const guest = result.value as { failure: { ownKeys: string[] } };
+      expect(guest.failure.ownKeys.filter((key) => key !== "stack").sort()).toEqual([
+        "code",
+        "message",
+        "toolName",
+      ]);
+      expect(JSON.stringify(result)).not.toContain("宿主诊断占位");
+      expect(callTool.mock.calls.map(([name]) => name)).toEqual(["fail", "ok"]);
+      await expect(run("await tools.fail({});", { toolNames: ["fail"], callTool })).rejects.toThrow(
+        "PTC JavaScript 执行失败（未捕获异常或工具错误）",
+      );
+    },
+  );
+
+  it("普通宿主异常不读取 getter/toJSON，未知 guest 失败保留原文案并附工具名", async () => {
+    const hook = vi.fn(() => {
+      throw new Error("不应执行宿主钩子");
+    });
+    const accessorError = new Error();
+    for (const key of ["message", "code", "toolName", "failure", "stack", "details", "toJSON"])
+      Object.defineProperty(accessorError, key, { get: hook });
+    const proxy = new Proxy(new Error(), { get: hook, getPrototypeOf: hook });
+    const errors: unknown[] = [
+      accessorError,
+      {
+        get message() {
+          return hook();
+        },
+        toJSON: hook,
+      },
+      new Error('{"code":"EXEC_TIMEOUT","message":"宿主诊断占位"}'),
+      { failure: { code: "EXEC_TIMEOUT", message: "宿主诊断占位" }, toolName: "宿主诊断占位" },
+      proxy,
+    ];
+    const callTool = vi.fn(async (name: string) => {
+      if (name === "fail") throw errors.shift();
+      return { ok: true };
+    });
+    const result = await run(
+      `
+      const failures = [];
+      for (let i = 0; i < 5; i++) {
+        try { await tools.fail({}); } catch (error) {
+          failures.push({code: error.code, message: error.message, toolName: error.toolName});
+        }
+      }
+      return {failures, next: await tools.ok({})};
+      `,
+      { toolNames: ["fail", "ok"], callTool },
+    );
+    expect(result.value).toEqual({
+      failures: Array(5).fill({
+        code: "TOOL_FAILED",
+        message: "PTC 工具调用失败",
+        toolName: "fail",
+      }),
+      next: { ok: true },
+    });
+    expect(JSON.stringify(result)).not.toContain("宿主诊断占位");
+    expect(hook).not.toHaveBeenCalled();
+    expect(callTool).toHaveBeenCalledTimes(6);
   });
 
   it("用户异常和语法错误均拒绝，不执行宿主转换方法", async () => {

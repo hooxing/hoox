@@ -255,7 +255,7 @@ jobs:
           M4_DATABASE_WORKER_COORDINATOR_PASSWORD: ci-worker-coordinator-placeholder-password
           M4_DATABASE_TEAM_COORDINATOR_PASSWORD: ci-team-coordinator-placeholder-password
           M4_DATABASE_ADMIN_CONTROL_PASSWORD: ci-admin-control-placeholder-password
-        # 超级用户凭据只在本步骤创建受限角色；迁移与黑盒测试均不再使用它。
+        # 管理凭据只用于一次性测试夹具的角色和 Schema 准备、清理；迁移与业务查询均使用受限角色。
         run: pnpm --filter @hoox/persistence prepare:ci:m4
 
       - name: 验证 Runtime 模型与模式持久化快照

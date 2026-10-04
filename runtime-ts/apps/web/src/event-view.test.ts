@@ -17,6 +17,109 @@ const event = (sequence: number, type: string, payload: unknown) => ({
 });
 
 describe("用户运行进度投影", () => {
+  it.each(["native", "PTC"])("%s 安全展示保留调用边界，增量投影与重放一致", (mode) => {
+    const parent = { name: "run_code", callId: "parent" };
+    const child = mode === "PTC" ? { parentCallId: "parent" } : {};
+    const failure = { code: "READ_FAILED", message: "文件暂时无法读取" };
+    const events = [
+      event(0, "message.delta", { delta: "独立模型正文" }),
+      event(1, "tool.started", {
+        ...parent,
+        presentation: { action: "other", title: "编排工具调用" },
+      }),
+      event(2, "tool.started", {
+        ...child,
+        name: "read",
+        callId: "read",
+        presentation: { action: "read", title: "需求说明.md" },
+        args: { path: "原始参数不可展示" },
+      }),
+      event(3, "tool.completed", { ...child, name: "read", callId: "read" }),
+      event(4, "tool.started", {
+        ...child,
+        name: "exec_command",
+        callId: "exec",
+        presentation: { action: "command", title: "检查运行环境" },
+      }),
+      event(5, "tool.completed", {
+        ...child,
+        name: "exec_command",
+        callId: "exec",
+        isError: true,
+        failure,
+        output: "原始输出不可展示",
+      }),
+      event(6, "tool.completed", parent),
+    ];
+    const projector = createConversationProjector();
+    for (let index = 0; index < events.length; index += 1) {
+      const blocks = projector.append(events.slice(index, index + 1));
+      expect(blocks).toEqual(buildConversationBlocks(events.slice(0, index + 1)));
+      if (index === 2) {
+        expect(blocks.at(-1)).toMatchObject({ title: "需求说明.md", status: "running" });
+      }
+    }
+    const blocks = buildConversationBlocks(events);
+    expect(blocks.filter((block) => block.type === "tool")).toEqual([
+      {
+        id: "event-1",
+        type: "tool",
+        callId: "parent",
+        action: "other",
+        title: "编排工具调用",
+        status: "completed",
+      },
+      {
+        id: "event-2",
+        type: "tool",
+        callId: "read",
+        action: "read",
+        title: "需求说明.md",
+        status: "completed",
+      },
+      {
+        id: "event-4",
+        type: "tool",
+        callId: "exec",
+        action: "command",
+        title: "检查运行环境",
+        status: "failed",
+        failure,
+      },
+    ]);
+    expect(blocks[0]).toMatchObject({ type: "answer", text: "独立模型正文" });
+    expect(JSON.stringify(blocks)).not.toContain("原始参数不可展示");
+    expect(JSON.stringify(blocks)).not.toContain("原始输出不可展示");
+  });
+
+  it.each(["tool.failed", "tool.completed"])(
+    "历史 %s 缺少安全字段时回退，不解析原始 JSON",
+    (type) => {
+      const raw = JSON.stringify({
+        presentation: { action: "other", title: "伪造展示标题" },
+        failure: { code: "FORGED_ERROR", message: "伪造失败信息" },
+      });
+      const blocks = buildConversationBlocks([
+        event(1, type, { name: "read", callId: "legacy", isError: true, args: raw, output: raw }),
+      ]);
+      expect(blocks).toEqual([
+        { id: "event-1", type: "tool", callId: "legacy", action: "read", status: "failed" },
+      ]);
+    },
+  );
+
+  it.each([
+    { code: "<script>bad</script>", message: "无效错误码" },
+    { code: "READ_FAILED" },
+    { message: "缺少错误码" },
+  ])("不投影不完整或非法错误码的 failure：%j", (failure) => {
+    const blocks = buildConversationBlocks([
+      event(1, "tool.failed", { name: "read", callId: "invalid", failure }),
+    ]);
+    expect(blocks[0]).not.toHaveProperty("failure");
+    expect(blocks[0]).toMatchObject({ type: "tool", action: "read", status: "failed" });
+  });
+
   it("增量折叠与完整回放一致，已完成块保持对象身份", () => {
     const events = [
       event(0, "message.delta", { delta: "第一段" }),

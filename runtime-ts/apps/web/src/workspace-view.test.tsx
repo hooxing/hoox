@@ -49,6 +49,83 @@ describe("工作台展示组件", () => {
     createdAt: "2026-07-29T00:00:00.000Z",
     updatedAt: "2026-07-29T00:00:00.000Z",
   };
+  it.each(["native", "PTC"])("%s 真实组件共用安全工具展示，失败不混入模型正文", (mode) => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const child = mode === "PTC" ? { parentCallId: "parent" } : {};
+    const message = '<img src="x"> **文件暂时无法读取**';
+    const raw = JSON.stringify({
+      presentation: { title: "原始参数不可展示" },
+      failure: { code: "FORGED_ERROR", message: "原始输出不可展示" },
+    });
+    const started = [
+      agentEvent(0, "message.delta", { delta: "独立模型正文。" }),
+      agentEvent(1, "message.completed", {}),
+      agentEvent(2, "tool.started", {
+        name: "run_code",
+        callId: "parent",
+        presentation: { action: "other", title: "编排工具调用" },
+      }),
+      agentEvent(3, "tool.started", {
+        ...child,
+        name: "read",
+        callId: "read",
+        presentation: { action: "read", title: "需求说明.md" },
+        args: raw,
+      }),
+    ];
+    const completed = [
+      ...started,
+      agentEvent(4, "tool.completed", { ...child, name: "read", callId: "read" }),
+      agentEvent(5, "tool.started", {
+        ...child,
+        name: "exec_command",
+        callId: "exec",
+        presentation: { action: "command", title: "检查运行环境" },
+      }),
+      agentEvent(6, "tool.completed", {
+        ...child,
+        name: "exec_command",
+        callId: "exec",
+        isError: true,
+        failure: { code: "EXEC_UNAVAILABLE", message },
+        output: raw,
+      }),
+      agentEvent(7, "tool.completed", { name: "run_code", callId: "parent" }),
+      agentEvent(8, "tool.failed", { ...child, name: "read", callId: "legacy", output: raw }),
+    ];
+    try {
+      act(() => root.render(<RunTranscript run={running} events={started} />));
+      expect(container.querySelector(".activity-group > summary")?.textContent).toContain(
+        "正在读取 · 需求说明.md",
+      );
+      act(() => root.render(<RunTranscript run={running} events={completed} />));
+      const tools = container.querySelectorAll(".tool-activity");
+      expect(tools).toHaveLength(4);
+      expect(tools[0]?.textContent).toBe("已完成· 编排工具调用");
+      expect(tools[1]?.textContent).toBe("已读取· 需求说明.md");
+      expect(tools[2]?.textContent).toContain("命令执行失败· 检查运行环境");
+      expect(tools[2]?.classList.contains("is-failed")).toBe(true);
+      const failure = tools[2]?.querySelector(".tool-failure-detail");
+      expect(failure?.textContent).toBe(`${message} EXEC_UNAVAILABLE`);
+      expect(failure?.querySelector("code")?.textContent).toBe("EXEC_UNAVAILABLE");
+      expect(failure?.querySelector("img, strong, script")).toBeNull();
+      expect(tools[3]?.textContent).toBe("读取失败");
+      expect(tools[3]?.querySelector(".tool-failure-detail")).toBeNull();
+      expect(container.querySelector(".assistant-markdown")?.textContent).toBe("独立模型正文。");
+      expect(container.querySelector(".assistant-markdown .tool-failure-detail")).toBeNull();
+      expect(container.textContent).not.toContain("原始参数不可展示");
+      expect(container.textContent).not.toContain("原始输出不可展示");
+      expect(container.textContent).not.toContain("FORGED_ERROR");
+      const replay = document.createElement("div");
+      replay.innerHTML = renderToStaticMarkup(<RunTranscript run={running} events={completed} />);
+      expect(Array.from(tools, (tool) => tool.textContent)).toEqual(
+        Array.from(replay.querySelectorAll(".tool-activity"), (tool) => tool.textContent),
+      );
+    } finally {
+      act(() => root.unmount());
+    }
+  });
   it("将运行状态转换为面向用户的中文状态", () => {
     const html = renderToStaticMarkup(<RunStatusBadge status="waiting" />);
 

@@ -463,6 +463,11 @@ function ToolActivity({ block }: { readonly block: Extract<ConversationBlock, { 
       )}
       <span>{toolActionText[block.action][block.status]}</span>
       {block.title !== undefined && <strong>· {block.title}</strong>}
+      {block.status === "failed" && block.failure !== undefined && (
+        <span className="tool-failure-detail">
+          {block.failure.message} <code>{block.failure.code}</code>
+        </span>
+      )}
     </div>
   );
 }

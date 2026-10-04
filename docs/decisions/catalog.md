@@ -305,5 +305,6 @@
 | [ADR-20260911162421：MCP 与外部工具接入采用发布期固化与 Run 快照](20260911162421-mcp-and-external-tool-integration-boundary.md) | 提议 | 2026-09-11 |
 | [ADR-20261003011415：PTC 模式与独立受控调用日志](20261003011415-ptc-mode-and-durable-dispatch-journal.md) | 已接受（测试分支实验） | 2026-10-03 |
 | [公开首页与工作台分离入口](20261003184949-public-home-and-workspace-entry.md) | 已接受 | 2026-10-03 |
+| [ADR-20261004184828：工具设计同时交付模型结果与用户展示契约](20261004184828-tool-user-presentation-contract.md) | 已接受 | 2026-10-04 |
 
 </details>

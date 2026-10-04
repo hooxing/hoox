@@ -1,6 +1,8 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import type { RuntimeAgentEvent } from "./events.js";
+import { projectToolPresentation } from "./events.js";
 import { buildPtcSdk, createPtcTool } from "./ptc-tools.js";
 
 function harness(
@@ -148,5 +150,108 @@ describe("PTC 受控工具包装", () => {
     expect(facts.filter((x) => x.startsWith("effect:"))).toHaveLength(1);
     expect(facts.some((x) => x.startsWith("settled:"))).toBe(true);
     expect(facts.at(-1)).toBe("program:parent:failed");
+  });
+});
+
+describe("PTC 子调用的用户展示", () => {
+  function presentationHarness() {
+    const events: RuntimeAgentEvent[] = [];
+    const schema = Type.Object(
+      {
+        path: Type.Optional(Type.String()),
+        cmd: Type.Optional(Type.String()),
+        user_facing_purpose: Type.Optional(Type.String()),
+      },
+      { additionalProperties: false },
+    );
+    const tools: AgentTool[] = ["read", "exec_command", "todo_write"].map((name) => ({
+      name,
+      label: name,
+      description: "测试工具",
+      parameters: schema,
+      execute: async () => {
+        if (name === "read")
+          throw new Error(
+            JSON.stringify({ code: "READ_NOT_FOUND", message: "private-host-secret" }),
+          );
+        return {
+          content: [{ type: "text", text: "private-tool-output" }],
+          details: { exit_code: 7 },
+        };
+      },
+    }));
+    const wrapper = createPtcTool({
+      tools,
+      emit: (event) => events.push(event),
+      prepareProgram: async () => {},
+      prepareTool: async () => {},
+      ensureReceipt: async () => {},
+      recordProgramReceipt: async () => ({
+        outcome: "recorded",
+        observation: "固定回执",
+        isTruncated: false,
+      }),
+      assertContinuationAllowed: () => {},
+    });
+    return { wrapper, events };
+  }
+  it("真实 VM 子调用与正常模式共用摘要，失败可捕获且不被外层成功抹除", async () => {
+    const { wrapper, events } = presentationHarness();
+    const result = await wrapper.execute("parent", {
+      code: 'let failure; try { await tools.read({path:"/workspace/reports/missing.md"}); } catch(e) { failure={code:e.code,toolName:e.toolName,message:e.message}; } const command=await tools.exec_command({cmd:"private-command",user_facing_purpose:"检查环境"}); await tools.todo_write({}); return {failure,exit_code:command.details.exit_code};',
+    });
+    const output = JSON.parse((result.content[0] as { text: string }).text).value;
+    expect(output).toEqual({
+      failure: {
+        code: "READ_NOT_FOUND",
+        toolName: "read",
+        message: "指定文件或目录不存在，请检查路径",
+      },
+      exit_code: 7,
+    });
+    const starts = events.filter((event) => event.type === "tool.started");
+    expect(starts).toHaveLength(3);
+    expect(starts[0]).toMatchObject({
+      name: "read",
+      parentCallId: "parent",
+      presentation: projectToolPresentation("read", { path: "/workspace/reports/missing.md" }),
+    });
+    expect(starts[1]).toMatchObject({
+      name: "exec_command",
+      parentCallId: "parent",
+      presentation: projectToolPresentation("exec_command", { user_facing_purpose: "检查环境" }),
+    });
+    expect(starts[2]).toMatchObject({
+      name: "todo_write",
+      presentation: { action: "other", title: "更新任务清单" },
+    });
+    expect(events.filter((event) => event.type === "tool.completed")).toMatchObject([
+      {
+        name: "read",
+        isError: true,
+        failure: { code: "READ_NOT_FOUND", message: "指定文件或目录不存在，请检查路径" },
+      },
+      { name: "exec_command", isError: false },
+      { name: "todo_write", isError: false },
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(
+      /private-command|private-host-secret|private-tool-output/,
+    );
+  });
+  it("参数拒绝也带安全错误码与独立终态", async () => {
+    const { wrapper, events } = presentationHarness();
+    const result = await wrapper.execute("parent", {
+      code: "try { await tools.read({path:42}); } catch(e) { return {code:e.code,toolName:e.toolName}; }",
+    });
+    expect(JSON.parse((result.content[0] as { text: string }).text).value).toEqual({
+      code: "PTC_TOOL_INVALID_ARGUMENTS",
+      toolName: "read",
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "tool.completed",
+      name: "read",
+      isError: true,
+      failure: { code: "PTC_TOOL_INVALID_ARGUMENTS" },
+    });
   });
 });

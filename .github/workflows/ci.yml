@@ -258,6 +258,18 @@ jobs:
         # 超级用户凭据只在本步骤创建受限角色；迁移与黑盒测试均不再使用它。
         run: pnpm --filter @hoox/persistence prepare:ci:m4
 
+      - name: 验证 Runtime 模型与模式持久化快照
+        env:
+          DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          MIGRATION_DATABASE_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+        # M4 套件结束会删除受限角色；快照验证先运行，随后 M4 仍从无 dist 状态启动。
+        run: |
+          pnpm build:m4-runtime-dependencies
+          pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "PostgreSQL Runtime 模型与模式快照"
+
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:
           RUN_PG_RUN_WORKER_INTEGRATION: "true"
@@ -275,12 +287,3 @@ jobs:
           DATABASE_SCHEMA: m4_ci_runtime_schema
         # M4 独立清理运行时依赖的 dist，以此回归验证黑盒不依赖其他 Job 或缓存遗留。
         run: pnpm test:integration:m4:clean
-
-      - name: 验证 Runtime 模型与模式持久化快照
-        env:
-          DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
-          MIGRATION_DATABASE_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
-          DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
-          DATABASE_RUNTIME_ROLE: m4_ci_runtime
-          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
-        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "PostgreSQL Runtime 模型与模式快照"

@@ -121,6 +121,8 @@ import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 import { RunWorker } from "./run-worker.js";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 import {
+  resolveRuntimeModelProbeConfiguration,
+  type RuntimeModelProbeConfiguration,
   RuntimeConfiguredMemoryProvider,
   RuntimeConfiguredSessionFactory,
 } from "./runtime-configured-providers.js";
@@ -1402,7 +1404,11 @@ async function assembleWorkerRuntime(
         probePostgres(coordinatorPool, configuration.databaseWorkerCoordinatorRole),
       objectStorage: () => probeS3BlobStore(s3Config),
       sandbox: () => upstreamSandboxes.probe(),
-      model: () => probeOpenAiCompatibleModel(configuration.model, runtimeMode),
+      model: async () =>
+        probeOpenAiCompatibleModel(
+          await resolveRuntimeModelProbeConfiguration(configuration.model, runtimeConfigurations),
+          runtimeMode,
+        ),
     });
     await startWorkerLoopAfterDependencyProbes(runtimeMode, probes, () => {
       loop.start();
@@ -1582,7 +1588,17 @@ export async function probeDevelopmentWorkerDependencies(
       probePostgres(coordinatorPool, configuration.databaseWorkerCoordinatorRole),
       probeS3BlobStore(s3Config),
       sandbox.probeExecution(),
-      probeOpenAiCompatibleModel(configuration.model, "development"),
+      (async () => {
+        const configurations = new PgRuntimeControlConfigurationRepository(
+          pool,
+          new ModelProviderCredentialCipher(configuration.model.credentialEncryptionKey),
+          configuration.model.apiKey,
+        );
+        await probeOpenAiCompatibleModel(
+          await resolveRuntimeModelProbeConfiguration(configuration.model, configurations),
+          "development",
+        );
+      })(),
     ]);
   } finally {
     await Promise.all([
@@ -1593,7 +1609,7 @@ export async function probeDevelopmentWorkerDependencies(
 }
 
 export async function probeOpenAiCompatibleModel(
-  model: WorkerProcessConfiguration["model"],
+  model: RuntimeModelProbeConfiguration,
   mode: "development" | "production",
 ): Promise<void> {
   const endpoint = new URL(
@@ -1619,7 +1635,7 @@ export async function probeOpenAiCompatibleModel(
 
 function modelMetadataMatches(
   entry: unknown,
-  model: WorkerProcessConfiguration["model"],
+  model: RuntimeModelProbeConfiguration,
   mode: "development" | "production",
 ): boolean {
   if (typeof entry !== "object" || entry === null) return false;

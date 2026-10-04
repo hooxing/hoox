@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-
 import {
   assembleModelWireTraceIfEnabled,
   createDevelopmentOpenAiCompatibleModel,
@@ -11,6 +10,7 @@ import {
   startWorkerLoopAfterDependencyProbes,
   startWorkerProcess,
 } from "./process-entry.js";
+import { resolveRuntimeModelProbeConfiguration } from "./runtime-configured-providers.js";
 
 function productionEnvironment(): Record<string, string> {
   return {
@@ -768,6 +768,66 @@ describe("Agent Worker 进程入口", () => {
         thinkingFormat: "deepseek",
       },
     });
+  });
+
+  it.each([200, 401])("启动只探测 active 模型，HTTP %i 时不使用过期 fallback", async (status) => {
+    const deployment = parseWorkerProcessEnvironment(productionEnvironment()).model;
+    const activeBaseUrl = "https://active.example.invalid/v1";
+    const fetchSpy = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(JSON.stringify({ data: [{ id: "active-model" }] }), { status }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const startLoop = vi.fn();
+    const modelProbe = async () =>
+      probeOpenAiCompatibleModel(
+        await resolveRuntimeModelProbeConfiguration(deployment, {
+          resolveActiveModelConfiguration: async () => ({
+            apiKey: "active-test-key",
+            configuration: {
+              providerKey: "active",
+              displayName: "当前模型",
+              protocol: "openai-compatible",
+              baseUrl: activeBaseUrl,
+              credentialConfigured: true,
+              defaultModelId: "active-model",
+              models: [
+                {
+                  id: "active-model",
+                  name: "当前模型",
+                  enabled: true,
+                  reasoning: false,
+                  input: ["text"],
+                  contextWindow: 128_000,
+                  maxTokens: 8192,
+                },
+              ],
+            },
+          }),
+        }),
+        "development",
+      );
+    const startup = startWorkerLoopAfterDependencyProbes(
+      "development",
+      {
+        postgres: async () => undefined,
+        workerCoordinatorPostgres: async () => undefined,
+        objectStorage: async () => undefined,
+        sandbox: async () => undefined,
+        model: modelProbe,
+      },
+      startLoop,
+    );
+    if (status === 200) {
+      await expect(startup).resolves.toBeUndefined();
+      expect(startLoop).toHaveBeenCalledOnce();
+    } else {
+      await expect(startup).rejects.toThrow("模型 provider readiness 失败");
+      expect(startLoop).not.toHaveBeenCalled();
+    }
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const requestUrl = fetchSpy.mock.calls[0]?.[0];
+    expect(String(requestUrl)).toBe(`${activeBaseUrl}/models`);
   });
 
   it("开发 readiness 只要求 /models 返回已配置 model id", async () => {

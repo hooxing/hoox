@@ -84,6 +84,27 @@ wait_http() {
   return 1
 }
 
+wait_worker_started() {
+  local container_id state
+  for ((attempt = 1; attempt <= 60; attempt += 1)); do
+    container_id="$(compose ps -q worker)"
+    if [[ -n "$container_id" ]]; then
+      state="$(docker inspect --format '{{.State.Running}}|{{.RestartCount}}' "$container_id")"
+      # 短暂 Running 不证明已开始消费；启动失败重启必须让发布失败，而不是由 API readiness 掩盖。
+      if [[ "$state" != "true|0" ]]; then
+        echo "Demo Worker 启动失败或发生重启" >&2
+        return 1
+      fi
+      if docker logs "$container_id" 2>&1 | grep -Fx 'Agent Worker 开发进程已启动' >/dev/null; then
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  echo "Demo Worker 未在期限内完成启动" >&2
+  return 1
+}
+
 rollback() {
   local status=$?
   trap - EXIT
@@ -300,6 +321,7 @@ for service in api web admin-control admin-web trajectory scheduler worker; do
     exit 1
   fi
 done
+wait_worker_started
 wait_http "http://127.0.0.1:3001/ready"
 wait_http "http://127.0.0.1:3003/ready"
 wait_http "https://$domain/api/ready"

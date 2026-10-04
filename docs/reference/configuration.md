@@ -51,7 +51,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 ### 模型与上下文
 
-- `MODEL_BASE_URL`、`MODEL_API_KEY` 和 `MODEL_ID` 定义没有 active 后台配置时的兼容回退模型。
+- `MODEL_BASE_URL`、`MODEL_API_KEY` 和 `MODEL_ID` 定义没有 active 后台配置时的兼容回退模型。Worker 启动、预检与 readiness 探测当前已发布的后台模型；只有尚未发布模型时才探测部署回退。读取或解密已发布凭据失败时失败关闭，不使用旧部署凭据掩盖故障。
 - 日常 Provider 密钥在后台模型页面写入；“保存并使用”由服务端一次原子保存并启用，列表中的“使用”切换已保存供应商。已有托管模型快照继续固定旧 Run 的配置与密钥，新配置只影响之后首次建立模型配置快照的 Run。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 是 Admin API 与 Worker 共享的稳定加密根，production 至少 32 字节且不能用于调用模型。
 - 后台“运行设置”可选工具调用模式：`native`（正常、默认）或 `ptc`（实验）。模式在 Worker 首次建立 Run 配置快照时固定，已有快照及该 Run 的子 Agent/恢复不受切换影响；缺字段的旧配置使用正常模式。PTC 的执行、审计和限制见[工具调用模式](../architecture/tool-calling-modes.md)。
 - Context window、最大输出和图片能力是显式可信配置，不能只依赖模型名称猜测。

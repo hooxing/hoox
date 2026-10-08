@@ -1262,6 +1262,9 @@ async function assembleWorkerRuntime(
         );
         return deploymentSessions.withModel({
           toolCallingMode: snapshot?.runtimeSettings?.configuration.toolCallingMode ?? "native",
+          ...(snapshot?.runtimeSettings?.configuration.enabledTools === undefined
+            ? {}
+            : { enabledTools: snapshot.runtimeSettings.configuration.enabledTools }),
           model: dynamicModel.model,
           modelRuntime: dynamicModel.modelRuntime,
           modelContext: dynamicModelContext,

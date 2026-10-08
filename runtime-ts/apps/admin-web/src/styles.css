@@ -2155,6 +2155,98 @@ body {
   min-width: 160px;
 }
 
+.runtime-tool-selection {
+  display: grid;
+  gap: 16px;
+}
+
+.runtime-tool-groups {
+  display: grid;
+  gap: 24px;
+}
+
+.runtime-tool-heading,
+.runtime-tool-actions,
+.runtime-tool-name {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.runtime-tool-heading {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.runtime-tool-heading h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.runtime-tool-selection .runtime-tool-description {
+  margin: 0;
+  color: #4c5a52;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.runtime-settings-form .runtime-tool-group {
+  gap: 12px;
+  border-top: 1px solid #dce2de;
+  padding-top: 12px;
+}
+
+.runtime-tool-group legend {
+  padding-right: 12px;
+  color: #314138;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.runtime-tool-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 24px;
+}
+
+.control-form .runtime-tool-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.runtime-tool-option input {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 4px 0 0;
+  accent-color: #2e7254;
+}
+
+.runtime-tool-content {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.runtime-tool-content small,
+.runtime-tool-name code {
+  color: #4c5a52;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .runtime-tool-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .runtime-settings-guide {
   display: grid;
   grid-template-columns: minmax(220px, 0.7fr) 1.3fr;

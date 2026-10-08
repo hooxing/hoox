@@ -191,6 +191,9 @@ importers:
       '@hoox/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
+      '@hoox/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@hoox/resource':
         specifier: workspace:*
         version: link:../../packages/resource
@@ -370,7 +373,11 @@ importers:
         specifier: 7.1.7
         version: 7.1.7(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.20.6)(yaml@2.9.0)
 
-  runtime-ts/packages/admin-control: {}
+  runtime-ts/packages/admin-control:
+    dependencies:
+      '@hoox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
   runtime-ts/packages/artifact:
     dependencies:

@@ -20,6 +20,7 @@
     "@hoox/persistence": "workspace:*",
     "@hoox/pi-adapter": "workspace:*",
     "@hoox/process-runtime": "workspace:*",
+    "@hoox/protocol": "workspace:*",
     "@hoox/resource": "workspace:*",
     "@hoox/run-contracts": "workspace:*",
     "@hoox/sandbox": "workspace:*",

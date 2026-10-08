@@ -7,7 +7,9 @@ import type {
   PiModelCatalogModelDto,
   PiModelCatalogProviderDto,
   PlatformUserPageDto,
+  RuntimeToolName,
 } from "@hoox/protocol";
+import { RUNTIME_TOOL_CATALOG } from "@hoox/protocol";
 import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdminApiError } from "./api.js";
@@ -1035,6 +1037,82 @@ const runtimeSettingFields = [
   ["compactionTimeoutMs", "压缩请求超时（毫秒）", 1000, 600000, 60000],
 ] as const;
 
+const runtimeToolGroups = [...new Set(RUNTIME_TOOL_CATALOG.map((tool) => tool.group))];
+
+function RuntimeToolSelection({
+  enabledTools,
+}: {
+  readonly enabledTools: readonly RuntimeToolName[] | undefined;
+}) {
+  // 表单按配置 revision 重挂载；保存失败不会重置尚未保存的勾选。
+  const [selected, setSelected] = useState(
+    () => new Set(enabledTools ?? RUNTIME_TOOL_CATALOG.map((tool) => tool.name)),
+  );
+  return (
+    <section className="runtime-tool-selection" aria-labelledby="runtime-tools-heading">
+      <div className="runtime-tool-heading">
+        <h3 id="runtime-tools-heading">可用工具</h3>
+        <div className="runtime-tool-actions">
+          <button
+            type="button"
+            className="quiet-button"
+            onClick={() => setSelected(new Set(RUNTIME_TOOL_CATALOG.map((tool) => tool.name)))}
+          >
+            全选
+          </button>
+          <button type="button" className="quiet-button" onClick={() => setSelected(new Set())}>
+            全部关闭
+          </button>
+        </div>
+      </div>
+      <p id="runtime-tools-description" className="runtime-tool-description">
+        正常模式与 PTC 模式共用此工具名单。名单在 Worker 首次建立 Run 配置快照时固定；已有快照的 Run
+        执行和恢复均保持原名单。run_code 与 collapse_process_for_final_answer
+        属于框架机制，不参与勾选。
+      </p>
+      <p className="runtime-tool-description">
+        工具选择不能替代沙箱隔离：exec_command 仍可操作文件，关闭 read 不代表禁止读取文件系统。
+      </p>
+      <div className="runtime-tool-groups" aria-describedby="runtime-tools-description">
+        {runtimeToolGroups.map((group) => (
+          <fieldset key={group} className="runtime-tool-group">
+            <legend>{group}</legend>
+            <div className="runtime-tool-options">
+              {RUNTIME_TOOL_CATALOG.filter((tool) => tool.group === group).map((tool) => (
+                <label key={tool.name} className="runtime-tool-option">
+                  <input
+                    type="checkbox"
+                    name="enabledTools"
+                    value={tool.name}
+                    checked={selected.has(tool.name)}
+                    aria-describedby={`runtime-tool-description-${tool.name}`}
+                    onChange={(event) => {
+                      const checked = event.currentTarget.checked;
+                      setSelected((previous) => {
+                        const next = new Set(previous);
+                        if (checked) next.add(tool.name);
+                        else next.delete(tool.name);
+                        return next;
+                      });
+                    }}
+                  />
+                  <span className="runtime-tool-content">
+                    <span className="runtime-tool-name">
+                      <strong>{tool.label}</strong>
+                      <code>{tool.name}</code>
+                    </span>
+                    <small id={`runtime-tool-description-${tool.name}`}>{tool.description}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function RuntimeSettingsWorkspace({
   overview,
   busy,
@@ -1078,6 +1156,7 @@ function RuntimeSettingsWorkspace({
             工具调用模式在 Worker 首次建立 Run 配置快照时固定；已有快照的 Run
             执行和恢复均保持原模式。
           </p>
+          <RuntimeToolSelection enabledTools={configuration?.enabledTools} />
           <div className="form-grid">
             {runtimeSettingFields.slice(0, 2).map(([name, label, min, max, fallback]) => (
               <label key={name}>
@@ -1335,6 +1414,7 @@ export function AdminControlConsole({
             operation(() =>
               api.saveRuntimeSettingsConfiguration({
                 toolCallingMode: form.get("toolCallingMode") === "ptc" ? "ptc" : "native",
+                enabledTools: form.getAll("enabledTools") as RuntimeToolName[],
                 workerMaxConcurrentRuns: number(form, "workerMaxConcurrentRuns"),
                 userMaxConcurrentRunsPerTenant: number(form, "userMaxConcurrentRunsPerTenant"),
                 compactionSoftLimitPercent: number(form, "compactionSoftLimitPercent"),

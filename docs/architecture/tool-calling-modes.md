@@ -8,9 +8,19 @@
 
 Worker 首次为 Run 解析运行配置时持久化快照；尚未建立快照的排队 Run 会采用当时的 active 配置，不是在 API 创建 Run 时就固定。已有快照的 Run、恢复 Attempt 和该 Run 的子 Agent 沿用快照模式。模式参与 Session 工厂缓存键和工具能力兼容身份；切换不会复用另一模式的 Session 能力集合。
 
+## 后台工具选择
+
+后台“运行设置”的工具选择保存为可选 `enabledTools` 启用名单，覆盖文件与命令、技能与任务交付、智能体协作工具。缺字段的旧配置保留全工具行为；显式空数组关闭全部业务工具，仍可文字答复。保存后无需重启，选择与模式在同一 Run 快照中固定；已有快照、恢复与该 Run 的子 Agent 不受后续保存影响。关闭工具不会停止已创建的定时任务或已启动的子任务，不能用作即时撤权。
+
+正常模式只注册启用工具；PTC SDK 和程序内执行映射使用同一集合，强行调用关闭的名称不能进入工具实现、授权或副作用。子 Agent 的工具集合为平台名单与委派名单的交集，不能通过委派扩大平台能力。勾选仅允许既有实现，未装配对应服务的工具仍不可用。关闭 `skill` 时不再恢复或显式加载技能说明，但不会删除历史对话中已经出现的内容。
+
+`run_code` 是 PTC 的隔离编排入口，`collapse_process_for_final_answer` 是正常模式的展示机制，不在业务开关中。全部关闭时，PTC 保留纯计算程序入口，但 tools 命名空间为空，不能获得宿主文件、命令或网络能力。
+
+工具开关不是沙箱文件 ACL：保留 `exec_command` 时仍可通过命令读写文件，关闭文件工具不能替代沙箱隔离。后台显示该限制。共享工具目录、规范化规则和数据库约束拒绝未知、重复及非数组选择；选择顺序不改变能力缓存或模型 Schema。工具新增必须同步目录、受控执行和[用户展示契约](../decisions/20261004184828-tool-user-presentation-contract.md)；已显式保存的名单不自动启用新增工具。长期取舍见[后台工具选择决策](../decisions/20261008150709-admin-tool-selection-and-run-snapshot.md)。
+
 ## 模型与执行边界
 
-正常模式向模型公开既有工具。PTC 只公开 `run_code({code})`，参数说明包含按工具名称和 Schema 键排序生成的固定 SDK。代码是支持顶层 `await` 和 `return` 的异步 JavaScript 函数体，通过 `tools[工具名](参数)` 调用实际工具。SDK 不包含 Tenant、Run、Thread、附件或动态工作目录。
+正常模式向模型公开当前实际启用工具。PTC 只公开 `run_code({code})`，参数说明包含按工具名称和 Schema 键排序生成的固定 SDK。代码是支持顶层 `await` 和 `return` 的异步 JavaScript 函数体，通过 `tools[工具名](参数)` 调用实际工具。SDK 不包含 Tenant、Run、Thread、附件或动态工作目录。
 
 每次程序使用 fresh QuickJS WASM runtime/context，不继承上次变量，只暴露工具命名空间与 `console.log`，没有宿主 `process`、`require`、文件或网络能力。不使用宿主动态函数执行生成代码。工具能力仍由当前 Agent 的既有 allowlist 和受控实现决定，不借 PTC 增加权限。
 
@@ -59,3 +69,6 @@ try {
 - 尚无真实模型成本、正确率和多模态等价性结论；正常模式仍是默认，不把单元测试当作收益证明。
 - 后台切回正常模式仅影响之后首次建立快照的 Run。已有 PTC Run 需保留 PTC 运行时代码和 migration 0066，直到安全排空和核对完成；不要删除 journal 或倒退已执行 migration。
 - 运行设置 Revision 一旦保存模式字段，migration 0067 拒绝降级到不支持该字段的约束，包括值为 `native` 的 Revision；切回正常模式不等于删除历史事实。
+
+- 含 `enabledTools` 的任何运行设置 Revision 都会阻止 migration 0068 降级，包括空名单。重新全选工具不删除历史配置，回滚代码必须保留该字段的支持。
+- migration 0069 将工具选择校验改为内联 CHECK，整批迁移提交时不保留数据库 routine。无工具选择历史时可整批回退至 0067 或更早；停在 0068 的函数中间态会被安全检查拒绝并整体回滚。禁止绕过迁移入口直接执行 down 后提交，取舍见[无 routine 迁移终态决策](../decisions/20261008154038-tool-selection-routine-free-migration.md)。

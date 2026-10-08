@@ -146,15 +146,21 @@ describe("PTC Session 恢复安全选项", () => {
   for (const mode of ["native", "ptc"] as const) {
     it.each([
       { label: "空", enabledToolNames: [] },
+      { label: "平台关闭命令", enabledToolNames: ["exec_command"], enabledTools: [] },
       { label: "窄", enabledToolNames: ["exec_command"] },
     ] as const)(
       `${mode} 恢复保留$label allowlist 的兼容身份及实际能力，不扩大工具集合`,
-      async ({ enabledToolNames }) => {
+      async (selection) => {
+        const { enabledToolNames } = selection;
+        const platformSelection =
+          "enabledTools" in selection ? { enabledTools: selection.enabledTools } : {};
+        const effectiveNames = "enabledTools" in selection ? [] : enabledToolNames;
         const h = await harness();
         const options: SessionOptions = {
           ...h.options,
           toolCallingMode: mode,
           enabledToolNames,
+          ...platformSelection,
         };
         const expected = deriveSafePiSessionCompatibility(options);
         expect(expected.toolSchemaHash).not.toBe(
@@ -202,14 +208,14 @@ describe("PTC Session 恢复安全选项", () => {
         if (result.outcome !== "session_created") throw new Error("未创建恢复 Session");
         try {
           expect(result.controller.getDiagnostics().activeToolNames).toEqual(
-            mode === "ptc" ? ["run_code"] : enabledToolNames,
+            mode === "ptc" ? ["run_code"] : effectiveNames,
           );
           await result.controller.prompt("恢复 allowlist 测试");
-          expect(exposedNames).toEqual(enabledToolNames);
+          expect(exposedNames).toEqual(effectiveNames);
           if (mode === "ptc") {
             expect(JSON.parse(guestResult)).toEqual({
               logs: [],
-              value: { toolNames: enabledToolNames },
+              value: { toolNames: effectiveNames },
             });
           }
           expect(h.command).not.toHaveBeenCalled();

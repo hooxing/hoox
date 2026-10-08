@@ -1,3 +1,8 @@
+import {
+  normalizeRuntimeToolSelection,
+  RUNTIME_TOOL_NAMES,
+  type RuntimeToolName,
+} from "@hoox/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { projectFileReferencePrompt } from "./file-reference-prompt.js";
 import { types } from "node:util";
@@ -414,6 +419,8 @@ function bindModelContextCapability(
 }
 
 export interface CreateSafePiSessionOptions {
+  /** 平台工具选择与子智能体委派取交集；缺省全启用，空清单不授予业务工具。 */
+  enabledTools?: readonly RuntimeToolName[];
   /** Run 固定的工具编排模式；缺字段保持正常模式。 */
   toolCallingMode?: ToolCallingMode;
   /** 外层程序先形成模型调用事实，内部工具再独立进入受控执行审计。 */
@@ -865,7 +872,12 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     options.enabledToolNames === undefined
       ? undefined
       : new Set<DelegablePiToolName>(options.enabledToolNames);
-  const isEnabled = (name: DelegablePiToolName) => enabled === undefined || enabled.has(name);
+  const platformTools = normalizeRuntimeToolSelection(options.enabledTools);
+  const isPlatformEnabled = (name: RuntimeToolName) =>
+    RUNTIME_TOOL_NAMES.includes(name) &&
+    (platformTools === undefined || platformTools.includes(name));
+  const isEnabled = (name: DelegablePiToolName) =>
+    isPlatformEnabled(name) && (enabled === undefined || enabled.has(name));
   const selectedSandboxTools = observedSandboxTools.tools.filter((tool) =>
     isEnabled(tool.name as DelegablePiToolName),
   );
@@ -912,7 +924,12 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
           options.agentControlToolExecutor,
           observedSandboxTools.recordControlledReceipt,
         )),
-  ];
+  ].filter(
+    (tool) =>
+      // 展示机制不是管理员业务开关；未来新增工具必须先进入共享目录才能曝光。
+      tool.name === "collapse_process_for_final_answer" ||
+      isPlatformEnabled(tool.name as RuntimeToolName),
+  );
   const preparePtcProgram = options.preparePtcProgram;
   const preparePtcTool = options.preparePtcTool;
   if (

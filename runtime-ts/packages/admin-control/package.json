@@ -13,5 +13,8 @@
     "clean": "tsc -b tsconfig.json --clean",
     "test": "vitest run --root ../../.. runtime-ts/packages/admin-control/src",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hoox/protocol": "workspace:*"
   }
 }

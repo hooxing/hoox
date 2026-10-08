@@ -65,7 +65,11 @@ import {
 } from "../../runtime-ts/packages/admin-control/src/index.js";
 import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
 import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
-import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import {
+  loadMigrations,
+  migrateDown,
+  migrateUp,
+} from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
 import { PgAdminControlRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
 import {
@@ -117,6 +121,7 @@ import {
   PgThreadContinuityMetrics,
 } from "../../runtime-ts/packages/persistence/src/thread-continuity-rollout.js";
 import { PgThreadSandboxSessionLifecycle } from "../../runtime-ts/packages/persistence/src/thread-sandbox-session.js";
+import { RUNTIME_TOOL_CATALOG } from "../../runtime-ts/packages/protocol/src/index.js";
 import { createWorkspaceManifest } from "../../runtime-ts/packages/workspace/src/manifest.js";
 import {
   loadPostgreSqlMigrationContract,
@@ -846,6 +851,203 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       }
     }
   }, 90_000);
+
+  it.each([68, 69])(
+    "%i 隔离 Schema 校验工具选择，并在保留历史字段时阻止降级与回滚事务",
+    async (version) => {
+      const isolatedSchema = `it_rw_tool_selection_${version}_${suffix}`;
+      if (!safePgIdentifier.test(isolatedSchema)) throw new Error("工具选择测试 Schema 名称无效");
+      const migrations = await loadMigrations();
+      const previous = migrations.find((migration) => migration.version === 67);
+      const selection = migrations.find((migration) => migration.version === 68);
+      const correction = migrations.find((migration) => migration.version === 69);
+      if (previous === undefined || selection === undefined || correction === undefined)
+        throw new Error("缺少工具选择迁移夹具");
+      const isolated = createPostgresPool({
+        connectionString: adminUrl,
+        schema: isolatedSchema,
+        maxConnections: 2,
+      });
+      let schemaPrepared = false;
+      const historicalConfiguration = {
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
+        compactionSoftLimitPercent: 80,
+        compactionTargetPercent: 50,
+        compactionRecentUserTokens: 2048,
+        compactionMaxOutputTokens: 4096,
+        compactionTimeoutMs: 30_000,
+      };
+      const toolNames = RUNTIME_TOOL_CATALOG.map((tool) => tool.name);
+      const insertSql = `INSERT INTO admin_control_config_revisions(id,object_kind,object_key,configuration)
+      VALUES($1,'runtime_settings','global',$2::jsonb)`;
+      const readFacts = async () => ({
+        revisions: (
+          await isolated.query<{ readonly id: number; readonly configuration: unknown }>(
+            "SELECT id,configuration FROM admin_control_config_revisions ORDER BY id",
+          )
+        ).rows,
+        constraints: (
+          await isolated.query<{ readonly definition: string }>(
+            `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+           WHERE conrelid='admin_control_config_revisions'::regclass
+             AND conname='admin_control_configuration_shape'`,
+          )
+        ).rows,
+        helper:
+          (
+            await isolated.query<{ readonly helper: string | null }>(
+              "SELECT to_regprocedure('runtime_tool_selection_is_valid(jsonb)')::text AS helper",
+            )
+          ).rows[0]?.helper ?? null,
+      });
+      try {
+        await admin.query(`CREATE SCHEMA "${isolatedSchema}"`);
+        schemaPrepared = true;
+        // 只装载受测约束，隔离真实 SQL 行为，避免夹具依赖完整迁移链与开发数据库历史。
+        await withTransaction(isolated, async (client) => {
+          await client.query(`CREATE TABLE admin_control_config_revisions(
+          id integer PRIMARY KEY,
+          object_kind text NOT NULL,
+          object_key text NOT NULL,
+          configuration jsonb NOT NULL,
+          CONSTRAINT admin_control_configuration_shape CHECK (true)
+        )`);
+          await client.query(previous.upSql);
+          await client.query(insertSql, [1, JSON.stringify(historicalConfiguration)]);
+        });
+        const previousFacts = await readFacts();
+        expect(previousFacts.constraints).toHaveLength(1);
+        expect(previousFacts.helper).toBeNull();
+        await withTransaction(isolated, async (client) => {
+          await client.query(selection.upSql);
+          if (version === 69) await client.query(correction.upSql);
+        });
+        const expandedFacts = await readFacts();
+        expect(expandedFacts.revisions).toEqual(previousFacts.revisions);
+        expect(expandedFacts.constraints).toHaveLength(1);
+        expect(expandedFacts.constraints[0]?.definition).toContain("enabledTools");
+        expect(expandedFacts.helper).toBe(
+          version === 68 ? "runtime_tool_selection_is_valid(jsonb)" : null,
+        );
+        expect(toolNames).toHaveLength(14);
+        const validConfigurations = [
+          historicalConfiguration,
+          { ...historicalConfiguration, enabledTools: [] },
+          { ...historicalConfiguration, toolCallingMode: "native", enabledTools: toolNames },
+          { ...historicalConfiguration, toolCallingMode: "ptc", enabledTools: ["write", "read"] },
+        ];
+        for (const [index, configuration] of validConfigurations.entries()) {
+          await isolated.query(insertSql, [index + 2, JSON.stringify(configuration)]);
+        }
+        const acceptedFacts = await readFacts();
+        expect(acceptedFacts.revisions.map((row) => row.configuration)).toEqual([
+          historicalConfiguration,
+          ...validConfigurations,
+        ]);
+        if (version === 68) {
+          const nullGuards = await isolated.query<{
+            readonly sql_null: boolean;
+            readonly json_null: boolean;
+          }>(`SELECT runtime_tool_selection_is_valid(NULL::jsonb) AS sql_null,
+                runtime_tool_selection_is_valid('null'::jsonb) AS json_null`);
+          expect(nullGuards.rows).toEqual([{ sql_null: false, json_null: false }]);
+        }
+        const invalidSelections = [
+          null,
+          "read",
+          1,
+          true,
+          {},
+          { read: true },
+          ["unknown"],
+          ["READ"],
+          ["run_code"],
+          ["collapse_process_for_final_answer"],
+          ["read", "read"],
+          ["read", null],
+          ["read", 1],
+          ["read", true],
+          ["read", {}],
+          ["read", []],
+          [...toolNames, "read"],
+        ];
+        const invalidConfigurations = [
+          ...invalidSelections.map((enabledTools) => ({
+            ...historicalConfiguration,
+            enabledTools,
+          })),
+          { ...historicalConfiguration, enabledTools: [], unexpectedSetting: true },
+          { ...historicalConfiguration, enabledTools: [], toolCallingMode: "auto" },
+          { ...historicalConfiguration, enabledTools: [], workerMaxConcurrentRuns: 101 },
+        ];
+        for (const configuration of invalidConfigurations) {
+          // 非法 JSON 必须触发 CHECK 失败，而不是展开非数组时的 SQL 错误；每次失败独立回滚。
+          await expect(
+            withTransaction(isolated, (client) =>
+              client.query(insertSql, [100, JSON.stringify(configuration)]),
+            ),
+          ).rejects.toMatchObject({
+            code: "23514",
+            constraint: "admin_control_configuration_shape",
+          });
+        }
+        expect(await readFacts()).toEqual(acceptedFacts);
+        for (const enabledTools of [[], toolNames, ["read"]]) {
+          await withTransaction(isolated, async (client) => {
+            await client.query("DELETE FROM admin_control_config_revisions WHERE id<>1");
+            await client.query(insertSql, [
+              2,
+              JSON.stringify({ ...historicalConfiguration, enabledTools }),
+            ]);
+          });
+          const beforeDown = await readFacts();
+          await expect(
+            withTransaction(isolated, async (client) => {
+              // 先写事务标记；降级受阻后该标记也必须消失，不能仅断言错误消息。
+              await client.query(insertSql, [99, JSON.stringify(historicalConfiguration)]);
+              if (version === 69) await client.query(correction.downSql);
+              await client.query(selection.downSql);
+            }),
+          ).rejects.toMatchObject({
+            code: "P0001",
+            message: "DOWN_MIGRATION_BLOCKED:runtime_tool_selection_configuration_exists",
+          });
+          expect(await readFacts()).toEqual(beforeDown);
+        }
+        await isolated.query("DELETE FROM admin_control_config_revisions");
+        await withTransaction(isolated, async (client) => {
+          if (version === 69) await client.query(correction.downSql);
+          await client.query(selection.downSql);
+        });
+        const restoredFacts = await readFacts();
+        expect(restoredFacts.revisions).toEqual([]);
+        expect(restoredFacts.constraints).toEqual(previousFacts.constraints);
+        expect(restoredFacts.helper).toBeNull();
+        for (const [index, configuration] of [
+          historicalConfiguration,
+          { ...historicalConfiguration, toolCallingMode: "native" },
+          { ...historicalConfiguration, toolCallingMode: "ptc" },
+        ].entries()) {
+          await isolated.query(insertSql, [index + 1, JSON.stringify(configuration)]);
+        }
+        const factsBeforeLegacyRejection = await readFacts();
+        await expect(
+          withTransaction(isolated, (client) =>
+            client.query(insertSql, [
+              100,
+              JSON.stringify({ ...historicalConfiguration, enabledTools: [] }),
+            ]),
+          ),
+        ).rejects.toMatchObject({ code: "23514", constraint: "admin_control_configuration_shape" });
+        expect(await readFacts()).toEqual(factsBeforeLegacyRejection);
+      } finally {
+        await isolated.end();
+        if (schemaPrepared) await admin.query(`DROP SCHEMA "${isolatedSchema}" CASCADE`);
+      }
+    },
+    90_000,
+  );
 
   it("0014 journal 保持 completed 单调，manifest 外键、RLS 与 runtime ACL 均受约束", async () => {
     const f = await fixture(`workspace-manifest-contract-${suffix}`);

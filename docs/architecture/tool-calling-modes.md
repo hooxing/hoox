@@ -71,3 +71,4 @@ try {
 - 运行设置 Revision 一旦保存模式字段，migration 0067 拒绝降级到不支持该字段的约束，包括值为 `native` 的 Revision；切回正常模式不等于删除历史事实。
 
 - 含 `enabledTools` 的任何运行设置 Revision 都会阻止 migration 0068 降级，包括空名单。重新全选工具不删除历史配置，回滚代码必须保留该字段的支持。
+- migration 0069 将工具选择校验改为内联 CHECK，整批迁移提交时不保留数据库 routine。无工具选择历史时可整批回退至 0067 或更早；停在 0068 的函数中间态会被安全检查拒绝并整体回滚。禁止绕过迁移入口直接执行 down 后提交，取舍见[无 routine 迁移终态决策](../decisions/20261008154038-tool-selection-routine-free-migration.md)。

@@ -309,4 +309,6 @@
 | [ADR-20261004184828：工具设计同时交付模型结果与用户展示契约](20261004184828-tool-user-presentation-contract.md) | 已接受 | 2026-10-04 |
 | [ADR-20261008150709：后台工具选择与 Run 快照边界](20261008150709-admin-tool-selection-and-run-snapshot.md) | 已接受 | 2026-10-08 |
 
+| [ADR-20261008154038：工具选择约束保持无 routine 的迁移终态](20261008154038-tool-selection-routine-free-migration.md) | 已接受 | 2026-10-08 |
+
 </details>

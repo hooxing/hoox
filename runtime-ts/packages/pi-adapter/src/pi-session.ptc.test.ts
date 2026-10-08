@@ -1,3 +1,4 @@
+import { RUNTIME_TOOL_NAMES } from "@hoox/protocol";
 import {
   createModels,
   type FauxResponseStep,
@@ -15,7 +16,11 @@ import {
   deriveSafePiSessionCompatibility,
 } from "./pi-session.js";
 
-async function harness(mode: "native" | "ptc", responses: FauxResponseStep[]) {
+async function harness(
+  mode: "native" | "ptc",
+  responses: FauxResponseStep[],
+  selection: Partial<Parameters<typeof createSafePiSession>[0]> = {},
+) {
   const faux = fauxProvider({
     api: `ptc-session-${Math.random()}`,
     provider: `ptc-session-${Math.random()}`,
@@ -42,6 +47,7 @@ async function harness(mode: "native" | "ptc", responses: FauxResponseStep[]) {
     modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
     sandbox,
     toolCallingMode: mode,
+    ...selection,
     preparePtcProgram: async (id) => {
       facts.push(`parent:${id}`);
     },
@@ -135,6 +141,153 @@ describe("PTC 模型协议与上下文", () => {
       const { preparePtcTool: _unused, ...options } = h.options;
       await expect(createSafePiSession({ ...options, toolCallingMode: "ptc" })).rejects.toThrow(
         "审计",
+      );
+    } finally {
+      h.controller.dispose();
+    }
+  });
+});
+
+describe("平台工具选择与执行边界", () => {
+  it.each(RUNTIME_TOOL_NAMES)("工具目录 %s 与普通定义及 PTC SDK 一致", async (name) => {
+    const unexpectedCall = async (): Promise<never> => {
+      throw new Error("目录测试不应执行工具");
+    };
+    const projectError = (): never => {
+      throw new Error("目录测试不应投影执行错误");
+    };
+    for (const mode of ["native", "ptc"] as const) {
+      const h = await harness(
+        mode,
+        [
+          (context) => {
+            if (mode === "native") {
+              expect(
+                context.tools
+                  ?.map((tool) => tool.name)
+                  .filter((tool) => tool !== "collapse_process_for_final_answer"),
+              ).toEqual([name]);
+            } else {
+              const definitions = JSON.stringify(context.tools);
+              for (const tool of RUNTIME_TOOL_NAMES) {
+                const schemaName = `\\"name\\":\\"${tool}\\"`;
+                if (tool === name) expect(definitions).toContain(schemaName);
+                else expect(definitions).not.toContain(schemaName);
+              }
+            }
+            return fauxAssistantMessage("目录检查完成");
+          },
+        ],
+        {
+          enabledTools: [name],
+          todoWriteToolExecutor: { write: unexpectedCall, projectError },
+          deliverFileToolRouter: { deliverFile: unexpectedCall, projectError },
+          automationUpdateToolExecutor: { apply: unexpectedCall, projectError },
+          agentControlToolExecutor: {
+            spawn: unexpectedCall,
+            sendMessage: unexpectedCall,
+            followUp: unexpectedCall,
+            interrupt: unexpectedCall,
+            list: unexpectedCall,
+            wait: unexpectedCall,
+            projectError,
+          },
+        },
+      );
+      try {
+        await h.controller.prompt("验证工具目录");
+      } finally {
+        h.controller.dispose();
+      }
+    }
+  });
+  it.each(["native", "ptc"] as const)("%s 不曝光关闭的工具且不能强行调用命令", async (mode) => {
+    let result = "";
+    const h = await harness(
+      mode,
+      [
+        (context) => {
+          if (mode === "native")
+            expect(context.tools?.map((t) => t.name)).toEqual([
+              "read",
+              "collapse_process_for_final_answer",
+            ]);
+          else {
+            const definitions = JSON.stringify(context.tools);
+            expect(definitions).toContain('\\"name\\":\\"read\\"');
+            expect(definitions).not.toContain('\\"name\\":\\"exec_command\\"');
+          }
+          return fauxAssistantMessage(
+            mode === "ptc"
+              ? fauxToolCall("run_code", {
+                  code: 'return await tools.exec_command({cmd:"echo forbidden"});',
+                })
+              : fauxToolCall("exec_command", { cmd: "echo forbidden" }),
+            { stopReason: "toolUse" },
+          );
+        },
+        (context) => {
+          result = JSON.stringify(context.messages);
+          return fauxAssistantMessage("完成");
+        },
+      ],
+      { enabledTools: ["read"] },
+    );
+    try {
+      await h.controller.prompt("尝试关闭的工具");
+      expect(h.facts).not.toContain("effect");
+      expect(h.facts).not.toContain("authorize");
+      expect(
+        h.events.some(
+          (e) =>
+            e.type === "tool.started" && e.name === "exec_command" && e.parentCallId !== undefined,
+        ),
+      ).toBe(false);
+      expect(result).toContain('"isError":true');
+    } finally {
+      h.controller.dispose();
+    }
+  });
+  it.each(["native", "ptc"] as const)("%s 显式空选择不授予任何业务工具", async (mode) => {
+    const h = await harness(mode, [fauxAssistantMessage("完成")], { enabledTools: [] });
+    try {
+      expect(h.controller.getDiagnostics().activeToolNames).toEqual(
+        mode === "native" ? ["collapse_process_for_final_answer"] : ["run_code"],
+      );
+      expect(h.facts).not.toContain("effect");
+    } finally {
+      h.controller.dispose();
+    }
+  });
+  it.each(["native", "ptc"] as const)(
+    "%s 委派不能恢复平台关闭能力，能力身份随真实交集改变",
+    async (mode) => {
+      const h = await harness(mode, [fauxAssistantMessage("完成")], {
+        enabledTools: ["read"],
+        enabledToolNames: ["exec_command", "read"],
+      });
+      try {
+        expect(h.controller.getDiagnostics().activeToolNames).toEqual(
+          mode === "native" ? ["read"] : ["run_code"],
+        );
+        expect(deriveSafePiSessionCompatibility(h.options)).toEqual(
+          deriveSafePiSessionCompatibility({ ...h.options, enabledToolNames: ["read"] }),
+        );
+        expect(deriveSafePiSessionCompatibility(h.options)).not.toEqual(
+          deriveSafePiSessionCompatibility({ ...h.options, enabledTools: [] }),
+        );
+      } finally {
+        h.controller.dispose();
+      }
+    },
+  );
+  it("选择顺序不改变提示词、Schema 与恢复兼容身份", async () => {
+    const h = await harness("ptc", [fauxAssistantMessage("完成")], {
+      enabledTools: ["read", "exec_command"],
+    });
+    try {
+      expect(deriveSafePiSessionCompatibility(h.options)).toEqual(
+        deriveSafePiSessionCompatibility({ ...h.options, enabledTools: ["exec_command", "read"] }),
       );
     } finally {
       h.controller.dispose();

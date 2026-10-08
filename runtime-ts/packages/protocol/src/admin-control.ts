@@ -2,6 +2,8 @@ import { type Static, Type } from "@sinclair/typebox";
 import { successEnvelopeSchema } from "./envelopes.js";
 import { IdSchema, IsoTimestampSchema } from "./schemas.js";
 
+import { RUNTIME_TOOL_NAMES } from "./tool-configuration.js";
+
 const strict = { additionalProperties: false } as const;
 const ProviderKeySchema = Type.String({
   pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
@@ -114,6 +116,12 @@ export type MemoryProviderConfigurationDto = Static<typeof MemoryProviderConfigu
 
 export const RuntimeSettingsConfigurationDtoSchema = Type.Object(
   {
+    enabledTools: Type.Optional(
+      Type.Array(Type.Union(RUNTIME_TOOL_NAMES.map((name) => Type.Literal(name))), {
+        uniqueItems: true,
+        maxItems: RUNTIME_TOOL_NAMES.length,
+      }),
+    ),
     toolCallingMode: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("ptc")])),
     workerMaxConcurrentRuns: Type.Integer({ minimum: 1, maximum: 100 }),
     userMaxConcurrentRunsPerTenant: Type.Integer({ minimum: 1, maximum: 100 }),

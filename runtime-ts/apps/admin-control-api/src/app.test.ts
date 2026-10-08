@@ -520,6 +520,57 @@ describe("后台控制 API", () => {
     await app.close();
   });
 
+  it("运行设置 API 部分工具与空清单往返，保存与读取保留选择", async () => {
+    const { app, control } = fixture();
+    const configuration = {
+      toolCallingMode: "native" as const,
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 80,
+      compactionTargetPercent: 55,
+      compactionRecentUserTokens: 4096,
+      compactionMaxOutputTokens: 4096,
+      compactionTimeoutMs: 60000,
+    };
+    for (const [index, enabledTools] of (
+      [["read", "skill"], [], ["exec_command"]] as const
+    ).entries()) {
+      const revision = {
+        ...modelRevision,
+        revision: index + 1,
+        status: "active" as const,
+        configuration: { ...configuration, enabledTools: [...enabledTools] },
+      };
+      control.saveRuntimeSettingsConfiguration.mockResolvedValueOnce(revision);
+      const payload = { ...revision.configuration, expectedGeneration: index };
+      const response = await app.inject({
+        method: "PUT",
+        url: "/v1/admin/control/runtime-settings/current",
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "idempotency-key": `settings-tools-${index}`,
+        },
+        payload,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.configuration.enabledTools).toEqual(enabledTools);
+      expect(control.saveRuntimeSettingsConfiguration).toHaveBeenLastCalledWith(
+        expect.objectContaining({ actorUserId: "user_admin" }),
+        payload,
+      );
+      control.listRuntimeSettings.mockResolvedValueOnce([revision]);
+      const read = await app.inject({
+        method: "GET",
+        url: "/v1/admin/control/runtime-settings",
+        headers: { authorization: "Bearer admin" },
+      });
+      expect(read.statusCode).toBe(200);
+      expect(read.json().data.items[0].configuration.enabledTools).toEqual(enabledTools);
+    }
+    await app.close();
+  });
+
   it.each([null, "", "PTC", "auto", 1, false])(
     "API 拒绝非法工具调用模式 %s",
     async (toolCallingMode) => {
@@ -746,4 +797,36 @@ describe("后台控制 API", () => {
     );
     await app.close();
   });
+});
+
+describe("后台工具开关输入保护", () => {
+  it.each([null, "read", ["unknown"], ["read", "read"], ["run_code"]])(
+    "非法工具选择 %j 不进入控制服务",
+    async (enabledTools) => {
+      const { app, control } = fixture();
+      const response = await app.inject({
+        method: "PUT",
+        url: "/v1/admin/control/runtime-settings/current",
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "idempotency-key": "invalid-tools-selection",
+        },
+        payload: {
+          workerMaxConcurrentRuns: 20,
+          userMaxConcurrentRunsPerTenant: 2,
+          compactionSoftLimitPercent: 80,
+          compactionTargetPercent: 55,
+          compactionRecentUserTokens: 4096,
+          compactionMaxOutputTokens: 4096,
+          compactionTimeoutMs: 60000,
+          expectedGeneration: 0,
+          enabledTools,
+        },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(control.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
+      await app.close();
+    },
+  );
 });

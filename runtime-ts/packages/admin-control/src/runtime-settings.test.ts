@@ -178,3 +178,40 @@ describe("运行设置工具调用模式", () => {
     });
   });
 });
+
+describe("后台工具选择", () => {
+  it("旧配置不补写工具名单，显式空清单不会回退全启用", () => {
+    expect(normalizeRuntimeSettingsConfiguration(configuration)).not.toHaveProperty("enabledTools");
+    expect(
+      normalizeRuntimeSettingsConfiguration({ ...configuration, enabledTools: [] }).enabledTools,
+    ).toEqual([]);
+  });
+  it("保存规范化工具名单并通过概览回显，不改写历史配置", async () => {
+    const { repository, service } = fixture();
+    const selection = ["skill", "read"] as const;
+    await service.saveRuntimeSettingsConfiguration(context, {
+      ...configuration,
+      enabledTools: selection,
+      expectedGeneration: 1,
+    });
+    expect(repository.saveRuntimeSettingsConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.objectContaining({ enabledTools: ["read", "skill"] }),
+      }),
+    );
+    expect(
+      (await service.overview("admin")).activeRuntimeSettings?.configuration.enabledTools,
+    ).toEqual(["read", "skill"]);
+  });
+  it("非法工具清单在持久化前失败关闭", async () => {
+    const { repository, service } = fixture();
+    await expect(
+      service.saveRuntimeSettingsConfiguration(context, {
+        ...configuration,
+        enabledTools: ["unknown"],
+        expectedGeneration: 1,
+      } as never),
+    ).rejects.toThrow("启用工具");
+    expect(repository.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
+  });
+});

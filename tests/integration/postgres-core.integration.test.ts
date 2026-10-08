@@ -3482,7 +3482,7 @@ describe("PostgreSQL Runtime 模型与模式快照", () => {
     }
   });
 
-  it("真实 PG 新 Run 绑定 PTC revision，切换 native 后新 Run 生效且重建仓储恢复旧模式", async () => {
+  it("真实 PG 新 Run 绑定工具模式和名单 revision，切换后新 Run 生效且重建仓储恢复旧选择", async () => {
     const test = await createConfigurationFixture("mode_snapshot");
     try {
       await test.saveModel("mode-model");
@@ -3493,6 +3493,7 @@ describe("PostgreSQL Runtime 模型与模式快照", () => {
         workerMaxConcurrentRuns: 4,
         userMaxConcurrentRunsPerTenant: 2,
         toolCallingMode: "ptc",
+        enabledTools: ["read", "skill"],
         compactionSoftLimitPercent: 90,
         compactionTargetPercent: 65,
         compactionRecentUserTokens: 2048,
@@ -3507,7 +3508,7 @@ describe("PostgreSQL Runtime 模型与模式快照", () => {
       const ptcSnapshot = await test.runtime.resolveForRun(ptcInput);
       expect(ptcSnapshot?.runtimeSettings).toMatchObject({
         revision: ptc.revision,
-        configuration: { toolCallingMode: "ptc" },
+        configuration: { toolCallingMode: "ptc", enabledTools: ["read", "skill"] },
       });
       const stored = await withTenantTransaction(runtimePool, ptcInput, (client) =>
         client.query(
@@ -3526,13 +3527,14 @@ describe("PostgreSQL Runtime 模型与模式快照", () => {
       const native = await test.service.saveRuntimeSettingsConfiguration(test.context("native"), {
         ...settings,
         toolCallingMode: "native",
+        enabledTools: [],
         expectedGeneration: await test.repository.generation(test.fixture.user.id),
       });
       const nativeInput = await test.newRun("native");
       const nativeSnapshot = await test.runtime.resolveForRun(nativeInput);
       expect(nativeSnapshot?.runtimeSettings).toMatchObject({
         revision: native.revision,
-        configuration: { toolCallingMode: "native" },
+        configuration: { toolCallingMode: "native", enabledTools: [] },
       });
       const restored = new PgRuntimeControlConfigurationRepository(runtimePool, test.cipher);
       await expect(restored.resolveForRun(ptcInput)).resolves.toEqual(ptcSnapshot);
@@ -3571,6 +3573,7 @@ describe("PostgreSQL Runtime 模型与模式快照", () => {
       ).resolveForRun(nativeInput);
       expect(legacySnapshot?.runtimeSettings?.revision).toBe(native.revision);
       expect(legacySnapshot?.runtimeSettings?.configuration.toolCallingMode).toBe("native");
+      expect(legacySnapshot?.runtimeSettings?.configuration.enabledTools).toEqual([]);
     } finally {
       await test.close();
     }

@@ -5,7 +5,9 @@ import type {
   ModelProviderRevisionDto,
   PiModelCatalogModelDto,
   RuntimeSettingsRevisionDto,
+  RuntimeToolName,
 } from "@hoox/protocol";
+import { RUNTIME_TOOL_CATALOG } from "@hoox/protocol";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -214,6 +216,63 @@ function navigationItem(container: HTMLElement, label: string): HTMLElement {
   return item;
 }
 
+function runtimeSettingsRevision(enabledTools?: RuntimeToolName[]): RuntimeSettingsRevisionDto {
+  return {
+    revision: 1,
+    versionToken: 1,
+    status: "active",
+    probeStatus: "untested",
+    createdBy: "user_admin",
+    createdAt: "2026-10-08T00:00:00.000Z",
+    updatedAt: "2026-10-08T00:00:00.000Z",
+    configuration: {
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 80,
+      compactionTargetPercent: 55,
+      compactionRecentUserTokens: 4096,
+      compactionMaxOutputTokens: 4096,
+      compactionTimeoutMs: 60000,
+      ...(enabledTools === undefined ? {} : { enabledTools }),
+    },
+  };
+}
+
+async function mountRuntimeSettings(api: AdminControlApiContract) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  act(() => root.render(<App controlApi={api} />));
+  await settle();
+  act(() => navigationItem(container, "运行设置").click());
+  await settle();
+  return {
+    container,
+    unmount: () => {
+      act(() => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+function runtimeToolCheckboxes(container: HTMLElement): HTMLInputElement[] {
+  return [...container.querySelectorAll<HTMLInputElement>('input[name="enabledTools"]')];
+}
+
+function selectedRuntimeTools(container: HTMLElement): string[] {
+  return runtimeToolCheckboxes(container)
+    .filter((checkbox) => checkbox.checked)
+    .map((checkbox) => checkbox.value);
+}
+
+function runtimeToolAction(container: HTMLElement, label: string): HTMLButtonElement {
+  const button = [...container.querySelectorAll<HTMLButtonElement>('button[type="button"]')].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (button === undefined) throw new Error(`${label}按钮缺失`);
+  return button;
+}
+
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 });
@@ -246,6 +305,7 @@ describe("统一平台管理导航", () => {
       compactionRecentUserTokens: 4096,
       compactionMaxOutputTokens: 4096,
       compactionTimeoutMs: 60000,
+      enabledTools: RUNTIME_TOOL_CATALOG.map((tool) => tool.name),
     });
     expect(vi.mocked(api.saveRuntimeSettingsConfiguration).mock.calls[0]?.[0].toolCallingMode).toBe(
       "native",
@@ -339,6 +399,260 @@ describe("统一平台管理导航", () => {
       container.remove();
     },
   );
+
+  it.each<{ label: string; enabledTools: RuntimeToolName[] | undefined }>([
+    { label: "旧配置缺省时全选", enabledTools: undefined },
+    { label: "部分工具", enabledTools: ["read", "todo_write", "wait_agent"] },
+    { label: "显式空名单全部关闭", enabledTools: [] },
+  ])("运行工具读取并保存：$label", async ({ enabledTools }) => {
+    const api = fixture();
+    let active = runtimeSettingsRevision(enabledTools);
+    vi.mocked(api.overview).mockImplementation(async () => ({
+      ...overview,
+      generation: active.revision,
+      activeRuntimeSettings: active,
+    }));
+    vi.mocked(api.saveRuntimeSettingsConfiguration).mockImplementation(async (input) => {
+      const { expectedGeneration: _generation, ...configuration } = input;
+      active = { ...active, revision: active.revision + 1, configuration };
+      return active;
+    });
+    const { container, unmount } = await mountRuntimeSettings(api);
+    const expected = RUNTIME_TOOL_CATALOG.filter(
+      (tool) => enabledTools === undefined || enabledTools.includes(tool.name),
+    ).map((tool) => tool.name);
+    expect(selectedRuntimeTools(container)).toEqual(expected);
+    expect(runtimeToolCheckboxes(container).map((checkbox) => checkbox.value)).toEqual([
+      "exec_command",
+      "read",
+      "edit",
+      "write",
+      "skill",
+      "todo_write",
+      "deliver_file",
+      "automation_update",
+      "spawn_agent",
+      "send_message",
+      "followup_task",
+      "wait_agent",
+      "interrupt_agent",
+      "list_agents",
+    ]);
+    expect(
+      [...container.querySelectorAll(".runtime-tool-group legend")].map(
+        (legend) => legend.textContent,
+      ),
+    ).toEqual(["文件与命令", "任务与交付", "智能体协作"]);
+    for (const tool of RUNTIME_TOOL_CATALOG) {
+      const checkbox = requiredControl(
+        runtimeToolCheckboxes(container).find((item) => item.value === tool.name),
+        tool.name,
+      );
+      expect(checkbox.closest("label")?.textContent).toContain(tool.label);
+      expect(checkbox.closest("label")?.textContent).toContain(tool.name);
+      expect(
+        document.getElementById(checkbox.getAttribute("aria-describedby") ?? "")?.textContent,
+      ).toBe(tool.description);
+    }
+    expect(container.querySelector('input[value="run_code"]')).toBeNull();
+    expect(container.querySelector('input[value="collapse_process_for_final_answer"]')).toBeNull();
+    const description = container.querySelector(".runtime-tool-selection")?.textContent ?? "";
+    expect(description).toContain("正常模式与 PTC 模式共用此工具名单");
+    expect(description).toContain("首次建立 Run 配置快照时固定");
+    expect(description).toContain("已有快照的 Run 执行和恢复均保持原名单");
+    expect(description).toContain("不能替代沙箱隔离");
+    expect(description).toContain("exec_command 仍可操作文件");
+    expect(description).toContain("关闭 read 不代表禁止读取文件系统");
+    const form = container.querySelector("form");
+    act(() => form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await settle();
+    expect(api.saveRuntimeSettingsConfiguration).toHaveBeenLastCalledWith(
+      expect.objectContaining({ enabledTools: expected, expectedGeneration: 1 }),
+    );
+    expect(selectedRuntimeTools(container)).toEqual(expected);
+    expect(container.querySelector("form")).not.toBe(form);
+    unmount();
+  });
+
+  it.each(["native", "ptc"] as const)("%s 模式勾选部分工具并保存", async (toolCallingMode) => {
+    const api = fixture();
+    const { container, unmount } = await mountRuntimeSettings(api);
+    act(() => runtimeToolAction(container, "全部关闭").click());
+    expect(selectedRuntimeTools(container)).toEqual([]);
+    for (const name of ["read", "deliver_file", "spawn_agent"]) {
+      act(() =>
+        requiredControl(
+          runtimeToolCheckboxes(container).find((checkbox) => checkbox.value === name),
+          name,
+        ).click(),
+      );
+    }
+    const readCheckbox = requiredControl(
+      runtimeToolCheckboxes(container).find((checkbox) => checkbox.value === "read"),
+      "read",
+    );
+    act(() => readCheckbox.click());
+    expect(selectedRuntimeTools(container)).toEqual(["deliver_file", "spawn_agent"]);
+    act(() => readCheckbox.click());
+    const mode = requiredControl(
+      container.querySelector<HTMLSelectElement>('select[name="toolCallingMode"]'),
+      "工具调用模式",
+    );
+    act(() => {
+      mode.value = toolCallingMode;
+      mode.dispatchEvent(new Event("change", { bubbles: true }));
+      container
+        .querySelector("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(api.saveRuntimeSettingsConfiguration).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        toolCallingMode,
+        enabledTools: ["read", "deliver_file", "spawn_agent"],
+      }),
+    );
+    unmount();
+  });
+
+  it("运行工具支持全部关闭与全选，提交空数组而不是省略名单", async () => {
+    const api = fixture();
+    vi.mocked(api.overview).mockResolvedValue({
+      ...overview,
+      activeRuntimeSettings: runtimeSettingsRevision(["read"]),
+    });
+    const { container, unmount } = await mountRuntimeSettings(api);
+    act(() => runtimeToolAction(container, "全选").click());
+    expect(selectedRuntimeTools(container)).toEqual(RUNTIME_TOOL_CATALOG.map((tool) => tool.name));
+    expect(api.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
+    act(() => runtimeToolAction(container, "全部关闭").click());
+    expect(selectedRuntimeTools(container)).toEqual([]);
+    expect(api.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
+    act(() =>
+      container
+        .querySelector("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await settle();
+    expect(api.saveRuntimeSettingsConfiguration).toHaveBeenLastCalledWith(
+      expect.objectContaining({ enabledTools: [] }),
+    );
+    unmount();
+  });
+
+  it("运行工具保存失败保留选择与并发检查值，不自动刷新", async () => {
+    const api = fixture();
+    vi.mocked(api.overview).mockResolvedValue({
+      ...overview,
+      activeRuntimeSettings: runtimeSettingsRevision(["read"]),
+    });
+    vi.mocked(api.saveRuntimeSettingsConfiguration).mockRejectedValue(
+      new AdminApiError("配置已被更新，请刷新后重试。", 409, false),
+    );
+    const { container, unmount } = await mountRuntimeSettings(api);
+    act(() => runtimeToolAction(container, "全部关闭").click());
+    act(() =>
+      requiredControl(
+        runtimeToolCheckboxes(container).find((checkbox) => checkbox.value === "edit"),
+        "edit",
+      ).click(),
+    );
+    const form = container.querySelector("form");
+    const reads = vi.mocked(api.overview).mock.calls.length;
+    act(() => form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await settle();
+    expect(api.saveRuntimeSettingsConfiguration).toHaveBeenLastCalledWith(
+      expect.objectContaining({ enabledTools: ["edit"], expectedGeneration: 3 }),
+    );
+    expect(api.overview).toHaveBeenCalledTimes(reads);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("配置已被更新");
+    expect(container.querySelector("form")).toBe(form);
+    expect(selectedRuntimeTools(container)).toEqual(["edit"]);
+    expect(container.querySelector('input[name="expectedGeneration"]')).toHaveProperty(
+      "value",
+      "3",
+    );
+    expect(
+      runtimeToolCheckboxes(container).every((checkbox) => !checkbox.matches(":disabled")),
+    ).toBe(true);
+    unmount();
+  });
+
+  it.each<{ label: string; enabledTools: RuntimeToolName[] | undefined }>([
+    { label: "部分名单", enabledTools: ["write", "list_agents"] },
+    { label: "全部关闭", enabledTools: [] },
+    { label: "旧配置全选", enabledTools: undefined },
+  ])("运行工具刷新新 revision 回显：$label", async ({ enabledTools }) => {
+    const api = fixture();
+    let active = runtimeSettingsRevision(["read"]);
+    vi.mocked(api.overview).mockImplementation(async () => ({
+      ...overview,
+      generation: active.revision,
+      activeRuntimeSettings: active,
+    }));
+    const { container, unmount } = await mountRuntimeSettings(api);
+    act(() => runtimeToolAction(container, "全部关闭").click());
+    const previousForm = container.querySelector("form");
+    active = { ...runtimeSettingsRevision(enabledTools), revision: 2 };
+    await act(async () => runtimeToolAction(container, "刷新").click());
+    await settle();
+    expect(container.querySelector("form")).not.toBe(previousForm);
+    expect(selectedRuntimeTools(container)).toEqual(
+      RUNTIME_TOOL_CATALOG.filter(
+        (tool) => enabledTools === undefined || enabledTools.includes(tool.name),
+      ).map((tool) => tool.name),
+    );
+    expect(container.querySelector('input[name="expectedGeneration"]')).toHaveProperty(
+      "value",
+      "2",
+    );
+    expect(api.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("运行工具在概览不可用或保存中禁用勾选与批量操作", async () => {
+    const api = fixture();
+    vi.mocked(api.overview).mockRejectedValue(new AdminApiError("概览暂不可用", 503, false));
+    const { container, unmount } = await mountRuntimeSettings(api);
+    const assertDisabled = (disabled: boolean) => {
+      expect(
+        runtimeToolCheckboxes(container).every(
+          (checkbox) => checkbox.matches(":disabled") === disabled,
+        ),
+      ).toBe(true);
+      for (const label of ["全选", "全部关闭"]) {
+        expect(runtimeToolAction(container, label).matches(":disabled")).toBe(disabled);
+      }
+    };
+    assertDisabled(true);
+    act(() => runtimeToolAction(container, "全部关闭").click());
+    expect(selectedRuntimeTools(container)).toEqual(RUNTIME_TOOL_CATALOG.map((tool) => tool.name));
+    vi.mocked(api.overview).mockResolvedValue(overview);
+    await act(async () => runtimeToolAction(container, "刷新").click());
+    await settle();
+    assertDisabled(false);
+    let rejectSave: ((reason: unknown) => void) | undefined;
+    vi.mocked(api.saveRuntimeSettingsConfiguration).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    act(() => runtimeToolAction(container, "全部关闭").click());
+    act(() =>
+      container
+        .querySelector("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    assertDisabled(true);
+    act(() => runtimeToolAction(container, "全选").click());
+    expect(selectedRuntimeTools(container)).toEqual([]);
+    await act(async () => rejectSave?.(new AdminApiError("保存失败", 503, false)));
+    await settle();
+    assertDisabled(false);
+    expect(selectedRuntimeTools(container)).toEqual([]);
+    unmount();
+  });
 
   it("工作台展示真实指标，隐藏内部配置和版本信息", async () => {
     const api = fixture();

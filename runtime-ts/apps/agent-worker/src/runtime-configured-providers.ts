@@ -1,3 +1,4 @@
+import { normalizeRuntimeToolSelection } from "@hoox/protocol";
 import {
   defaultModelConfiguration,
   type ModelProviderConfiguration,
@@ -92,8 +93,12 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       ...savedCompactionSettings,
       maxOutputTokens: Math.min(savedCompactionSettings.maxOutputTokens, modelMaxOutputTokens),
     };
+    const selectedTools = normalizeRuntimeToolSelection(
+      snapshot?.runtimeSettings?.configuration.enabledTools,
+    );
     const key = [
       snapshot?.runtimeSettings?.configuration.toolCallingMode ?? "native",
+      selectedTools === undefined ? "default-tools" : JSON.stringify(selectedTools),
       snapshot?.model?.configuration.providerKey ?? "deployment",
       snapshot?.model?.revision ?? 0,
       compactionSettings.softLimitPercent,

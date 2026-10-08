@@ -1526,6 +1526,55 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("工具选择迁移整批提交不留 routine，拒绝停在 0068 并允许继续无数据降级", async () => {
+    const target = await createIsolatedMigrationTarget("tool_selection_routine_boundary");
+    const facts = async () => ({
+      migrations: (
+        await target.pool.query(
+          "SELECT version,name,checksum FROM runtime_schema_migrations ORDER BY version",
+        )
+      ).rows,
+      routines: (
+        await target.pool.query(
+          "SELECT count(*)::text AS count FROM pg_proc WHERE pronamespace=current_schema()::regnamespace",
+        )
+      ).rows,
+      constraints: (
+        await target.pool.query(
+          "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='admin_control_config_revisions'::regclass AND conname='admin_control_configuration_shape'",
+        )
+      ).rows,
+    });
+    try {
+      await migrateUp(target.pool, target.context);
+      const before = await facts();
+      expect(before.routines).toEqual([{ count: "0" }]);
+      expect(before.constraints[0]?.definition).toContain("enabledTools");
+      await expect(
+        migrateDown(target.pool, {
+          ...target.context,
+          allowDestructive: true,
+          environment: "test",
+          targetVersion: 68,
+        }),
+      ).rejects.toThrow("数据库迁移角色或 Schema 边界不安全");
+      expect(await facts()).toEqual(before);
+      await migrateDown(target.pool, {
+        ...target.context,
+        allowDestructive: true,
+        environment: "test",
+        targetVersion: 67,
+      });
+      const downgraded = await facts();
+      expect(downgraded.routines).toEqual([{ count: "0" }]);
+      expect(downgraded.constraints[0]?.definition).not.toContain("enabledTools");
+      await migrateUp(target.pool, target.context);
+      expect(await facts()).toEqual(before);
+    } finally {
+      await target.close();
+    }
+  }, 120_000);
+
   it("down 只有显式 test 授权可执行并能再次向前", async () => {
     await expect(
       migrateDown(migratorPool, {

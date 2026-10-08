@@ -464,113 +464,149 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     });
   });
 
-  it("显式 Skill 在首个模型请求前由后端注入，纯指令任务保持零 Sandbox", async () => {
-    const body = new TextEncoder().encode("# Review\n按检查清单处理。\n");
-    const entrypointDigest = createHash("sha256").update(body).digest("hex");
-    const target: SkillInvocationTarget = {
-      invocationId: "explicit",
-      invocationName: "review",
-      canonicalKey: "code-review",
-      skillVersion: "1.0.0",
-      entrypointDigest,
-      entrypointSizeBytes: body.byteLength,
-      entrypointBlobRef: "entrypoint-ref",
-      packageDigest: "a".repeat(64),
-      files: [
-        {
-          path: "SKILL.md",
-          mediaType: "text/markdown",
-          sizeBytes: body.byteLength,
-          contentDigest: entrypointDigest,
-          blobRef: "entrypoint-ref",
-        },
-      ],
-    };
-    const repository: SkillRuntimeRepository = {
-      beginInvocation: vi.fn(async () => target),
-      completeInvocation: vi.fn(async () => undefined),
-      listLoadedPackages: vi.fn(async () => []),
-    };
-    const contents = { read: vi.fn(async () => body) };
-    const skillRuntime = new SkillRuntimeService(repository, contents);
-    const persistence = new FakeExecutionPersistence();
-    const seed = fakeSeed("explicit-skill-no-sandbox");
-    const skillItems = [
-      {
+  it.each([
+    { boundary: "默认启用", mode: "native", selection: undefined, delegated: false },
+    { boundary: "平台关闭", mode: "native", selection: [] as const, delegated: false },
+    { boundary: "平台关闭", mode: "ptc", selection: [] as const, delegated: false },
+    { boundary: "委派关闭", mode: "native", selection: undefined, delegated: true },
+    { boundary: "委派关闭", mode: "ptc", selection: undefined, delegated: true },
+  ] as const)(
+    "$mode $boundary 决定显式及恢复技能加载，纯指令任务保持零 Sandbox",
+    async ({ mode, selection, delegated }) => {
+      const skillEnabled = selection === undefined && !delegated;
+      const body = new TextEncoder().encode("# Review\n按检查清单处理。\n");
+      const entrypointDigest = createHash("sha256").update(body).digest("hex");
+      const target: SkillInvocationTarget = {
+        invocationId: "explicit",
         invocationName: "review",
         canonicalKey: "code-review",
         skillVersion: "1.0.0",
-        description: "按检查清单审阅修改",
         entrypointDigest,
+        entrypointSizeBytes: body.byteLength,
+        entrypointBlobRef: "entrypoint-ref",
         packageDigest: "a".repeat(64),
-      },
-    ];
-    const explicitInvocation = { invocationName: "review", args: "检查当前修改" };
-    const scope = persistence.addSeed({
-      ...seed,
-      skills: {
-        schemaVersion: 1,
-        digest: digestRunSkillSnapshot({ items: skillItems, explicitInvocation }),
-        items: skillItems,
-        explicitInvocation,
-      },
-    });
-    const faux = fauxProvider();
-    faux.setResponses([
-      (context) => {
-        expect(JSON.stringify(context.messages)).toContain("RUNTIME_SKILL_INSTRUCTION");
-        expect(JSON.stringify(context.messages)).toContain("按检查清单处理");
-        return fauxAssistantMessage("已完成检查");
-      },
-    ]);
-    const credentials = new InMemoryCredentialStore();
-    await credentials.modify(faux.provider.id, async () => ({
-      type: "api_key",
-      key: "test-only-key",
-    }));
-    const modelRuntime = createModels({ credentials });
-    modelRuntime.setProvider(faux.provider);
-    const sessions = new PiWorkerSessionFactory(
-      faux.getModel(),
-      modelRuntime,
-      () => ({
-        recordStarted: async () => "recorded" as const,
-        record: async () => ({ outcome: "recorded" as const, observation: "", isTruncated: false }),
-      }),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      skillRuntime,
-    );
-    const sandboxes = new FakeSandboxRegistry();
-    const worker = new RunWorker(
-      {
-        persistence,
-        revisions: new FakeRevisionVerifier(),
-        sandboxes,
-        orphanSandboxes: sandboxes,
-        sessions,
-        cancellation: new FakeCancellationPort(),
-        artifacts: new FakeArtifactPublication(),
-        clock: new FakeClock(),
-        metrics: new FakeRecoveryMetrics(),
-      },
-      { workerId: "explicit-skill-worker", runTimeoutMs: 60_000 },
-    );
+        files: [
+          {
+            path: "SKILL.md",
+            mediaType: "text/markdown",
+            sizeBytes: body.byteLength,
+            contentDigest: entrypointDigest,
+            blobRef: "entrypoint-ref",
+          },
+        ],
+      };
+      const repository: SkillRuntimeRepository = {
+        beginInvocation: vi.fn(async () => target),
+        completeInvocation: vi.fn(async () => undefined),
+        listLoadedPackages: vi.fn(async () => [target]),
+      };
+      const contents = { read: vi.fn(async () => body) };
+      const skillRuntime = new SkillRuntimeService(repository, contents);
+      const load = vi.spyOn(skillRuntime, "loadInstruction");
+      const recover = vi.spyOn(skillRuntime, "recoverLoadedInstructions");
+      const persistence = new FakeExecutionPersistence();
+      const seed = fakeSeed("explicit-skill-no-sandbox");
+      const skillItems = [
+        {
+          invocationName: "review",
+          canonicalKey: "code-review",
+          skillVersion: "1.0.0",
+          description: "按检查清单审阅修改",
+          entrypointDigest,
+          packageDigest: "a".repeat(64),
+        },
+      ];
+      const explicitInvocation = { invocationName: "review", args: "检查当前修改" };
+      const scope = persistence.addSeed({
+        ...seed,
+        skills: {
+          schemaVersion: 1,
+          digest: digestRunSkillSnapshot({ items: skillItems, explicitInvocation }),
+          items: skillItems,
+          explicitInvocation,
+        },
+      });
+      const faux = fauxProvider();
+      faux.setResponses([
+        (context) => {
+          if (!skillEnabled) {
+            expect(JSON.stringify(context.messages)).not.toContain("RUNTIME_SKILL_INSTRUCTION");
+            expect(JSON.stringify(context.messages)).not.toContain("按检查清单处理");
+            return fauxAssistantMessage("未加载技能");
+          }
+          expect(JSON.stringify(context.messages)).toContain("RUNTIME_SKILL_INSTRUCTION");
+          expect(JSON.stringify(context.messages)).toContain("按检查清单处理");
+          return fauxAssistantMessage("已完成检查");
+        },
+      ]);
+      const credentials = new InMemoryCredentialStore();
+      await credentials.modify(faux.provider.id, async () => ({
+        type: "api_key",
+        key: "test-only-key",
+      }));
+      const modelRuntime = createModels({ credentials });
+      modelRuntime.setProvider(faux.provider);
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        () => ({
+          recordStarted: async () => "recorded" as const,
+          record: async () => ({
+            outcome: "recorded" as const,
+            observation: "",
+            isTruncated: false,
+          }),
+        }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        skillRuntime,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        mode,
+        selection,
+      );
+      const sandboxes = new FakeSandboxRegistry();
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions: {
+            create: (input) =>
+              sessions.create({
+                ...input,
+                ...(delegated ? { enabledToolNames: ["read"] as const } : {}),
+              }),
+          },
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "explicit-skill-worker", runTimeoutMs: 60_000 },
+      );
 
-    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
-    expect(repository.beginInvocation).toHaveBeenCalledWith(
-      expect.objectContaining({ source: "explicit", invocationName: "review" }),
-    );
-    expect(contents.read).toHaveBeenCalledTimes(1);
-    expect(repository.listLoadedPackages).toHaveBeenCalledTimes(1);
-    expect(sandboxes.acquireCount).toBe(0);
-    expect(sandboxes.settleCount).toBe(0);
-  });
+      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+      expect(load).toHaveBeenCalledTimes(skillEnabled ? 1 : 0);
+      expect(recover).toHaveBeenCalledTimes(skillEnabled ? 1 : 0);
+      if (skillEnabled)
+        expect(repository.beginInvocation).toHaveBeenCalledWith(
+          expect.objectContaining({ source: "explicit", invocationName: "review" }),
+        );
+      expect(contents.read).toHaveBeenCalledTimes(skillEnabled ? 2 : 0);
+      expect(repository.listLoadedPackages).toHaveBeenCalledTimes(skillEnabled ? 1 : 0);
+      expect(sandboxes.acquireCount).toBe(0);
+      expect(sandboxes.settleCount).toBe(0);
+    },
+  );
 
   it("skill 工具不等待附件触发的 Sandbox 准备，后续命令工具等待同一任务", async () => {
     const instruction = new TextEncoder().encode("# Review\n按检查清单处理。\n");

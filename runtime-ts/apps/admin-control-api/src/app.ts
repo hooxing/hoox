@@ -19,6 +19,7 @@ import {
   type CreateModelProviderDraftRequest,
   CreateModelProviderDraftRequestSchema,
   createErrorEnvelope,
+  normalizeRuntimeToolSelection,
   ErrorEnvelopeSchema,
   IdentityAdminConfigurationSuccessEnvelopeSchema,
   MemoryProviderRevisionListSuccessEnvelopeSchema,
@@ -422,6 +423,11 @@ export function createAdminControlApiApp(
   app.put<{ Body: SaveRuntimeSettingsConfigurationRequest }>(
     "/v1/admin/control/runtime-settings/current",
     {
+      preValidation: async (request) => {
+        requireJson(request);
+        // Fastify 的默认数组 coercion 不能把字符串工具名升级成管理员授权清单。
+        normalizeRuntimeToolSelection(request.body?.enabledTools);
+      },
       schema: {
         body: SaveRuntimeSettingsConfigurationRequestSchema,
         response: responseSchemas(RuntimeSettingsRevisionSuccessEnvelopeSchema),

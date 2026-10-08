@@ -1,3 +1,4 @@
+import type { RuntimeToolName } from "@hoox/protocol";
 import {
   encodeControlledToolReceipt,
   type ToolObservationResult,
@@ -39,7 +40,8 @@ type ToolCall = Parameters<ReturnType<RecorderFactory>["recordStarted"]>[0];
 async function fixture(
   options: {
     constructorMode?: ToolCallingMode;
-    withModel?: { toolCallingMode?: ToolCallingMode };
+    enabledTools?: readonly RuntimeToolName[];
+    withModel?: { toolCallingMode?: ToolCallingMode; enabledTools?: readonly RuntimeToolName[] };
     code?: string;
     beforeStarted?: (call: ToolCall) => Promise<void>;
     startedOutcome?: (call: ToolCall) => ToolObservationResult["outcome"];
@@ -174,6 +176,7 @@ async function fixture(
     options.updateScheduledTask,
     undefined,
     options.constructorMode,
+    options.enabledTools,
   );
   if (options.withModel !== undefined) {
     factory = factory.withModel({
@@ -588,5 +591,47 @@ describe("PiWorkerSessionFactory PTC 模式", () => {
     );
     expect(appendToolCall.mock.calls[0]?.[0]).not.toHaveProperty("parentToolCallId");
     expect(appendToolResult.mock.calls[1]?.[0]).not.toHaveProperty("parentToolCallId");
+  });
+});
+
+describe("Worker 平台工具开关", () => {
+  it.each(["native", "ptc"] as const)("%s 不给关闭的定时任务发放许可或执行副作用", async (mode) => {
+    const mutation = vi.fn<NonNullable<ConstructorParameters<typeof PiWorkerSessionFactory>[13]>>();
+    const test = await fixture({
+      constructorMode: mode,
+      enabledTools: ["read"],
+      updateScheduledTask: mutation,
+      ...(mode === "ptc" ? { code: automationProgram } : { nativeAutomation: true }),
+    });
+    await test.worker.execute(test.scope);
+    expect(mutation).not.toHaveBeenCalled();
+    expect(toolPermits(test)).toHaveLength(0);
+    expect(test.providerTools.flat()).not.toContain("automation_update");
+    expect(startedCalls(test).some((call) => call.toolName === "automation_update")).toBe(false);
+  });
+  it("withModel 保留选择并允许显式空选择覆盖", async () => {
+    for (const enabledTools of [undefined, []] as const) {
+      const test = await fixture({
+        enabledTools: ["read"],
+        withModel: { ...(enabledTools === undefined ? {} : { enabledTools }) },
+      });
+      await test.worker.execute(test.scope);
+      expect(test.providerTools[0]).toEqual(
+        enabledTools === undefined
+          ? ["read", "collapse_process_for_final_answer"]
+          : ["collapse_process_for_final_answer"],
+      );
+    }
+  });
+  it("PTC 已启用的命令仍走受控开始、授权和回执", async () => {
+    const test = await fixture({
+      constructorMode: "ptc",
+      enabledTools: ["exec_command"],
+      code: firstCommand,
+    });
+    await test.worker.execute(test.scope);
+    expect(test.command).toHaveBeenCalledTimes(1);
+    expect(toolPermits(test)).toHaveLength(1);
+    expect(test.receipts.map((call) => call.toolName)).toEqual(["exec_command", "run_code"]);
   });
 });

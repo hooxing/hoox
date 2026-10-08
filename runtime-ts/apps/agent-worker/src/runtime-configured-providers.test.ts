@@ -466,3 +466,58 @@ describe("Worker 模型启动探针配置", () => {
     ).rejects.toThrow("MODEL_CREDENTIAL_UNAVAILABLE");
   });
 });
+
+describe("Run 工具选择工厂缓存", () => {
+  const deploymentSettings: RunCompactionSettings = {
+    softLimitPercent: 80,
+    targetPercent: 55,
+    recentUserTokens: 4096,
+    maxOutputTokens: 4096,
+    timeoutMs: 60_000,
+  };
+  it("同模型不同选择不共用工厂，输入顺序不影响缓存，恢复保持原选择", async () => {
+    const base = toolModeSnapshot("ptc");
+    const runtimeSettings = base.runtimeSettings;
+    if (runtimeSettings === undefined) throw new Error("测试快照缺少运行设置");
+    const select = (
+      enabledTools?: readonly ("read" | "skill")[],
+    ): RuntimeControlConfigurationSnapshot => ({
+      ...base,
+      runtimeSettings: {
+        ...runtimeSettings,
+        configuration: {
+          ...runtimeSettings.configuration,
+          ...(enabledTools === undefined ? {} : { enabledTools }),
+        },
+      },
+    });
+    const snapshots = [
+      select(),
+      select([]),
+      select(["skill", "read"]),
+      select(["read", "skill"]),
+      select([]),
+      select(),
+    ];
+    const build = vi.fn(
+      async (
+        _snapshot: RuntimeControlConfigurationSnapshot | undefined,
+        _settings: RunCompactionSettings,
+      ) => ({ create: vi.fn(async () => ({ dispose() {} }) as never) }),
+    );
+    const resolveForRun = vi.fn();
+    for (const value of snapshots) resolveForRun.mockResolvedValueOnce(value);
+    const factory = new RuntimeConfiguredSessionFactory(
+      { resolveForRun },
+      { resolveForRun: async () => deploymentSettings },
+      deploymentSettings,
+      8192,
+      build,
+    );
+    for (let i = 0; i < snapshots.length; i++) await factory.create(createInput(`run-${i}`));
+    expect(build).toHaveBeenCalledTimes(3);
+    expect(
+      build.mock.calls.map(([value]) => value?.runtimeSettings?.configuration.enabledTools),
+    ).toEqual([undefined, [], ["skill", "read"]]);
+  });
+});

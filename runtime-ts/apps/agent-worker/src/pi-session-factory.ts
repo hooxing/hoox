@@ -1,3 +1,4 @@
+import { normalizeRuntimeToolSelection, type RuntimeToolName } from "@hoox/protocol";
 import { measureExecutionPhase } from "@hoox/domain";
 import { createHash } from "node:crypto";
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@hoox/artifact";
@@ -223,13 +224,16 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     }) => Promise<ScheduledTask>,
     private readonly modelUsageMetrics?: ModelUsageMetricsPort,
     private readonly toolCallingMode: ToolCallingMode = "native",
+    private readonly enabledTools?: readonly RuntimeToolName[],
   ) {
+    this.enabledTools = normalizeRuntimeToolSelection(enabledTools);
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
   }
 
   /** 复用工具、持久化和恢复边界，只替换由 Run 固定配置决定的模型相关能力。 */
   withModel(input: {
     readonly toolCallingMode?: ToolCallingMode;
+    readonly enabledTools?: readonly RuntimeToolName[];
     readonly model: Model<Api>;
     readonly modelRuntime: Models;
     readonly modelContext: TrustedPiModelContextCapability;
@@ -261,6 +265,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       this.updateScheduledTask,
       this.modelUsageMetrics,
       input.toolCallingMode ?? this.toolCallingMode,
+      input.enabledTools ?? this.enabledTools,
     );
   }
 
@@ -316,7 +321,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           }
         : {}),
     });
-    const skillEnabled = input.enabledToolNames?.includes("skill") ?? true;
+    const skillEnabled =
+      (this.enabledTools?.includes("skill") ?? true) &&
+      (input.enabledToolNames?.includes("skill") ?? true);
     const agentControl = input.agentControl;
     let attachmentSandboxPreparation: Promise<SandboxSessionRef> | undefined;
     const startAttachmentSandboxPreparation = () => {
@@ -418,14 +425,14 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     });
     const skillRuntime = this.skillRuntime;
     const recoveredSkillInstructions =
-      skillRuntime === undefined
+      !skillEnabled || skillRuntime === undefined
         ? Object.freeze([])
         : await measureStartup("skill_recovery", () =>
             skillRuntime.recoverLoadedInstructions({ binding: skillBinding }),
           );
     const explicitInvocation = skillSnapshot.explicitInvocation;
     const explicitSkillInstruction =
-      explicitInvocation === undefined
+      !skillEnabled || explicitInvocation === undefined
         ? undefined
         : await measureStartup("explicit_skill_load", () =>
             this.requireSkillRuntime().loadInstruction({
@@ -685,6 +692,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     };
     const sessionMaterial = {
       toolCallingMode: this.toolCallingMode,
+      ...(this.enabledTools === undefined ? {} : { enabledTools: this.enabledTools }),
       preparePtcProgram: async (callId: string) => {
         await recordStartedTool({ toolCallId: callId, toolName: "run_code" });
       },

@@ -18,6 +18,7 @@
 | Skill 分发 | ADR-0097 的专有 development fixture | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260827174210](20260827174210-open-source-distribution-license-and-security-gates.md) |
 | 生产 SBOM | clipboard 原生变体规范化特例 | [生产就绪说明](../operations/production-readiness.md) · [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) |
 | Pi 内核与模型目录 | AgentSession/Session 树装配、前后端分别加载目录 | [Thread 连续上下文](../architecture/thread-continuity.md) · [仓库导览](../architecture/repository-map.md) · [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) |
+| 后台工具选择 | 仅隐藏前端工具、全局实时改变在途任务能力 | [工具调用模式](../architecture/tool-calling-modes.md) · [ADR-20261008150709](20261008150709-admin-tool-selection-and-run-snapshot.md) |
 
 ## 完整历史目录
 
@@ -306,5 +307,6 @@
 | [ADR-20261003011415：PTC 模式与独立受控调用日志](20261003011415-ptc-mode-and-durable-dispatch-journal.md) | 已接受（测试分支实验） | 2026-10-03 |
 | [公开首页与工作台分离入口](20261003184949-public-home-and-workspace-entry.md) | 已接受 | 2026-10-03 |
 | [ADR-20261004184828：工具设计同时交付模型结果与用户展示契约](20261004184828-tool-user-presentation-contract.md) | 已接受 | 2026-10-04 |
+| [ADR-20261008150709：后台工具选择与 Run 快照边界](20261008150709-admin-tool-selection-and-run-snapshot.md) | 已接受 | 2026-10-08 |
 
 </details>

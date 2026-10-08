@@ -1,3 +1,4 @@
+import { normalizeRuntimeToolSelection, type RuntimeToolName } from "@hoox/protocol";
 import { createHash } from "node:crypto";
 
 export * from "./run-compaction-settings.js";
@@ -50,6 +51,7 @@ export const DEFAULT_WORKER_MAX_CONCURRENT_RUNS = 20;
 export const DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT = 2;
 
 export interface RuntimeSettingsConfiguration {
+  readonly enabledTools?: readonly RuntimeToolName[];
   readonly toolCallingMode?: "native" | "ptc";
   readonly workerMaxConcurrentRuns: number;
   readonly userMaxConcurrentRunsPerTenant: number;
@@ -551,11 +553,13 @@ export function normalizeRuntimeSettingsConfiguration(
   if (toolCallingMode !== "native" && toolCallingMode !== "ptc") {
     throw new TypeError("工具调用模式必须为 native 或 ptc");
   }
+  const enabledTools = normalizeRuntimeToolSelection(input.enabledTools);
   const softLimit = boundedInteger(input.compactionSoftLimitPercent, "压缩软上限", 50, 95);
   const target = boundedInteger(input.compactionTargetPercent, "压缩目标", 20, 90);
   if (target >= softLimit) throw new TypeError("压缩目标必须低于软上限");
   return Object.freeze({
     toolCallingMode,
+    ...(enabledTools === undefined ? {} : { enabledTools }),
     workerMaxConcurrentRuns: boundedInteger(
       input.workerMaxConcurrentRuns,
       "单 Worker 并行 Run 上限",

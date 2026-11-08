@@ -222,19 +222,34 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
+demo_account_exists="$(printf '%s\n' \
+  "SELECT EXISTS(SELECT 1 FROM :\"runtime_schema\".better_auth_users WHERE email=lower(:'demo_email'))::text;" \
+  | compose exec -T postgres psql \
+      --username "$POSTGRES_USER" \
+      --dbname "$POSTGRES_DB" \
+      --set=runtime_schema="$DATABASE_SCHEMA" \
+      --set=demo_email="$DEMO_ACCOUNT_EMAIL" \
+      --tuples-only --no-align)"
+if [[ "$demo_account_exists" != "true" && "$demo_account_exists" != "false" ]]; then
+  echo "Demo 账号存在性检查失败" >&2
+  exit 1
+fi
 cookie_jar="$(mktemp)"
 account_response="$(mktemp)"
 temporary_files+=("$cookie_jar" "$account_response")
-signup_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output "$account_response" --write-out '%{http_code}' \
+if [[ "$demo_account_exists" == "false" ]]; then
+  # 已有账号继续使用原凭据；注册关闭、重复注册防护或邮件发送策略不应阻断重复发布。
+  signup_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output "$account_response" --write-out '%{http_code}' \
   --header 'Content-Type: application/json' \
   --header "Origin: https://$domain" \
   --header "Referer: https://$domain/" \
   --cookie-jar "$cookie_jar" \
   --data "$account_payload" \
-  "https://$domain/api/api/auth/sign-up/email")"
-if [[ "$signup_status" != "200" && "$signup_status" != "201" && "$signup_status" != "409" && "$signup_status" != "422" ]]; then
-  echo "Demo 账号注册失败" >&2
-  exit 1
+    "https://$domain/api/api/auth/sign-up/email")"
+  if [[ "$signup_status" != "200" && "$signup_status" != "201" && "$signup_status" != "409" && "$signup_status" != "422" ]]; then
+    echo "Demo 账号注册失败：HTTP $signup_status" >&2
+    exit 1
+  fi
 fi
 demo_identity_verified="$(printf '%s\n' \
   "WITH target AS (UPDATE :\"runtime_schema\".better_auth_users SET email_verified=true,updated_at=clock_timestamp() WHERE email=lower(:'demo_email') RETURNING email_verified) SELECT email_verified::text FROM target LIMIT 1;" \
@@ -264,7 +279,7 @@ signin_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 -
   --data "$signin_payload" \
   "https://$domain/api/api/auth/sign-in/email")"
 if [[ "$signin_status" != "200" ]]; then
-  echo "Demo 账号登录初始化失败" >&2
+  echo "Demo 账号登录初始化失败：HTTP $signin_status" >&2
   exit 1
 fi
 exchange_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output "$account_response" --write-out '%{http_code}' \

@@ -121,13 +121,13 @@ describe("工作台滚动区域样式", () => {
 });
 
 describe("正式首页按钮可读性", () => {
-  it("部署按钮默认和悬停共用固定的高对比样式，不再变色", () => {
+  it("部署按钮默认和悬停保持同一组高对比颜色", () => {
     const landing = readFileSync(
       fileURLToPath(new URL("./landing-page.css", import.meta.url)),
       "utf8",
     );
     expect(landing).toMatch(
-      /\.landing-page \.landing-button-light,\s*\.landing-page \.landing-button-light:hover\s*\{[^}]*color:\s*#173b2e;[^}]*background:\s*#faf9f6;[^}]*transition:\s*none;/su,
+      /\.landing-page \.landing-button-light,\s*\.landing-page \.landing-button-light:hover\s*\{[^}]*background:\s*var\(--landing-paper\);[^}]*color:\s*var\(--landing-green\);/su,
     );
   });
 });

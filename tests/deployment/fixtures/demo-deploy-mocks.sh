@@ -15,7 +15,15 @@ docker() {
   elif [[ "$*" == *'exec -T postgres psql'* ]]; then
     local query
     query="$(cat)"
-    if [[ "$query" == *'UPDATE '* ]]; then
+    if [[ "$query" == 'SELECT EXISTS('* ]]; then
+      if [[ "$MOCK_MODE" == existing-account* ]]; then
+        printf 'true\n'
+      elif [[ "$MOCK_MODE" == account-lookup-invalid ]]; then
+        printf 'unknown\n'
+      else
+        printf 'false\n'
+      fi
+    elif [[ "$query" == *'UPDATE '* ]]; then
       if [[ "$MOCK_MODE" == subshell-failure ]]; then
         return 41
       fi
@@ -41,9 +49,16 @@ docker() {
 }
 
 curl() {
+  if [[ "$*" == *'/sign-up/email'* ]]; then
+    printf 'curl signup\n' >>"$MOCK_LOG"
+  elif [[ "$*" == *'/sign-in/email'* ]]; then
+    printf 'curl signin\n' >>"$MOCK_LOG"
+  fi
   if [[ "$*" == *'--write-out'* ]]; then
-    if [[ "$*" == *'/sign-up/email'* && ( "$MOCK_MODE" == explicit-failure || "$MOCK_MODE" == cleanup-failure ) ]]; then
+    if [[ "$*" == *'/sign-up/email'* && ( "$MOCK_MODE" == explicit-failure || "$MOCK_MODE" == cleanup-failure || "$MOCK_MODE" == existing-account* ) ]]; then
       printf '500'
+    elif [[ "$*" == *'/sign-in/email'* && "$MOCK_MODE" == existing-account-signin-failure ]]; then
+      printf '401'
     elif [[ "$*" == *'/v1/admin/control/overview'* || "$*" == *'/trajectory/api/threads'* ]]; then
       printf '401'
     else

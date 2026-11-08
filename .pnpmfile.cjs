@@ -15,10 +15,10 @@ function keepOnlyPeerDependencies(pkg, allowedPeers) {
 module.exports = {
   hooks: {
     readPackage(pkg) {
-      if (pkg.name === "better-auth" && pkg.version === "1.7.1") {
+      if (pkg.name === "better-auth" && pkg.version === "1.7.7") {
         return keepOnlyPeerDependencies(pkg, new Set(["pg"]));
       }
-      if (pkg.name === "@better-auth/core" && pkg.version === "1.7.1") {
+      if (pkg.name === "@better-auth/core" && pkg.version === "1.7.7") {
         return keepOnlyPeerDependencies(
           pkg,
           new Set([

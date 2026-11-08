@@ -87,4 +87,6 @@ API Gate 会在最终镜像中使用真实 AWS SDK 验证与 Worker 一致的 st
 
 `supply-chain:check` 根据 production installed closure 离线生成无时间戳、确定排序的 SBOM，并与已提交文件逐字比较。`license:check` 重算 registry 与 vendor 许可证策略、本地派生 vendor 的上游 commit、patch 和 canonical tree hash；exact patch 还需通过反向应用检查。
 
+安全修复通过精确直接依赖和限定版本线或父依赖的 override 固定版本；升级 Better Auth 时同步 `.pnpmfile.cjs` 的版本匹配，继续裁剪服务端未使用的框架、ORM 和测试 optional peer，避免开发工具进入生产闭包。更新锁文件后重新生成并验证 SBOM，并验证邮件传输、身份配置与 E2B 模板文件匹配的兼容性。
+
 第三方许可证和来源见仓库根目录 `THIRD_PARTY_NOTICES.md`。基础镜像 digest 的现有证据来自记录的 Docker `RepoDigests`；网络不可达时不能宣称已经重新验证远端 digest。

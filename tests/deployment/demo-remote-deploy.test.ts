@@ -124,6 +124,31 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     expect(result.log).not.toContain(" stop ");
     expect(result.composeEnv).toContain("HOOX_DEMO_IMAGE=test/candidate@sha256:candidate");
     expect(readdirSync(join(result.root, "tmp"))).toEqual([]);
+    expect(result.log).toContain("curl signup");
+    expect(result.log).toContain("curl signin");
+  });
+
+  it("已有 Demo 账号跳过注册并继续验证登录，不受重复注册失败影响", () => {
+    const result = deploy("existing-account");
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log).not.toContain("curl signup");
+    expect(result.log).toContain("curl signin");
+    expect(result.log).not.toContain(" stop ");
+    expect(result.stdout).toContain("Hoox Demo 发布完成：candidate");
+  });
+
+  it("账号查询结果无效或已有凭据不能登录时失败关闭并回滚", () => {
+    for (const mode of ["account-lookup-invalid", "existing-account-signin-failure"]) {
+      const result = deploy(mode);
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.log).not.toContain("curl signup");
+      expect(result.log).toContain(" stop ");
+      expect(result.stdout).not.toContain("Hoox Demo 发布完成：candidate");
+      expect(result.composeEnv).toContain("HOOX_DEMO_IMAGE=test/previous@sha256:previous");
+      expect(result.stderr).toContain(
+        mode === "account-lookup-invalid" ? "账号存在性检查失败" : "HTTP 401",
+      );
+    }
   });
 
   it.each([0, 31])("远端 logout 返回 %i 后仍清理临时 Docker 配置与 Runner 私钥", (logoutStatus) => {

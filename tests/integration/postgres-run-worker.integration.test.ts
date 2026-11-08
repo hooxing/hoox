@@ -63,6 +63,10 @@ import {
   AdminControlService,
   digestControlRequest,
 } from "../../runtime-ts/packages/admin-control/src/index.js";
+import {
+  createEmbeddedBetterAuth,
+  emptyIdentityConfiguration,
+} from "../../runtime-ts/packages/identity/src/index.js";
 import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
 import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
 import {
@@ -627,6 +631,126 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
        DROP ROLE IF EXISTS "${migratorRole}"`,
     );
     await admin?.end();
+  });
+
+  it("0070 保留旧密码账号并支持新版注册、登录和 Cookie 会话", async () => {
+    const migration = (await loadMigrations()).find((source) => source.version === 70);
+    if (migration === undefined) throw new Error("缺少 Better Auth 账号键迁移");
+    const legacyId = randomUUID();
+    const newEmail = `new-${suffix}@example.invalid`;
+    const legacyEmail = `legacy-${suffix}@example.invalid`;
+    const password = "test-placeholder-password-for-identity-upgrade";
+    const auth = createEmbeddedBetterAuth({
+      database: runtime,
+      baseURL: "https://hoox.example.invalid",
+      secret: "test-placeholder-secret-for-identity-upgrade-at-least-32-bytes",
+      trustedOrigins: ["https://hoox.example.invalid"],
+      configuration: {
+        ...emptyIdentityConfiguration(),
+        emailPasswordEnabled: true,
+        registrationEnabled: true,
+      },
+      secrets: { providerSecrets: {} },
+    });
+    const context = await auth.$context;
+    const passwordHash = await context.password.hash(password);
+    const request = (path: string, body: unknown) =>
+      auth.handler(
+        new Request(`https://hoox.example.invalid/api/auth/${path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://hoox.example.invalid",
+            "x-hoox-client-ip": "203.0.113.70",
+          },
+          body: JSON.stringify(body),
+        }),
+      );
+    try {
+      await withTransaction(admin, async (client) => {
+        await client.query(`SET LOCAL search_path TO "${schema}"`);
+        await client.query(migration.downSql);
+        await client.query(
+          "INSERT INTO better_auth_users(id,name,email,email_verified) VALUES($1,'旧版账号',$2,true)",
+          [legacyId, legacyEmail],
+        );
+        await client.query(
+          `INSERT INTO better_auth_accounts(issuer,account_id,provider_id,user_id,password,updated_at)
+           VALUES('credential',$1,'credential',$1,$2,clock_timestamp())`,
+          [legacyId, passwordHash],
+        );
+        await client.query(migration.upSql);
+      });
+      const legacy = await request("sign-in/email", { email: legacyEmail, password });
+      expect(legacy.status).toBe(200);
+      expect(((await legacy.json()) as { user: { id: string } }).user.id).toBe(legacyId);
+      const signup = await request("sign-up/email", {
+        name: "新版账号",
+        email: newEmail,
+        password,
+      });
+      expect(signup.status).toBe(200);
+      const newUserId = ((await signup.json()) as { user: { id: string } }).user.id;
+      const account = await runtime.query(
+        "SELECT issuer FROM better_auth_accounts WHERE user_id=$1 AND provider_id='credential'",
+        [newUserId],
+      );
+      expect(account.rows).toEqual([{ issuer: null }]);
+      const signin = await request("sign-in/email", { email: newEmail, password });
+      expect(signin.status).toBe(200);
+      const cookies = signin.headers
+        .getSetCookie()
+        .map((cookie) => cookie.split(";")[0])
+        .join("; ");
+      const session = await auth.api.getSession({ headers: new Headers({ cookie: cookies }) });
+      expect(session?.user.id).toBe(newUserId);
+      const original = await runtime.query(
+        "SELECT issuer FROM better_auth_accounts WHERE user_id=$1",
+        [legacyId],
+      );
+      expect(original.rows).toEqual([{ issuer: "credential" }]);
+    } finally {
+      await runtime.query("DELETE FROM better_auth_users WHERE email IN ($1,$2)", [
+        legacyEmail,
+        newEmail,
+      ]);
+      await runtime.query("DELETE FROM better_auth_rate_limits");
+    }
+  });
+
+  it("0070 拒绝合并重复 Provider 账号键及丢失 issuer 的自动降级", async () => {
+    const migration = (await loadMigrations()).find((source) => source.version === 70);
+    if (migration === undefined) throw new Error("缺少 Better Auth 账号键迁移");
+    for (const mode of ["duplicate-provider", "missing-issuer"] as const) {
+      await expect(
+        withTransaction(admin, async (client) => {
+          // 仅在事务内重建历史约束；失败后回滚，不能污染其他黑盒用例的迁移终态。
+          await client.query(`SET LOCAL search_path TO "${schema}"`);
+          if (mode === "duplicate-provider") await client.query(migration.downSql);
+          const id = randomUUID();
+          await client.query(
+            "INSERT INTO better_auth_users(id,name,email) VALUES($1,'迁移夹具',$2)",
+            [id, `${id}@example.invalid`],
+          );
+          if (mode === "duplicate-provider") {
+            await client.query(
+              `INSERT INTO better_auth_accounts(issuer,account_id,provider_id,user_id,updated_at)
+               VALUES('legacy-a',$1,'credential',$1,clock_timestamp()),
+                     ('legacy-b',$1,'credential',$1,clock_timestamp())`,
+              [id],
+            );
+            await client.query(migration.upSql);
+          } else {
+            await client.query(
+              `INSERT INTO better_auth_accounts(account_id,provider_id,user_id,updated_at)
+               VALUES($1,'credential',$1,clock_timestamp())`,
+              [id],
+            );
+            await client.query(migration.downSql);
+          }
+        }),
+      ).rejects.toThrow(mode === "duplicate-provider" ? "禁止自动合并身份" : "禁止自动回退");
+    }
   });
 
   it("0067 受限控制角色保存工具模式、恢复历史配置并拒绝非法直写", async () => {

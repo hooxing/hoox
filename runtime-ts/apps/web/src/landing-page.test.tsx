@@ -57,6 +57,36 @@ describe("正式产品首页", () => {
     expect(container.textContent).toContain("Skills 不扩张工具或权限");
     expect(container.textContent).toContain("当前为 0.x 早期开发阶段");
   });
+  it("调用模式、生命周期与供应商切换只更新本地演示，保留能力边界", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    await act(async () => root.render(<LandingPage />));
+    const choose = async (group: string, text: string) => {
+      const fieldset = container.querySelector(`[aria-label="${group}"]`);
+      const target = [...(fieldset?.querySelectorAll("button") ?? [])].find((button) =>
+        button.textContent?.includes(text),
+      );
+      expect(target).toBeDefined();
+      await act(async () => target?.click());
+      expect(target?.getAttribute("aria-pressed")).toBe("true");
+      expect(fieldset?.querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
+    };
+    expect(container.textContent).toContain("当前内部工具串行执行");
+    await choose("工具调用模式演示", "原生工具调用");
+    expect(container.querySelector(".landing-execution-body")?.getAttribute("data-mode")).toBe(
+      "native",
+    );
+    expect(container.textContent).toContain("模型读取工具回执，再决定下一步");
+    await choose("沙箱空闲策略演示", "任务后销毁");
+    expect(container.querySelector(".landing-cube-front")?.textContent).toContain("Sandbox B");
+    await choose("沙箱供应商接入演示", "腾讯云 AGS");
+    expect(container.textContent).toContain("接入示意：腾讯云 AGS");
+    expect(container.textContent).toContain("不进行跨供应商自动故障转移");
+    expect(container.textContent).toContain("分支生成后各自推进，不双向同步");
+    expect(container.textContent).toContain("文本快照");
+    expect(container.textContent).toContain("Mem0 可选接入");
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("只读交付卡片没有预览下载控制，工作台默认行为保持不变", async () => {
     const onDownload = vi.fn();
     const onPreview = vi.fn();

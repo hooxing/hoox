@@ -79,8 +79,8 @@ async function startFakeSmtp() {
 }
 
 describe("Nodemailer 真实兼容性", () => {
-  it("10.0.9 的真实 ESM 命名导入与 CommonJS 入口均支持结构化发信", async () => {
-    expect(require("nodemailer/package.json").version).toBe("10.0.9");
+  it("10.1.4 的真实 ESM 命名导入与 CommonJS 入口均支持结构化发信", async () => {
+    expect(require("nodemailer/package.json").version).toBe("10.1.4");
     const commonJs = require("nodemailer") as typeof import("nodemailer");
     for (const factory of [createTransport, commonJs.createTransport]) {
       const transport = factory({ jsonTransport: true });

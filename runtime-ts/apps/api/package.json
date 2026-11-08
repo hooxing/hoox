@@ -18,7 +18,7 @@
     "@hoox/protocol-mapper": "workspace:*",
     "@hoox/resource": "workspace:*",
     "@hoox/skill": "workspace:*",
-    "fastify": "5.12.5",
+    "fastify": "5.12.6",
     "jose": "6.2.10"
   },
   "scripts": {

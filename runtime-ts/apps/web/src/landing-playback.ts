@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
 import type { RunEvent } from "./api.js";
 import { bookRun } from "./landing-case.js";
+import { useLandingClock } from "./landing-motion.js";
 
 const steps = [
   { action: "read", title: "国富论.epub", text: "正在读取资料，梳理全书五篇的结构。" },
@@ -62,53 +62,9 @@ export function bookPlaybackFrame(elapsed: number) {
 }
 
 export function useBookPlayback() {
-  const targetRef = useRef<HTMLElement>(null);
-  const [elapsed, setElapsed] = useState(playbackDurationMs);
-  const [visible, setVisible] = useState(false);
-  const [pageVisible, setPageVisible] = useState(!document.hidden);
-  const [paused, setPaused] = useState(false);
-  const [canAnimate, setCanAnimate] = useState(false);
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function" || typeof IntersectionObserver === "undefined")
-      return;
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const updateMotion = () => {
-      setCanAnimate(!media.matches);
-      setElapsed(media.matches ? playbackDurationMs : 0);
-    };
-    updateMotion();
-    media.addEventListener("change", updateMotion);
-    const observer = new IntersectionObserver(
-      ([entry]) => setVisible(entry?.isIntersecting ?? false),
-      { threshold: 0.25 },
-    );
-    if (targetRef.current !== null) observer.observe(targetRef.current);
-    const updateVisibility = () => setPageVisible(!document.hidden);
-    document.addEventListener("visibilitychange", updateVisibility);
-    return () => {
-      media.removeEventListener("change", updateMotion);
-      observer.disconnect();
-      document.removeEventListener("visibilitychange", updateVisibility);
-    };
-  }, []);
-  const finished = elapsed >= playbackDurationMs;
-  useEffect(() => {
-    if (!canAnimate || !visible || !pageVisible || paused || finished) return;
-    const timer = window.setInterval(
-      () => setElapsed((value) => Math.min(value + playbackTickMs, playbackDurationMs)),
-      playbackTickMs,
-    );
-    return () => window.clearInterval(timer);
-  }, [canAnimate, visible, pageVisible, paused, finished]);
+  const clock = useLandingClock(playbackDurationMs, playbackTickMs);
   return {
-    ...bookPlaybackFrame(elapsed),
-    targetRef,
-    canAnimate,
-    paused,
-    togglePause: () => setPaused((value) => !value),
-    replay: () => {
-      setElapsed(0);
-      setPaused(false);
-    },
+    ...clock,
+    ...bookPlaybackFrame(clock.elapsed),
   };
 }

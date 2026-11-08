@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildConversationBlocks } from "./event-view.js";
-import { LandingPage } from "./landing-page.js";
+import { BookCase } from "./landing-book-case.js";
 import { bookPlaybackFrame, playbackDurationMs } from "./landing-playback.js";
 
 let container: HTMLDivElement;
@@ -50,7 +50,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 const render = async () => {
-  await act(async () => root.render(<LandingPage />));
+  await act(async () => root.render(<BookCase />));
 };
 const show = async (visible = true) => {
   await act(async () =>

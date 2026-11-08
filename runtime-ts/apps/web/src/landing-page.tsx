@@ -1,74 +1,42 @@
 import {
   ArrowDown,
+  ArrowRight,
   ArrowUpRight,
+  Box,
+  Brain,
   Check,
   Code2,
+  Database,
+  FileCheck2,
   Files,
   GitBranch,
   Github,
+  History,
   Layers3,
-  LoaderCircle,
+  LockKeyhole,
+  MessageSquare,
   Pause,
   Play,
+  Power,
   Puzzle,
+  Radio,
   RotateCcw,
+  ScanLine,
   ShieldCheck,
+  Sparkles,
+  Users,
   Workflow,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { type CSSProperties, type ReactNode, useState } from "react";
 import "@hoox/ui-theme/theme.css";
 import "./styles.css";
 import "./landing-page.css";
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
-import { bookArtifacts, bookMessages } from "./landing-case.js";
-import { useBookPlayback } from "./landing-playback.js";
-import { InlineArtifactDelivery, RunStatusBadge, ThreadTranscript } from "./workspace-view.js";
+import { BookCase } from "./landing-book-case.js";
+import { useLandingClock } from "./landing-motion.js";
 
 const repository = "https://github.com/hooxing/hoox";
-const capabilities = [
-  {
-    icon: Workflow,
-    title: "不止一次对话，持续把事做完。",
-    text: "连续上下文、持久执行与失败恢复，让长任务有进度、有记录，也能继续推进。",
-    detail: "Thread · Run · Attempt",
-    href: "/blob/main/docs/architecture/thread-continuity.md",
-  },
-  {
-    icon: Files,
-    title: "文件进来，成果出去。",
-    text: "在工作区处理资料与文件，将中间资源和最终交付分开管理。任务结束，成果留在你手里。",
-    detail: "Workspace · Resource · Artifact",
-    href: "/blob/main/docs/architecture/overview.md",
-  },
-  {
-    icon: GitBranch,
-    title: "多 Agent，各司其职。",
-    text: "主 Agent 拆解工作，子 Agent 独立处理子任务。隔离上下文，共享工作区，通过持久消息协作。",
-    detail: "独立上下文 · 共享工作区 · Mailbox",
-    href: "/blob/main/docs/architecture/agent-collaboration.md",
-  },
-  {
-    icon: Puzzle,
-    title: "把工作方法变成 Skills。",
-    text: "安装、管理和版本化复用专业流程。每次运行固定技能快照，不因更新改变正在执行的任务。",
-    detail: "Skills 不扩张工具或权限",
-    href: "/blob/main/docs/architecture/skill-runtime.md",
-  },
-  {
-    icon: Layers3,
-    title: "从个人工作，到团队协作。",
-    text: "个人与团队空间、任务分支、定时任务，让一次探索可以延续，也让重复工作按计划执行。",
-    detail: "团队空间 · 任务分支 · 调度",
-    href: "/blob/main/docs/architecture/team-collaboration.md",
-  },
-  {
-    icon: ShieldCheck,
-    title: "执行有边界，过程可追溯。",
-    text: "沙箱执行、租户隔离与持久事件共同约束运行。源码、依赖与发布检查都在仓库中可查。",
-    detail: "Tool Router · PostgreSQL RLS · 事件记录",
-    href: "/blob/main/docs/architecture/overview.md",
-  },
-];
+type SceneClock = ReturnType<typeof useLandingClock>;
 
 function RepositoryLink({
   path = "",
@@ -86,115 +54,885 @@ function RepositoryLink({
     </a>
   );
 }
-const ignoreAction = () => undefined;
 
-function BookCase() {
-  const playback = useBookPlayback();
+function SceneControls({ clock, name }: { readonly clock: SceneClock; readonly name: string }) {
+  if (!clock.canAnimate) return null;
+  return (
+    <div className="landing-scene-controls">
+      {!clock.finished && (
+        <button
+          type="button"
+          onClick={clock.togglePause}
+          aria-label={`${clock.paused ? "继续" : "暂停"}${name}动效`}
+        >
+          {clock.paused ? (
+            <Play size={14} aria-hidden="true" />
+          ) : (
+            <Pause size={14} aria-hidden="true" />
+          )}
+        </button>
+      )}
+      <button type="button" onClick={clock.replay} aria-label={`重播${name}演示`}>
+        <RotateCcw size={14} aria-hidden="true" />
+        <span>重播</span>
+      </button>
+    </div>
+  );
+}
+
+function SectionHeading({
+  index,
+  label,
+  title,
+  children,
+}: {
+  readonly index: string;
+  readonly label: string;
+  readonly title: ReactNode;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div className="landing-section-heading">
+      <div>
+        <p className="landing-eyebrow">
+          <span>{index}</span> / {label}
+        </p>
+        <h2>{title}</h2>
+      </div>
+      <div className="landing-heading-copy">{children}</div>
+    </div>
+  );
+}
+
+function RuntimeHero() {
+  const clock = useLandingClock(4_800);
+  const phase = Math.min(4, Math.floor(clock.elapsed / 960));
+  const statuses = [
+    "接收任务与资料",
+    "准备模型与上下文",
+    "调用沙箱与专业能力",
+    "整理任务成果",
+    "成果就绪，可以接着工作",
+  ];
   return (
     <section
-      className="landing-case"
-      id="workbench"
-      aria-labelledby="case-title"
-      ref={playback.targetRef}
-      data-playback={playback.paused ? "paused" : playback.finished ? "completed" : "running"}
+      className="landing-hero landing-wrap"
+      aria-labelledby="hero-title"
+      ref={clock.targetRef}
+      data-motion={clock.motionState}
     >
-      <div className="landing-case-bar">
-        <span>
-          <span className="landing-dot" /> 真实任务
-        </span>
-        <span>执行回放</span>
+      <div className="landing-hero-copy">
+        <p className="landing-eyebrow">
+          <span className="landing-dot" /> 开源 Agent Runtime 与团队工作台
+        </p>
+        <h1 id="hero-title">
+          为你的 Agent，
+          <br />
+          <span className="landing-title-accent">配齐执行底座。</span>
+        </h1>
+        <p className="landing-hero-lead">
+          接上模型与沙箱，
+          <br />
+          让执行、上下文与团队协作连起来。
+        </p>
+        <p className="landing-hero-description">
+          从工具编排、连续任务到文件交付与运行追踪。
+          <br className="landing-desktop-break" />用 Hoox 搭建你能掌控的 Agent。
+        </p>
+        <div className="landing-actions">
+          <a className="landing-button landing-button-primary" href="/app">
+            体验工作台 <ArrowUpRight size={18} aria-hidden="true" />
+          </a>
+          <RepositoryLink className="landing-button">
+            <Github size={18} aria-hidden="true" />
+            查看源码
+          </RepositoryLink>
+        </div>
+        <div className="landing-meta">
+          <span>Apache-2.0</span>
+          <span>TypeScript</span>
+          <span>自主部署</span>
+        </div>
+        <a href="#execution" className="landing-discover">
+          探索执行方式 <ArrowDown size={14} aria-hidden="true" />
+        </a>
       </div>
-      <div className="landing-case-grid">
-        <section className="landing-workspace" aria-label="国富论任务展示">
-          <header className="landing-workspace-header">
-            <h3 id="case-title">帮我整理一份思维导图</h3>
-            {playback.paused && !playback.finished ? (
-              <span className="landing-playback-paused">回放已暂停</span>
-            ) : (
-              <RunStatusBadge status={playback.run.status} />
-            )}
-          </header>
-          <div className="landing-transcript">
-            <ThreadTranscript
-              messages={bookMessages}
-              currentRun={playback.run}
-              currentRunEvents={playback.events}
-            />
-            {playback.finished && (
-              <InlineArtifactDelivery
-                artifacts={bookArtifacts}
-                readOnly
-                onPreview={ignoreAction}
-                onDownload={ignoreAction}
-              />
-            )}
-          </div>
-          <div className="landing-case-complete">
-            <span className="landing-playback-status" role="status">
-              {playback.finished ? (
-                <Check size={15} aria-hidden="true" />
-              ) : (
-                <LoaderCircle
-                  className={playback.paused ? undefined : "spin"}
-                  size={15}
-                  aria-hidden="true"
+      <div
+        className="landing-runtime-art"
+        onPointerMove={(event) => {
+          if (!clock.canAnimate || event.pointerType !== "mouse") return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          event.currentTarget.style.setProperty(
+            "--tilt-x",
+            `${(0.5 - (event.clientY - rect.top) / rect.height) * 6}deg`,
+          );
+          event.currentTarget.style.setProperty(
+            "--tilt-y",
+            `${((event.clientX - rect.left) / rect.width - 0.5) * 6}deg`,
+          );
+        }}
+        onPointerLeave={(event) => {
+          event.currentTarget.style.setProperty("--tilt-x", "0deg");
+          event.currentTarget.style.setProperty("--tilt-y", "0deg");
+        }}
+      >
+        <div className="landing-art-chrome">
+          <span>
+            <Radio size={12} aria-hidden="true" /> HOOX / RUNTIME
+          </span>
+          <span>机制演示</span>
+        </div>
+        <div key={clock.revision} className="landing-runtime-stage" data-phase={phase}>
+          <div className="landing-stage-grid" aria-hidden="true" />
+          <svg
+            className="landing-circuit"
+            viewBox="0 0 600 500"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            <defs>
+              <filter id="landing-beam-glow">
+                <feGaussianBlur stdDeviation="3" />
+              </filter>
+            </defs>
+            {[
+              "M300 78 V172",
+              "M500 136 H420 Q400 136 400 156 V190 H360",
+              "M300 250 V290 H115 Q100 290 100 310 V342",
+              "M300 250 V342",
+              "M300 250 V290 H485 Q500 290 500 310 V342",
+              "M100 390 V414 H300 V438",
+              "M300 390 V438",
+              "M500 390 V414 H300 V438",
+            ].map((path, index) => (
+              <g key={path}>
+                <path className="landing-circuit-base" d={path} />
+                <path className={`landing-beam landing-beam-${index}`} d={path} pathLength="100" />
+                <path
+                  className={`landing-beam landing-beam-glow landing-beam-${index}`}
+                  d={path}
+                  pathLength="100"
+                  filter="url(#landing-beam-glow)"
                 />
-              )}
-              {playback.finished ? "交付完成" : playback.paused ? "已暂停" : "正在处理资料与文件"}
+              </g>
+            ))}
+          </svg>
+          <div className="landing-hero-request">
+            <MessageSquare size={16} aria-hidden="true" />
+            <span>把资料整理成一份调研报告</span>
+            <span>↵</span>
+          </div>
+          <div className="landing-model-node">
+            <Sparkles size={14} aria-hidden="true" />
+            模型服务
+          </div>
+          <div className="landing-runtime-core">
+            <div className="landing-core-halo" aria-hidden="true" />
+            <div className="landing-core-chip">
+              <span className="landing-core-wordmark">
+                Hoox<span>RUNTIME</span>
+              </span>
+              <span className="landing-core-caption">CONTEXT · EXECUTION · STATE</span>
+              <div className="landing-core-pins" aria-hidden="true">
+                {"abcdefghijkl".split("").map((pin) => (
+                  <span key={pin} />
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="landing-hero-tools">
+            {[
+              { icon: Box, label: "Sandbox" },
+              { icon: Puzzle, label: "Skills" },
+              { icon: Brain, label: "Memory", optional: true },
+            ].map(({ icon: Icon, label, optional }) => (
+              <div key={label} className={phase >= 2 ? "is-ready" : ""}>
+                <Icon size={20} aria-hidden="true" />
+                <span>
+                  {label}
+                  {optional && <small>可选</small>}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className={`landing-hero-delivery ${phase >= 4 ? "is-delivered" : ""}`}>
+            <FileCheck2 size={20} aria-hidden="true" />
+            <div>
+              <strong>调研报告.md</strong>
+              <span>文件交付 · 可继续完善</span>
+            </div>
+            <Check size={16} aria-hidden="true" />
+          </div>
+        </div>
+        <div className="landing-art-footer">
+          <span className="landing-art-status" role="status">
+            <span className="landing-dot" />
+            {statuses[phase]}
+          </span>
+          <SceneControls clock={clock} name="执行链路" />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ExecutionSection() {
+  const [mode, setMode] = useState<"native" | "ptc">("ptc");
+  const clock = useLandingClock(4_000);
+  const step = Math.min(3, Math.floor(clock.elapsed / 1_000));
+  const ptc = mode === "ptc";
+  const lines = ptc
+    ? [
+        { id: "brief-call", text: "const brief = await tools.read({" },
+        { id: "brief-path", text: '  path: "brief.md"' },
+        { id: "brief-end", text: "});" },
+        { id: "data-call", text: "const data = await tools.read({" },
+        { id: "data-path", text: '  path: "data.csv"' },
+        { id: "data-end", text: "});" },
+        { id: "result", text: "return { brief, data };" },
+      ]
+    : [
+        { id: "brief-call", text: "模型请求  →  读取 brief.md" },
+        { id: "brief-result", text: "工具回执  ←  返回资料内容" },
+        { id: "brief-end", text: " " },
+        { id: "data-call", text: "模型请求  →  读取 data.csv" },
+        { id: "data-result", text: "工具回执  ←  返回数据内容" },
+        { id: "data-end", text: " " },
+        { id: "result", text: "模型继续  →  整理报告" },
+      ];
+  return (
+    <section
+      id="execution"
+      className="landing-section landing-wrap"
+      ref={clock.targetRef}
+      data-motion={clock.motionState}
+      aria-labelledby="execution-title"
+    >
+      <SectionHeading
+        index="01"
+        label="执行方式"
+        title={
+          <span id="execution-title">
+            同一个任务，
+            <br />
+            选择合适的执行方式。
+          </span>
+        }
+      >
+        <p>
+          原生工具调用与程序化编排。
+          <br />
+          按模型能力和任务需要选择。
+        </p>
+        <RepositoryLink
+          path="/blob/main/docs/architecture/tool-calling-modes.md"
+          className="landing-text-link"
+        >
+          阅读执行契约
+        </RepositoryLink>
+      </SectionHeading>
+      <div className="landing-execution-panel">
+        <div className="landing-panel-bar">
+          <fieldset className="landing-mode-picker" aria-label="工具调用模式演示">
+            {(["native", "ptc"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={mode === value}
+                onClick={() => {
+                  setMode(value);
+                  clock.replay();
+                }}
+              >
+                {value === "ptc" ? (
+                  <>
+                    程序化编排 <span>PTC · 实验</span>
+                  </>
+                ) : (
+                  "原生工具调用"
+                )}
+              </button>
+            ))}
+          </fieldset>
+          <SceneControls clock={clock} name="工具编排" />
+        </div>
+        <div
+          key={`${mode}-${clock.revision}`}
+          className="landing-execution-body"
+          data-step={step}
+          data-mode={mode}
+        >
+          <div className="landing-code-panel">
+            <div className="landing-code-title">
+              <span>{ptc ? "program.js" : "tool turns"}</span>
+              <span>结构示意</span>
+            </div>
+            <pre>
+              <code>
+                {lines.map((line, index) => (
+                  <span
+                    key={`${mode}-${line.id}`}
+                    className={
+                      (step === 0 && index < 3) ||
+                      (step === 1 && index >= 3 && index < 6) ||
+                      (step >= 2 && index === 6)
+                        ? "is-active"
+                        : ""
+                    }
+                  >
+                    <small>{String(index + 1).padStart(2, "0")}</small>
+                    {line.text}
+                  </span>
+                ))}
+              </code>
+            </pre>
+            <div className="landing-code-result">
+              <Check size={14} aria-hidden="true" />
+              {step >= 3 ? "所需结果已返回，模型继续整理报告" : "工具通过同一受控边界执行"}
+            </div>
+          </div>
+          <div className="landing-execution-visual">
+            <span className="landing-overline">
+              {ptc ? "PROGRAMMATIC TOOL CALLING" : "NATIVE TOOL CALLING"}
             </span>
-            {playback.canAnimate && (
+            <h3>{ptc ? "连续工具操作，\n在程序内组织。" : "每一步，\n由模型直接决定。"}</h3>
+            <div className="landing-call-chain">
+              <div className={step >= 0 ? "is-active" : ""}>
+                <Sparkles size={18} aria-hidden="true" />
+                <span>模型规划</span>
+                <small>{ptc ? "生成编排程序" : "发出工具请求"}</small>
+              </div>
+              <div className="landing-call-connector" aria-hidden="true">
+                <span />
+              </div>
+              <div className={step >= 1 ? "is-active" : ""}>
+                <Code2 size={18} aria-hidden="true" />
+                <span>{ptc ? "读取资料 → 读取数据" : "工具回执 → 模型 → 下一工具"}</span>
+                <small>{ptc ? "程序内依次调用" : "逐步交互"}</small>
+              </div>
+              <div className="landing-call-connector" aria-hidden="true">
+                <span />
+              </div>
+              <div className={step >= 3 ? "is-active" : ""}>
+                <FileCheck2 size={18} aria-hidden="true" />
+                <span>模型整理报告</span>
+                <small>继续完成任务</small>
+              </div>
+            </div>
+            <p>
+              {ptc
+                ? "中间结果可在程序内处理，减少逐次返回模型的往返。当前内部工具串行执行，收益因模型与任务而异。"
+                : "模型读取工具回执，再决定下一步。需要检查中间内容或依赖工具返回图片推理时，使用原生模式。"}
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ContinuitySection() {
+  const [policy, setPolicy] = useState<"pause" | "kill">("pause");
+  const clock = useLandingClock(4_800);
+  const step = Math.min(3, Math.floor(clock.elapsed / 1_200));
+  const steps = [
+    "执行任务",
+    "保存工作区",
+    policy === "pause" ? "暂停实例" : "销毁实例",
+    policy === "pause" ? "恢复执行" : "重建环境",
+  ];
+  return (
+    <div className="landing-continuity-band">
+      <section
+        id="continuity"
+        className="landing-section landing-wrap landing-split-section"
+        ref={clock.targetRef}
+        data-motion={clock.motionState}
+      >
+        <div className="landing-section-copy">
+          <p className="landing-eyebrow">02 / 连续工作</p>
+          <h2>
+            执行可以暂停，
+            <br />
+            工作有据可续。
+          </h2>
+          <p>
+            连续上下文与工作区独立持久保存。
+            <br />
+            按任务需要选择实例复用或任务后销毁。
+          </p>
+          <div className="landing-feature-line">
+            <History size={20} aria-hidden="true" />
+            <div>
+              <strong>上下文留得住</strong>
+              <p>后续输入从持久事实重建对话。</p>
+            </div>
+          </div>
+          <div className="landing-feature-line">
+            <Files size={20} aria-hidden="true" />
+            <div>
+              <strong>工作区有版本</strong>
+              <p>实例需要重建时，恢复已保存的工作。</p>
+            </div>
+          </div>
+          <RepositoryLink
+            path="/blob/main/docs/architecture/thread-continuity.md"
+            className="landing-text-link"
+          >
+            了解连续上下文
+          </RepositoryLink>
+        </div>
+        <div className="landing-lifecycle-panel">
+          <div className="landing-panel-bar">
+            <span className="landing-overline">SANDBOX LIFECYCLE</span>
+            <SceneControls clock={clock} name="沙箱生命周期" />
+          </div>
+          <fieldset className="landing-policy-picker" aria-label="沙箱空闲策略演示">
+            {(["pause", "kill"] as const).map((value) => (
               <button
                 type="button"
-                className="landing-playback-control"
-                onClick={playback.finished ? playback.replay : playback.togglePause}
+                key={value}
+                aria-pressed={policy === value}
+                onClick={() => {
+                  setPolicy(value);
+                  clock.replay();
+                }}
               >
-                {playback.finished ? (
-                  <RotateCcw size={14} aria-hidden="true" />
-                ) : playback.paused ? (
-                  <Play size={14} aria-hidden="true" />
-                ) : (
+                {value === "pause" ? (
                   <Pause size={14} aria-hidden="true" />
+                ) : (
+                  <Power size={14} aria-hidden="true" />
                 )}
-                {playback.finished ? "再次回放" : playback.paused ? "继续回放" : "暂停回放"}
+                {value === "pause" ? "暂停复用" : "任务后销毁"}
               </button>
-            )}
+            ))}
+          </fieldset>
+          <div
+            key={`${policy}-${clock.revision}`}
+            className="landing-sandbox-stage"
+            data-step={step}
+            data-policy={policy}
+          >
+            <div className="landing-sandbox-orbit landing-orbit-back" aria-hidden="true" />
+            <div className="landing-sandbox-orbit landing-orbit-front" aria-hidden="true" />
+            <div className="landing-sandbox-cube">
+              <div className="landing-cube-top" />
+              <div className="landing-cube-front">
+                <Box size={24} aria-hidden="true" />
+                <strong>{policy === "kill" && step === 3 ? "Sandbox B" : "Sandbox A"}</strong>
+                <span>
+                  {step === 2
+                    ? policy === "pause"
+                      ? "已暂停"
+                      : "已销毁"
+                    : step === 3
+                      ? policy === "pause"
+                        ? "已恢复"
+                        : "新实例"
+                      : "运行中"}
+                </span>
+              </div>
+              <div className="landing-cube-side" />
+            </div>
+            <div className="landing-sandbox-shards" aria-hidden="true">
+              {"abcdefgh".split("").map((shard, index) => (
+                <span key={shard} style={{ "--shard": index } as CSSProperties} />
+              ))}
+            </div>
+            <p className="landing-sandbox-state" role="status">
+              {step === 2
+                ? policy === "pause"
+                  ? "保存状态，等待后续输入"
+                  : "释放实例，保留已保存的工作"
+                : step === 3
+                  ? policy === "pause"
+                    ? "恢复实例，接着处理后续任务"
+                    : "新建实例，从持久化工作区接续"
+                  : "上下文与工作区逐步持久保存"}
+            </p>
           </div>
-        </section>
-        <aside className="landing-case-note">
-          <span className="landing-eyebrow">FROM REQUEST TO RESULT</span>
-          <h2>
-            交代一件事，
-            <br />
-            拿到一份成果。
-          </h2>
-          <p>一本《国富论》，一句需求。Hoox 阅读资料、梳理脉络，把结果整理成可以继续使用的文件。</p>
-          <ol>
-            <li>
-              <span>01</span>
-              <div>
-                <strong>交代任务</strong>
-                <p>直接说出需求，附上你的资料。</p>
-              </div>
-            </li>
-            <li>
-              <span>02</span>
-              <div>
-                <strong>看见执行</strong>
-                <p>处理文件、调用工具，过程有迹可循。</p>
-              </div>
-            </li>
-            <li>
-              <span>03</span>
-              <div>
-                <strong>接着工作</strong>
-                <p>拿走交付物，或在同一任务中继续完善。</p>
-              </div>
-            </li>
+          <ol className="landing-lifecycle-steps">
+            {steps.map((label, index) => (
+              <li key={label} className={index <= step ? "is-active" : ""}>
+                <span>{index < step ? <Check size={12} aria-hidden="true" /> : index + 1}</span>
+                {label}
+              </li>
+            ))}
           </ol>
-          <a href="/app" className="landing-text-link">
-            把你的任务交给 Hoox <ArrowUpRight size={16} aria-hidden="true" />
-          </a>
-        </aside>
+          <div className="landing-persistence-layer">
+            <Database size={18} aria-hidden="true" />
+            <div>
+              <strong>Thread Context + Workspace Revision</strong>
+              <span>持久保存，不随实例销毁而删除</span>
+            </div>
+            <ShieldCheck size={18} aria-hidden="true" />
+          </div>
+          <p className="landing-boundary">暂停与恢复受供应商能力、TTL 和保留策略约束。</p>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TeamSection() {
+  const clock = useLandingClock(4_000);
+  const step = Math.min(3, Math.floor(clock.elapsed / 1_000));
+  return (
+    <section
+      id="team"
+      className="landing-section landing-wrap"
+      ref={clock.targetRef}
+      data-motion={clock.motionState}
+    >
+      <SectionHeading
+        index="03"
+        label="团队工作台"
+        title={
+          <>
+            从一个人的探索，
+            <br />
+            到团队继续推进。
+          </>
+        }
+      >
+        <p>
+          对话生成团队分支，文件与 Skills
+          <br />
+          留在团队空间，记忆按空间隔离。
+        </p>
+        <RepositoryLink
+          path="/blob/main/docs/architecture/team-collaboration.md"
+          className="landing-text-link"
+        >
+          了解团队边界
+        </RepositoryLink>
+      </SectionHeading>
+      <div className="landing-team-panel">
+        <div className="landing-panel-bar">
+          <span className="landing-panel-label">
+            <GitBranch size={16} aria-hidden="true" /> 对话分支示意
+          </span>
+          <SceneControls clock={clock} name="团队分支" />
+        </div>
+        <div key={clock.revision} className="landing-team-stage" data-step={step}>
+          <article className="landing-thread-card">
+            <header>
+              <span className="landing-avatar">
+                <MessageSquare size={18} aria-hidden="true" />
+              </span>
+              <div>
+                <strong>个人空间</strong>
+                <p>供应商调研</p>
+              </div>
+              <LockKeyhole size={14} aria-label="个人空间" />
+            </header>
+            <div className="landing-chat-prompt">帮我整理供应商评估维度。</div>
+            <div className="landing-chat-answer">
+              <span>h</span>
+              <p>从接入成本、运行能力与部署约束三个维度展开。</p>
+            </div>
+            <footer>
+              <History size={14} aria-hidden="true" />
+              来源对话保留
+            </footer>
+          </article>
+          <div className="landing-branch-link" aria-hidden="true">
+            <span className="landing-branch-wire" />
+            <span className="landing-snapshot-packet">
+              <Files size={20} />
+            </span>
+            <ArrowRight size={20} />
+            <small>文本快照</small>
+          </div>
+          <article className="landing-thread-card landing-team-target">
+            <header>
+              <span className="landing-avatar landing-team-avatar">
+                <Users size={18} aria-hidden="true" />
+              </span>
+              <div>
+                <strong>工程团队</strong>
+                <p>供应商调研 · 分支</p>
+              </div>
+              <span className="landing-team-tag">独立推进</span>
+            </header>
+            <div className="landing-shared-snapshot">
+              <Check size={14} aria-hidden="true" />
+              已带入来源对话文本
+            </div>
+            <div className="landing-team-message">
+              <span className="landing-avatar">林</span>
+              <p>接着评估各方案的部署成本。</p>
+            </div>
+            <footer>
+              <GitBranch size={14} aria-hidden="true" />
+              独立上下文与工作区
+            </footer>
+          </article>
+        </div>
+        <div className="landing-team-foundation">
+          <span>
+            <Brain size={16} aria-hidden="true" />
+            团队记忆 · Mem0 可选接入
+          </span>
+          <span>
+            <Puzzle size={16} aria-hidden="true" />
+            团队文件与 Skills
+          </span>
+          <span>分支生成后各自推进，不双向同步</span>
+        </div>
+      </div>
+      <div className="landing-team-details">
+        <div>
+          <Layers3 size={20} aria-hidden="true" />
+          <h3>多 Agent，各司其职。</h3>
+          <p>独立上下文，共享工作区，通过持久消息协作。</p>
+          <RepositoryLink
+            path="/blob/main/docs/architecture/agent-collaboration.md"
+            className="landing-text-link"
+          >
+            智能体协作
+          </RepositoryLink>
+        </div>
+        <div>
+          <Puzzle size={20} aria-hidden="true" />
+          <h3>把工作方法变成 Skills。</h3>
+          <p>按空间管理和复用。Skills 不扩张工具或权限。</p>
+          <RepositoryLink
+            path="/blob/main/docs/architecture/skill-runtime.md"
+            className="landing-text-link"
+          >
+            技能运行机制
+          </RepositoryLink>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+const sandboxProviders = ["CubeSandbox", "E2B", "腾讯云 AGS"] as const;
+function IntegrationSection() {
+  const [provider, setProvider] = useState<(typeof sandboxProviders)[number]>("CubeSandbox");
+  const clock = useLandingClock(2_400);
+  const providerIndex = sandboxProviders.indexOf(provider);
+  const route = `M0 100 H35 Q45 100 45 ${[35, 100, 165][providerIndex]} H100`;
+  return (
+    <section
+      id="providers"
+      className="landing-section landing-wrap landing-integrations"
+      ref={clock.targetRef}
+      data-motion={clock.motionState}
+    >
+      <SectionHeading
+        index="04"
+        label="服务接入"
+        title={
+          <>
+            模型与基础设施，
+            <br />
+            按你的需要接入。
+          </>
+        }
+      >
+        <p>
+          保持统一的执行边界，
+          <br />
+          连接你选择的服务。
+        </p>
+        <RepositoryLink
+          path="/blob/main/docs/architecture/sandbox-providers.md"
+          className="landing-text-link"
+        >
+          查看供应商能力
+        </RepositoryLink>
+      </SectionHeading>
+      <div className="landing-integration-map">
+        <div className="landing-service-inputs">
+          <div>
+            <Sparkles size={20} aria-hidden="true" />
+            <div>
+              <strong>模型服务</strong>
+              <span>按 Provider 契约接入</span>
+            </div>
+          </div>
+          <div>
+            <Brain size={20} aria-hidden="true" />
+            <div>
+              <strong>长期记忆</strong>
+              <span>Mem0 · 可选</span>
+            </div>
+          </div>
+        </div>
+        <span className="landing-map-incoming" aria-hidden="true" />
+        <div className="landing-map-core">
+          <span>Hoox</span>
+          <small>统一执行与持久身份</small>
+        </div>
+        <svg
+          className="landing-provider-route"
+          viewBox="0 0 100 200"
+          preserveAspectRatio="none"
+          aria-hidden="true"
+        >
+          <path className="landing-route-base" d={route} />
+          <path
+            key={`${provider}-${clock.revision}`}
+            className="landing-route-packet"
+            d={route}
+            pathLength="100"
+          />
+        </svg>
+        <fieldset className="landing-provider-options" aria-label="沙箱供应商接入演示">
+          {sandboxProviders.map((item, index) => (
+            <button
+              type="button"
+              key={item}
+              aria-pressed={provider === item}
+              onClick={() => {
+                setProvider(item);
+                clock.replay();
+              }}
+            >
+              <span className="landing-provider-mark">
+                {index === 0 ? (
+                  <Box size={20} aria-hidden="true" />
+                ) : index === 1 ? (
+                  <Code2 size={20} aria-hidden="true" />
+                ) : (
+                  <Layers3 size={20} aria-hidden="true" />
+                )}
+              </span>
+              <span>{item}</span>
+              {provider === item && <Check size={16} aria-label="已选择" />}
+            </button>
+          ))}
+        </fieldset>
+      </div>
+      <div className="landing-integration-note">
+        <span role="status">接入示意：{provider}</span>
+        <p>
+          新实例采用配置；存量实例保留原有供应商身份。
+          <br />
+          不进行跨供应商自动故障转移。
+        </p>
+      </div>
+    </section>
+  );
+}
+
+const traceEvents = [
+  { title: "领取任务", detail: "Worker 获得当前执行租约", icon: Workflow },
+  { title: "准备上下文", detail: "从持久事实重建当前对话", icon: History },
+  { title: "完成工具操作", detail: "执行状态与受控回执形成记录", icon: Code2 },
+  { title: "发布交付物", detail: "调研报告.md 已就绪", icon: FileCheck2 },
+] as const;
+function OperationsSection() {
+  const clock = useLandingClock(4_000);
+  const step = Math.min(3, Math.floor(clock.elapsed / 1_000));
+  return (
+    <section
+      id="architecture"
+      className="landing-operations"
+      ref={clock.targetRef}
+      data-motion={clock.motionState}
+    >
+      <div className="landing-wrap landing-section">
+        <SectionHeading
+          index="05"
+          label="部署与运维"
+          title={
+            <>
+              发生了什么，
+              <br />
+              沿着记录看清楚。
+            </>
+          }
+        >
+          <p>
+            查看任务进度、工具状态与交付结果。
+            <br />
+            模型配置和运行设置集中管理。
+          </p>
+          <RepositoryLink
+            path="/blob/main/docs/architecture/overview.md"
+            className="landing-text-link"
+          >
+            了解完整架构
+          </RepositoryLink>
+        </SectionHeading>
+        <div className="landing-console">
+          <div className="landing-console-bar">
+            <span>
+              <span className="landing-dot" /> HOOX / EXECUTION TRACE
+            </span>
+            <span>机制演示</span>
+            <SceneControls clock={clock} name="运行轨迹" />
+          </div>
+          <div className="landing-console-body">
+            <aside>
+              <span className="landing-overline">运行记录</span>
+              <strong>供应商调研报告</strong>
+              <span className="landing-console-task-status">
+                {clock.finished ? "交付完成" : "任务执行中"}
+              </span>
+              <hr />
+              <span>
+                <ScanLine size={16} aria-hidden="true" />
+                执行轨迹
+              </span>
+              <span>
+                <Sparkles size={16} aria-hidden="true" />
+                模型配置
+              </span>
+              <span>
+                <Workflow size={16} aria-hidden="true" />
+                运行设置
+              </span>
+              <span>
+                <ShieldCheck size={16} aria-hidden="true" />
+                Worker 调度
+              </span>
+            </aside>
+            <div key={clock.revision} className="landing-trace-list">
+              {traceEvents.map(({ title, detail, icon: Icon }, index) => (
+                <div
+                  key={title}
+                  className={`landing-trace-event ${index <= step ? "is-recorded" : ""} ${index === step && !clock.finished ? "is-current" : ""}`}
+                >
+                  <span className="landing-trace-index">0{index + 1}</span>
+                  <span className="landing-trace-dot" />
+                  <Icon size={20} aria-hidden="true" />
+                  <div>
+                    <strong>{title}</strong>
+                    <p>{detail}</p>
+                  </div>
+                  <Check size={16} className="landing-trace-check" aria-hidden="true" />
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="landing-console-footer">
+            <span role="status">
+              {clock.finished ? "执行完成，关键状态形成持久记录" : "沿时间线查看执行过程"}
+            </span>
+            <span>示意内容，不读取用户任务</span>
+          </div>
+        </div>
+        <div className="landing-deployment-row">
+          <div>
+            <strong>在你的基础设施上运行。</strong>
+            <p>
+              部署需要 PostgreSQL、S3 兼容存储、Sandbox 与模型服务。
+              <br />
+              当前为 0.x 早期开发阶段。
+            </p>
+          </div>
+          <RepositoryLink
+            path="/blob/main/docs/development.md"
+            className="landing-button landing-button-light"
+          >
+            阅读部署文档
+          </RepositoryLink>
+        </div>
       </div>
     </section>
   );
@@ -211,186 +949,66 @@ export function LandingPage() {
           <img src={HOOX_HORIZONTAL_PATH} alt="Hoox" width="136" height="42" />
         </a>
         <nav aria-label="首页导航">
-          <a href="#capabilities">核心能力</a>
-          <a href="#architecture">架构与部署</a>
+          <a href="#execution">执行方式</a>
+          <a href="#team">团队协作</a>
+          <a href="#architecture">部署</a>
           <RepositoryLink className="landing-nav-github">
-            <Github size={17} aria-hidden="true" /> GitHub
+            <Github size={16} aria-hidden="true" />
+            GitHub
           </RepositoryLink>
-          <a className="landing-nav-app" href="/app">
-            打开工作台 <ArrowUpRight size={15} aria-hidden="true" />
+          <a href="/app" className="landing-nav-app">
+            打开工作台 <ArrowUpRight size={16} aria-hidden="true" />
           </a>
         </nav>
       </header>
       <main id="main-content">
-        <section className="landing-hero landing-wrap" aria-labelledby="hero-title">
-          <p className="landing-eyebrow">
-            <span className="landing-dot" /> 开源 Agent 工作台与执行运行时
-          </p>
-          <h1 id="hero-title">
-            你说，<span>它做。</span>
-          </h1>
-          <p className="landing-hero-lead">一个能做事，也由你掌控的 Agent 工作空间。</p>
-          <p className="landing-hero-copy">
-            从对话、文件和工具执行，到真正可交付的成果。
-            <br className="landing-desktop-break" />{" "}
-            给日常工作一个帮手，也给开发者一套开放的执行底座。
-          </p>
-          <div className="landing-actions">
-            <a className="landing-button landing-button-primary" href="/app">
-              开始使用 Hoox <ArrowUpRight size={18} aria-hidden="true" />
-            </a>
-            <RepositoryLink className="landing-button">
-              <Github size={18} aria-hidden="true" /> 查看源码
-            </RepositoryLink>
+        <RuntimeHero />
+        <div className="landing-principles landing-wrap">
+          <span>
+            <Workflow size={16} aria-hidden="true" />
+            执行方式可选
+          </span>
+          <span>
+            <History size={16} aria-hidden="true" />
+            任务状态可恢复
+          </span>
+          <span>
+            <ScanLine size={16} aria-hidden="true" />
+            运行过程可追踪
+          </span>
+          <span>
+            <Users size={16} aria-hidden="true" />
+            团队工作可接续
+          </span>
+        </div>
+        <ExecutionSection />
+        <ContinuitySection />
+        <TeamSection />
+        <IntegrationSection />
+        <OperationsSection />
+        <div className="landing-section landing-wrap landing-proof">
+          <div className="landing-proof-heading">
+            <p className="landing-eyebrow">06 / 从请求到成果</p>
+            <p>看看工作台如何把资料变成交付物。</p>
           </div>
-          <div className="landing-meta">
-            <span>Apache-2.0</span>
-            <span>TypeScript</span>
-            <span>自主部署</span>
-          </div>
-          <a className="landing-discover" href="#workbench">
-            看看它如何工作 <ArrowDown size={14} aria-hidden="true" />
-          </a>
-        </section>
-        <div className="landing-wrap">
           <BookCase />
         </div>
-        <section
-          id="capabilities"
-          className="landing-capabilities landing-wrap"
-          aria-labelledby="capabilities-title"
-        >
-          <div className="landing-section-heading">
-            <div>
-              <p className="landing-eyebrow">BUILT TO GET THINGS DONE</p>
-              <h2 id="capabilities-title">
-                好用的工作台。
-                <br />
-                扎实的执行底座。
-              </h2>
-            </div>
-            <p>
-              使用者关心事情有没有做完。
-              <br />
-              开发者还关心：它是怎样做到的。
-            </p>
-          </div>
-          <div className="landing-capability-grid">
-            {capabilities.map(({ icon: Icon, title, text, detail, href }) => (
-              <article key={title}>
-                <div className="landing-capability-icon">
-                  <Icon size={23} strokeWidth={1.6} aria-hidden="true" />
-                </div>
-                <h3>{title}</h3>
-                <p>{text}</p>
-                <RepositoryLink path={href} className="landing-capability-detail">
-                  {detail}
-                </RepositoryLink>
-              </article>
-            ))}
-          </div>
-        </section>
-        <section
-          id="architecture"
-          className="landing-architecture"
-          aria-labelledby="architecture-title"
-        >
-          <div className="landing-wrap landing-architecture-grid">
-            <div>
-              <p className="landing-eyebrow">OPEN BY DESIGN</p>
-              <h2 id="architecture-title">
-                你的模型。
-                <br />
-                你的基础设施。
-                <br />
-                <span>你的 Hoox。</span>
-              </h2>
-              <p className="landing-architecture-copy">
-                不把运行机制藏在黑盒里。独立部署，阅读实现，按自己的需求构建。
-              </p>
-              <RepositoryLink
-                path="/blob/main/docs/development.md"
-                className="landing-button landing-button-light"
-              >
-                阅读部署文档
-              </RepositoryLink>
-              <p className="landing-deployment-note">
-                部署需要 PostgreSQL、S3 兼容存储、Sandbox 与模型服务。
-                <br />
-                当前为 0.x 早期开发阶段。
-              </p>
-            </div>
-            <section className="landing-stack" aria-label="Hoox 架构">
-              <div className="landing-stack-client">
-                <span>Web 工作台</span>
-                <Code2 size={20} aria-hidden="true" />
-                <span>API</span>
-              </div>
-              <div className="landing-stack-connector" aria-hidden="true">
-                ↓
-              </div>
-              <div className="landing-stack-runtime">
-                <span>HOOX RUNTIME</span>
-                <strong>让执行连续、受控、可追溯</strong>
-                <div>
-                  <span>Agent Worker</span>
-                  <span>Scheduler</span>
-                  <span>Tool Router</span>
-                </div>
-              </div>
-              <div className="landing-stack-connector" aria-hidden="true">
-                ↓
-              </div>
-              <div className="landing-stack-foundation">
-                <div>
-                  <strong>模型服务</strong>
-                  <span>按 Provider 契约接入</span>
-                </div>
-                <div>
-                  <strong>Sandbox</strong>
-                  <span>CubeSandbox / E2B / AGS</span>
-                </div>
-                <div>
-                  <strong>持久化</strong>
-                  <span>PostgreSQL / S3</span>
-                </div>
-              </div>
-              <RepositoryLink
-                path="/blob/main/docs/architecture/overview.md"
-                className="landing-stack-link"
-              >
-                了解完整架构
-              </RepositoryLink>
-            </section>
-          </div>
-        </section>
-        <section
-          id="open-source"
-          className="landing-open-source landing-wrap"
-          aria-labelledby="opensource-title"
-        >
-          <p className="landing-eyebrow">BUILD IT TOGETHER</p>
-          <h2 id="opensource-title">
-            不只是使用。
-            <br />
-            也可以一起创造。
-          </h2>
-          <p>
-            读代码，提建议，贡献一个修复，或分享你的工作方法。
-            <br className="landing-desktop-break" />让 Agent 真正成为能够托付工作的工具。
-          </p>
+        <section className="landing-open-source landing-wrap" aria-labelledby="opensource-title">
+          <p className="landing-eyebrow">OPEN SOURCE. YOUR CONTROL.</p>
+          <h2 id="opensource-title">下一步，把你的 Agent 跑起来。</h2>
+          <p>从源码了解 Hoox，按你的基础设施部署。</p>
           <div className="landing-actions">
-            <RepositoryLink className="landing-button landing-button-primary">
-              前往 GitHub
-            </RepositoryLink>
-            <RepositoryLink path="/blob/main/CONTRIBUTING.md" className="landing-button">
-              参与贡献
+            <a href="/app" className="landing-button landing-button-primary">
+              体验工作台 <ArrowUpRight size={18} aria-hidden="true" />
+            </a>
+            <RepositoryLink path="/blob/main/docs/development.md" className="landing-button">
+              阅读部署文档
             </RepositoryLink>
           </div>
           <div className="landing-community-links">
+            <RepositoryLink path="/blob/main/CONTRIBUTING.md">参与贡献</RepositoryLink>
             <RepositoryLink path="/issues">问题与建议</RepositoryLink>
             <RepositoryLink path="/blob/main/SECURITY.md">安全反馈</RepositoryLink>
-            <RepositoryLink path="/blob/main/LICENSE">Apache-2.0 许可证</RepositoryLink>
           </div>
         </section>
       </main>
@@ -398,10 +1016,10 @@ export function LandingPage() {
         <a href="/" aria-label="返回 Hoox 首页">
           <img src={HOOX_HORIZONTAL_PATH} alt="Hoox" width="108" height="34" />
         </a>
-        <span>你说，它做。</span>
+        <span>开源 Agent Runtime · 团队工作台</span>
         <div>
           <a href="/app">工作台</a>
-          <RepositoryLink>GitHub</RepositoryLink>
+          <RepositoryLink path="/blob/main/LICENSE">Apache-2.0</RepositoryLink>
         </div>
       </footer>
     </div>

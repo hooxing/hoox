@@ -3952,27 +3952,27 @@ td:first-child {
   display: grid;
   place-items: center;
   padding: 32px 16px;
-  background: hsl(220, 24%, 97%);
-  color: hsl(220, 24%, 16%);
+  background: hsl(140, 14.29%, 95.88%);
+  color: hsl(154.29, 23.33%, 11.76%);
 }
 .installation-card {
   width: 100%;
   max-width: 448px;
   padding: 48px 32px;
   background: white;
-  border: 1px solid hsl(220, 16%, 88%);
+  border: 1px solid hsl(140, 12.5%, 90.59%);
   border-radius: 12px;
-  box-shadow: 0 4px 6px hsla(220, 24%, 16%, 0.05);
+  box-shadow: 0 4px 6px hsla(154.29, 23.33%, 11.76%, 0.05);
 }
 .installation-brand {
   font-size: 24px;
   font-weight: 700;
-  color: hsl(220, 24%, 16%);
+  color: hsl(159, 46.51%, 16.86%);
   text-decoration: none;
 }
 .installation-eyebrow {
   margin: 32px 0 8px;
-  color: hsl(220, 14%, 40%);
+  color: hsl(148, 6.85%, 42.94%);
   font-size: 14px;
 }
 .installation-card h1 {
@@ -3982,7 +3982,7 @@ td:first-child {
 }
 .installation-description {
   margin: 12px 0 32px;
-  color: hsl(220, 14%, 40%);
+  color: hsl(148, 6.85%, 42.94%);
   line-height: 1.5;
 }
 .installation-card form {
@@ -3998,24 +3998,35 @@ td:first-child {
 .installation-card input {
   width: 100%;
   padding: 12px;
-  border: 1px solid hsl(220, 10%, 55%);
+  border: 1px solid hsl(141.43, 5.93%, 53.73%);
   border-radius: 8px;
+  color: inherit;
+  background: white;
   font-size: 16px;
   font-weight: 400;
 }
 .installation-card input:focus {
-  outline: 2px solid hsl(220, 70%, 45%);
+  outline: 2px solid hsl(158.57, 64.62%, 25.49%);
   outline-offset: 2px;
 }
 .installation-card button {
   border: 0;
   border-radius: 8px;
   padding: 12px 16px;
-  background: hsl(220, 70%, 40%);
+  background: hsl(158.57, 64.62%, 25.49%);
   color: white;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
+}
+.installation-card button:hover:not(:disabled) {
+  background: hsl(158.82, 65.38%, 20.39%);
+}
+.installation-card button:focus-visible,
+.installation-banner a:focus-visible,
+.installation-logout:focus-visible {
+  outline: 2px solid hsl(158.57, 64.62%, 25.49%);
+  outline-offset: 2px;
 }
 .installation-card button:disabled {
   opacity: 0.6;
@@ -4023,13 +4034,13 @@ td:first-child {
 }
 .installation-error {
   margin: 0;
-  color: hsl(0, 65%, 36%);
+  color: hsl(5.12, 53.09%, 52.35%);
   font-size: 14px;
 }
 .installation-note,
 .installation-card small {
   margin: 24px 0 0;
-  color: hsl(220, 14%, 40%);
+  color: hsl(148, 6.85%, 42.94%);
   font-size: 14px;
   font-weight: 400;
 }
@@ -4040,8 +4051,8 @@ td:first-child {
   flex-wrap: wrap;
   gap: 16px;
   padding: 16px 32px;
-  background: hsl(220, 65%, 95%);
-  color: hsl(220, 65%, 25%);
+  background: hsl(150, 33.33%, 92.94%);
+  color: hsl(158.82, 65.38%, 20.39%);
 }
 .installation-banner p {
   margin: 8px 0 0;
@@ -4055,8 +4066,9 @@ td:first-child {
   bottom: 16px;
   right: 16px;
   z-index: 10;
-  border: 1px solid hsl(220, 10%, 55%);
+  border: 1px solid hsl(141.43, 5.93%, 53.73%);
   background: white;
+  color: hsl(158.57, 64.62%, 25.49%);
   border-radius: 8px;
   padding: 8px 12px;
   cursor: pointer;

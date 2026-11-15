@@ -4,6 +4,7 @@ import {
   ModelProviderCredentialCipher,
   PgSandboxCleanupConsumerStore,
   PgSandboxConfigurationResolver,
+  PgRuntimeControlConfigurationRepository,
   PgThreadContinuityMetrics,
   PgThreadSandboxLifecycleConsumerStore,
   PgThreadTitleGenerationStore,
@@ -71,7 +72,7 @@ const schedulerEnvironmentSchema = Object.freeze({
   E2B_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   TENCENT_AGS_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   TENCENT_AGS_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
-  CUBESANDBOX_API_URL: urlEnvironmentField(),
+  CUBESANDBOX_API_URL: urlEnvironmentField({ requiredIn: [] }),
   CUBESANDBOX_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   CUBESANDBOX_PROXY_NODE_IP: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   CUBESANDBOX_PROXY_PORT: integerEnvironmentField({ minimum: 1, maximum: 65_535, requiredIn: [] }),
@@ -149,7 +150,7 @@ export interface SchedulerProcessConfiguration {
     enabledProviderKeys: readonly SandboxProviderKey[];
     e2b?: Readonly<{ apiKey: string; domain?: string }>;
     tencentAgs?: Readonly<{ apiKey: string; domain: string }>;
-    apiUrl: string;
+    apiUrl?: string;
     apiKey?: string;
     proxyNodeIp?: string;
     proxyPort?: number;
@@ -187,6 +188,7 @@ function parseSandboxProviderKey(value: string): SandboxProviderKey {
 }
 
 function parseEnabledSandboxProviders(value: string): readonly SandboxProviderKey[] {
+  if (value === "") return Object.freeze([]);
   const keys = value.split(",").map((item) => parseSandboxProviderKey(item.trim()));
   if (keys.length === 0 || new Set(keys).size !== keys.length) {
     throw new TypeError("SANDBOX_ENABLED_PROVIDERS 必须是非空且不重复的 Provider 列表");
@@ -231,9 +233,9 @@ export function parseSchedulerProcessEnvironment(
     parsed.values.SANDBOX_DEFAULT_PROVIDER ?? "cube",
   );
   const enabledProviderKeys = parseEnabledSandboxProviders(
-    parsed.values.SANDBOX_ENABLED_PROVIDERS ?? "cube",
+    parsed.values.SANDBOX_ENABLED_PROVIDERS ?? (parsed.values.CUBESANDBOX_API_URL ? "cube" : ""),
   );
-  if (!enabledProviderKeys.includes(defaultProviderKey)) {
+  if (enabledProviderKeys.length > 0 && !enabledProviderKeys.includes(defaultProviderKey)) {
     throw new TypeError("SANDBOX_DEFAULT_PROVIDER 必须包含在 SANDBOX_ENABLED_PROVIDERS 中");
   }
   const e2b = enabledProviderKeys.includes("e2b")
@@ -259,26 +261,40 @@ export function parseSchedulerProcessEnvironment(
   ) {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
   }
-  const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
-  if (parsed.runtimeEnvironment === "production") {
+  const sandboxApiUrl = parsed.values.CUBESANDBOX_API_URL;
+  if (enabledProviderKeys.includes("cube"))
+    readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
+  if (parsed.runtimeEnvironment === "production" && sandboxApiUrl !== undefined) {
     assertProductionHttpsEndpoint(sandboxApiUrl, "CUBESANDBOX_API_URL");
   }
-  const proxyRouting = resolveCubeProxyRouting({
-    apiUrl: sandboxApiUrl,
-    ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
+  const proxyRouting: Partial<ReturnType<typeof resolveCubeProxyRouting>> =
+    sandboxApiUrl === undefined
       ? {}
-      : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
-    ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
-      ? {}
-      : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
-    ...(configuredProxyScheme === undefined ? {} : { proxyScheme: configuredProxyScheme }),
-  });
-  if (parsed.runtimeEnvironment === "production" && proxyRouting.proxyScheme !== "https") {
+      : resolveCubeProxyRouting({
+          apiUrl: sandboxApiUrl,
+          ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
+            ? {}
+            : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
+          ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
+            ? {}
+            : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
+          ...(configuredProxyScheme === undefined ? {} : { proxyScheme: configuredProxyScheme }),
+        });
+  if (
+    parsed.runtimeEnvironment === "production" &&
+    sandboxApiUrl !== undefined &&
+    proxyRouting.proxyScheme !== "https"
+  ) {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 在 production 必须为 https");
   }
   const titleGenerationEnabled = parsed.values.HISTORY_TITLE_GENERATION_ENABLED ?? false;
   let titleGeneration: SchedulerProcessConfiguration["titleGeneration"];
-  if (titleGenerationEnabled) {
+  const titleModelFields = [
+    parsed.values.HISTORY_TITLE_MODEL_BASE_URL,
+    parsed.values.HISTORY_TITLE_MODEL_API_KEY,
+    parsed.values.HISTORY_TITLE_MODEL_ID,
+  ];
+  if (titleGenerationEnabled && titleModelFields.some((value) => value !== undefined)) {
     const baseUrl = readRequiredEnvironmentValue(parsed, "HISTORY_TITLE_MODEL_BASE_URL");
     if (parsed.runtimeEnvironment === "production") {
       assertProductionHttpsEndpoint(baseUrl, "HISTORY_TITLE_MODEL_BASE_URL");
@@ -315,7 +331,7 @@ export function parseSchedulerProcessEnvironment(
       enabledProviderKeys,
       ...(e2b === undefined ? {} : { e2b }),
       ...(tencentAgs === undefined ? {} : { tencentAgs }),
-      apiUrl: sandboxApiUrl,
+      ...(sandboxApiUrl === undefined ? {} : { apiUrl: sandboxApiUrl }),
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
         ? {}
         : { apiKey: parsed.values.CUBESANDBOX_API_KEY }),
@@ -369,6 +385,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       await probePostgres(pool, configuration.databaseRuntimeRole);
       const gateways: RuntimeSandboxGateway[] = [];
       if (configuration.sandbox.enabledProviderKeys.includes("cube")) {
+        if (!configuration.sandbox.apiUrl) throw new Error("SANDBOX_CONFIGURATION_REQUIRED");
         gateways.push(
           new CubeSandboxGateway({
             apiUrl: configuration.sandbox.apiUrl,
@@ -422,7 +439,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         providers,
         configuration.threadSandbox.lifecycleTimeoutMs,
       );
-      await managed.probe();
+      if (await managed.isConfigured()) await managed.probe();
       const consumer = new SandboxCleanupConsumer(
         new PgSandboxCleanupConsumerStore(pool),
         new SandboxCleanupRouterResolver(
@@ -457,28 +474,35 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         configuration.cleanup.tenantId,
         configuration.cleanup.pollIntervalMs,
       );
-      const titleGenerationLoop =
+      const titleConfigurations =
+        configuration.credentialEncryptionKey === undefined
+          ? undefined
+          : new PgRuntimeControlConfigurationRepository(
+              pool,
+              new ModelProviderCredentialCipher(configuration.credentialEncryptionKey),
+            );
+      const deploymentTitleGenerator =
         configuration.titleGeneration === undefined
           ? undefined
-          : new ThreadTitleGenerationPollingLoop(
-              new ThreadTitleGenerationConsumer(
-                new PgThreadTitleGenerationStore(pool),
-                new OpenAiCompatibleThreadTitleGenerator({
-                  baseUrl: configuration.titleGeneration.baseUrl,
-                  apiKey: configuration.titleGeneration.apiKey,
-                  modelId: configuration.titleGeneration.modelId,
-                  timeoutMs: configuration.titleGeneration.timeoutMs,
-                  inputMaximumBytes: configuration.titleGeneration.inputMaximumBytes,
-                  maximumOutputTokens: configuration.titleGeneration.maximumOutputTokens,
-                }),
-                configuration.cleanup.workerId,
-                configuration.titleGeneration.claimLeaseMs,
-                configuration.titleGeneration.maximumAttempts,
-                configuration.titleGeneration.retryBaseMs,
-              ),
-              configuration.cleanup.tenantId,
-              configuration.titleGeneration.pollIntervalMs,
-            );
+          : new OpenAiCompatibleThreadTitleGenerator(configuration.titleGeneration);
+      const titleGenerationLoop = new ThreadTitleGenerationPollingLoop(
+        new ThreadTitleGenerationConsumer(
+          new PgThreadTitleGenerationStore(pool),
+          deploymentTitleGenerator,
+          `${configuration.cleanup.workerId}-titles`,
+          Math.max(configuration.titleGeneration?.claimLeaseMs ?? 60_000, 25_000),
+          configuration.titleGeneration?.maximumAttempts ?? 3,
+          configuration.titleGeneration?.retryBaseMs ?? 5_000,
+          async () => {
+            const model = await titleConfigurations?.resolveTitleModelConfiguration();
+            if (model === null) return null;
+            if (model === undefined) return deploymentTitleGenerator;
+            return new OpenAiCompatibleThreadTitleGenerator(model);
+          },
+        ),
+        configuration.cleanup.tenantId,
+        configuration.titleGeneration?.pollIntervalMs ?? 1_000,
+      );
       loop.start();
       titleGenerationLoop?.start();
       threadSandboxLoop.start();

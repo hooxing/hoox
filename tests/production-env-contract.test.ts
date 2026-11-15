@@ -2,19 +2,39 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   expectedProductionEnvironmentKeys,
+  optionalProductionEnvironmentKeys,
   validateProductionEnvironmentExample,
 } from "../scripts/production-env-contract.mjs";
 
 const example = readFileSync(new URL("../deploy/production.env.example", import.meta.url), "utf8");
 
 describe("production 部署配置契约", () => {
+  it("基础部署样例不要求供应商与后台运行参数，可选回退仍登记", () => {
+    const source = example
+      .split("\n")
+      .filter(
+        (line) => !optionalProductionEnvironmentKeys.some((key) => line.startsWith(`${key}=`)),
+      )
+      .join("\n");
+    expect(validateProductionEnvironmentExample(source)).toEqual([]);
+    for (const key of [
+      "MODEL_API_KEY",
+      "SANDBOX_ENABLED_PROVIDERS",
+      "HISTORY_TITLE_MODEL_API_KEY",
+      "MEM0_API_KEY",
+      "AGENT_WORKER_MAX_CONCURRENT_RUNS",
+      "THREAD_CONTEXT_COMPACTION_TIMEOUT_MS",
+    ]) {
+      expect(expectedProductionEnvironmentKeys).not.toContain(key);
+      expect(optionalProductionEnvironmentKeys).toContain(key);
+    }
+    expect(expectedProductionEnvironmentKeys).toContain("MODEL_CREDENTIAL_ENCRYPTION_KEY");
+  });
+
   it("AGS 示例凭据必须使用占位值且诊断不回显密钥", () => {
     const secret = "ags-private-canary";
     const issues = validateProductionEnvironmentExample(
-      example.replace(
-        "TENCENT_AGS_API_KEY=replace-with-tencent-ags-api-key",
-        `TENCENT_AGS_API_KEY=${secret}`,
-      ),
+      `${example}\nTENCENT_AGS_API_KEY=${secret}`,
     );
     expect(issues.length).toBeGreaterThan(0);
     expect(issues.join(" ")).toContain("TENCENT_AGS_API_KEY");
@@ -23,7 +43,7 @@ describe("production 部署配置契约", () => {
 
   it("完整样例只使用占位凭据，且不包含 development 身份", () => {
     expect(expectedProductionEnvironmentKeys).not.toContain("DEV_AUTH_ENABLED");
-    expect(expectedProductionEnvironmentKeys).toEqual(
+    expect([...expectedProductionEnvironmentKeys, ...optionalProductionEnvironmentKeys]).toEqual(
       expect.arrayContaining([
         "THREAD_SERIAL_QUEUE_V2_ENABLED",
         "THREAD_CONTEXT_V2_WRITE_ENABLED",
@@ -84,9 +104,10 @@ describe("production 部署配置契约", () => {
 
   it("development 身份、明文端点和真实样式密钥都会失败且不回显其值", () => {
     const secret = "live-production-secret-canary";
-    const source = `${example}\nDEV_AUTH_ENABLED=false`
-      .replace("S3_ENDPOINT=https://s3.internal.example.invalid", "S3_ENDPOINT=http://s3.internal")
-      .replace("\nMODEL_API_KEY=", `\nMODEL_API_KEY=${secret}`);
+    const source = `${example}\nDEV_AUTH_ENABLED=false\nMODEL_API_KEY=${secret}`.replace(
+      "S3_ENDPOINT=https://s3.internal.example.invalid",
+      "S3_ENDPOINT=http://s3.internal",
+    );
     const issues = validateProductionEnvironmentExample(source);
     expect(issues).toContain("未登记的生产环境变量：DEV_AUTH_ENABLED");
     expect(issues).toContain("生产配置禁止开发身份变量：DEV_AUTH_ENABLED");

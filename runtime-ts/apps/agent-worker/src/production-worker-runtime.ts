@@ -721,7 +721,8 @@ export class SandboxSessionRegistryRouter
         throw new TypeError("Sandbox Provider registry 重复");
       indexed.set(registry.gateway.providerKey, registry);
     }
-    if (!indexed.has(defaultProviderKey)) throw new TypeError("默认 Sandbox Provider 未启用");
+    if (indexed.size > 0 && !indexed.has(defaultProviderKey))
+      throw new TypeError("默认 Sandbox Provider 未启用");
     this.registries = indexed;
   }
 
@@ -731,12 +732,18 @@ export class SandboxSessionRegistryRouter
     return registry;
   }
 
+  async isConfigured(): Promise<boolean> {
+    const profiles = await this.managed?.resolver.activeProfiles();
+    return profiles === undefined ? this.registries.size > 0 : profiles.length > 0;
+  }
+
   async probe(): Promise<void> {
     const profiles = await this.managed?.resolver.activeProfiles();
     const registries =
       profiles === undefined
         ? [...this.registries.values()]
         : profiles.map((profile) => this.managedRegistry(profile));
+    if (registries.length === 0) throw new Error("SANDBOX_CONFIGURATION_REQUIRED");
     return Promise.all(registries.map((registry) => registry.probe())).then(() => undefined);
   }
 
@@ -759,6 +766,7 @@ export class SandboxSessionRegistryRouter
       tenantId: input.scope.tenantId,
       registryId: input.registryId,
     });
+    if (profile === undefined) this.require(this.defaultProviderKey);
     return profile === undefined
       ? { providerKey: this.defaultProviderKey }
       : {

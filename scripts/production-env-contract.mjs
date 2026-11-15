@@ -20,15 +20,9 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "THREAD_CONTEXT_INLINE_BODY_MAX_BYTES",
   "THREAD_CONTEXT_COMPACTION_ENABLED",
   "THREAD_CONTEXT_COMPACTION_PATH",
-  "THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT",
-  "THREAD_CONTEXT_COMPACTION_TARGET_PERCENT",
-  "THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS",
-  "THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS",
-  "THREAD_CONTEXT_COMPACTION_TIMEOUT_MS",
   "THREAD_SANDBOX_SESSION_REUSE_ENABLED",
   "SUBAGENTS_ENABLED",
   "THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED",
-  "CUBESANDBOX_SESSION_TTL_SECONDS",
   "THREAD_SANDBOX_PAUSED_RETENTION_SECONDS",
   "THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS",
   "API_LISTEN_HOST",
@@ -67,6 +61,34 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "ADMIN_CONTROL_JWT_SIGNING_KEYS",
   "ADMIN_CONTROL_JWT_CLOCK_SKEW_SECONDS",
   "ADMIN_CONTROL_JWT_MAX_LIFETIME_SECONDS",
+  "RESOURCE_FILESYSTEM_SIGNING_KEY",
+  "HISTORY_FILESYSTEM_ENABLED",
+  "HISTORY_DIRECTORY_TIME_ZONE",
+  "SCHEDULER_TENANT_ID",
+  "SCHEDULER_WORKER_ID",
+  "CLEANUP_POLL_INTERVAL_MS",
+  "CLEANUP_LEASE_MS",
+  "AGENT_WORKER_TENANT_ID",
+  "AGENT_WORKER_ID",
+  "AGENT_WORKER_POLL_INTERVAL_MS",
+  "AGENT_WORKER_DISPATCH_LEASE_MS",
+  "AGENT_WORKER_RUN_LEASE_MS",
+  "AGENT_WORKER_RUN_TIMEOUT_MS",
+  "INSTALLATION_SETUP_TOKEN",
+  "ADMIN_CONTROL_IDENTITY_API_URL",
+  "MODEL_CREDENTIAL_ENCRYPTION_KEY",
+  "MODEL_WIRE_TRACE_ENABLED",
+  "MODEL_WIRE_TRACE_RETENTION_DAYS",
+  "MODEL_WIRE_TRACE_MAX_BYTES",
+]);
+
+export const optionalProductionEnvironmentKeys = Object.freeze([
+  "THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT",
+  "THREAD_CONTEXT_COMPACTION_TARGET_PERCENT",
+  "THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS",
+  "THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS",
+  "THREAD_CONTEXT_COMPACTION_TIMEOUT_MS",
+  "CUBESANDBOX_SESSION_TTL_SECONDS",
   "SANDBOX_DEFAULT_PROVIDER",
   "SANDBOX_ENABLED_PROVIDERS",
   "E2B_API_KEY",
@@ -80,15 +102,10 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "CUBESANDBOX_API_URL",
   "CUBESANDBOX_TEMPLATE_ID",
   "CUBESANDBOX_API_KEY",
-  "E2B_API_KEY",
-  "E2B_TEMPLATE_ID",
   "CUBESANDBOX_PROXY_NODE_IP",
   "CUBESANDBOX_PROXY_PORT",
   "CUBESANDBOX_PROXY_SCHEME",
   "CUBESANDBOX_RESOURCE_VOLUME_DRIVER",
-  "RESOURCE_FILESYSTEM_SIGNING_KEY",
-  "HISTORY_FILESYSTEM_ENABLED",
-  "HISTORY_DIRECTORY_TIME_ZONE",
   "HISTORY_TITLE_GENERATION_ENABLED",
   "HISTORY_TITLE_MODEL_BASE_URL",
   "HISTORY_TITLE_MODEL_API_KEY",
@@ -100,32 +117,16 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "HISTORY_TITLE_RETRY_BASE_MS",
   "HISTORY_TITLE_POLL_INTERVAL_MS",
   "HISTORY_TITLE_CLAIM_LEASE_MS",
-  "SCHEDULER_TENANT_ID",
-  "SCHEDULER_WORKER_ID",
-  "CLEANUP_POLL_INTERVAL_MS",
-  "CLEANUP_LEASE_MS",
-  "AGENT_WORKER_TENANT_ID",
-  "AGENT_WORKER_ID",
   "AGENT_WORKER_MAX_CONCURRENT_RUNS",
   "AGENT_WORKER_USER_MAX_CONCURRENT_RUNS_PER_TENANT",
-  "AGENT_WORKER_POLL_INTERVAL_MS",
-  "AGENT_WORKER_DISPATCH_LEASE_MS",
-  "AGENT_WORKER_RUN_LEASE_MS",
-  "AGENT_WORKER_RUN_TIMEOUT_MS",
-  "INSTALLATION_SETUP_TOKEN",
-  "ADMIN_CONTROL_IDENTITY_API_URL",
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
-  "MODEL_CREDENTIAL_ENCRYPTION_KEY",
   "MEM0_API_KEY",
   "MEM0_SCOPE_HMAC_KEY",
   "MODEL_ID",
   "MODEL_SUPPORTS_IMAGES",
   "MODEL_CONTEXT_WINDOW",
   "MODEL_MAX_OUTPUT_TOKENS",
-  "MODEL_WIRE_TRACE_ENABLED",
-  "MODEL_WIRE_TRACE_RETENTION_DAYS",
-  "MODEL_WIRE_TRACE_MAX_BYTES",
 ]);
 
 const secretKeys = new Set([
@@ -198,7 +199,10 @@ function obviousPlaceholder(key, value) {
 /** 仅校验可提交的部署样例；错误只暴露变量名，绝不回显值。 */
 export function validateProductionEnvironmentExample(source) {
   const { values, issues } = parseLines(source);
-  const expected = new Set(expectedProductionEnvironmentKeys);
+  const expected = new Set([
+    ...expectedProductionEnvironmentKeys,
+    ...optionalProductionEnvironmentKeys,
+  ]);
   for (const key of expectedProductionEnvironmentKeys) {
     if (!values.has(key)) issues.push(`缺少环境变量：${key}`);
   }
@@ -225,7 +229,6 @@ export function validateProductionEnvironmentExample(source) {
     "THREAD_SANDBOX_SESSION_REUSE_ENABLED",
     "SUBAGENTS_ENABLED",
     "THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED",
-    "HISTORY_TITLE_GENERATION_ENABLED",
   ]) {
     if (values.get(key) !== "true") issues.push(`生产样例 ${key} 必须为 true`);
   }
@@ -251,7 +254,8 @@ export function validateProductionEnvironmentExample(source) {
     "HISTORY_TITLE_MODEL_BASE_URL",
   ]) {
     const value = values.get(key);
-    if (key === "MODEL_BASE_URL" && value === "") continue;
+    if (optionalProductionEnvironmentKeys.includes(key) && (value === undefined || value === ""))
+      continue;
     try {
       const url = value === undefined ? undefined : new URL(value);
       if (
@@ -290,7 +294,10 @@ export function validateProductionEnvironmentExample(source) {
       }
     }
   }
-  if (values.get("CUBESANDBOX_PROXY_SCHEME") !== "https") {
+  if (
+    values.has("CUBESANDBOX_PROXY_SCHEME") &&
+    values.get("CUBESANDBOX_PROXY_SCHEME") !== "https"
+  ) {
     issues.push("CUBESANDBOX_PROXY_SCHEME 必须为 https");
   }
   try {

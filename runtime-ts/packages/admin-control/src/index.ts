@@ -50,7 +50,13 @@ export interface MemoryProviderConfiguration {
 export const DEFAULT_WORKER_MAX_CONCURRENT_RUNS = 20;
 export const DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT = 2;
 
+export type TitleGenerationConfiguration =
+  | Readonly<{ enabled: false }>
+  | Readonly<{ enabled: true; providerKey: string; providerRevision: number; modelId: string }>;
+
 export interface RuntimeSettingsConfiguration {
+  readonly titleGeneration?: TitleGenerationConfiguration;
+  readonly compactionEnabled?: boolean;
   readonly enabledTools?: readonly RuntimeToolName[];
   readonly toolCallingMode?: "native" | "ptc";
   readonly workerMaxConcurrentRuns: number;
@@ -545,6 +551,25 @@ export function normalizeStoredMemoryProviderConfiguration(
   );
 }
 
+export function normalizeTitleGenerationConfiguration(
+  input: TitleGenerationConfiguration | undefined,
+): TitleGenerationConfiguration | undefined {
+  if (input === undefined) return undefined;
+  if (!input || typeof input.enabled !== "boolean") throw new TypeError("标题生成配置无效");
+  if (!input.enabled) return Object.freeze({ enabled: false });
+  return Object.freeze({
+    enabled: true,
+    providerKey: normalizedStoredProviderKey(input.providerKey),
+    providerRevision: boundedInteger(
+      input.providerRevision,
+      "标题供应商版本",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    modelId: normalizedText(input.modelId, "标题模型", 512),
+  });
+}
+
 export function normalizeRuntimeSettingsConfiguration(
   input: RuntimeSettingsConfiguration,
 ): RuntimeSettingsConfiguration & { readonly toolCallingMode: "native" | "ptc" } {
@@ -554,11 +579,18 @@ export function normalizeRuntimeSettingsConfiguration(
     throw new TypeError("工具调用模式必须为 native 或 ptc");
   }
   const enabledTools = normalizeRuntimeToolSelection(input.enabledTools);
+  const titleGeneration = normalizeTitleGenerationConfiguration(input.titleGeneration);
+  if (input.compactionEnabled !== undefined && typeof input.compactionEnabled !== "boolean")
+    throw new TypeError("上下文压缩开关无效");
   const softLimit = boundedInteger(input.compactionSoftLimitPercent, "压缩软上限", 50, 95);
   const target = boundedInteger(input.compactionTargetPercent, "压缩目标", 20, 90);
   if (target >= softLimit) throw new TypeError("压缩目标必须低于软上限");
   return Object.freeze({
     toolCallingMode,
+    ...(titleGeneration === undefined ? {} : { titleGeneration }),
+    ...(input.compactionEnabled === undefined
+      ? {}
+      : { compactionEnabled: input.compactionEnabled }),
     ...(enabledTools === undefined ? {} : { enabledTools }),
     workerMaxConcurrentRuns: boundedInteger(
       input.workerMaxConcurrentRuns,
@@ -866,17 +898,41 @@ export class AdminControlService {
     );
   }
 
+  private async validateTitleModel(
+    actorUserId: string,
+    configuration: RuntimeSettingsConfiguration,
+  ) {
+    const title = configuration.titleGeneration;
+    if (title?.enabled) {
+      const models = await this.repository.listModelProviders(actorUserId);
+      const selected = models.find(
+        (item) =>
+          item.configuration.providerKey === title.providerKey &&
+          item.revision === title.providerRevision,
+      );
+      if (
+        !selected?.configuration.credentialConfigured ||
+        !selected.configuration.models.some(
+          (model) => model.id === title.modelId && model.enabled && model.maxTokens >= 32,
+        )
+      )
+        throw new TypeError("请选择已保存且启用的标题模型");
+    }
+  }
+
   async createRuntimeSettingsDraft(
     context: ControlMutationContext,
     command: CreateRuntimeSettingsDraftCommand,
   ) {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["operator", "admin"]);
     const { reason, ...configuration } = command;
+    const normalized = normalizeRuntimeSettingsConfiguration(configuration);
+    await this.validateTitleModel(context.actorUserId, normalized);
     return unwrapMutation(
       await this.repository.createRuntimeSettingsDraft({
         ...context,
         command: {
-          ...normalizeRuntimeSettingsConfiguration(configuration),
+          ...normalized,
           reason: normalizeChangeReason(reason),
         },
       }),
@@ -888,11 +944,13 @@ export class AdminControlService {
     command: SaveRuntimeSettingsConfigurationCommand,
   ) {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
+    const normalized = normalizeRuntimeSettingsConfiguration(command);
+    await this.validateTitleModel(context.actorUserId, normalized);
     return unwrapMutation(
       await this.repository.saveRuntimeSettingsConfiguration({
         ...context,
         command: {
-          ...normalizeRuntimeSettingsConfiguration(command),
+          ...normalized,
           expectedGeneration: boundedInteger(
             command.expectedGeneration,
             "配置更新状态",
@@ -997,6 +1055,8 @@ export class AdminControlService {
       ]);
       const model = models.find((candidate) => candidate.status === "active");
       const runtimeSettings = settings.find((candidate) => candidate.revision === revision);
+      if (runtimeSettings !== undefined)
+        await this.validateTitleModel(context.actorUserId, runtimeSettings.configuration);
       if (
         model !== undefined &&
         runtimeSettings !== undefined &&

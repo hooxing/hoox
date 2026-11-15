@@ -40,6 +40,7 @@ import {
 import { HOOX_APP_ICON_PATH } from "./brand.js";
 import type { AdminControlApiContract } from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
+import { InstallationProgress } from "./installation-progress.js";
 import { SandboxConfigurationPanel } from "./sandbox-configuration-panel.js";
 import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
 
@@ -1045,7 +1046,9 @@ function AdminPlatform({
           mode="inline"
           items={navigation}
           selectedKeys={[location.pathname]}
-          onClick={({ key }) => navigate(key)}
+          onClick={({ key }) =>
+            navigate({ pathname: key, search: location.search === "?setup=1" ? "?setup=1" : "" })
+          }
         />
         <div className="platform-sider-footer">
           <span className="service-health-dot" aria-hidden="true" />
@@ -1224,15 +1227,7 @@ export function App({
         <QueryClientProvider client={queryClient}>
           {typeof window !== "undefined" &&
             new URLSearchParams(window.location.search).get("setup") === "1" && (
-              <div className="installation-banner">
-                <div>
-                  <strong>首次运行 · 2 / 2：连接模型</strong>
-                  <p>
-                    添加供应商，填写 API Key 和模型，选择“保存并使用”。Worker 会自动读取新配置。
-                  </p>
-                </div>
-                <a href="/app">进入工作台 / 稍后配置</a>
-              </div>
+              <InstallationProgress />
             )}
           {apiClient === undefined && controlApi === undefined && (
             <button

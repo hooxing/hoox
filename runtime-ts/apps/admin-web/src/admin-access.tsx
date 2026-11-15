@@ -101,7 +101,7 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
           Hoox
         </a>
         <p className="installation-eyebrow">
-          {status?.initialized ? "管理控制台" : "首次运行 · 1 / 2"}
+          {status?.initialized ? "管理控制台" : "首次运行 · 1 / 3"}
         </p>
         <h1 id="installation-title">
           {status === undefined
@@ -113,7 +113,7 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
         <p className="installation-description">
           {status?.initialized
             ? "使用管理员邮箱和密码登录。"
-            : "先创建管理员账号，再连接你的线上模型。"}
+            : "先创建管理员账号，再连接线上模型和沙箱服务。"}
         </p>
         {status !== undefined && (
           <form
@@ -186,7 +186,7 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
             <p role="status">正在检查安装状态…</p>
           ))}
         {!status?.initialized && (
-          <p className="installation-note">账号保存在当前实例中。模型可稍后配置。</p>
+          <p className="installation-note">账号保存在当前实例中。模型和沙箱可在启动后配置。</p>
         )}
         {status?.initialized && (
           <p className="installation-note">

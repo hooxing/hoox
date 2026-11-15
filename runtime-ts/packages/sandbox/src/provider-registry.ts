@@ -30,7 +30,7 @@ export class SandboxProviderRegistry {
       }
       indexed.set(gateway.providerKey, gateway);
     }
-    if (!indexed.has(defaultProviderKey)) {
+    if (indexed.size > 0 && !indexed.has(defaultProviderKey)) {
       throw new SandboxRuntimeError("INVALID_ARGUMENT", "默认 Sandbox Provider 未启用");
     }
     this.gateways = indexed;
@@ -49,6 +49,7 @@ export class SandboxProviderRegistry {
   }
 
   async probe(): Promise<void> {
+    if (this.gateways.size === 0) throw new Error("SANDBOX_CONFIGURATION_REQUIRED");
     await Promise.all([...this.gateways.values()].map((gateway) => gateway.probe()));
   }
 

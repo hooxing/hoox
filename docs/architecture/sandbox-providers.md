@@ -4,7 +4,7 @@
 
 ## 当前支持
 
-Hoox 当前支持 `cube`、`e2b` 和 `tencent-ags` 三种 `SandboxProviderKey`。后台“沙箱服务”管理供应商连接、模板和策略，支持单供应商切换或按权重分配新实例。尚未发布后台路由时，Worker 与 Scheduler 沿用 `SANDBOX_DEFAULT_PROVIDER` 和 `SANDBOX_ENABLED_PROVIDERS` 构造的部署注册表；部署默认 Provider 必须已启用，重复或未知 key 拒绝启动。
+Hoox 当前支持 `cube`、`e2b` 和 `tencent-ags` 三种 `SandboxProviderKey`。后台“沙箱服务”管理供应商连接、模板和策略，支持单供应商切换或按权重分配新实例。尚未发布后台路由时，Worker 与 Scheduler 沿用 `SANDBOX_DEFAULT_PROVIDER` 和 `SANDBOX_ENABLED_PROVIDERS` 构造的部署注册表；非空部署注册表的默认 Provider 必须已启用，重复或未知 key 拒绝启动。空安装允许无部署供应商常驻等待；readiness 不伪装就绪，后台配置后自动可用。
 
 Provider 选择来自可信后台路由或部署配置，不接受业务用户或模型指定。注册表不进行跨 Provider 自动故障转移：远端结果未知时必须由同一 Provider 和持久身份对账，不能在另一 Provider 上盲目重放外部副作用。
 

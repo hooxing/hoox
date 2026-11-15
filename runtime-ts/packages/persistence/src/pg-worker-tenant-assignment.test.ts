@@ -170,6 +170,9 @@ describe("PostgreSQL 动态 Worker Tenant 调度", () => {
     expect(pending?.sql).toContain("greatest(");
     expect(pending?.sql).toContain("statement_timestamp()");
     expect(pending?.sql).toContain("FROM memory_ingestion_outbox memory");
+    expect(pending?.sql).toContain("FROM thread_title_generation_outbox title");
+    expect(pending?.sql).toContain("title.tenant_id=$1");
+    expect(pending?.sql).toContain("title.claim_expires_at");
     expect(update?.values?.slice(0, 5)).toEqual([
       assignment.tenantId,
       assignment.generation,

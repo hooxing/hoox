@@ -3065,6 +3065,18 @@ async function grantAdminControlAccess(
         GRANT SELECT,INSERT ON ${schema}.platform_skill_operators TO ${runtime}`);
     }
   }
+  const titleReference = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.runtime_title_model_reference',$1::text)) IS NOT NULL AS present",
+    [context.schema],
+  );
+  if (titleReference.rows[0]?.present) {
+    await client.query(`
+      ALTER VIEW ${schema}.runtime_title_model_reference OWNER TO ${quoteIdentifier(context.migratorRole)};
+      REVOKE ALL ON ${schema}.runtime_title_model_reference FROM PUBLIC;
+      GRANT SELECT ON ${schema}.runtime_title_model_reference TO ${quoteIdentifier(context.runtimeRole)};
+      ALTER POLICY runtime_title_model_revisions_read_policy ON ${schema}.admin_control_config_revisions TO ${quoteIdentifier(context.runtimeRole)};
+    `);
+  }
   if (await hasManagedSandboxState(client, context.schema)) {
     for (const table of managedSandboxControlTables)
       await client.query(

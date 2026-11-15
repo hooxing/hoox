@@ -49,9 +49,14 @@ export class ManagedSandboxGatewayResolver {
   async session(input: { tenantId: string; sessionId: string; providerKey: SandboxProviderKey }) {
     return this.resolve(await this.configurations.resolveSession(input), input.providerKey);
   }
+  async isConfigured(): Promise<boolean> {
+    const profiles = await this.configurations.activeProfiles();
+    return profiles === undefined ? this.fallback.keys().length > 0 : profiles.length > 0;
+  }
   async probe() {
     const profiles = await this.configurations.activeProfiles();
     if (profiles === undefined) return this.fallback.probe();
+    if (profiles.length === 0) throw new Error("SANDBOX_CONFIGURATION_REQUIRED");
     for (const profile of profiles)
       await this.resolve(profile, profile.configuration.providerKey).gateway.probe();
   }

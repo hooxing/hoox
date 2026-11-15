@@ -29,6 +29,7 @@
     "@hoox/trajectory": "workspace:*",
     "@hoox/workspace": "workspace:*",
     "@earendil-works/pi-ai": "0.82.1",
-    "@hoox/automation": "workspace:*"
+    "@hoox/automation": "workspace:*",
+    "@hoox/thread-title": "workspace:*"
   }
 }

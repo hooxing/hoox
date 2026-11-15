@@ -151,6 +151,50 @@ class FakeStore implements ThreadTitleGenerationStore {
 }
 
 describe("标题 Outbox 消费器", () => {
+  it("未配置或配置读取失败不领取，后台保存后同一个消费者开始工作", async () => {
+    const store = new FakeStore();
+    const claimNext = vi.spyOn(store, "claimNext");
+    const generator = {
+      generate: vi.fn(async () => ({ title: "合同审查", modelKey: "b".repeat(64), durationMs: 1 })),
+    };
+    const resolve = vi.fn<() => Promise<typeof generator | undefined>>(async () => undefined);
+    const consumer = new ThreadTitleGenerationConsumer(
+      store,
+      undefined,
+      "worker-a",
+      60_000,
+      3,
+      1_000,
+      resolve,
+    );
+    expect(await consumer.drainTenant("tenant-a")).toBe(0);
+    expect(claimNext).not.toHaveBeenCalled();
+    resolve.mockRejectedValueOnce(new Error("配置不可用"));
+    await expect(consumer.drainTenant("tenant-a")).rejects.toThrow("配置不可用");
+    expect(claimNext).not.toHaveBeenCalled();
+    resolve.mockResolvedValue(generator);
+    expect(await consumer.drainTenant("tenant-a")).toBe(1);
+    expect(generator.generate).toHaveBeenCalledWith(claim);
+    await consumer.close();
+  });
+
+  it("显式关闭收敛待处理目录，不调用部署回退模型", async () => {
+    const store = new FakeStore();
+    const generate = vi.fn();
+    const consumer = new ThreadTitleGenerationConsumer(
+      store,
+      { generate },
+      "worker-a",
+      60_000,
+      3,
+      1_000,
+      async () => null,
+    );
+    expect(await consumer.drainTenant("tenant-a")).toBe(1);
+    expect(store.fail).toHaveBeenCalledWith(claim, expect.objectContaining({ maximumAttempts: 1 }));
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it("成功时只提交 claim-fenced 完成", async () => {
     const store = new FakeStore();
     const consumer = new ThreadTitleGenerationConsumer(

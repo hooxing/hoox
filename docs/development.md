@@ -9,7 +9,7 @@
 - Corepack 与 pnpm `10.15.1`。
 - Docker Compose v2，用于 MinIO 和容器 Gate。
 - 专用 PostgreSQL 17 数据库。
-- 至少一个可用 Sandbox Provider：CubeSandbox 或 E2B。
+- 执行任务前需要可用 Sandbox Provider：CubeSandbox、E2B 或腾讯云 AGS，可在启动后的后台接入。
 - 可选的线上 OpenAI-compatible 模型；可在首次运行页面之后配置，不要求本地模型。
 
 `package.json#engines.node` 是 Node.js 运行时版本契约，`.node-version`、`.nvmrc`、CI 和 Docker 镜像必须与其一致；CI 直接读取 `.node-version`。`@types/node` 使用 npm 已发布的相同主版本，并与其他依赖一样精确固定。执行 `corepack pnpm toolchain:check` 可检查这些约束。
@@ -33,12 +33,11 @@ Copy-Item .env.example .env
 
 - PostgreSQL Runtime、Migrator、Worker Coordinator、Team Coordinator、Admin Control 和 Skill Publisher 连接；
 - MinIO/S3；
-- Sandbox Provider endpoint、模板与凭据；
 - 稳定的 `MODEL_CREDENTIAL_ENCRYPTION_KEY`；模型 endpoint、API Key、模型 ID 与能力可留到后台配置；
 - development 身份、签名密钥和 Tenant ID；
 - API、Worker 与 Scheduler 的本地监听及轮询参数。
 
-完整分组见[配置参考](reference/configuration.md)。`.env` 被 Git 忽略，不得提交、截图或粘贴到公开 Issue。
+模型、沙箱、记忆和标题策略在启动后的后台配置，无需在 `.env` 中预填供应商密钥。完整分组见[配置参考](reference/configuration.md)。`.env` 被 Git 忽略，不得提交、截图或粘贴到公开 Issue。
 
 ### PostgreSQL bootstrap 与迁移
 
@@ -93,7 +92,9 @@ Get-Content .env | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEa
 $database = [Uri]$env:DATABASE_URL
 Test-NetConnection -ComputerName $database.Host -Port $database.Port
 Invoke-WebRequest -UseBasicParsing "$($env:S3_ENDPOINT)/minio/health/live"
-Invoke-RestMethod "$($env:CUBESANDBOX_API_URL.TrimEnd('/'))/health"
+if ($env:CUBESANDBOX_API_URL) {
+  Invoke-RestMethod "$($env:CUBESANDBOX_API_URL.TrimEnd('/'))/health"
+}
 ```
 
 如果默认 Provider 为 E2B，则按 E2B 配置和真实冒烟验证，不执行 CubeSandbox 健康请求。
@@ -112,7 +113,7 @@ corepack pnpm db:migrate:up
 corepack pnpm dev:worker:check
 ```
 
-预检只读访问真实 PostgreSQL、S3 和 Sandbox；有模型配置时额外发送受限 `chat/completions` 请求，无模型时跳过模型探测。不启动 polling，也不领取 Run。基础依赖和角色配置错误会阻止启动。
+预检只读访问真实 PostgreSQL、S3，并在沙箱已配置时检查 Sandbox；有模型配置时额外发送受限 `chat/completions` 请求，无模型时跳过模型探测。不启动 polling，也不领取 Run。基础依赖和角色配置错误会阻止启动。
 
 ## 7. 启动工作台
 

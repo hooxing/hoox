@@ -298,6 +298,25 @@ describe("生产维护组合", () => {
     resourceBlobBatchLimit: 16,
   };
 
+  it("标题消费包含在停机等待和维护失败范围内", async () => {
+    const release = deferred();
+    let finished = false;
+    const running = performWorkerMaintenance({
+      ...base,
+      drainTitles: async () => {
+        await release.promise;
+        finished = true;
+        throw new Error("标题配置暂时不可读");
+      },
+    });
+    const result = expect(running).rejects.toThrow("WORKER_MAINTENANCE_INCOMPLETE");
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    release.resolve();
+    await result;
+    expect(finished).toBe(true);
+  });
+
   it("一个子任务失败仍等待其他已启动副作用结束", async () => {
     const release = deferred();
     let finished = false;

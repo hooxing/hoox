@@ -148,7 +148,7 @@
 | [ADR-0118：历史任务文件虚拟目录与个人/团队任务归属](0118-history-files-virtual-directory-and-task-ownership.md) | 已接受 | 2026-08-07 |
 | [ADR-0119：个人历史文件虚拟目录首期范围](0119-personal-history-files-first-release-scope.md) | 已接受 | 2026-08-07 |
 | [ADR-0120：个人历史文件虚拟目录实现切片](0120-personal-history-filesystem-implementation-slice.md) | 已接受 | 2026-08-07 |
-| [ADR-0121：personal Thread 低成本标题 Outbox 与异步目录就绪](0121-low-cost-thread-title-generation.md) | 已接受 | 2026-08-07 |
+| [ADR-0121：personal Thread 低成本标题 Outbox 与异步目录就绪](0121-low-cost-thread-title-generation.md) | 部分已替代 | 2026-08-07 |
 | [ADR-0122：共享 Sandbox 的 SubAgent 控制面](0122-shared-sandbox-subagent-control-plane.md) | 已接受 | 2026-08-05 |
 | [ADR-0123：SubAgent 工具调用身份与持久生命周期](0123-subagent-tool-call-identity-and-durable-lifecycle.md) | 已接受 | 2026-08-06 |
 | [ADR-0124：SubAgent 执行链路事务并发冲突重试](0124-subagent-control-serializable-retry.md) | 已接受 | 2026-08-06 |
@@ -300,7 +300,7 @@
 | [ADR-20260908104231：浏览器优先的文件预览与固定版本选区引用](20260908104231-browser-file-preview-and-versioned-references.md) | 已接受 | 2026-09-08 |
 
 | [ADR-20260909174703：腾讯云 AGS 独立 Provider 与受限生命周期](20260909174703-tencent-ags-provider.md) | 部分已替代 | 2026-09-09 |
-| [后端管理 Sandbox 供应商配置与版本固定](20260910005916-managed-sandbox-routing.md) | 已接受 | 2026-09-10 |
+| [后端管理 Sandbox 供应商配置与版本固定](20260910005916-managed-sandbox-routing.md) | 部分已替代 | 2026-09-10 |
 | [ResourceFS 受控快照的分块重试与有界并发写入](20260910191159-resourcefs-snapshot-chunked-write.md) | 已接受 | 2026-09-10 |
 | [受控快照分块在链路失败时自动降级](20260910202709-resourcefs-snapshot-adaptive-chunk-downshift.md) | 已接受 | 2026-09-10 |
 | [ADR-20260911162421：MCP 与外部工具接入采用发布期固化与 Run 快照](20260911162421-mcp-and-external-tool-integration-boundary.md) | 提议 | 2026-09-11 |
@@ -313,6 +313,8 @@
 
 | [ADR-20261108180541：Better Auth 升级保留历史 issuer 并约束 Provider 账号键](20261108180541-better-auth-provider-account-key.md) | 已接受 | 2026-11-08 |
 
-| [首次运行创建管理员与延后模型配置](20261115122045-first-run-administrator-and-model-setup.md) | 已接受 | 2026-11-15 |
+| [首次运行创建管理员与延后模型配置](20261115122045-first-run-administrator-and-model-setup.md) | 部分已替代 | 2026-11-15 |
+
+| [部署后配置沙箱与标题模型](20261115155532-post-deployment-service-configuration.md) | 已接受 | 2026-11-15 |
 
 </details>

@@ -52,6 +52,7 @@ import {
   PgThreadContextHistoryRepository,
   PgThreadContinuityMetrics,
   PgThreadSandboxSessionLifecycle,
+  PgThreadTitleGenerationStore,
   PgWorkerDispatchWakeListener,
   PgWorkerTenantAssignments,
   PgWorkspaceCandidateHandoff,
@@ -94,6 +95,10 @@ import {
   type TenantResourceVolumePort,
 } from "@hoox/sandbox";
 import { SkillRuntimeService } from "@hoox/skill";
+import {
+  OpenAiCompatibleThreadTitleGenerator,
+  ThreadTitleGenerationConsumer,
+} from "@hoox/thread-title";
 import { DeliverFileToolRouterFactory } from "@hoox/tool-router";
 import { SandboxDeliverFileSource } from "./deliver-file-source.js";
 import { createManagedSandboxRegistry } from "./managed-sandbox-registry.js";
@@ -121,10 +126,10 @@ import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 import { RunWorker } from "./run-worker.js";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 import {
-  resolveRuntimeModelProbeConfiguration,
-  type RuntimeModelProbeConfiguration,
   RuntimeConfiguredMemoryProvider,
   RuntimeConfiguredSessionFactory,
+  type RuntimeModelProbeConfiguration,
+  resolveRuntimeModelProbeConfiguration,
 } from "./runtime-configured-providers.js";
 import { ManagedResourceFilesystemSnapshotMaterializer } from "./sandbox-resource-filesystem-materializer.js";
 import { performWorkerMaintenance } from "./worker-maintenance.js";
@@ -175,8 +180,8 @@ const workerEnvironmentSchema = Object.freeze({
     maximum: 86_400,
     requiredIn: [],
   }),
-  CUBESANDBOX_API_URL: urlEnvironmentField(),
-  CUBESANDBOX_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255 }),
+  CUBESANDBOX_API_URL: urlEnvironmentField({ requiredIn: [] }),
+  CUBESANDBOX_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   CUBESANDBOX_API_KEY: stringEnvironmentField({
     secret: true,
     maxLength: 4_096,
@@ -189,7 +194,7 @@ const workerEnvironmentSchema = Object.freeze({
     requiredIn: [],
   }),
   CUBESANDBOX_PROXY_SCHEME: stringEnvironmentField({ maxLength: 5, requiredIn: [] }),
-  CUBESANDBOX_RESOURCE_VOLUME_DRIVER: stringEnvironmentField({ maxLength: 128 }),
+  CUBESANDBOX_RESOURCE_VOLUME_DRIVER: stringEnvironmentField({ requiredIn: [], maxLength: 128 }),
   MODEL_BASE_URL: urlEnvironmentField({ requiredIn: [] }),
   MODEL_API_KEY: stringEnvironmentField({ requiredIn: [], secret: true, maxLength: 8_192 }),
   MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
@@ -341,8 +346,8 @@ export interface WorkerProcessConfiguration {
       domain: string;
       sessionTtlSeconds: number;
     }>;
-    apiUrl: string;
-    templateId: string;
+    apiUrl?: string;
+    templateId?: string;
     apiKey?: string;
     proxyNodeIp?: string;
     proxyPort?: number;
@@ -414,6 +419,7 @@ function parseSandboxProviderKey(value: string): SandboxProviderKey {
 }
 
 function parseEnabledSandboxProviders(value: string): readonly SandboxProviderKey[] {
+  if (value === "") return Object.freeze([]);
   const keys = value.split(",").map((item) => parseSandboxProviderKey(item.trim()));
   if (keys.length === 0 || new Set(keys).size !== keys.length) {
     throw new TypeError("SANDBOX_ENABLED_PROVIDERS 必须是非空且不重复的 Provider 列表");
@@ -446,9 +452,9 @@ export function parseWorkerProcessEnvironment(
     parsed.values.SANDBOX_DEFAULT_PROVIDER ?? "cube",
   );
   const enabledProviderKeys = parseEnabledSandboxProviders(
-    parsed.values.SANDBOX_ENABLED_PROVIDERS ?? "cube",
+    parsed.values.SANDBOX_ENABLED_PROVIDERS ?? (parsed.values.CUBESANDBOX_API_URL ? "cube" : ""),
   );
-  if (!enabledProviderKeys.includes(defaultProviderKey)) {
+  if (enabledProviderKeys.length > 0 && !enabledProviderKeys.includes(defaultProviderKey)) {
     throw new TypeError("SANDBOX_DEFAULT_PROVIDER 必须包含在 SANDBOX_ENABLED_PROVIDERS 中");
   }
   const e2b = enabledProviderKeys.includes("e2b")
@@ -605,25 +611,36 @@ export function parseWorkerProcessEnvironment(
   if ((memoryApiKey === undefined) !== (memoryScopeHmacKey === undefined)) {
     throw new TypeError("MEM0_API_KEY 与 MEM0_SCOPE_HMAC_KEY 必须同时配置");
   }
-  const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
+  const sandboxApiUrl = parsed.values.CUBESANDBOX_API_URL;
+  if (enabledProviderKeys.includes("cube")) {
+    readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
+    readRequiredEnvironmentValue(parsed, "CUBESANDBOX_TEMPLATE_ID");
+  }
   if (parsed.runtimeEnvironment === "production") {
     assertProductionWorkerTransport({
-      modelBaseUrl: parsed.values.MODEL_BASE_URL ?? "https://unconfigured.invalid/v1",
+      modelBaseUrl: parsed.values.MODEL_BASE_URL,
       objectStorageEndpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
       sandboxApiUrl,
     });
   }
-  const proxyRouting = resolveCubeProxyRouting({
-    apiUrl: sandboxApiUrl,
-    ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
+  const proxyRouting: Partial<ReturnType<typeof resolveCubeProxyRouting>> =
+    sandboxApiUrl === undefined
       ? {}
-      : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
-    ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
-      ? {}
-      : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
-    ...(proxyScheme === undefined ? {} : { proxyScheme }),
-  });
-  if (parsed.runtimeEnvironment === "production" && proxyRouting.proxyScheme !== "https") {
+      : resolveCubeProxyRouting({
+          apiUrl: sandboxApiUrl,
+          ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
+            ? {}
+            : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
+          ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
+            ? {}
+            : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
+          ...(proxyScheme === undefined ? {} : { proxyScheme }),
+        });
+  if (
+    parsed.runtimeEnvironment === "production" &&
+    sandboxApiUrl !== undefined &&
+    proxyRouting.proxyScheme !== "https"
+  ) {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 在 production 必须为 https");
   }
   return Object.freeze({
@@ -651,15 +668,15 @@ export function parseWorkerProcessEnvironment(
       enabledProviderKeys,
       ...(e2b === undefined ? {} : { e2b }),
       ...(tencentAgs === undefined ? {} : { tencentAgs }),
-      apiUrl: sandboxApiUrl,
-      templateId: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_TEMPLATE_ID"),
+      ...(sandboxApiUrl === undefined ? {} : { apiUrl: sandboxApiUrl }),
+      ...(parsed.values.CUBESANDBOX_TEMPLATE_ID === undefined
+        ? {}
+        : { templateId: parsed.values.CUBESANDBOX_TEMPLATE_ID }),
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
         ? {}
         : { apiKey: parsed.values.CUBESANDBOX_API_KEY }),
-      resourceVolumeDriver: readRequiredEnvironmentValue(
-        parsed,
-        "CUBESANDBOX_RESOURCE_VOLUME_DRIVER",
-      ),
+      resourceVolumeDriver:
+        parsed.values.CUBESANDBOX_RESOURCE_VOLUME_DRIVER ?? "runtime-resourcefs",
       ...proxyRouting,
     }),
     model: Object.freeze({
@@ -1011,12 +1028,15 @@ async function assembleWorkerRuntime(
       ...(runtimeMode === "development" ? { allowInsecureHttpDownload: true } : {}),
       executionAuthorizationVerifier: artifactAuthorization.verifier,
     });
-    const resourceVolume = new CubeTenantResourceVolume({
-      apiUrl: configuration.sandbox.apiUrl,
-      apiKey: configuration.sandbox.apiKey ?? null,
-      driver: configuration.sandbox.resourceVolumeDriver,
-      requestTimeoutMs: 5_000,
-    });
+    const resourceVolume =
+      configuration.sandbox.apiUrl === undefined
+        ? undefined
+        : new CubeTenantResourceVolume({
+            apiUrl: configuration.sandbox.apiUrl,
+            apiKey: configuration.sandbox.apiKey ?? null,
+            driver: configuration.sandbox.resourceVolumeDriver,
+            requestTimeoutMs: 5_000,
+          });
     const resourceFilesystemMaterializer = new ManagedResourceFilesystemSnapshotMaterializer({
       resources: resourceFilesystem,
       history: resourceFilesystem,
@@ -1244,6 +1264,20 @@ async function assembleWorkerRuntime(
       new ModelProviderCredentialCipher(configuration.model.credentialEncryptionKey),
       configuration.model.apiKey,
     );
+    const titleConsumer = new ThreadTitleGenerationConsumer(
+      new PgThreadTitleGenerationStore(pool),
+      undefined,
+      `${configuration.worker.workerId}-titles`,
+      60_000,
+      3,
+      5_000,
+      async () => {
+        const titleModel = await runtimeConfigurations.resolveTitleModelConfiguration();
+        return titleModel == null
+          ? titleModel
+          : new OpenAiCompatibleThreadTitleGenerator(titleModel);
+      },
+    );
     const sessions = new RuntimeConfiguredSessionFactory(
       runtimeConfigurations,
       new PgRunCompactionSettingsRepository(pool),
@@ -1295,23 +1329,25 @@ async function assembleWorkerRuntime(
                 configuredProvider?.baseUrl ?? configuration.model.baseUrl,
               )
             : undefined,
-          prepareRuntimeCompaction: configuration.threadContext.compaction.enabled
-            ? async (
-                input,
-                compatibility,
-                history,
-                availableHistoryTokens,
-                additionalVisibleTokens,
-              ) =>
-                await dynamicCompaction.prepare({
-                  fence: input.fence,
-                  attemptId: input.attemptId,
-                  compatibilityDigest: digestCanonical(compatibility),
+          prepareRuntimeCompaction:
+            configuration.threadContext.compaction.enabled &&
+            (snapshot?.runtimeSettings?.configuration.compactionEnabled ?? true)
+              ? async (
+                  input,
+                  compatibility,
                   history,
                   availableHistoryTokens,
                   additionalVisibleTokens,
-                })
-            : undefined,
+                ) =>
+                  await dynamicCompaction.prepare({
+                    fence: input.fence,
+                    attemptId: input.attemptId,
+                    compatibilityDigest: digestCanonical(compatibility),
+                    history,
+                    availableHistoryTokens,
+                    additionalVisibleTokens,
+                  })
+              : undefined,
         });
       },
     );
@@ -1410,8 +1446,9 @@ async function assembleWorkerRuntime(
         },
         resolveConcurrencySettings: () => runtimeConfigurations.resolveActiveRuntimeSettings(),
         canClaim: async () =>
-          (await runtimeConfigurations.resolveActiveModelConfiguration()) !== undefined ||
-          configuration.model.apiKey !== "",
+          (await upstreamSandboxes.isConfigured()) &&
+          ((await runtimeConfigurations.resolveActiveModelConfiguration()) !== undefined ||
+            configuration.model.apiKey !== ""),
         maintenance: (tenantId) =>
           performWorkerMaintenance({
             resourceBlobBatchLimit: 16,
@@ -1422,6 +1459,7 @@ async function assembleWorkerRuntime(
                 orphanGraceSeconds: 300,
               }),
             drainMemory: () => memoryConsumer.drainTenant(tenantId),
+            drainTitles: () => titleConsumer.drainTenant(tenantId),
             drainScheduledTasks: () => scheduledTaskConsumer.drainTenant(tenantId),
           }),
       },
@@ -1438,10 +1476,10 @@ async function assembleWorkerRuntime(
           throw new Error("MODEL_CONFIGURATION_REQUIRED");
       },
     });
-    // 模型是否已配置只影响领取资格；缺少模型不能阻止安装向导启动整个服务。
+    // 模型与沙箱是否已配置只影响领取资格；安装期间保留进程和动态配置读取。
     await startWorkerLoopAfterDependencyProbes(
       runtimeMode,
-      { ...probes, model: async () => undefined },
+      { ...probes, model: async () => undefined, sandbox: async () => undefined },
       () => {
         loop.start();
         dispatchWakeListener.start(() => loop.wake());
@@ -1453,6 +1491,7 @@ async function assembleWorkerRuntime(
         shutdown.request();
         await dispatchWakeListener.close();
         await loop.drain();
+        await titleConsumer.close();
       },
       resources: Object.freeze([
         Object.freeze({ name: "postgres", close: () => pool.end() }),
@@ -1486,6 +1525,8 @@ function createConfiguredSandboxRouter(
 ): SandboxSessionRegistryRouter {
   const registries = [];
   if (configuration.sandbox.enabledProviderKeys.includes("cube")) {
+    if (!configuration.sandbox.apiUrl || !configuration.sandbox.templateId)
+      throw new Error("SANDBOX_CONFIGURATION_REQUIRED");
     registries.push(
       new CubeSandboxSessionRegistry(
         {
@@ -1604,12 +1645,14 @@ export async function probeDevelopmentWorkerDependencies(
     } as const;
     const sandbox = createConfiguredSandboxRouter(
       configuration,
-      new CubeTenantResourceVolume({
-        apiUrl: configuration.sandbox.apiUrl,
-        apiKey: configuration.sandbox.apiKey ?? null,
-        driver: configuration.sandbox.resourceVolumeDriver,
-        requestTimeoutMs: 5_000,
-      }),
+      configuration.sandbox.apiUrl === undefined
+        ? undefined
+        : new CubeTenantResourceVolume({
+            apiUrl: configuration.sandbox.apiUrl,
+            apiKey: configuration.sandbox.apiKey ?? null,
+            driver: configuration.sandbox.resourceVolumeDriver,
+            requestTimeoutMs: 5_000,
+          }),
       undefined,
       new PgSandboxConfigurationResolver(
         pool,
@@ -1620,7 +1663,9 @@ export async function probeDevelopmentWorkerDependencies(
       probePostgres(pool, configuration.databaseRuntimeRole),
       probePostgres(coordinatorPool, configuration.databaseWorkerCoordinatorRole),
       probeS3BlobStore(s3Config),
-      sandbox.probeExecution(),
+      (async () => {
+        if (await sandbox.isConfigured()) await sandbox.probeExecution();
+      })(),
       (async () => {
         const configurations = new PgRuntimeControlConfigurationRepository(
           pool,
@@ -1708,16 +1753,17 @@ function assertProductionHasNoDevelopmentIdentity(
 
 /** 凭据会随请求头发送，生产网络边界不能把模型/S3 密钥降为明文传输。 */
 function assertProductionWorkerTransport(input: {
-  readonly modelBaseUrl: string;
+  readonly modelBaseUrl: string | undefined;
   readonly objectStorageEndpoint: string;
-  readonly sandboxApiUrl: string;
+  readonly sandboxApiUrl: string | undefined;
 }): void {
-  const endpoints: Array<readonly [string, string]> = [
+  const endpoints: Array<readonly [string, string | undefined]> = [
     ["MODEL_BASE_URL", input.modelBaseUrl],
     ["S3_ENDPOINT", input.objectStorageEndpoint],
     ["CUBESANDBOX_API_URL", input.sandboxApiUrl],
   ];
   for (const [key, value] of endpoints) {
+    if (value === undefined) continue;
     const url = new URL(value);
     if (url.protocol !== "https:" || url.username !== "" || url.password !== "") {
       throw new TypeError(`${key} 在 production 必须为无凭据的 HTTPS URL`);

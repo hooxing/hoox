@@ -1,6 +1,7 @@
 # ADR-20261115122045：首次运行创建管理员与延后模型配置
+- 部分替代入口：[Sandbox 部署前置要求](20261115155532-post-deployment-service-configuration.md)；其余安全、持久化与恢复结论保持有效。
 
-- 状态：已接受
+- 状态：部分已替代
 - 日期：2026-11-15
 - 部分替代：[独立控制面](20260819165254-independent-admin-control-plane.md)中所有初始授权仅经数据库运维的结论、[统一管理 API](20260821115221-unified-admin-api-process.md)的浏览器固定开发 Token 前置，以及[身份交换](20260824125500-embedded-identity-session-exchange-and-admin-configuration.md)中按邮箱自动绑定已有本地账号的结论。独立数据库角色、领域授权、会话交换和配置快照继续有效。
 

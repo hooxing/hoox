@@ -38,6 +38,36 @@ function developmentEnvironment(): Record<string, string> {
 }
 
 describe("Scheduler 进程入口", () => {
+  it("无沙箱和模型供应商时仍能解析基础部署，显式启用的沙箱仍校验完整性", () => {
+    const env = productionEnvironment();
+    for (const key of Object.keys(env)) {
+      if (
+        key.startsWith("CUBESANDBOX_") ||
+        (key.startsWith("MODEL_") && key !== "MODEL_CREDENTIAL_ENCRYPTION_KEY")
+      )
+        delete env[key];
+    }
+    expect(parseSchedulerProcessEnvironment(env).sandbox.enabledProviderKeys).toEqual([]);
+    expect(() =>
+      parseSchedulerProcessEnvironment({ ...env, SANDBOX_ENABLED_PROVIDERS: "cube" }),
+    ).toThrow("CUBESANDBOX_API_URL");
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...env,
+        SANDBOX_ENABLED_PROVIDERS: "e2b",
+        SANDBOX_DEFAULT_PROVIDER: "e2b",
+      }),
+    ).toThrow("E2B_API_KEY");
+    const e2b = parseSchedulerProcessEnvironment({
+      ...env,
+      SANDBOX_ENABLED_PROVIDERS: "e2b",
+      SANDBOX_DEFAULT_PROVIDER: "e2b",
+      E2B_API_KEY: "placeholder-api-key",
+    });
+    expect(e2b.sandbox.enabledProviderKeys).toEqual(["e2b"]);
+    expect(e2b.sandbox.apiUrl).toBeUndefined();
+  });
+
   it("托管沙箱使用共享加密根且凭据字段不会被环境筛选丢弃", () => {
     const environment = {
       ...developmentEnvironment(),

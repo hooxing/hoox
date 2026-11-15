@@ -206,6 +206,13 @@ export class PgWorkerTenantAssignments {
                   WHERE memory.tenant_id=$1
                     AND memory.state IN ('pending','claimed','submitted')
                  UNION ALL
+                 SELECT CASE WHEN title.state='pending'
+                        THEN greatest(title.next_attempt_at,statement_timestamp())
+                        ELSE greatest(title.claim_expires_at+interval '1 millisecond',statement_timestamp()) END
+                   FROM thread_title_generation_outbox title
+                   JOIN tenants title_tenant ON title_tenant.id=title.tenant_id AND title_tenant.kind='personal'
+                  WHERE title.tenant_id=$1 AND title.state IN ('pending','claimed')
+                 UNION ALL
                  SELECT greatest(task.next_run_at,statement_timestamp()) AS next_attempt_at
                    FROM scheduled_tasks task
                   WHERE task.tenant_id=$1 AND task.status='active' AND task.next_run_at IS NOT NULL

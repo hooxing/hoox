@@ -114,6 +114,19 @@ export const MemoryProviderConfigurationDtoSchema = Type.Object(
 );
 export type MemoryProviderConfigurationDto = Static<typeof MemoryProviderConfigurationDtoSchema>;
 
+const TitleGenerationConfigurationSchema = Type.Union([
+  Type.Object({ enabled: Type.Literal(false) }, strict),
+  Type.Object(
+    {
+      enabled: Type.Literal(true),
+      providerKey: ProviderKeySchema,
+      providerRevision: RevisionNumberSchema,
+      modelId: Type.String({ minLength: 1, maxLength: 512 }),
+    },
+    strict,
+  ),
+]);
+
 export const RuntimeSettingsConfigurationDtoSchema = Type.Object(
   {
     enabledTools: Type.Optional(
@@ -123,6 +136,8 @@ export const RuntimeSettingsConfigurationDtoSchema = Type.Object(
       }),
     ),
     toolCallingMode: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("ptc")])),
+    titleGeneration: Type.Optional(TitleGenerationConfigurationSchema),
+    compactionEnabled: Type.Optional(Type.Boolean()),
     workerMaxConcurrentRuns: Type.Integer({ minimum: 1, maximum: 100 }),
     userMaxConcurrentRunsPerTenant: Type.Integer({ minimum: 1, maximum: 100 }),
     compactionSoftLimitPercent: Type.Integer({ minimum: 50, maximum: 95 }),

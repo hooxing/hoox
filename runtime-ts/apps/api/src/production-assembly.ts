@@ -4,6 +4,7 @@ import {
   BlobSkillContentStore,
   type CreateS3BlobStoreConfig,
   createApiPersistenceRuntime,
+  PgInstallationRepository,
   createS3BlobStore,
   DurableResourceBlobWriter,
   DurableResourceUploadBlobAdapter,
@@ -138,6 +139,18 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         {
           auth,
           localAccounts,
+          installation: {
+            repository: new PgInstallationRepository(persistence.identityDatabase),
+            administratorAccounts: createLocalAccountAuthService({
+              repository: persistence.localAccounts,
+              clock,
+              initialAdministrator: true,
+            }),
+            runtimeEnvironment: configuration.runtimeEnvironment,
+            ...(configuration.installationSetupToken === undefined
+              ? {}
+              : { setupToken: configuration.installationSetupToken }),
+          },
           localAccountPasswordRoutes: false,
           embeddedIdentity,
           ...(configuration.demoAdminUserId === undefined

@@ -112,6 +112,8 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "AGENT_WORKER_DISPATCH_LEASE_MS",
   "AGENT_WORKER_RUN_LEASE_MS",
   "AGENT_WORKER_RUN_TIMEOUT_MS",
+  "INSTALLATION_SETUP_TOKEN",
+  "ADMIN_CONTROL_IDENTITY_API_URL",
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
   "MODEL_CREDENTIAL_ENCRYPTION_KEY",
@@ -127,6 +129,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
 ]);
 
 const secretKeys = new Set([
+  "INSTALLATION_SETUP_TOKEN",
   "DATABASE_URL",
   "DATABASE_WORKER_COORDINATOR_URL",
   "DATABASE_TEAM_COORDINATOR_URL",
@@ -228,7 +231,11 @@ export function validateProductionEnvironmentExample(source) {
   }
   for (const key of secretKeys) {
     const value = values.get(key);
-    if (value !== undefined && !obviousPlaceholder(key, value)) {
+    if (
+      value !== undefined &&
+      !(["MODEL_API_KEY", "MODEL_ID"].includes(key) && value === "") &&
+      !obviousPlaceholder(key, value)
+    ) {
       issues.push(`示例配置疑似包含真实凭据：${key}`);
     }
   }
@@ -244,6 +251,7 @@ export function validateProductionEnvironmentExample(source) {
     "HISTORY_TITLE_MODEL_BASE_URL",
   ]) {
     const value = values.get(key);
+    if (key === "MODEL_BASE_URL" && value === "") continue;
     try {
       const url = value === undefined ? undefined : new URL(value);
       if (

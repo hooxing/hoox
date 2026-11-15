@@ -24,6 +24,7 @@ export interface BetterAuthIdentityExchangeInput extends LocalAccountProfileReco
 }
 
 export interface RegisterLocalAccountInput extends LocalAccountPasswordRecord {
+  readonly initialAdministrator?: boolean;
   readonly membershipId: string;
   readonly sessionTokenDigest: string;
   readonly createdAt: string;
@@ -116,6 +117,17 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
         this.pool,
         { tenantId: input.personalTenantId, userId: input.userId },
         async (client) => {
+          if (input.initialAdministrator) {
+            // 单行锁覆盖账号、会话和授权的完整事务，竞争失败不会遗留孤立账号。
+            const state = await client.query<{ administrator_user_id: string | null }>(
+              "SELECT administrator_user_id FROM installation_state WHERE singleton=true FOR UPDATE",
+            );
+            if (state.rows[0]?.administrator_user_id !== null) return "conflict" as const;
+            const status = await client.query<{ initialized: boolean }>(
+              "SELECT initialized FROM installation_status",
+            );
+            if (status.rows[0]?.initialized !== false) return "conflict" as const;
+          }
           await client.query("INSERT INTO app_users(id,created_at) VALUES ($1,$2)", [
             input.userId,
             input.createdAt,
@@ -158,6 +170,20 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
               input.sessionExpiresAt,
             ],
           );
+          if (input.initialAdministrator) {
+            await client.query(
+              "UPDATE installation_state SET administrator_user_id=$1,initialized_at=$2 WHERE singleton=true",
+              [input.userId, input.createdAt],
+            );
+            await client.query(
+              "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+              [input.userId],
+            );
+            await client.query(
+              "INSERT INTO platform_skill_operators(user_id,role,status) VALUES($1,'admin','active')",
+              [input.userId],
+            );
+          }
           return "created" as const;
         },
       );
@@ -189,6 +215,8 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
         const row = existing.rows[0];
         if (row !== undefined) {
           if (row.status === "disabled") return "disabled" as const;
+          // 邮箱匹配不能证明本地密码账号的所有权，尤其不能借注册接管初始管理员。
+          if (row.better_auth_user_id == null) return "conflict" as const;
           if (
             row.better_auth_user_id !== null &&
             row.better_auth_user_id !== undefined &&

@@ -36,13 +36,13 @@ describe("Windows development 一键启动脚本", () => {
     expect(script).not.toContain("docker-compose.dev.yml");
   });
 
-  it("交互询问平台管理服务且空回答默认不启动", async () => {
+  it("默认启动平台管理服务以支持首次配置", async () => {
     const script = await readFile(scriptUrl, "utf8");
 
     expect(script).toContain("[switch]$IncludeSkill");
-    expect(script).toContain("Read-Host $skillPrompt");
-    expect(script).toContain("是否启动平台管理服务（Skill、Control 与 Admin Web）？[y/N]");
-    expect(script).toContain('$skillAnswer.Trim() -match "^(y|yes|1|是)$"');
+    expect(script).not.toContain("Read-Host $skillPrompt");
+    expect(script).toContain("$startSkillServices = $true");
+    expect(script).toContain("http://127.0.0.1:4173/admin/");
     expect(script).toContain("if ($startSkillServices)");
     expect(script).toContain("@hoox/admin-web");
     expect(script).toContain(

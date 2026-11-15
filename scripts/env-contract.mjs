@@ -135,7 +135,12 @@ export const expectedEnvironmentKeys = Object.freeze([
   "DEV_AUTH_USER_B_TENANT_ID",
 ]);
 
-export const optionalEnvironmentKeys = Object.freeze(["DEMO_PUBLIC_ORIGIN", "DEMO_ADMIN_USER_ID"]);
+export const optionalEnvironmentKeys = Object.freeze([
+  "DEMO_PUBLIC_ORIGIN",
+  "DEMO_ADMIN_USER_ID",
+  "INSTALLATION_SETUP_TOKEN",
+  "ADMIN_CONTROL_IDENTITY_API_URL",
+]);
 
 const placeholderOnlyKeys = new Set([
   "DATABASE_URL",
@@ -170,8 +175,16 @@ const placeholderOnlyKeys = new Set([
   "RESOURCEFS_PROXY_TLS_KEY_PATH",
   "RESOURCEFS_PROXY_TLS_CERT_PATH",
   "DEV_ADMIN_CONTROL_TOKEN",
+  "INSTALLATION_SETUP_TOKEN",
 ]);
-const nullablePlaceholderKeys = new Set(["CUBESANDBOX_API_KEY", "E2B_DOMAIN"]);
+const nullablePlaceholderKeys = new Set([
+  "CUBESANDBOX_API_KEY",
+  "E2B_DOMAIN",
+  "MODEL_BASE_URL",
+  "MODEL_API_KEY",
+  "MODEL_ID",
+  "DEV_ADMIN_CONTROL_TOKEN",
+]);
 
 function looksLikePlaceholder(key, value) {
   if (

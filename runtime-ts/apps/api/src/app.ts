@@ -184,6 +184,11 @@ import {
 } from "./resource-filesystem-http.js";
 import type { EmbeddedIdentityAuthService } from "./embedded-identity-auth.js";
 import type { LocalAccountAuthService } from "./local-account-auth.js";
+import {
+  installationAccessAllowed,
+  InstallationAttemptLimiter,
+  type InstallationRepository,
+} from "@hoox/identity";
 import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
 
 export interface ApiDependencies {
@@ -192,6 +197,12 @@ export interface ApiDependencies {
   readonly localAccountPasswordRoutes?: boolean;
   readonly embeddedIdentity?: EmbeddedIdentityAuthService;
   readonly demoAdminUserId?: string;
+  readonly installation?: Readonly<{
+    repository: InstallationRepository;
+    administratorAccounts: LocalAccountAuthService;
+    runtimeEnvironment: string;
+    setupToken?: string;
+  }>;
   readonly repositories: CoreRepositories;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -803,6 +814,80 @@ export function createApiApp(
       500: ErrorEnvelopeSchema,
       503: ErrorEnvelopeSchema,
     } as const;
+
+    if (normalizedDependencies.installation !== undefined) {
+      const installation = normalizedDependencies.installation;
+      const limiter = new InstallationAttemptLimiter();
+      const accessAllowed = (request: FastifyRequest) =>
+        installationAccessAllowed({
+          runtimeEnvironment: installation.runtimeEnvironment,
+          ...(installation.setupToken === undefined
+            ? {}
+            : { configuredToken: installation.setupToken }),
+          ...(typeof request.headers["x-hoox-setup-token"] === "string"
+            ? { suppliedToken: request.headers["x-hoox-setup-token"] }
+            : {}),
+          remoteAddress: request.raw.socket.remoteAddress ?? "",
+          host: request.headers.host ?? "",
+          ...(request.headers.origin === undefined ? {} : { origin: request.headers.origin }),
+          forwarded:
+            request.headers.forwarded !== undefined ||
+            request.headers["x-forwarded-for"] !== undefined ||
+            request.headers["x-forwarded-host"] !== undefined,
+        });
+      app.get("/v1/installation", async (request, reply) => {
+        reply.header("Cache-Control", "no-store");
+        const initialized = await installation.repository.initialized();
+        return success(request, {
+          initialized,
+          setupTokenRequired: !initialized && !accessAllowed(request),
+        });
+      });
+      app.post<{ Body: RegisterAccountRequest }>(
+        "/v1/installation/administrator",
+        {
+          preValidation: async (request) => requireJsonContentType(request),
+          schema: { body: RegisterAccountRequestSchema, response: accountSessionResponses },
+        },
+        async (request, reply) => {
+          reply.header("Cache-Control", "no-store");
+          if (!limiter.accept(request.ip)) throw new ApiFailure("dependency_unavailable");
+          if (await installation.repository.initialized()) throw new ApiFailure("conflict");
+          if (!accessAllowed(request)) throw new ApiFailure("unauthorized");
+          return success(request, await installation.administratorAccounts.register(request.body));
+        },
+      );
+      app.post<{ Body: LoginAccountRequest }>(
+        "/v1/installation/login",
+        {
+          preValidation: async (request) => requireJsonContentType(request),
+          schema: { body: LoginAccountRequestSchema, response: accountSessionResponses },
+        },
+        async (request, reply) => {
+          reply.header("Cache-Control", "no-store");
+          if (!limiter.accept(request.ip)) throw new ApiFailure("dependency_unavailable");
+          const session = await localAccounts.login(request.body);
+          if (!(await installation.repository.isAdministrator(session.profile.id))) {
+            await localAccounts.logout(`Bearer ${session.accessToken}`);
+            throw new ApiFailure("unauthorized");
+          }
+          return success(request, session);
+        },
+      );
+      app.get("/v1/auth/admin-principal", async (request, reply) => {
+        reply.header("Cache-Control", "no-store");
+        const principal = await localAccounts.resolve({
+          authorization: authorization(request),
+          requestId: requestId(request),
+        });
+        if (
+          principal === undefined ||
+          !(await installation.repository.canAccessControl(principal.userId))
+        )
+          throw new ApiFailure("unauthorized");
+        return success(request, { userId: principal.userId });
+      });
+    }
 
     if (
       normalizedDependencies.localAccountPasswordRoutes ??

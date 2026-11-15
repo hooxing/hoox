@@ -113,7 +113,7 @@ corepack pnpm dev:admin-control:api
 corepack pnpm dev:admin:web
 ```
 
-浏览器访问 `http://127.0.0.1:4174`。上传包必须包含根级、严格 UTF-8 的 `SKILL.md`，最多 256 个文件、总计
+浏览器访问 `http://127.0.0.1:4173/admin/`。上传包必须包含根级、严格 UTF-8 的 `SKILL.md`，最多 256 个文件、总计
 32 MiB、入口最多 64 KiB；界面采集 SPDX 许可证，上游 URL 和不可变 revision 是可选高级信息。未声明兼容性时由
 系统固定为 `Agent Skills 标准格式`，未声明上游来源时以规范包 SHA-256 标识实际文件。确定性校验通过后的版本仍
 标记为 `restricted`，管理员必须人工检查入口正文、许可证、文件摘要及已声明的来源；它不等价于恶意软件或脚本
@@ -152,8 +152,8 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
    `credentialConfigured`，不返回明文或密文。记忆凭据仍使用部署秘密引用；一旦密钥曾被误填到普通字段，
    必须在 Provider 侧轮换，不能把响应脱敏视为秘密已经从历史事实中删除。疑似密钥启发式只约束新写入；持久化读取
    继续验证完整配置结构，但必须先允许既有对象键进入受控投影，不能在脱敏前把整次概览读取变成服务端错误。
-3. 执行迁移与开发身份初始化后，由受控数据库运维事务向
-   `platform_control_operators(user_id, role, status)` 写入 `viewer`、`operator` 或 `admin`。控制 API 不提供自助提权
+3. 空安装可通过首次运行页面原子创建唯一初始管理员；已有安装的授权变更仍由受控数据库运维事务向
+   `platform_control_operators(user_id, role, status)` 写入 `viewer`、`operator` 或 `admin`。授权事务先锁定 `installation_state` 单行；控制 API 不提供既有安装的自助提权
    路由。日常模型与记忆的一次保存生效均要求 admin；operator 仍可通过旧兼容接口创建草稿和测试。
    模型与记忆的新保存接口和旧发布接口均不以连接测试为启用门禁；兼容探测接口仍可诊断连接，服务端授权与并发检查继续有效，不能以导航或按钮替代。
 
@@ -203,7 +203,7 @@ TanStack Query 协调控制面读取、去重和失效。页面按工作台、�
 
 PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/Poppler 依赖必须由 Sandbox 模板提供，不能在 Run 内临时安装。开发模板从 `deploy/cubesandbox/agent-sandbox-pptx.Dockerfile` 构建；发布镜像后用 CubeSandbox `Template.build({ image })` 创建不可变模板，并把返回的模板 ID 写入本地 `.env` 的 `CUBESANDBOX_TEMPLATE_ID`。基础镜像使用摘要固定，Node 模块使用精确版本；每次发布使用新的不可变镜像标签，不在既有标签上依赖 `Template.rebuild` 刷新。命令服务会净化进程环境，因此模板同时提供根级 `/node_modules` 解析路径，不能只依赖镜像中的 `NODE_PATH`。旧模板保留到新模板完成真实 `.pptx` 生成及 pause/resume 冒烟后再回收。
 
-`agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 仍严格等于 `DEV_AUTH_USER_A_TENANT_ID`，但只用于启动兼容；个人与团队 dispatch 都会原子唤醒动态 Tenant 控制面。`DATABASE_WORKER_COORDINATOR_URL` 必须使用独立的 `DATABASE_WORKER_COORDINATOR_ROLE` 登录，该角色只能领取无业务载荷的 Tenant 租约；实际任务始终回到 `DATABASE_URL` 对应的 Runtime 角色和 Tenant RLS 内读取。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它会同时检查两个数据库身份，但不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
+`agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 仍严格等于 `DEV_AUTH_USER_A_TENANT_ID`，但只用于启动兼容；个人与团队 dispatch 都会原子唤醒动态 Tenant 控制面。`DATABASE_WORKER_COORDINATOR_URL` 必须使用独立的 `DATABASE_WORKER_COORDINATOR_ROLE` 登录，该角色只能领取无业务载荷的 Tenant 租约；实际任务始终回到 `DATABASE_URL` 对应的 Runtime 角色和 Tenant RLS 内读取。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它会同时检查两个数据库身份，但不会启动 polling 或领取 dispatch。无模型时 Worker 保持运行且不领取任务，后台保存配置后自动恢复。预检对已配置模型使用受限 `chat/completions`；部署回退模型存在时，`MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
 
 新增或修改工具必须同时交付模型调用契约与用户展示契约：安全用途或操作对象、真实生命周期、受控失败信息，以及正常/PTC 共用投影。同步维护 `pi-adapter` 展示与错误映射，并测试前端终态、旧事件缺字段和重放一致性；不得从完整参数、源码或输出推断界面摘要。当前字段、失败和兼容边界见[工具调用模式](../architecture/tool-calling-modes.md#用户可见工具信息与错误处理)，长期原则见[工具用户展示契约决策](../decisions/20261004184828-tool-user-presentation-contract.md)。
 
@@ -226,7 +226,7 @@ Sidecar 只接受 `/v1/resource-filesystem`，不得用它转发其他 API 路�
 忽略目录。节点 endpoint 使用该证书覆盖的 HTTPS 地址；未携带 ResourceFS capability 的探针应快速返回 401，
 而不是超时。配置与安全边界见 [ADR-0105](../decisions/0105-development-resourcefs-https-sidecar.md)。
 
-production Worker 使用 `pnpm --filter @hoox/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、严格模型元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。
+production Worker 使用 `pnpm --filter @hoox/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、已配置部署模型的严格元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。
 
 装配器按业务接收顺序实现 `stopAccepting`，将数据库连接池、HTTP listener、消费者和遥测等资源按确定顺序登记。关闭时先停止接收，再等待 `lifecycle.track()` 登记的在途操作，最后串行关闭资源。资源错误只上报稳定名称；库不调用 `process.exit`。部署平台的强制终止宽限期必须大于 `PROCESS_SHUTDOWN_TIMEOUT_MS`。
 

@@ -92,9 +92,11 @@ export class PgWorkerTenantAssignments {
 
   async wake(tenantId: string): Promise<void> {
     try {
-      await withTenantTransaction(this.pools.runtime, { tenantId }, (client) =>
-        wakeWorkerTenant(client, tenantId),
-      );
+      await withTenantTransaction(this.pools.runtime, { tenantId }, async (client) => {
+        // 空安装尚无兼容 Tenant；真实 dispatch 仍在提交事务内动态唤醒所属 Tenant。
+        const tenant = await client.query("SELECT 1 FROM tenants WHERE id=$1", [tenantId]);
+        if (tenant.rowCount !== 0) await wakeWorkerTenant(client, tenantId);
+      });
     } catch (error) {
       throw mapPersistenceError(error, "唤醒 Worker Tenant 调度");
     }

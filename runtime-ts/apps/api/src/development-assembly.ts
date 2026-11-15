@@ -3,6 +3,7 @@ import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@h
 import {
   BlobSkillContentStore,
   createApiPersistenceRuntime,
+  PgInstallationRepository,
   createS3BlobStore,
   DurableResourceBlobWriter,
   DurableResourceUploadBlobAdapter,
@@ -41,13 +42,10 @@ const developmentApiMaxSkillBlobSizeBytes = 32 * 1_024 * 1_024;
 
 export { parseThreadCursorSigningKeys } from "./cursor.js";
 
-/** development 装配默认只服务固定本地身份；公开 Demo 必须显式关闭固定身份并保持回环监听。 */
+/** development 装配保持回环监听；固定身份仅在显式启用时注入。 */
 export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = {
   async assemble(configuration) {
-    if (
-      configuration.runtimeEnvironment !== "development" ||
-      (configuration.developmentPrincipals === undefined && !configuration.demoPublicAccessEnabled)
-    ) {
+    if (configuration.runtimeEnvironment !== "development") {
       throw new Error("DEVELOPMENT_API_ASSEMBLY_FORBIDDEN");
     }
     // 即使调用方绕过进程配置解析直接调用装配器，API 也只能由宿主机反向代理从回环地址转发。
@@ -169,6 +167,18 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
                   fallback: localAccounts,
                 }),
           localAccounts,
+          installation: {
+            repository: new PgInstallationRepository(persistence.identityDatabase),
+            administratorAccounts: createLocalAccountAuthService({
+              repository: persistence.localAccounts,
+              clock,
+              initialAdministrator: true,
+            }),
+            runtimeEnvironment: configuration.runtimeEnvironment,
+            ...(configuration.installationSetupToken === undefined
+              ? {}
+              : { setupToken: configuration.installationSetupToken }),
+          },
           localAccountPasswordRoutes: principals !== undefined,
           embeddedIdentity,
           ...(configuration.demoAdminUserId === undefined

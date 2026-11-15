@@ -550,6 +550,7 @@ function fixture(
     readonly personalizations?: ApiDependencies["personalizations"];
     readonly threadForks?: ApiDependencies["threadForks"];
     readonly localAccounts?: ApiDependencies["localAccounts"];
+    readonly installation?: ApiDependencies["installation"];
     readonly demoAdminUserId?: string;
     readonly scheduledTasks?: ApiDependencies["scheduledTasks"];
   } = {},
@@ -621,6 +622,7 @@ function fixture(
       },
     },
     ...(options.localAccounts === undefined ? {} : { localAccounts: options.localAccounts }),
+    ...(options.installation === undefined ? {} : { installation: options.installation }),
     ...(options.demoAdminUserId === undefined ? {} : { demoAdminUserId: options.demoAdminUserId }),
     repositories: state.repositories,
     ...(options.enableCreate === false
@@ -1011,6 +1013,88 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("首次管理员入口校验部署令牌，初始化后关闭且普通注册不能提权", async () => {
+    let initialized = false;
+    const session = {
+      profile: { id: "user_setup", email: "setup@example.invalid", displayName: "管理员" },
+      accessToken: "hoox_session_test-token-with-more-than-thirty-two-characters",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    };
+    const localAccounts = {
+      register: vi.fn(),
+      login: vi.fn(async () => session),
+      exchangeBetterAuthIdentity: vi.fn(),
+      resolve: vi.fn(async () => ({ userId: userId("user_setup") })),
+      getProfile: vi.fn(),
+      logout: vi.fn(),
+    };
+    const administratorAccounts = {
+      ...localAccounts,
+      register: vi.fn(async () => {
+        initialized = true;
+        return session;
+      }),
+    };
+    const repository = {
+      initialized: async () => initialized,
+      isAdministrator: vi.fn(async () => false),
+      canAccessControl: vi.fn(async () => true),
+    };
+    const { app } = fixture({
+      localAccounts,
+      installation: {
+        repository,
+        administratorAccounts,
+        runtimeEnvironment: "production",
+        setupToken: "setup-token-with-at-least-32-characters",
+      },
+    });
+    openApps.push(app);
+    const status = await app.inject({ url: "/v1/installation" });
+    expect(status.json().data).toEqual({ initialized: false, setupTokenRequired: true });
+    expect(status.headers["cache-control"]).toBe("no-store");
+    const input = {
+      method: "POST" as const,
+      url: "/v1/installation/administrator",
+      payload: {
+        displayName: "管理员",
+        email: "setup@example.invalid",
+        password: "setup-password",
+      },
+    };
+    expect((await app.inject(input)).statusCode).toBe(401);
+    expect(administratorAccounts.register).not.toHaveBeenCalled();
+    expect(
+      (
+        await app.inject({
+          ...input,
+          headers: { "x-hoox-setup-token": "setup-token-with-at-least-32-characters" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(localAccounts.register).not.toHaveBeenCalled();
+    expect((await app.inject(input)).statusCode).toBe(409);
+    expect(
+      (
+        await app.inject({
+          url: "/v1/auth/admin-principal",
+          headers: { authorization: "Bearer hoox_session_test" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(repository.canAccessControl).toHaveBeenCalledWith("user_setup");
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/v1/installation/login",
+          payload: { email: "setup@example.invalid", password: "setup-password" },
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(localAccounts.logout).toHaveBeenCalledWith(`Bearer ${session.accessToken}`);
+  });
+
   it("仅在装配本地账号能力时暴露注册登录路由", async () => {
     const session = {
       profile: { id: "user_local", displayName: "林晓", email: "lin@example.com" },

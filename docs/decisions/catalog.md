@@ -240,7 +240,7 @@
 | [ADR-20260820101805：浏览器内置 Pi 目录与后台配置服务独立降级](20260820101805-browser-bundled-pi-catalog-degrades-independently.md) | 部分已替代（模型配置流程与目录加载位置） | 2026-08-20 |
 | [ADR-20260820153000：项目采用 Apache License 2.0 并建立公开文档分层](20260820153000-open-source-license-and-documentation-boundary.md) | 已接受 | 2026-08-20 |
 | [ADR-20260821004057：工业化后台的信息架构、运营统计与用户治理边界](20260821004057-industrial-admin-operations-and-user-governance.md) | 部分已替代（后台配置工作流与用户交互） | 2026-08-21 |
-| [ADR-20260821115221：统一后台 API 进程并保留发布资源隔离](20260821115221-unified-admin-api-process.md) | 已接受 | 2026-08-21 |
+| [ADR-20260821115221：统一后台 API 进程并保留发布资源隔离](20260821115221-unified-admin-api-process.md) | 部分已替代 | 2026-08-21 |
 | [后台管理 Web 采用可路由的 Ant Design 应用外壳](20260824115942-admin-web-routable-ant-design-shell.md) | 部分已替代（模型页面工作流） | 2026-08-24 |
 | [后台模型用量指标与开发轨迹入口边界](20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md) | 部分已替代（Demo 轨迹入口） | 2026-08-24 |
 | [ADR-20260824222258：Demo 后台使用同源受保护路由](20260824222258-demo-admin-protected-same-origin-route.md) | 部分已替代（HTTP Basic 入口） | 2026-08-24 |
@@ -312,5 +312,7 @@
 | [ADR-20261008154038：工具选择约束保持无 routine 的迁移终态](20261008154038-tool-selection-routine-free-migration.md) | 已接受 | 2026-10-08 |
 
 | [ADR-20261108180541：Better Auth 升级保留历史 issuer 并约束 Provider 账号键](20261108180541-better-auth-provider-account-key.md) | 已接受 | 2026-11-08 |
+
+| [首次运行创建管理员与延后模型配置](20261115122045-first-run-administrator-and-model-setup.md) | 已接受 | 2026-11-15 |
 
 </details>

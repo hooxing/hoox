@@ -25,6 +25,7 @@ class ScriptedAssignmentClient {
       | "settle-stale"
       | "settle-expired"
       | "wake"
+      | "wake-empty"
       | "unused",
   ) {}
 
@@ -34,6 +35,8 @@ class ScriptedAssignmentClient {
       return { rows: [], rowCount: 0 };
     }
     if (sql.includes("set_config('app.tenant_id'")) return { rows: [], rowCount: 1 };
+    if (sql.includes("SELECT 1 FROM tenants"))
+      return { rows: [], rowCount: this.mode === "wake-empty" ? 0 : 1 };
     if (sql.includes("SELECT tenant_id,generation")) {
       return { rows: [{ tenant_id: "team-dynamic", generation: "6" }], rowCount: 1 };
     }
@@ -96,6 +99,15 @@ const assignment = Object.freeze({
 }) satisfies PgClaimedWorkerTenantAssignment;
 
 describe("PostgreSQL 动态 Worker Tenant 调度", () => {
+  it("空安装尚无兼容 Tenant 时不创建 assignment", async () => {
+    const client = new ScriptedAssignmentClient("wake-empty");
+    await storeFor({ runtime: client, coordinator: new ScriptedAssignmentClient("unused") }).wake(
+      "tenant_missing",
+    );
+    expect(
+      client.statements.some(({ sql }) => sql.includes("INSERT INTO worker_tenant_assignments")),
+    ).toBe(false);
+  });
   it("跨 Tenant 只领取控制面租约，并以数据库时钟和 SKIP LOCKED 保持公平竞争", async () => {
     const coordinator = new ScriptedAssignmentClient("claim");
     const runtime = new ScriptedAssignmentClient("unused");

@@ -172,6 +172,32 @@ describe("RuntimeApi", () => {
     expect((firstRequest as RequestInit).credentials).toBe("same-origin");
   });
 
+  it("首次管理员可在 Better Auth 拒绝密码后使用本地管理员登录", async () => {
+    const session = { accessToken: "hoox_session_setup" };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response("{}", { status: 401 }))
+      .mockResolvedValueOnce(Response.json({ data: session }));
+    const api = new RuntimeApi(fetcher, "/api");
+    await expect(
+      api.signInWithEmail({ email: "setup@example.invalid", password: "setup-password" }),
+    ).resolves.toEqual(session);
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/api/auth/sign-in/email",
+      "/api/v1/installation/login",
+    ]);
+  });
+  it("身份服务故障时不会降级到管理员登录", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 503 }));
+    await expect(
+      new RuntimeApi(fetcher, "/api").signInWithEmail({
+        email: "setup@example.invalid",
+        password: "setup-password",
+      }),
+    ).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("邮箱注册在验证码验证后才交换 Hoox 会话", async () => {
     const session = {
       profile: { id: "user_identity", displayName: "身份用户", email: "identity@example.com" },

@@ -167,7 +167,6 @@ Invoke-CheckedNative {
   node runtime-ts/apps/agent-worker/dist/development-preflight-main.js
 } ".env 外部服务预检失败，请检查 PostgreSQL、S3、CubeSandbox 与模型配置"
 
-$skillPrompt = "是否启动平台管理服务（Skill、Control 与 Admin Web）？[y/N]"
 if ($CoreOnly -and $IncludeSkill) {
   throw "-CoreOnly 与 -IncludeSkill 不能同时使用"
 }
@@ -178,13 +177,12 @@ if ($IncludeSkill) {
 } elseif ($CoreOnly) {
   $startSkillServices = $false
 } else {
-  $skillAnswer = Read-Host $skillPrompt
-  $startSkillServices = $skillAnswer.Trim() -match "^(y|yes|1|是)$"
+  $startSkillServices = $true
 }
 if ($startSkillServices) {
   Write-Host "[包含] 将启动平台管理服务" -ForegroundColor Green
 } else {
-  Write-Host "[跳过] 默认不启动平台管理服务" -ForegroundColor Yellow
+  Write-Host "[跳过] 按 -CoreOnly 省略平台管理服务" -ForegroundColor Yellow
 }
 
 $apiEntry = (Join-Path $repo "runtime-ts\apps\api\dist\development-main.js").Replace("'", "''")
@@ -233,7 +231,7 @@ if ($startSkillServices) {
     [pscustomobject]@{
       Name = "Admin Web"
       Command = "corepack pnpm --filter `"@hoox/admin-web`" dev"
-      HealthUrl = "http://127.0.0.1:4174"
+      HealthUrl = "http://127.0.0.1:4174/admin/"
       Port = 4174
       ProcessPattern = "(@hoox[\\/]admin-web|apps[\\/]+admin-web|dev:admin:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4174)"
     }
@@ -317,7 +315,7 @@ if (-not $allReady) {
 if (-not $NoBrowser) {
   Start-Process "http://127.0.0.1:4173/app"
   if ($startSkillServices) {
-    Start-Process "http://127.0.0.1:4174"
+    Start-Process "http://127.0.0.1:4173/admin/"
   }
 }
 
@@ -325,6 +323,6 @@ Write-Host "开发环境已全部启动。" -ForegroundColor Green
 Write-Host "主工作台：http://127.0.0.1:4173/app"
 Write-Host "API：$apiBaseUrl"
 if ($startSkillServices) {
-  Write-Host "Admin Web：http://127.0.0.1:4174"
+  Write-Host "Admin Web：http://127.0.0.1:4173/admin/"
 }
 Write-Host "启动状态：$(Join-Path $runtimeDirectory 'pids.json')"

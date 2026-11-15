@@ -45,6 +45,11 @@ const apiEnvironmentSchema = Object.freeze({
     maxLength: 8_192,
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
+  INSTALLATION_SETUP_TOKEN: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    secret: true,
+    maxLength: 512,
+  }),
   BETTER_AUTH_SECRET: stringEnvironmentField({ secret: true, maxLength: 4096 }),
   BETTER_AUTH_TRUSTED_ORIGINS: stringEnvironmentField({
     requiredIn: optionalEnvironments,
@@ -186,6 +191,7 @@ export interface ApiProcessConfiguration {
   readonly developmentPrincipals?: readonly [ApiDevelopmentPrincipal, ApiDevelopmentPrincipal];
   readonly demoPublicAccessEnabled: boolean;
   readonly demoAdminUserId?: string;
+  readonly installationSetupToken?: string;
   readonly shutdownTimeoutMilliseconds: number;
   readonly listenHost: string;
   readonly listenPort: number;
@@ -253,6 +259,11 @@ export function parseApiProcessEnvironment(
   if (configuredDemoPublicOrigin !== undefined && !demoPublicAccessEnabled) {
     throw new TypeError("DEMO_PUBLIC_ORIGIN_REQUIRES_DEMO_PUBLIC_ACCESS");
   }
+  if (
+    parsed.values.INSTALLATION_SETUP_TOKEN !== undefined &&
+    Buffer.byteLength(parsed.values.INSTALLATION_SETUP_TOKEN) < 32
+  )
+    throw new TypeError("INVALID:INSTALLATION_SETUP_TOKEN");
   const configuredDemoAdminUserId = parsed.values.DEMO_ADMIN_USER_ID;
   if (configuredDemoAdminUserId !== undefined && !demoPublicAccessEnabled) {
     throw new TypeError("DEMO_ADMIN_USER_ID_REQUIRES_DEMO_PUBLIC_ACCESS");
@@ -430,6 +441,9 @@ export function parseApiProcessEnvironment(
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     ...(databaseRuntimeRole === undefined ? {} : { databaseRuntimeRole }),
     ...(databaseTeamCoordinatorRole === undefined ? {} : { databaseTeamCoordinatorRole }),
+    ...(parsed.values.INSTALLATION_SETUP_TOKEN === undefined
+      ? {}
+      : { installationSetupToken: parsed.values.INSTALLATION_SETUP_TOKEN }),
     identityAuth: Object.freeze({
       secret: betterAuthSecret,
       baseURL:
@@ -490,10 +504,7 @@ export async function startApiProcess(input: {
   }
   const assembler =
     input.assembler ??
-    (configuration.runtimeEnvironment === "development" &&
-    (configuration.developmentPrincipals !== undefined || configuration.demoPublicAccessEnabled)
-      ? developmentApiAssembler
-      : undefined);
+    (configuration.runtimeEnvironment === "development" ? developmentApiAssembler : undefined);
   return startServiceProcess({
     serviceName: "api",
     configuration,

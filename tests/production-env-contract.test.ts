@@ -86,7 +86,7 @@ describe("production 部署配置契约", () => {
     const secret = "live-production-secret-canary";
     const source = `${example}\nDEV_AUTH_ENABLED=false`
       .replace("S3_ENDPOINT=https://s3.internal.example.invalid", "S3_ENDPOINT=http://s3.internal")
-      .replace("MODEL_API_KEY=replace-with-production-model-api-key", `MODEL_API_KEY=${secret}`);
+      .replace("\nMODEL_API_KEY=", `\nMODEL_API_KEY=${secret}`);
     const issues = validateProductionEnvironmentExample(source);
     expect(issues).toContain("未登记的生产环境变量：DEV_AUTH_ENABLED");
     expect(issues).toContain("生产配置禁止开发身份变量：DEV_AUTH_ENABLED");

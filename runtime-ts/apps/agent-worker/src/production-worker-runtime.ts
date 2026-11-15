@@ -963,6 +963,7 @@ export class AgentWorkerPollingLoop {
       readonly tenantAssignmentLeaseMs: number;
       readonly dispatchLeaseMs: number;
       readonly concurrencySettings?: WorkerRunConcurrencySettings;
+      readonly canClaim?: () => Promise<boolean>;
       readonly resolveConcurrencySettings?: () => Promise<WorkerRunConcurrencySettings | undefined>;
       /** 有界后台维护成功后释放 Tenant 租约；失败或容量不足时保留租约，过期后重试。 */
       readonly maintenance?: (tenantId: string) => Promise<unknown>;
@@ -1051,6 +1052,13 @@ export class AgentWorkerPollingLoop {
 
   private async tick(): Promise<boolean> {
     if (this.closed) return false;
+    if (this.options.canClaim !== undefined) {
+      try {
+        if (!(await this.options.canClaim())) return false;
+      } catch {
+        return false;
+      }
+    }
     if (this.options.resolveConcurrencySettings !== undefined) {
       try {
         const next = await this.options.resolveConcurrencySettings();

@@ -1081,6 +1081,14 @@ async function hasEmbeddedIdentityState(client: PoolClient, schema: string): Pro
   );
   return result.rows[0]?.present === true;
 }
+async function hasInstallationState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.installation_state',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAdminControlState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.platform_control_operators',$1::text)) IS NOT NULL
@@ -1292,6 +1300,16 @@ async function activeTablePolicy(
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
+  if (await hasInstallationState(client, schema)) {
+    policy.set("installation_state", new Set(["SELECT"]));
+    const statusView = await client.query<{ present: boolean }>(
+      "SELECT to_regclass(format('%I.installation_status',$1::text)) IS NOT NULL AS present",
+      [schema],
+    );
+    if (statusView.rows[0]?.present)
+      policy.set("platform_skill_operators", new Set(["SELECT", "INSERT"]));
+    policy.set("platform_control_operators", new Set(["SELECT", "INSERT"]));
+  }
   return policy;
 }
 
@@ -1300,6 +1318,9 @@ async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  if (await hasInstallationState(client, schema)) {
+    policy.set("installation_state", new Set(["administrator_user_id", "initialized_at"]));
+  }
   if (await hasEmbeddedIdentityState(client, schema)) {
     policy.set("user_accounts", new Set(["better_auth_user_id", "display_name", "updated_at"]));
   }
@@ -3020,6 +3041,30 @@ async function grantAdminControlAccess(
   if (!(await hasAdminControlState(client, context.schema))) return;
   const schema = quoteIdentifier(context.schema);
   const control = quoteIdentifier(context.adminControlRole);
+  if (await hasInstallationState(client, context.schema)) {
+    const runtime = quoteIdentifier(context.runtimeRole);
+    await client.query(`
+      ALTER POLICY installation_state_migrator_policy ON ${schema}.installation_state TO ${quoteIdentifier(context.migratorRole)};
+      ALTER POLICY installation_state_read_policy ON ${schema}.installation_state TO ${runtime};
+      ALTER POLICY installation_state_initialize_policy ON ${schema}.installation_state TO ${runtime};
+      ALTER POLICY platform_control_operators_runtime_read_policy ON ${schema}.platform_control_operators TO ${runtime};
+      ALTER POLICY platform_control_operators_initialize_policy ON ${schema}.platform_control_operators TO ${runtime};
+      GRANT SELECT ON ${schema}.installation_state TO ${runtime};
+      GRANT UPDATE(administrator_user_id,initialized_at) ON ${schema}.installation_state TO ${runtime};
+      GRANT SELECT,INSERT ON ${schema}.platform_control_operators TO ${runtime};
+    `);
+    const statusView = await client.query<{ present: boolean }>(
+      "SELECT to_regclass(format('%I.installation_status',$1::text)) IS NOT NULL AS present",
+      [context.schema],
+    );
+    if (statusView.rows[0]?.present) {
+      await client.query(`ALTER VIEW ${schema}.installation_status OWNER TO ${quoteIdentifier(context.migratorRole)};
+        GRANT SELECT ON ${schema}.installation_status TO ${runtime};
+        ALTER POLICY platform_skill_operators_runtime_read_policy ON ${schema}.platform_skill_operators TO ${runtime};
+        ALTER POLICY platform_skill_operators_initialize_policy ON ${schema}.platform_skill_operators TO ${runtime};
+        GRANT SELECT,INSERT ON ${schema}.platform_skill_operators TO ${runtime}`);
+    }
+  }
   if (await hasManagedSandboxState(client, context.schema)) {
     for (const table of managedSandboxControlTables)
       await client.query(

@@ -49,6 +49,67 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 
 `deploy/demo/*.env.example` 只说明字段归属，不能直接作为凭据文件。API、Admin Control、Scheduler 和 Worker 必须各自只获得其进程需要的配置；MinIO root 与 PostgreSQL bootstrap 密码不得注入应用容器。
 
+## 首次部署操作指南
+
+以下步骤对应仓库现有的 `demo` GitHub Actions 工作流，目标是受控 ARM64 单机演示环境。工作流中的镜像名、目录、域名和桶名是固定值；要用于其他环境，须先修改并验证工作流、反向代理及相应配置，不能只修改本机环境变量。该工作流不是通用 production 安装器。
+
+### 1. 准备主机、域名和证书
+
+1. 准备可从 GitHub Actions 经 SSH 访问的 Linux ARM64 主机，安装 Docker Engine、Compose v2、Nginx、Certbot、curl、Python 3 和 sudo；确认部署用户可运行 `docker compose version`、访问 Docker socket，并能无交互地安装及重载 Nginx 配置。
+2. 将 `hoox.aisay.cc` 的 DNS 指向目标主机，开放公网 TCP 80、443；SSH 访问按部署网络限制。确认宿主机的 3001、3003、4173、4174、4188、15432、19000、19001 端口未被占用。PostgreSQL、MinIO 和应用监听回环地址，不要将其端口直接开放到公网。
+3. 以有权限的账号创建目录，再将其所有权交给部署用户：
+
+   ```bash
+   sudo install -d -m 0755 /opt/hoox-demo/releases
+   sudo install -d -m 0700 /opt/hoox-demo/shared
+   sudo chown -R <部署用户>:<部署用户组> /opt/hoox-demo
+   sudo install -d -m 0755 /var/www/letsencrypt
+   ```
+
+   将尖括号及内容替换为真实的本机用户和组，勿直接复制占位符执行。保留已有 Nginx 站点并确认 `http` 块加载 `conf.d/*.conf`。
+4. 配置只监听 80 且允许 `/.well-known/acme-challenge/` 从 `/var/www/letsencrypt` 读取的临时站点，执行 `sudo nginx -t` 并重载后，使用 Certbot 的 webroot 模式为域名申请证书。确认 `/etc/letsencrypt/live/hoox.aisay.cc/` 下存在 `fullchain.pem` 和 `privkey.pem`，并配置和验证证书自动续期及续期后的 Nginx 重载。正式站点由发布脚本安装；首次发布前必须已有证书。
+
+### 2. 准备共享配置
+
+在目标主机以部署用户创建 `/opt/hoox-demo/shared` 下的七个文件，权限均设为 `0600`。以下是文件职责；具体变量和校验以[配置参考](../reference/configuration.md)、`.env.example`、`deploy/demo/*.env.example` 和各进程配置契约为准。示例是字段参考，不能原样投入运行，也不能将完整 `.env` 分发给每个服务。
+
+| 文件 | 所需内容和关系 |
+| --- | --- |
+| `infra.env` | PostgreSQL 初始化账号、数据库及各独立角色和密码，MinIO root、运行时与 Skill 发布账号，以及桶名；从 `infra.env.example` 起草。PostgreSQL 初始化脚本只在新数据卷初始化时执行，修改此文件不会自动轮换已有数据库角色密码。 |
+| `migration.env` | 迁移连接 `MIGRATION_DATABASE_URL`、schema 和迁移角色等迁移契约；连接指向宿主机回环 `127.0.0.1:15432`，身份与 `infra.env` 中的 migrator 一致。 |
+| `api.env` | 从 `api.env.example` 起草，补齐运行时数据库、身份、游标和 S3 等 API 必需配置；数据库和 S3 身份对应 `infra.env` 的运行时账号，S3 内部地址使用 `127.0.0.1:19000`。 |
+| `admin-control.env` | 从同名示例起草，使用独立 Admin Control、Skill Publisher 数据库角色和 Skill Publisher S3 账号；`BETTER_AUTH_SECRET` 与 API 相同，设置独立的 `DEV_ADMIN_CONTROL_TOKEN` 和稳定加密根。 |
+| `scheduler.env` | Scheduler 所需数据库角色、进程身份和稳定加密根；租户 ID 由发布脚本注入。不要注入 S3 或主模型调用密钥。 |
+| `worker.env` | Worker 所需数据库角色、S3 运行时账号、进程身份和稳定加密根；租户 ID 由发布脚本注入。 |
+| `demo-account.env` | `DEMO_ACCOUNT_DISPLAY_NAME`、`DEMO_ACCOUNT_EMAIL`、`DEMO_ACCOUNT_PASSWORD`，供脚本创建或登录固定 Demo 管理员。文件由 shell `source` 读取，值须是有效 shell 赋值；已有账号不会因修改文件而自动改密码。 |
+
+仓库目前只为 `infra.env`、`api.env` 和 `admin-control.env` 提供 Demo 局部示例，其余文件需要按当前进程契约准备。生成密码和密钥时避免出现在命令历史、终端录屏、日志或提交中；连接串中的特殊字符需按 URL 规则编码。`infra.env` 同样被 shell 读取，必须同时满足 shell 与 Compose env 文件解析。完成后核对权限及文件存在性，避免打印文件内容：
+
+```bash
+chmod 0700 /opt/hoox-demo/shared
+chmod 0600 /opt/hoox-demo/shared/{infra,migration,api,admin-control,scheduler,worker,demo-account}.env
+ls -ld /opt/hoox-demo/shared
+ls -l /opt/hoox-demo/shared/*.env
+```
+
+`MODEL_CREDENTIAL_ENCRYPTION_KEY` 在 Admin Control、Worker 和 Scheduler 中必须一致且稳定并安全备份。`BETTER_AUTH_SECRET` 在 API 和 Admin Control 中必须一致。模型和沙箱可以在后台配置；尚未就绪时 Worker 不领取业务任务，因此服务启动不代表可以执行 Run。Demo 发布仍会初始化固定管理员，和通用安装的首次管理员创建流程不同。
+
+### 3. 配置发布并触发
+
+在 GitHub 仓库的 `demo` Environment 或 Actions Secrets 中填写上一节列出的五项 Secrets，使用人工核验过的 SSH host key；确保部署令牌可推送和拉取该 GHCR 包。保护 Environment 时还需满足其审批规则。将变更通过必需 CI 合并到 `main`：该提交的 push CI 成功后自动触发 Demo CD；也可在 Actions 中选择“Demo 持续部署”，从 `main` 手动运行。手动运行同样要求当前 `main` 的最新 push CI 成功。
+
+查看 Actions 的构建、发布和验证步骤；确认工作流实际执行发布而非因提交过期跳过。成功后按下方“验证”完成浏览器、管理员、Run 和轨迹验收。进入同源后台后配置并测试模型和沙箱、应用沙箱分配，再创建新的 Run；保存配置不等于外部依赖可达。配置与运行快照的生效边界见[配置参考](../reference/configuration.md)。
+
+### 4. 常见故障定位
+
+- SSH 或镜像拉取失败：检查 Actions Secret、主机指纹、网络、GHCR 包权限及令牌；不要在日志中打印密钥。
+- 证书或 Nginx 失败：检查 DNS、80/443、证书路径、`sudo nginx -t` 和站点冲突；发布失败会尝试恢复原站点。
+- 迁移或数据库连接失败：检查数据库健康状态、各角色和 schema、连接地址及迁移日志；checksum 不一致时停止，勿修改已执行迁移或迁移记录。
+- API 正常但任务不运行：查看 Worker、Scheduler 容器状态与日志，检查后台模型和沙箱配置、分配及实际依赖连通性；Worker 未就绪会停止领取任务。
+- 管理页面无法访问数据：先从同源工作台以固定 Demo 管理员登录，检查会话、管理员授权及 Nginx 配置；不要公开后台 Token。
+
+定位时可使用上一节验证命令中的 Compose 参数加 `logs --tail=100 <服务名>`。日志可能包含运行信息，应在受控环境查看并在分享前脱敏。
+
 ## 发布顺序
 
 `.github/workflows/cd-demo.yml` 执行以下步骤：

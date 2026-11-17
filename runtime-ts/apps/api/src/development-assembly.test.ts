@@ -45,6 +45,7 @@ vi.mock("../development-resourcefs-proxy.mjs", () => ({
 
 vi.mock("@hoox/persistence", () => ({
   BlobSkillContentStore: class {},
+  PgInstallationRepository: class {},
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
   DurableResourceBlobWriter: class {},
@@ -92,6 +93,16 @@ describe("开发 API 默认装配", () => {
     vi.clearAllMocks();
   });
 
+  it("空安装关闭固定开发身份时仍装配 API", async () => {
+    const running = await startApiProcess({
+      environment: { ...developmentEnvironment(), DEV_AUTH_ENABLED: "false" },
+    });
+    expect(mocks.createApiApp).toHaveBeenCalledWith(
+      expect.objectContaining({ installation: expect.any(Object) }),
+      expect.anything(),
+    );
+    await running.close();
+  });
   it("普通对象保持 16 MiB，Skill 文件使用 32 MiB 读取边界并完成进程启动", async () => {
     const running = await startApiProcess({ environment: developmentEnvironment() });
 

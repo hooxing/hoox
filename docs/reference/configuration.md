@@ -6,16 +6,16 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 | 文件 | 用途 | 是否可直接上线 |
 | --- | --- | --- |
-| `.env.example` | 完整 development 配置契约 | 否，只能复制为本机 `.env` 后填写 |
+| `.env.example` | development 基础部署配置 | 否，只能复制为本机 `.env` 后填写 |
 | `.env` | 开发者本机真实配置 | 不得提交 |
-| `deploy/production.env.example` | API、Scheduler、Worker 和统一 Admin API 的 production 字段合集 | 否，必须由部署平台按服务拆分注入 |
+| `deploy/production.env.example` | API、Scheduler、Worker 和统一 Admin API 的 production 基础字段合集 | 否，必须由部署平台按服务拆分注入 |
 | `docker-compose.dev.yml` | 只管理 development MinIO | 否，不包含完整 Runtime |
 
 配置校验脚本分别读取 `scripts/env-contract.mjs` 和 `scripts/production-env-contract.mjs`。新增、删除或重命名变量时，示例和契约必须同步更新。
 
 ## Development 配置分组
 
-`.env.example` 包含完整开发链路，不表示每个进程都应读取全部变量。
+`.env.example` 包含基础部署字段；每个进程只读取其声明的变量。模型、沙箱、记忆和运行策略优先在后台配置，可选环境回退由契约脚本单独登记。
 
 ### PostgreSQL
 
@@ -51,16 +51,17 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 ### 模型与上下文
 
-- `MODEL_BASE_URL`、`MODEL_API_KEY` 和 `MODEL_ID` 定义没有 active 后台配置时的兼容回退模型。Worker 启动、预检与 readiness 探测当前已发布的后台模型；只有尚未发布模型时才探测部署回退。读取或解密已发布凭据失败时失败关闭，不使用旧部署凭据掩盖故障。
+- `MODEL_BASE_URL`、`MODEL_API_KEY` 和 `MODEL_ID` 定义没有 active 后台配置时的兼容回退模型，三项可全部留空或同时填写；填写部署模型时上下文、最大输出和图片能力仍必填。Worker 启动只依赖 PG、S3 与角色校验；模型或沙箱未配置、配置读取失败时不领取任务，对应 readiness 为未就绪，进程保持运行，配置可用后自动恢复。开发预检有模型时通过受限 `chat/completions` 验证，不依赖 `/models`。读取或解密已发布凭据失败时失败关闭，不使用旧部署凭据掩盖故障。
 - 日常 Provider 密钥在后台模型页面写入；“保存并使用”由服务端一次原子保存并启用，列表中的“使用”切换已保存供应商。已有托管模型快照继续固定旧 Run 的配置与密钥，新配置只影响之后首次建立模型配置快照的 Run。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 是 Admin API 与 Worker 共享的稳定加密根，production 至少 32 字节且不能用于调用模型。
 - 后台“运行设置”可选工具调用模式：`native`（正常、默认）或 `ptc`（实验）。模式在 Worker 首次建立 Run 配置快照时固定，已有快照及该 Run 的子 Agent/恢复不受切换影响；缺字段的旧配置使用正常模式。PTC 的执行、审计和限制见[工具调用模式](../architecture/tool-calling-modes.md)。
 - 后台工具选择使用 `enabledTools`：省略代表旧配置全启用，显式 `[]` 关闭全部业务工具；保存页面勾选会固定名单，新增工具需主动选择。工具选择与模式共享 Run 快照和保存审计，正常/PTC 及子 Agent 都遵守；不立即影响已有快照，不取消已创建的定时任务。保留 `exec_command` 时命令仍可读写文件，开关不能替代沙箱隔离。框架编排和展示机制不属于业务开关。
 - Context window、最大输出和图片能力是显式可信配置，不能只依赖模型名称猜测。
 - Thread Context、Compaction、Sandbox 复用和 Subagent 功能使用独立 feature flag。
-- 新 Run 的压缩参数优先采用后台“运行设置”，未保存时使用 Worker 部署回退。部署字段分别为 `THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT`（默认 `80`）、`THREAD_CONTEXT_COMPACTION_TARGET_PERCENT`（默认 `55`）、`THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS`（默认 `4096`）、`THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS`（省略时使用部署 `MODEL_MAX_OUTPUT_TOKENS`）、`THREAD_CONTEXT_COMPACTION_TIMEOUT_MS`（默认 `60000`）。示例文件的显式值是部署样例，不改变省略时的解析默认值。
+- 新 Run 的压缩参数优先采用后台“运行设置”，未保存时使用 Worker 部署回退。部署字段分别为 `THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT`（默认 `80`）、`THREAD_CONTEXT_COMPACTION_TARGET_PERCENT`（默认 `55`）、`THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS`（默认 `4096`）、`THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS`（省略时使用部署 `MODEL_MAX_OUTPUT_TOKENS`）、`THREAD_CONTEXT_COMPACTION_TIMEOUT_MS`（默认 `60000`）。这些高级回退字段无需预填，省略时使用解析默认值。后台 `compactionEnabled` 控制新 Run 的压缩，缺字段默认允许；部署 `THREAD_CONTEXT_COMPACTION_ENABLED=false` 仍会禁止此底层能力。
 - 压缩五项参数形成独立持久快照，执行输出预算按实际模型最大输出裁剪；恢复不改写原快照。部署回退输出预算在首次存储前也按当时模型上限裁剪。恢复和旧 Run 兼容边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
 - 首次运行快照固定是否使用托管模型与记忆，包括尚未配置的状态；后台新增配置不会改变已有空配置快照。部署回退模型的具体参数仍来自 `MODEL_*`，修改这些环境变量仍需重启，并应排空使用部署回退的在途 Run。升级前尚未建立快照的旧 Run 无法还原原部署状态。
-- 标题生成可以使用独立低成本模型，且只接收受限输入。
+- 后台“运行设置”中的会话标题模型从已保存供应商选择，复用其密钥并固定供应商修订与模型 ID；主模型切换和后续供应商编辑不会自动更换标题模型。所选模型必须启用且支持至少 32 输出 token，实际标题预算取模型上限与 128 的较小值。标题调用只发送受限首条输入和附件元数据，不读取附件正文。
+- `titleGeneration` 缺省表示沿用可选 `HISTORY_TITLE_*` 部署回退；`{enabled:false}` 明确关闭，使用确定性标题；启用时保存 `providerKey`、`providerRevision`、`modelId`。无后台配置且无回退模型时消费者等待，读取失败不消耗尝试次数；显式关闭会收敛已有待处理标题。后台配置由 Worker 按动态租户 assignment 消费，Scheduler 保留原固定租户兼容消费。
 
 ### Scheduler 与 Worker
 
@@ -74,7 +75,11 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 ### 后台管理
 
-- 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、身份、统计与 Skill 路由共用管理身份。“运行设置”在 `/settings` 配置工具调用模式、工具启用名单、并发和上下文压缩参数，一次保存生效；尚未保存时页面展示推荐默认值，并明确标识未保存。数据库、端口、部署角色与平台根秘密保留在部署配置。
+- 首次访问同源 `/admin/` 创建管理员账号，成功后依次配置线上模型和沙箱服务；已有管理员（包括禁用）会关闭安装入口。账号、租户、会话、控制面和 Skill 管理权限在同一事务创建，竞争请求只允许一个成功。
+- `INSTALLATION_SETUP_TOKEN` 是可选部署秘密，至少 32 字节；生产或经代理、非直接回环的首次安装必须提供。开发无令牌只接受字面回环 Host/Origin、回环 socket 且无转发标记的请求。初始化后令牌不能再次提权。
+- `ADMIN_CONTROL_IDENTITY_API_URL` 默认 `http://127.0.0.1:3001`，指向主 API；HTTP 仅允许字面回环，其他地址须 HTTPS。管理 API 验证真实 Hoox 会话，再由各领域校验角色。`DEV_ADMIN_CONTROL_USER_ID` 和 `DEV_ADMIN_CONTROL_TOKEN` 可同时留空；旧固定开发身份仍可显式成对配置。
+- 管理员密码使用本地账号的 scrypt 凭据，可直接从后台登录，不依赖外部登录供应商。后台退出会撤销服务端会话。同邮箱的新 Better Auth 身份不能静默绑定该本地密码账号。
+- 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、身份、统计与 Skill 路由共用管理身份。“运行设置”在 `/settings` 配置工具调用模式、工具启用名单、并发、标题模型和上下文压缩开关/参数，一次保存生效；尚未保存时页面展示推荐默认值，并明确标识未保存。数据库、端口、部署角色与平台根秘密保留在部署配置。
 - “身份与登录”配置保存后动态生效；页面不要求填写原因或理解版本，服务端仍执行并发检查并自动记录审计。Provider、SMTP 与短信秘密只返回已配置状态，不回显明文。
 - 模型 Provider 的 API Key 是写入型字段：首次配置必填，编辑时可保留旧密钥或替换。多个已保存供应商可分别使用或测试；“测试已保存配置”只验证已保存的默认模型，不测试未保存输入。模型能力高级设置保留显式覆盖，页面不展示内部版本或原因输入。
 - 记忆页可独立配置 Mem0 API Key、开关、地址与超时，不要求先配置模型。密钥加密保存、不回显，留空保留现有密钥；保存后对尚未建立运行快照的新任务生效，无需重启。新部署的作用域秘密由平台稳定主密钥独立派生；已有 `MEM0_SCOPE_HMAC_KEY` 优先沿用，接管 API Key 后仍必须保留，以免改变已有记忆标识。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 同时保护模型和记忆密钥，必须稳定并备份。
@@ -95,8 +100,8 @@ production 示例是字段合集，不是共享 env 文件。部署平台应至�
 | 服务 | 必需类别 | 不应获得 |
 | --- | --- | --- |
 | API | PostgreSQL、Better Auth 根秘密、JWT 兼容身份、S3 下载签名、TLS/公开 origin | 模型密钥、Sandbox 执行密钥、MinIO root、迁移器凭据 |
-| Scheduler | PostgreSQL、Sandbox 生命周期、托管沙箱共享加密根、标题模型（启用时） | S3 读写密钥、主模型调用密钥、API JWT 私钥 |
-| Agent Worker | PostgreSQL、S3、Sandbox、主模型 | API 身份签名私钥、Admin 管理凭据 |
+| Scheduler | PostgreSQL、平台共享加密根；Sandbox 与标题模型可由后台接入 | S3 读写密钥、主模型调用密钥、API JWT 私钥 |
+| Agent Worker | PostgreSQL、S3、平台加密根；Sandbox 与主模型可由后台接入 | API 身份签名私钥、Admin 管理凭据 |
 | Admin API | 独立管理身份、Admin Control PG、与 API 同值的 Better Auth 根秘密、Skill Publisher PG 与发布对象存储凭据 | 普通 Runtime 的其他全量秘密 |
 
 生产进程拒绝 development 变量、环境代理、危险 `NODE_*` 和 OpenSSL 配置覆盖；私有 CA 只能通过明确允许的通道注入。
@@ -105,12 +110,12 @@ production 示例是字段合集，不是共享 env 文件。部署平台应至�
 
 1. 从 `.env.example` 创建不提交的 `.env`。
 2. 准备专用 PostgreSQL 数据库和最小权限角色。
-3. 启动 MinIO，并准备 Sandbox 与模型服务。
+3. 启动 MinIO；模型和沙箱服务可留到后台接入。
 4. 加载本机环境变量。
 5. 执行数据库迁移。
-6. 显式初始化 development 身份。
+6. 保持默认 `DEV_AUTH_ENABLED=false`；只有隔离测试才显式初始化固定 development 身份。
 7. 执行 Worker 外部依赖预检。
-8. 启动核心 Runtime。
+8. 启动 Runtime 与管理面，从同源 `/admin/` 创建管理员，再配置线上模型和沙箱服务。
 
 具体命令见[开发指南](../development.md)。
 
@@ -125,6 +130,8 @@ corepack pnpm config:check:production
 
 ## 后台沙箱配置
 
+空安装无需填写 `SANDBOX_*`、`CUBESANDBOX_*`、`E2B_*` 或 `TENCENT_AGS_*`。Worker/Scheduler 常驻等待，模型与沙箱配置可用后自动处理新任务；配置进度显示的是后台保存状态，不替代实际依赖探针。仅启用 E2B 或 AGS 时不要求 Cube URL 和模板。
+
 后台“沙箱服务”支持管理 `cube`、`e2b`、`tencent-ags`，保存连接地址、密钥、模板和独立运行策略。E2B 与 AGS 的地址为不含协议和路径的域名；Cube 使用完整服务 URL。凭据留空可复用该供应商已有配置版本的密文，不回显密钥。
 
 管理员保存版本、测试连接后，选择单供应商或按权重分配并点击“应用分配”；新实例开始使用新配置，旧实例保持创建时的版本。测试会真实创建并释放沙箱。策略包含 TTL、操作超时、创建/恢复超时、暂停保留时间和空闲暂停/销毁，边界见 [Sandbox Provider](../architecture/sandbox-providers.md#后台配置与分配)。
@@ -133,7 +140,7 @@ Admin Control API、Worker 和 Scheduler 必须使用同一个稳定的 `MODEL_C
 
 ## 腾讯云 AGS
 
-将 `SANDBOX_ENABLED_PROVIDERS` 设为包含 `tencent-ags` 的逗号分隔列表；新建沙箱使用 `SANDBOX_DEFAULT_PROVIDER`。配置会在进程启动时读取，不支持请求级切换。
+推荐通过后台沙箱服务接入；需要保留部署回退时，将 `SANDBOX_ENABLED_PROVIDERS` 设为包含 `tencent-ags` 的逗号分隔列表；新建沙箱使用 `SANDBOX_DEFAULT_PROVIDER`。配置会在进程启动时读取，不支持请求级切换。
 
 | 变量 | 使用进程 | 规则 |
 | --- | --- | --- |
@@ -142,4 +149,4 @@ Admin Control API、Worker 和 Scheduler 必须使用同一个稳定的 `MODEL_C
 | `TENCENT_AGS_TEMPLATE_ID` | Worker | 启用 AGS 时必填，对应腾讯云沙箱工具名或受支持标识 |
 | `TENCENT_AGS_SESSION_TTL_SECONDS` | Worker | 1–86400，默认 3600；有效上限还受腾讯云账号与工具限制 |
 
-AGS 采用到期销毁与主动暂停策略；部署前须完成[Provider 验收](../architecture/sandbox-providers.md#接入与验收)。现有公共进程配置仍要求 Cube 配置字段通过格式校验；仅启用 AGS 时不会装配或探测 Cube 网关。
+AGS 采用到期销毁与主动暂停策略；部署前须完成[Provider 验收](../architecture/sandbox-providers.md#接入与验收)。仅启用 AGS 时不会要求、装配或探测 Cube 网关。

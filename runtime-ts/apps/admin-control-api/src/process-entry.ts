@@ -28,7 +28,6 @@ import {
 } from "./production-assembly.js";
 
 const optional = [] as const;
-const developmentAndTest = ["development", "test"] as const;
 const production = ["production"] as const;
 
 const environmentSchema = Object.freeze({
@@ -50,6 +49,7 @@ const environmentSchema = Object.freeze({
     maxLength: 63,
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
+  ADMIN_CONTROL_IDENTITY_API_URL: urlEnvironmentField({ requiredIn: optional }),
   BETTER_AUTH_SECRET: stringEnvironmentField({ secret: true, maxLength: 4096 }),
   ADMIN_CONTROL_LISTEN_HOST: stringEnvironmentField({ requiredIn: production, maxLength: 253 }),
   ADMIN_CONTROL_LISTEN_PORT: integerEnvironmentField({
@@ -95,15 +95,15 @@ const environmentSchema = Object.freeze({
   }),
   SKILL_PUBLISHER_S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
   DEV_ADMIN_CONTROL_USER_ID: stringEnvironmentField({
-    requiredIn: developmentAndTest,
+    requiredIn: optional,
     maxLength: 128,
   }),
   DEV_ADMIN_CONTROL_TOKEN: stringEnvironmentField({
-    requiredIn: developmentAndTest,
+    requiredIn: optional,
     secret: true,
     maxLength: 512,
   }),
-  MODEL_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192 }),
+  MODEL_API_KEY: stringEnvironmentField({ requiredIn: optional, secret: true, maxLength: 8_192 }),
   MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
     requiredIn: production,
     secret: true,
@@ -131,6 +131,7 @@ export interface AdminControlApiProcessConfiguration {
   readonly skillPublisherDatabaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   readonly betterAuthSecret: string;
+  readonly identityApiUrl?: string;
   readonly databaseAdminControlRole?: string;
   readonly databaseSkillPublisherRole?: string;
   readonly listenHost: string;
@@ -221,7 +222,9 @@ export function parseAdminControlApiProcessEnvironment(
     assertProductionObjectStorageEndpoint(objectStorage.endpoint);
   }
   const developmentAuth =
-    parsed.runtimeEnvironment === "production"
+    parsed.runtimeEnvironment === "production" ||
+    (parsed.values.DEV_ADMIN_CONTROL_USER_ID === undefined &&
+      parsed.values.DEV_ADMIN_CONTROL_TOKEN === undefined)
       ? undefined
       : Object.freeze({
           userId: readRequiredEnvironmentValue(parsed, "DEV_ADMIN_CONTROL_USER_ID"),
@@ -230,6 +233,17 @@ export function parseAdminControlApiProcessEnvironment(
   if (developmentAuth !== undefined && !identifierPattern.test(developmentAuth.userId)) {
     throw new TypeError("DEV_ADMIN_CONTROL_USER_ID 格式无效");
   }
+  const identityApiUrl = new URL(
+    parsed.values.ADMIN_CONTROL_IDENTITY_API_URL ?? "http://127.0.0.1:3001",
+  );
+  if (
+    identityApiUrl.protocol !== "https:" &&
+    !(
+      identityApiUrl.protocol === "http:" &&
+      ["127.0.0.1", "[::1]"].includes(identityApiUrl.hostname)
+    )
+  )
+    throw new TypeError("INVALID:ADMIN_CONTROL_IDENTITY_API_URL");
   const productionConfiguration =
     parsed.runtimeEnvironment === "production"
       ? createProductionConfiguration({
@@ -272,6 +286,7 @@ export function parseAdminControlApiProcessEnvironment(
       : { skillPublisherDatabaseSsl: productionSkillPublisherDatabase.ssl }),
     databaseSchema,
     betterAuthSecret,
+    identityApiUrl: parsed.values.ADMIN_CONTROL_IDENTITY_API_URL ?? "http://127.0.0.1:3001",
     ...(databaseAdminControlRole === undefined ? {} : { databaseAdminControlRole }),
     ...(databaseSkillPublisherRole === undefined ? {} : { databaseSkillPublisherRole }),
     listenHost,
@@ -282,7 +297,7 @@ export function parseAdminControlApiProcessEnvironment(
     ),
     objectStorage,
     providerSecrets: Object.freeze({
-      modelApiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
+      modelApiKey: parsed.values.MODEL_API_KEY ?? "",
       modelCredentialEncryptionKey:
         parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY ??
         readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),

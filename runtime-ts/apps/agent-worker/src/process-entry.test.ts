@@ -52,6 +52,55 @@ function productionEnvironment(): Record<string, string> {
 }
 
 describe("Agent Worker 进程入口", () => {
+  it("无沙箱和模型供应商时仍能解析基础部署，显式启用的沙箱仍校验完整性", () => {
+    const env = productionEnvironment();
+    for (const key of Object.keys(env)) {
+      if (
+        key.startsWith("CUBESANDBOX_") ||
+        (key.startsWith("MODEL_") &&
+          key !== "MODEL_CREDENTIAL_ENCRYPTION_KEY" &&
+          !key.startsWith("MODEL_WIRE_TRACE_"))
+      )
+        delete env[key];
+    }
+    expect(parseWorkerProcessEnvironment(env).sandbox.enabledProviderKeys).toEqual([]);
+    expect(() =>
+      parseWorkerProcessEnvironment({ ...env, SANDBOX_ENABLED_PROVIDERS: "cube" }),
+    ).toThrow("CUBESANDBOX_API_URL");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...env,
+        SANDBOX_ENABLED_PROVIDERS: "e2b",
+        SANDBOX_DEFAULT_PROVIDER: "e2b",
+      }),
+    ).toThrow("E2B_API_KEY");
+    const e2b = parseWorkerProcessEnvironment({
+      ...env,
+      SANDBOX_ENABLED_PROVIDERS: "e2b",
+      SANDBOX_DEFAULT_PROVIDER: "e2b",
+      E2B_API_KEY: "placeholder-api-key",
+      E2B_TEMPLATE_ID: "placeholder-template",
+    });
+    expect(e2b.sandbox.enabledProviderKeys).toEqual(["e2b"]);
+    expect(e2b.sandbox.apiUrl).toBeUndefined();
+  });
+
+  it("没有部署回退模型时允许启动装配，并保留稳定加密根", () => {
+    const env = productionEnvironment();
+    for (const key of [
+      "MODEL_BASE_URL",
+      "MODEL_API_KEY",
+      "MODEL_ID",
+      "MODEL_CONTEXT_WINDOW",
+      "MODEL_MAX_OUTPUT_TOKENS",
+      "MODEL_SUPPORTS_IMAGES",
+    ])
+      delete env[key];
+    const configuration = parseWorkerProcessEnvironment(env);
+    expect(configuration.model.apiKey).toBe("");
+    expect(configuration.model.credentialEncryptionKey).toBe(env.MODEL_CREDENTIAL_ENCRYPTION_KEY);
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -775,7 +824,7 @@ describe("Agent Worker 进程入口", () => {
     const activeBaseUrl = "https://active.example.invalid/v1";
     const fetchSpy = vi.fn(
       async (_input: string | URL | Request, _init?: RequestInit) =>
-        new Response(JSON.stringify({ data: [{ id: "active-model" }] }), { status }),
+        new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status }),
     );
     vi.stubGlobal("fetch", fetchSpy);
     const startLoop = vi.fn();
@@ -827,10 +876,10 @@ describe("Agent Worker 进程入口", () => {
     }
     expect(fetchSpy).toHaveBeenCalledOnce();
     const requestUrl = fetchSpy.mock.calls[0]?.[0];
-    expect(String(requestUrl)).toBe(`${activeBaseUrl}/models`);
+    expect(String(requestUrl)).toBe(`${activeBaseUrl}/chat/completions`);
   });
 
-  it("开发 readiness 只要求 /models 返回已配置 model id", async () => {
+  it("开发预检使用实际模型生成接口", async () => {
     const model = parseWorkerProcessEnvironment({
       ...productionEnvironment(),
       RUNTIME_ENV: "development",
@@ -840,20 +889,26 @@ describe("Agent Worker 进程入口", () => {
     }).model;
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ id: model.modelId }] }))),
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] })),
+        ),
     );
     await expect(probeOpenAiCompatibleModel(model, "development")).resolves.toBeUndefined();
   });
 
-  it("生产 readiness 不因 development 的 id-only Provider 放宽模型预算元数据", async () => {
+  it("生产预检不要求供应商提供非标准模型元数据", async () => {
     const model = parseWorkerProcessEnvironment(productionEnvironment()).model;
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ id: model.modelId }] }))),
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] })),
+        ),
     );
-    await expect(probeOpenAiCompatibleModel(model, "production")).rejects.toThrow(
-      "模型 provider 元数据与配置不一致",
-    );
+    await expect(probeOpenAiCompatibleModel(model, "production")).resolves.toBeUndefined();
   });
 });
 describe("个人历史目录配置", () => {

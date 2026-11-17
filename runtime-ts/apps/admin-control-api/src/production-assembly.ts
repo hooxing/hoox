@@ -1,3 +1,4 @@
+import { createAdminSessionAuthResolver } from "./session-auth.js";
 import { timingSafeEqual } from "node:crypto";
 import {
   AdminControlService,
@@ -57,7 +58,10 @@ const productionAssembler: ServiceAssemblyFactory<AdminControlApiProcessConfigur
     }
     const tls = await loadProductionTlsCredentials(configuration.production.transport);
     return assembleRealService(configuration, {
-      auth: createProductionJwtAuthResolver(configuration.production.jwt),
+      auth: createAdminSessionAuthResolver(
+        configuration.identityApiUrl ?? "http://127.0.0.1:3001",
+        createProductionJwtAuthResolver(configuration.production.jwt),
+      ),
       appOptions: {
         logger: true,
         trustProxy: productionTrustProxy(configuration.production.transport),
@@ -75,13 +79,15 @@ const developmentAssembler: ServiceAssemblyFactory<AdminControlApiProcessConfigu
     if (
       configuration.runtimeEnvironment === "production" ||
       configuration.production !== undefined ||
-      configuration.developmentAuth === undefined ||
       configuration.databaseSsl !== undefined
     ) {
       throw new Error("DEVELOPMENT_ADMIN_CONTROL_ASSEMBLY_FORBIDDEN");
     }
     return assembleRealService(configuration, {
-      auth: developmentAuth(configuration),
+      auth: createAdminSessionAuthResolver(
+        configuration.identityApiUrl ?? "http://127.0.0.1:3001",
+        configuration.developmentAuth === undefined ? undefined : developmentAuth(configuration),
+      ),
       appOptions: { logger: false, trustProxy: false },
       ...(configuration.databaseAdminControlRole === undefined
         ? {}

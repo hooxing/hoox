@@ -209,6 +209,9 @@ importers:
       '@hoox/skill':
         specifier: workspace:*
         version: link:../../packages/skill
+      '@hoox/thread-title':
+        specifier: workspace:*
+        version: link:../../packages/thread-title
       '@hoox/tool-router':
         specifier: workspace:*
         version: link:../../packages/tool-router

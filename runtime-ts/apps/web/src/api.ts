@@ -493,8 +493,21 @@ export class RuntimeApi {
     readonly email: string;
     readonly password: string;
   }): Promise<AccountSession> {
-    await this.betterAuthRequest("/sign-in/email", input);
-    return this.exchangeIdentitySession();
+    try {
+      await this.betterAuthRequest("/sign-in/email", input);
+      return this.exchangeIdentitySession();
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 401) throw error;
+      return this.request(
+        "/v1/installation/login",
+        {
+          method: "POST",
+          body: JSON.stringify(input),
+        },
+        null,
+        false,
+      );
+    }
   }
 
   async beginSocialSignIn(provider: IdentityProviderKey, callbackURL: string): Promise<string> {

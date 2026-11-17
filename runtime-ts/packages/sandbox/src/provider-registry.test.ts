@@ -13,6 +13,13 @@ function gateway(providerKey: "cube" | "e2b" | "tencent-ags"): RuntimeSandboxGat
 }
 
 describe("Sandbox Provider Registry", () => {
+  it("空安装允许建立 Registry，但探针与实际创建保持未配置错误", async () => {
+    const registry = new SandboxProviderRegistry("cube", []);
+    expect(registry.keys()).toEqual([]);
+    await expect(registry.probe()).rejects.toThrow("SANDBOX_CONFIGURATION_REQUIRED");
+    expect(() => registry.default()).toThrow();
+  });
+
   it("腾讯云与 E2B 同时注册时保持恢复路由隔离", () => {
     const e2b = gateway("e2b");
     const ags = gateway("tencent-ags");

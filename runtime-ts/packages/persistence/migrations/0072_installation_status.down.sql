@@ -1,0 +1,3 @@
+DROP POLICY platform_skill_operators_initialize_policy ON platform_skill_operators;
+DROP POLICY platform_skill_operators_runtime_read_policy ON platform_skill_operators;
+DROP VIEW installation_status;

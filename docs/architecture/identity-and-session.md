@@ -22,12 +22,14 @@ Better Auth 与 Hoox API 同进程运行，不需要独立身份服务。它负�
 1. Web 读取 `GET /v1/auth/config`，只展示后台已启用的登录方式。“允许新用户注册”是全局开关：关闭后邮箱、OAuth 和手机号都不能隐式创建 Better Auth User。
 2. 邮箱、OAuth 或手机号流程进入 `/api/auth/*`。邮箱验证码开启时，邮箱密码注册先发送 6 位 OTP，验证成功后才获得同源 Better Auth Cookie Session；未验证邮箱不能用密码登录。
 3. Web 调用 `POST /v1/auth/exchange`。API 验证 Cookie 中的 Better Auth Session；邮箱验证开启时，具有 `credential` 账号但邮箱未验证的身份会被拒绝。通过验证后再按 `better_auth_user_id` 或规范化邮箱查找 Hoox 账号。
-4. 已有邮箱账号绑定 Better Auth User ID 并保留原 User、个人 Tenant、Membership 和数据；新身份原子创建这些事实。
+4. 已关联相同 Better Auth User ID 的账号保留原 User、个人 Tenant、Membership 和数据；新身份原子创建这些事实。同邮箱但尚未关联的本地密码账号返回冲突，不能凭邮箱接管。
 5. API 返回 Hoox 不透明会话令牌。后续业务请求继续使用 `Authorization: Bearer <Hoox session>`，并由 Membership 与 RLS 重建 TenantScope。
 
 同一 Hoox 账号不能绑定两个不同 Better Auth User ID。账号被禁用时，两类 Session 都被删除；旧令牌不能继续访问业务数据。管理台停用账号只要求一次会话撤销后果确认，恢复账号直接执行；恢复后用户必须重新登录，旧会话不会恢复。操作不要求人工原因，服务端继续记录审计。
 
 ## 可配置登录方式
+
+首次管理员使用独立于外部身份配置的本地密码登录，边界见[首次管理员与管理面会话](#首次管理员与管理面会话)。
 
 管理台“身份与登录”页面按基础访问策略、发信邮箱、短信服务连接和第三方身份源分区展示，并可以立即启用或关闭：
 
@@ -59,3 +61,11 @@ Better Auth 固定为 `1.7.7`，数据库以 `(provider_id, account_id)` 唯一�
 production Web 使用内嵌身份入口，旧 `/v1/auth/register` 和 `/v1/auth/login` 不对外注册。development 可以显式保留旧本地账号端点和固定开发身份，用于夹具与兼容测试。生产 JWT 验证仍作为非浏览器调用方的后备，但不会绕过 Hoox 的 User、Membership 和 RLS 授权。
 
 管理交互与内部持久事实的分工见[后台任务操作决策](../decisions/20260906195752-admin-task-oriented-configuration-and-publication.md)。
+
+## 首次管理员与管理面会话
+
+空安装通过 `GET /v1/installation` 发现初始化状态，`POST /v1/installation/administrator` 仅在安装授权通过且数据库仍为空时创建管理员。安装单行锁覆盖本地密码账号、个人 Tenant、Membership、Hoox Session、控制面和 Skill 管理授权的完整事务；成功后安装状态不可由 Runtime 重置。已有任意管理员授权（包括禁用）也会关闭入口。运维 SQL 新增授权必须先锁定 `installation_state` 单行，与初始化事务串行；不提供在线自助提权。
+
+`POST /v1/installation/login` 只允许有效的本地管理员密码登录，使用既有 scrypt 凭据与 Hoox Session。工作台正常邮箱登录被身份服务以 401 拒绝时可尝试该入口，其他故障不降级。初始管理员不会按邮箱自动绑定后续 Better Auth 注册身份；显式账号关联尚未提供。
+
+管理 API 收到 Hoox Session 后，通过固定主 API 的 `GET /v1/auth/admin-principal` 确认账号和有效管理角色，禁止重定向、限制超时和响应大小；验证失败不会降级固定开发身份。viewer、operator、admin 及已有 Skill 管理身份继续进入各领域授权，页面不能替代服务端权限校验。安装来源、令牌和部署秘密见[配置参考](../reference/configuration.md#后台管理)，决策理由见[首次运行决策](../decisions/20261115122045-first-run-administrator-and-model-setup.md)。

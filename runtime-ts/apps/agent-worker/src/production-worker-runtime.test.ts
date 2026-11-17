@@ -47,6 +47,41 @@ function tenantAssignment(suffix = "worker-loop"): PgClaimedWorkerTenantAssignme
 }
 
 describe("Agent Worker production polling loop", () => {
+  it("缺少模型或配置读取失败时不领取，配置出现后自动恢复", async () => {
+    let configured = false;
+    let unavailable = false;
+    const assignmentClaim = vi.fn(async () => undefined);
+    const dispatchClaim = vi.fn(async () => []);
+    const canClaim = vi.fn(async () => {
+      if (unavailable) throw new Error("unavailable");
+      return configured;
+    });
+    const loop = new AgentWorkerPollingLoop(
+      { claim: assignmentClaim, settle: async () => true },
+      { claim: dispatchClaim, acknowledge: async () => undefined },
+      { execute: async () => ({ outcome: "succeeded" }) },
+      {
+        workerId: "waiting-model",
+        pollIntervalMs: 5,
+        tenantAssignmentLeaseMs: 1000,
+        dispatchLeaseMs: 1000,
+        canClaim,
+      },
+    );
+    loop.start();
+    await vi.waitFor(() => expect(canClaim).toHaveBeenCalled());
+    expect(assignmentClaim).not.toHaveBeenCalled();
+    expect(dispatchClaim).not.toHaveBeenCalled();
+    unavailable = true;
+    configured = true;
+    canClaim.mockClear();
+    await vi.waitFor(() => expect(canClaim).toHaveBeenCalled());
+    expect(assignmentClaim).not.toHaveBeenCalled();
+    unavailable = false;
+    await vi.waitFor(() => expect(assignmentClaim).toHaveBeenCalled());
+    await loop.close();
+  });
+
   it("领取 durable dispatch 后执行 RunWorker 并以同一 dispatch fence 确认终态", async () => {
     const acknowledged = deferred<void>();
     const expected = claim();

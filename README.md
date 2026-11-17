@@ -134,7 +134,8 @@ tests/              跨包、集成和黑盒测试
 | 查询开发命令 | [命令参考](docs/reference/commands.md) |
 | 调用开发 API | [开发 API 契约](docs/reference/development-api.md) |
 | 查看当前成熟度 | [项目状态](docs/project-status.md) |
-| 部署或发布评估 | [生产就绪说明](docs/operations/production-readiness.md) |
+| 部署演示环境 | [Demo 单机部署指南](docs/operations/demo-cd.md) |
+| 生产发布评估 | [生产就绪说明](docs/operations/production-readiness.md) |
 | 排查内部轨迹 | [诊断指南](docs/maintainers/diagnostics.md) |
 | 理解历史取舍 | [架构决策](docs/decisions/README.md) |
 | 参与贡献 | [贡献指南](CONTRIBUTING.md) |

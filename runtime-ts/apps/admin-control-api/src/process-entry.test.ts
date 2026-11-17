@@ -77,6 +77,25 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
 }
 
 describe("后台控制 API 进程入口", () => {
+  it("空安装可同时省略开发管理员令牌与模型密钥，保留稳定加密根", () => {
+    const environment = developmentEnvironment({
+      MODEL_CREDENTIAL_ENCRYPTION_KEY: "installation-root-at-least-thirty-two-bytes",
+    });
+    delete environment.DEV_ADMIN_CONTROL_USER_ID;
+    delete environment.DEV_ADMIN_CONTROL_TOKEN;
+    delete environment.MODEL_API_KEY;
+    const configuration = parseAdminControlApiProcessEnvironment(environment);
+    expect(configuration.developmentAuth).toBeUndefined();
+    expect(configuration.providerSecrets.modelApiKey).toBe("");
+    expect(configuration.identityApiUrl).toBe("http://127.0.0.1:3001");
+    expect(() =>
+      parseAdminControlApiProcessEnvironment({
+        ...environment,
+        DEV_ADMIN_CONTROL_TOKEN: "unpaired-test-token",
+      }),
+    ).toThrow("MISSING:DEV_ADMIN_CONTROL_USER_ID");
+  });
+
   it("只投影统一后台声明配置，不接收 Runtime 或 Migrator 凭据", () => {
     const selected = selectAdminControlApiProcessEnvironment({
       ...productionEnvironment(),

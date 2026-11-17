@@ -10,10 +10,16 @@ try {
       console.error("Agent Worker 生产进程关闭失败");
     },
   });
-  if ((await running.readiness()).status !== "ready") {
+  const readiness = await running.readiness();
+  if (
+    readiness.status !== "ready" &&
+    readiness.failedChecks.some((name) => name !== "model-runtime" && name !== "sandbox")
+  ) {
     await running.close();
     throw new Error("AGENT_WORKER_NOT_READY");
   }
+  if (readiness.status !== "ready")
+    console.info("Agent Worker 等待模型或沙箱配置；配置完成后会自动开始领取任务");
   console.info("Agent Worker 生产进程已启动");
 } catch {
   console.error("Agent Worker 生产进程启动失败");

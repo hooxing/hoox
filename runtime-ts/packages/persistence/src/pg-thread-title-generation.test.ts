@@ -1,8 +1,9 @@
 import type { ThreadTitleGenerationClaim } from "@hoox/thread-title";
 import type { Pool, PoolClient } from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   enqueueThreadTitleGeneration,
+  isThreadTitleGenerationEnabled,
   PgThreadTitleGenerationStore,
 } from "./pg-thread-title-generation.js";
 import { PgRunDispatchCreation } from "./pg-run-dispatch.js";
@@ -225,5 +226,31 @@ describe("PostgreSQL 低成本 Thread 标题任务", () => {
         statement.sql.includes("last_error_code=$7"),
     );
     expect(outboxUpdate?.values?.slice(5)).toEqual(["fallback", "PROVIDER_UNAVAILABLE"]);
+  });
+});
+
+describe("标题策略读取", () => {
+  it.each([
+    [false, true],
+    [true, false],
+    [undefined, true],
+    [undefined, false],
+  ] as const)("后台开关 %s，部署回退 %s", async (enabled, fallback) => {
+    const query = vi.fn(async () => ({ rows: enabled === undefined ? [] : [{ enabled }] }));
+    expect(await isThreadTitleGenerationEnabled({ query } as unknown as PoolClient, fallback)).toBe(
+      enabled ?? fallback,
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("active.object_kind='runtime_settings'"),
+      [fallback],
+    );
+  });
+  it("数据库错误向事务传播，不能静默回退", async () => {
+    const query = vi.fn(async () => {
+      throw new Error("读取失败");
+    });
+    await expect(
+      isThreadTitleGenerationEnabled({ query } as unknown as PoolClient, false),
+    ).rejects.toThrow("读取失败");
   });
 });

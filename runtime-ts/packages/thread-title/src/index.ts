@@ -323,11 +323,12 @@ export class ThreadTitleGenerationConsumer {
 
   constructor(
     private readonly store: ThreadTitleGenerationStore,
-    private readonly generator: ThreadTitleGenerator,
+    private readonly generator: ThreadTitleGenerator | undefined,
     private readonly workerId: string,
     private readonly leaseMs: number,
     private readonly maximumAttempts: number,
     private readonly retryBaseMs: number,
+    private readonly resolveGenerator?: () => Promise<ThreadTitleGenerator | null | undefined>,
   ) {
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 5_000 || leaseMs > 600_000) {
       throw new TypeError("标题领取 lease 无效");
@@ -342,15 +343,28 @@ export class ThreadTitleGenerationConsumer {
 
   async drainTenant(tenantId: string): Promise<number> {
     if (this.stopping) return 0;
+    // 先解析配置再领取；未启用或暂时无法读取配置时，不消耗任务尝试次数。
+    const generator =
+      this.resolveGenerator === undefined ? this.generator : await this.resolveGenerator();
+    if (generator === undefined || this.stopping) return 0;
     const claim = await this.store.claimNext({
       tenantId,
       workerId: this.workerId,
       leaseMs: this.leaseMs,
     });
     if (claim === undefined || this.stopping) return 0;
+    if (generator === null) {
+      return (await this.store.fail(claim, {
+        errorCode: "PROVIDER_UNAVAILABLE",
+        maximumAttempts: 1,
+        retryBaseMs: this.retryBaseMs,
+      }))
+        ? 1
+        : 0;
+    }
     let result: GeneratedThreadTitle;
     try {
-      result = await this.generator.generate(claim);
+      result = await generator.generate(claim);
     } catch (error) {
       const errorCode =
         error instanceof ThreadTitleGenerationError ? error.code : "PROVIDER_UNAVAILABLE";

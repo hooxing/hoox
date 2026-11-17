@@ -108,6 +108,7 @@ export interface LocalAccountAuthService extends AuthContextResolver {
 export function createLocalAccountAuthService(input: {
   readonly repository: LocalAccountRepository;
   readonly clock: ApiClock;
+  readonly initialAdministrator?: boolean;
 }): LocalAccountAuthService {
   const sessionExpiry = (createdAt: string): string =>
     new Date(new Date(createdAt).getTime() + sessionLifetimeMilliseconds).toISOString();
@@ -151,6 +152,7 @@ export function createLocalAccountAuthService(input: {
       } as const;
       const outcome = await input.repository.register({
         ...account,
+        ...(input.initialAdministrator ? { initialAdministrator: true } : {}),
         passwordAlgorithm,
         passwordSalt: salt,
         passwordHash: hash,

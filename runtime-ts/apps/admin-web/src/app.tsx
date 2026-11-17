@@ -40,6 +40,7 @@ import {
 import { HOOX_APP_ICON_PATH } from "./brand.js";
 import type { AdminControlApiContract } from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
+import { InstallationProgress } from "./installation-progress.js";
 import { SandboxConfigurationPanel } from "./sandbox-configuration-panel.js";
 import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
 
@@ -1045,7 +1046,9 @@ function AdminPlatform({
           mode="inline"
           items={navigation}
           selectedKeys={[location.pathname]}
-          onClick={({ key }) => navigate(key)}
+          onClick={({ key }) =>
+            navigate({ pathname: key, search: location.search === "?setup=1" ? "?setup=1" : "" })
+          }
         />
         <div className="platform-sider-footer">
           <span className="service-health-dot" aria-hidden="true" />
@@ -1222,6 +1225,34 @@ export function App({
     >
       <AntApp>
         <QueryClientProvider client={queryClient}>
+          {typeof window !== "undefined" &&
+            new URLSearchParams(window.location.search).get("setup") === "1" && (
+              <InstallationProgress />
+            )}
+          {apiClient === undefined && controlApi === undefined && (
+            <button
+              type="button"
+              className="installation-logout"
+              onClick={() => {
+                void (async () => {
+                  const token = readAdminAccessToken();
+                  try {
+                    const response = await fetch("/api/v1/auth/logout", {
+                      method: "POST",
+                      headers: { authorization: `Bearer ${token}` },
+                    });
+                    if (!response.ok && response.status !== 401) throw new Error("LOGOUT_FAILED");
+                    localStorage.removeItem("hoox.auth-session.v2");
+                    window.location.reload();
+                  } catch {
+                    window.alert("退出失败，请检查连接后重试。");
+                  }
+                })();
+              }}
+            >
+              退出登录
+            </button>
+          )}
           <AdminPlatform
             apiClient={apiClient ?? defaultApi}
             {...(controlApi === undefined ? {} : { controlApi })}

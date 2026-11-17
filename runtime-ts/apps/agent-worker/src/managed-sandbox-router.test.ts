@@ -74,6 +74,27 @@ function setup() {
 }
 
 describe("托管沙箱 Worker 路由", () => {
+  it("空安装不领取任务，后台分配后同一个路由可用，读取失败不回退", async () => {
+    const { resolver, registry, factory } = setup();
+    resolver.activeProfiles.mockResolvedValue(undefined);
+    const router = new SandboxSessionRegistryRouter("cube", [], {
+      resolver,
+      createRegistry: factory,
+    });
+    expect(await router.isConfigured()).toBe(false);
+    await expect(router.probe()).rejects.toThrow("SANDBOX_CONFIGURATION_REQUIRED");
+    await expect(router.prepareCreate({ scope, registryId: "empty" })).resolves.toMatchObject({
+      providerKey: "tencent-ags",
+    });
+    resolver.activeProfiles.mockResolvedValue([profile]);
+    const probe = vi.spyOn(registry, "probe").mockResolvedValue();
+    expect(await router.isConfigured()).toBe(true);
+    await router.probe();
+    expect(probe).toHaveBeenCalledOnce();
+    resolver.activeProfiles.mockRejectedValue(new Error("配置读取失败"));
+    await expect(router.isConfigured()).rejects.toThrow("配置读取失败");
+  });
+
   it("创建前选定实际供应商，执行配置模板、TTL、超时及 Workspace 能力", async () => {
     const { router, create, resolver, handle } = setup();
     expect(await router.prepareCreate({ scope, registryId: "managed-registry" })).toEqual({

@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("@hoox/persistence", () => ({
   BlobSkillContentStore: class {},
+  PgInstallationRepository: class {},
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
   DurableResourceBlobWriter: class {},

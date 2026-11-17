@@ -7,6 +7,7 @@ import type {
   PiModelCatalogModelDto,
   PiModelCatalogProviderDto,
   PlatformUserPageDto,
+  RuntimeSettingsConfigurationDto,
   RuntimeToolName,
 } from "@hoox/protocol";
 import { RUNTIME_TOOL_CATALOG } from "@hoox/protocol";
@@ -1115,14 +1116,30 @@ function RuntimeToolSelection({
 
 function RuntimeSettingsWorkspace({
   overview,
+  models,
   busy,
   onSave,
 }: {
+  readonly models: readonly ModelProviderRevisionDto[];
   readonly overview: AdminControlOverviewDto | undefined;
   readonly busy: boolean;
   readonly onSave: (form: FormData) => Promise<void>;
 }) {
   const configuration = overview?.activeRuntimeSettings?.configuration;
+  const selectedTitle = configuration?.titleGeneration;
+  const titleProviders = models.filter(
+    (item) =>
+      item.configuration.credentialConfigured &&
+      (!models.some(
+        (candidate) =>
+          candidate.configuration.providerKey === item.configuration.providerKey &&
+          candidate.revision > item.revision,
+      ) ||
+        (selectedTitle?.enabled &&
+          selectedTitle.providerKey === item.configuration.providerKey &&
+          selectedTitle.providerRevision === item.revision)),
+  );
+
   return (
     <section className="control-panel">
       <h2>运行设置</h2>
@@ -1172,8 +1189,51 @@ function RuntimeSettingsWorkspace({
               </label>
             ))}
           </div>
+          <label htmlFor="runtime-title-model">会话标题模型</label>
+          <select
+            id="runtime-title-model"
+            name="titleGeneration"
+            defaultValue={
+              configuration?.titleGeneration === undefined
+                ? "deployment"
+                : configuration.titleGeneration.enabled
+                  ? JSON.stringify(configuration.titleGeneration)
+                  : "disabled"
+            }
+          >
+            <option value="deployment">暂不配置（如有部署配置则沿用）</option>
+            <option value="disabled">关闭自动标题，使用默认标题</option>
+            {titleProviders.flatMap((item) =>
+              item.configuration.models
+                .filter((model) => model.enabled && model.maxTokens >= 32)
+                .map((model) => (
+                  <option
+                    key={`${item.configuration.providerKey}:${item.revision}:${model.id}`}
+                    value={JSON.stringify({
+                      enabled: true,
+                      providerKey: item.configuration.providerKey,
+                      providerRevision: item.revision,
+                      modelId: model.id,
+                    })}
+                  >
+                    {item.configuration.displayName} · {model.name}
+                  </option>
+                )),
+            )}
+          </select>
+          <p>
+            复用已保存的供应商密钥，可选择低成本模型。配置仅发送首条输入和附件名称；后续供应商更新后可重新选择。
+          </p>
           <details>
             <summary>上下文压缩设置</summary>
+            <label className="runtime-tool-option">
+              <input
+                type="checkbox"
+                name="compactionEnabled"
+                defaultChecked={configuration?.compactionEnabled ?? true}
+              />
+              开启自动上下文压缩（部署需允许此能力）
+            </label>
             <div className="form-grid">
               {runtimeSettingFields.slice(2).map(([name, label, min, max, fallback]) => (
                 <label key={name}>
@@ -1237,7 +1297,7 @@ export function AdminControlConsole({
                 queryFn: () => api.overview(),
                 staleTime: 0,
               }),
-          view === "models"
+          view === "models" || view === "settings"
             ? queryClient.fetchQuery({
                 queryKey: ["admin-control", "model-providers"],
                 queryFn: () => api.listModelProviders(),
@@ -1409,11 +1469,23 @@ export function AdminControlConsole({
       ) : view === "settings" ? (
         <RuntimeSettingsWorkspace
           overview={overview}
+          models={items}
           busy={busy}
           onSave={(form) =>
             operation(() =>
               api.saveRuntimeSettingsConfiguration({
                 toolCallingMode: form.get("toolCallingMode") === "ptc" ? "ptc" : "native",
+                compactionEnabled: form.has("compactionEnabled"),
+                ...(value(form, "titleGeneration") === "deployment"
+                  ? {}
+                  : {
+                      titleGeneration:
+                        value(form, "titleGeneration") === "disabled"
+                          ? { enabled: false as const }
+                          : (JSON.parse(value(form, "titleGeneration")) as NonNullable<
+                              RuntimeSettingsConfigurationDto["titleGeneration"]
+                            >),
+                    }),
                 enabledTools: form.getAll("enabledTools") as RuntimeToolName[],
                 workerMaxConcurrentRuns: number(form, "workerMaxConcurrentRuns"),
                 userMaxConcurrentRunsPerTenant: number(form, "userMaxConcurrentRunsPerTenant"),

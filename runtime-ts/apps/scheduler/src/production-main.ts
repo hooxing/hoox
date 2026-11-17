@@ -10,10 +10,15 @@ try {
       console.error("Scheduler 生产进程关闭失败");
     },
   });
-  if ((await running.readiness()).status !== "ready") {
+  const readiness = await running.readiness();
+  if (
+    readiness.status !== "ready" &&
+    readiness.failedChecks.some((name) => name !== "sandbox-providers")
+  ) {
     await running.close();
     throw new Error("SCHEDULER_NOT_READY");
   }
+  if (readiness.status !== "ready") console.info("Scheduler 等待沙箱配置；保存配置后自动就绪");
   console.info("Scheduler 生产进程已启动");
 } catch {
   console.error("Scheduler 生产进程启动失败");

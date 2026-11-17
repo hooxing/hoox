@@ -6,7 +6,7 @@ import {
 } from "../scripts/env-contract.mjs";
 
 function validExample(): string {
-  return expectedEnvironmentKeys
+  return [...expectedEnvironmentKeys, ...optionalEnvironmentKeys]
     .map((key) => {
       if (
         key === "DATABASE_URL" ||
@@ -50,6 +50,26 @@ function validExample(): string {
 }
 
 describe("环境变量示例契约", () => {
+  it("基础部署样例不要求供应商与后台运行参数，可选回退仍登记", () => {
+    const source = validExample()
+      .split("\n")
+      .filter((line) => !optionalEnvironmentKeys.some((key) => line.startsWith(`${key}=`)))
+      .join("\n");
+    expect(validateEnvironmentExample(source)).toEqual([]);
+    for (const key of [
+      "MODEL_API_KEY",
+      "SANDBOX_ENABLED_PROVIDERS",
+      "HISTORY_TITLE_MODEL_API_KEY",
+      "MEM0_API_KEY",
+      "AGENT_WORKER_MAX_CONCURRENT_RUNS",
+      "THREAD_CONTEXT_COMPACTION_TIMEOUT_MS",
+    ]) {
+      expect(expectedEnvironmentKeys).not.toContain(key);
+      expect(optionalEnvironmentKeys).toContain(key);
+    }
+    expect(expectedEnvironmentKeys).toContain("MODEL_CREDENTIAL_ENCRYPTION_KEY");
+  });
+
   it("AGS 示例凭据必须使用占位值且诊断不回显密钥", () => {
     const secret = "ags-private-canary";
     const issues = validateEnvironmentExample(
@@ -64,7 +84,7 @@ describe("环境变量示例契约", () => {
   });
 
   it("接受完整且只包含占位凭据的示例", () => {
-    expect(expectedEnvironmentKeys).toEqual(
+    expect([...expectedEnvironmentKeys, ...optionalEnvironmentKeys]).toEqual(
       expect.arrayContaining([
         "THREAD_SERIAL_QUEUE_V2_ENABLED",
         "THREAD_CONTEXT_V2_WRITE_ENABLED",
@@ -119,7 +139,15 @@ describe("环境变量示例契约", () => {
     expect(optionalEnvironmentKeys).toContain("DEMO_ADMIN_USER_ID");
     expect(
       validateEnvironmentExample(
-        `${validExample()}\nDEMO_PUBLIC_ORIGIN=https://demo.example.invalid\nDEMO_ADMIN_USER_ID=user_demo_admin`,
+        `${validExample()
+          .split("\n")
+          .filter(
+            (line) =>
+              !line.startsWith("DEMO_PUBLIC_ORIGIN=") && !line.startsWith("DEMO_ADMIN_USER_ID="),
+          )
+          .join(
+            "\n",
+          )}\nDEMO_PUBLIC_ORIGIN=https://demo.example.invalid\nDEMO_ADMIN_USER_ID=user_demo_admin`,
       ),
     ).toEqual([]);
   });
@@ -127,12 +155,12 @@ describe("环境变量示例契约", () => {
   it("同时报告缺失项和未登记项", () => {
     const source = validExample()
       .split("\n")
-      .filter((line) => !line.startsWith("MODEL_ID="))
+      .filter((line) => !line.startsWith("DATABASE_SCHEMA="))
       .concat("UNKNOWN_KEY=example")
       .join("\n");
 
     expect(validateEnvironmentExample(source)).toEqual([
-      "缺少环境变量：MODEL_ID",
+      "缺少环境变量：DATABASE_SCHEMA",
       "未登记的环境变量：UNKNOWN_KEY",
     ]);
   });

@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { AdminAccessGate } from "./admin-access.js";
 import { App } from "./app.js";
 import "antd/dist/reset.css";
 import "@hoox/ui-theme/theme.css";
@@ -9,7 +10,9 @@ const rootElement = document.getElementById("root");
 if (rootElement !== null) {
   createRoot(rootElement).render(
     <StrictMode>
-      <App />
+      <AdminAccessGate>
+        <App />
+      </AdminAccessGate>
     </StrictMode>,
   );
 }

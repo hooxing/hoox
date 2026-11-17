@@ -92,9 +92,11 @@ export class PgWorkerTenantAssignments {
 
   async wake(tenantId: string): Promise<void> {
     try {
-      await withTenantTransaction(this.pools.runtime, { tenantId }, (client) =>
-        wakeWorkerTenant(client, tenantId),
-      );
+      await withTenantTransaction(this.pools.runtime, { tenantId }, async (client) => {
+        // 空安装尚无兼容 Tenant；真实 dispatch 仍在提交事务内动态唤醒所属 Tenant。
+        const tenant = await client.query("SELECT 1 FROM tenants WHERE id=$1", [tenantId]);
+        if (tenant.rowCount !== 0) await wakeWorkerTenant(client, tenantId);
+      });
     } catch (error) {
       throw mapPersistenceError(error, "唤醒 Worker Tenant 调度");
     }
@@ -203,6 +205,13 @@ export class PgWorkerTenantAssignments {
                    FROM memory_ingestion_outbox memory
                   WHERE memory.tenant_id=$1
                     AND memory.state IN ('pending','claimed','submitted')
+                 UNION ALL
+                 SELECT CASE WHEN title.state='pending'
+                        THEN greatest(title.next_attempt_at,statement_timestamp())
+                        ELSE greatest(title.claim_expires_at+interval '1 millisecond',statement_timestamp()) END
+                   FROM thread_title_generation_outbox title
+                   JOIN tenants title_tenant ON title_tenant.id=title.tenant_id AND title_tenant.kind='personal'
+                  WHERE title.tenant_id=$1 AND title.state IN ('pending','claimed')
                  UNION ALL
                  SELECT greatest(task.next_run_at,statement_timestamp()) AS next_attempt_at
                    FROM scheduled_tasks task

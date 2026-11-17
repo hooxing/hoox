@@ -19,7 +19,10 @@ import {
   refreshHistoryDirectorySummary,
 } from "./pg-personal-history.js";
 import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
-import { enqueueThreadTitleGeneration } from "./pg-thread-title-generation.js";
+import {
+  enqueueThreadTitleGeneration,
+  isThreadTitleGenerationEnabled,
+} from "./pg-thread-title-generation.js";
 import {
   activateNextThreadRun,
   LegacyRunDrainRequiredError,
@@ -357,7 +360,11 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
               });
             }
           }
-          if (this.historyTitleGenerationEnabled && action !== "reject") {
+          if (
+            this.historyFilesystemEnabled &&
+            action !== "reject" &&
+            (await isThreadTitleGenerationEnabled(client, this.historyTitleGenerationEnabled))
+          ) {
             await enqueueThreadTitleGeneration(client, {
               tenantId: input.scope.tenantId,
               threadId: input.thread.id,

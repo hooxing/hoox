@@ -38,6 +38,10 @@ vi.mock("@hoox/sandbox", () => ({
       private readonly gateways: readonly { probe(): Promise<void> }[],
     ) {}
 
+    keys() {
+      return this.gateways.map(() => this.defaultProviderKey);
+    }
+
     async probe() {
       await Promise.all(this.gateways.map((gateway) => gateway.probe()));
     }

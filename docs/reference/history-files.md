@@ -23,6 +23,10 @@
 
 `/history` 使用稳定语义目录名并处理重名，`/thread-files` 始终指向当前 Thread。历史和资源目录只读，不暴露 Tenant、Thread、Resource、Version、Blob key 或签名 URL 作为主要路径。
 
+## 自动标题
+
+可在后台运行设置选择低成本标题模型或关闭自动标题，配置方法见[配置参考](configuration.md#模型与上下文)。启用后首条已接受输入生成持久标题任务；Worker 按租户维护异步消费，固定租户 Scheduler 保留兼容消费。生成失败有界重试后使用确定性标题，用户主动改名不会被覆盖。未配置不领取任务；显式关闭收敛待处理任务。内部 pending 目录只在标题完成或确定性回退后公开，不影响当前任务的 `/thread-files`。
+
 ## 数据与 Provider
 
 PostgreSQL 保存目录、所有权和不可变版本事实，S3 兼容存储保存 Blob。CubeSandbox 通过受控 Volume 读取 ResourceFS；E2B 由 Worker 物化同一能力范围的固定快照。Sandbox 不是文件事实源，丢失或重建后必须从持久事实恢复。

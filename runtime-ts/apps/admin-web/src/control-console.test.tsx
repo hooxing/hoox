@@ -278,6 +278,74 @@ beforeEach(() => {
 });
 
 describe("统一平台管理导航", () => {
+  it("标题模型复用已保存供应商，压缩开关和关闭标题可以保存往返", async () => {
+    const api = fixture();
+    vi.mocked(api.listModelProviders).mockResolvedValue([modelRevision("titles", "healthy")]);
+    let active: RuntimeSettingsRevisionDto | undefined;
+    vi.mocked(api.overview).mockImplementation(async () => ({
+      ...overview,
+      ...(active ? { activeRuntimeSettings: active } : {}),
+    }));
+    vi.mocked(api.saveRuntimeSettingsConfiguration).mockImplementation(async (input) => {
+      const { expectedGeneration: _generation, ...configuration } = input;
+      active = {
+        revision: (active?.revision ?? 0) + 1,
+        versionToken: 1,
+        status: "active",
+        probeStatus: "untested",
+        createdBy: "admin",
+        createdAt: "2026-11-15T00:00:00.000Z",
+        updatedAt: "2026-11-15T00:00:00.000Z",
+        configuration,
+      };
+      return active;
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    act(() => navigationItem(container, "运行设置").click());
+    await settle();
+    const title = { enabled: true, providerKey: "titles", providerRevision: 1, modelId: "model-a" };
+    for (const [selection, compactionEnabled] of [
+      [JSON.stringify(title), false],
+      ["disabled", true],
+    ] as const) {
+      act(() => {
+        const select = requiredControl(
+          container.querySelector<HTMLSelectElement>('select[name="titleGeneration"]'),
+          "标题模型",
+        );
+        select.value = selection;
+        const checkbox = requiredControl(
+          container.querySelector<HTMLInputElement>('input[name="compactionEnabled"]'),
+          "压缩开关",
+        );
+        checkbox.checked = compactionEnabled;
+        container
+          .querySelector("form")
+          ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+      await settle();
+      expect(api.saveRuntimeSettingsConfiguration).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          titleGeneration: selection === "disabled" ? { enabled: false } : title,
+          compactionEnabled,
+        }),
+      );
+      expect(
+        container.querySelector<HTMLSelectElement>('select[name="titleGeneration"]')?.value,
+      ).toBe(selection);
+      expect(
+        container.querySelector<HTMLInputElement>('input[name="compactionEnabled"]')?.checked,
+      ).toBe(compactionEnabled);
+    }
+    expect(container.querySelector('input[name="apiKey"]')).toBeNull();
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it("运行设置从默认值直接保存，没有变更原因或发布步骤", async () => {
     const api = fixture();
     const container = document.createElement("div");

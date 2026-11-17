@@ -1215,6 +1215,28 @@ async function publishPairIsCompatible(
     | ModelProviderConfiguration
     | undefined;
   const settings = mapConfiguration(kind, target.configuration) as RuntimeSettingsConfiguration;
+  const title = settings.titleGeneration;
+  if (title?.enabled) {
+    const selected = await client.query<{ readonly configuration: unknown }>(
+      "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2",
+      [title.providerKey, title.providerRevision],
+    );
+    const selectedRow = selected.rows[0];
+    if (selectedRow === undefined) return false;
+    const provider = mapConfiguration(
+      "model_provider",
+      selectedRow.configuration,
+    ) as ModelProviderConfiguration;
+    if (
+      !provider.credentialConfigured ||
+      !provider.models.some(
+        (candidate) =>
+          candidate.id === title.modelId && candidate.enabled && candidate.maxTokens >= 32,
+      )
+    )
+      return false;
+  }
+
   return (
     model === undefined ||
     settings === undefined ||
@@ -1432,6 +1454,48 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
         : (mapConfiguration("runtime_settings", row.configuration) as RuntimeSettingsConfiguration);
     } catch (error) {
       throw mapPersistenceError(error, "读取已发布运行设置");
+    }
+  }
+
+  /** undefined 表示没有后台接管，null 表示显式关闭；错误绝不能回退到部署密钥。 */
+  async resolveTitleModelConfiguration(): Promise<
+    | {
+        readonly baseUrl: string;
+        readonly apiKey: string;
+        readonly modelId: string;
+        readonly maximumOutputTokens: number;
+      }
+    | null
+    | undefined
+  > {
+    try {
+      const settings = await this.resolveActiveRuntimeSettings();
+      const title = settings?.titleGeneration;
+      if (title === undefined) return undefined;
+      if (!title.enabled) return null;
+      const result = await this.pool.query<{ readonly configuration: unknown }>(
+        `SELECT configuration FROM admin_control_config_revisions
+        WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2`,
+        [title.providerKey, title.providerRevision],
+      );
+      const row = result.rows[0];
+      if (!row) throw new Error("TITLE_MODEL_CONFIGURATION_UNAVAILABLE");
+      const resolved = resolveRuntimeModelConfiguration(
+        { model_key: title.providerKey, model_configuration: row.configuration },
+        this.credentialCipher,
+      );
+      const model = resolved.configuration.models.find(
+        (model) => model.id === title.modelId && model.enabled && model.maxTokens >= 32,
+      );
+      if (!model) throw new Error("TITLE_MODEL_CONFIGURATION_UNAVAILABLE");
+      return Object.freeze({
+        baseUrl: resolved.configuration.baseUrl,
+        apiKey: resolved.apiKey,
+        modelId: title.modelId,
+        maximumOutputTokens: Math.min(128, model.maxTokens),
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "读取标题模型配置");
     }
   }
 

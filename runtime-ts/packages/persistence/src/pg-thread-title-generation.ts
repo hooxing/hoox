@@ -30,6 +30,20 @@ interface ThreadTitleRow {
   readonly created_at: Date;
 }
 
+export async function isThreadTitleGenerationEnabled(
+  client: PoolClient,
+  deploymentFallback: boolean,
+): Promise<boolean> {
+  const result = await client.query<{ readonly enabled: boolean }>(
+    `SELECT COALESCE((SELECT (revision.configuration->'titleGeneration'->>'enabled')::boolean
+       FROM admin_control_active_configs active
+       JOIN admin_control_config_revisions revision USING(object_kind,object_key,revision)
+      WHERE active.object_kind='runtime_settings' AND active.object_key='global'),$1) AS enabled`,
+    [deploymentFallback],
+  );
+  return result.rows[0]?.enabled ?? deploymentFallback;
+}
+
 export async function enqueueThreadTitleGeneration(
   client: PoolClient,
   input: { readonly tenantId: string; readonly threadId: string; readonly receiptId: string },

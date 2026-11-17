@@ -36,6 +36,38 @@ describe("后台运营协议", () => {
     },
   );
 
+  it("标题模型协议区分未配置、关闭和精确引用，拒绝密钥或额外字段", () => {
+    const settings = {
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 80,
+      compactionTargetPercent: 55,
+      compactionRecentUserTokens: 4096,
+      compactionMaxOutputTokens: 4096,
+      compactionTimeoutMs: 60000,
+    };
+    const enabled = { enabled: true, providerKey: "titles", providerRevision: 2, modelId: "cheap" };
+    for (const titleGeneration of [undefined, { enabled: false }, enabled]) {
+      expect(
+        Value.Check(RuntimeSettingsConfigurationDtoSchema, {
+          ...settings,
+          compactionEnabled: false,
+          ...(titleGeneration === undefined ? {} : { titleGeneration }),
+        }),
+      ).toBe(true);
+    }
+    for (const titleGeneration of [
+      { enabled: true },
+      { ...enabled, providerRevision: 0 },
+      { ...enabled, apiKey: "private-canary" },
+      { ...enabled, enabled: false },
+    ]) {
+      expect(
+        Value.Check(RuntimeSettingsConfigurationDtoSchema, { ...settings, titleGeneration }),
+      ).toBe(false);
+    }
+  });
+
   it("模型配置允许正常大小写且保存、测试和切换均不接收变更原因", () => {
     const draft = {
       providerKey: "DeepSeek",

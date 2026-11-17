@@ -215,3 +215,91 @@ describe("后台工具选择", () => {
     expect(repository.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
   });
 });
+
+describe("部署后标题模型和压缩设置", () => {
+  const titleGeneration = {
+    enabled: true as const,
+    providerKey: "titles",
+    providerRevision: 2,
+    modelId: "cheap",
+  };
+  it("兼容旧配置，禁用不保留模型引用并严格拒绝非法值", () => {
+    expect(normalizeRuntimeSettingsConfiguration(configuration)).not.toHaveProperty(
+      "titleGeneration",
+    );
+    expect(
+      normalizeRuntimeSettingsConfiguration({
+        ...configuration,
+        titleGeneration,
+        compactionEnabled: false,
+      }),
+    ).toMatchObject({ titleGeneration, compactionEnabled: false });
+    expect(
+      normalizeRuntimeSettingsConfiguration({
+        ...configuration,
+        titleGeneration: { ...titleGeneration, enabled: false },
+      }),
+    ).toHaveProperty("titleGeneration", { enabled: false });
+    expect(() =>
+      normalizeRuntimeSettingsConfiguration({
+        ...configuration,
+        compactionEnabled: "false",
+      } as never),
+    ).toThrow();
+    expect(() =>
+      normalizeRuntimeSettingsConfiguration({
+        ...configuration,
+        titleGeneration: { ...titleGeneration, providerRevision: 0 },
+      }),
+    ).toThrow();
+  });
+  it("无凭据或无有效模型的引用不能直接保存或创建草稿", async () => {
+    const { repository, service } = fixture();
+    await expect(
+      service.saveRuntimeSettingsConfiguration(context, {
+        ...configuration,
+        titleGeneration,
+        expectedGeneration: 1,
+      }),
+    ).rejects.toThrow("标题模型");
+    await expect(
+      service.createRuntimeSettingsDraft(context, {
+        ...configuration,
+        titleGeneration,
+        reason: "配置标题",
+      }),
+    ).rejects.toThrow("标题模型");
+    expect(repository.saveRuntimeSettingsConfiguration).not.toHaveBeenCalled();
+    expect(repository.createRuntimeSettingsDraft).not.toHaveBeenCalled();
+  });
+  it("已保存供应商的精确修订可用，停用后草稿无法发布", async () => {
+    const { repository, service } = fixture();
+    const providers = [
+      {
+        revision: 2,
+        configuration: {
+          providerKey: "titles",
+          credentialConfigured: true,
+          models: [{ id: "cheap", enabled: true, maxTokens: 128 }],
+        },
+      },
+    ];
+    repository.listModelProviders.mockResolvedValue(providers as never);
+    const draft = await service.createRuntimeSettingsDraft(context, {
+      ...configuration,
+      titleGeneration,
+      reason: "配置标题",
+    });
+    expect(draft.configuration.titleGeneration).toEqual(titleGeneration);
+    repository.listModelProviders.mockResolvedValue([]);
+    await expect(
+      service.publish(context, {
+        kind: "runtime_settings",
+        objectKey: "global",
+        revision: draft.revision,
+        command: { expectedVersionToken: 1, reason: "发布标题" },
+      }),
+    ).rejects.toThrow("标题模型");
+    expect(repository.publish).not.toHaveBeenCalled();
+  });
+});

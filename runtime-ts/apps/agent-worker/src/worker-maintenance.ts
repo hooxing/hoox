@@ -5,18 +5,21 @@ export async function performWorkerMaintenance(input: {
     readonly converged: number;
   }>;
   readonly drainMemory: () => Promise<unknown>;
+  readonly drainTitles?: () => Promise<unknown>;
   readonly drainScheduledTasks: () => Promise<unknown>;
   readonly resourceBlobBatchLimit: number;
 }): Promise<void> {
-  const [blobs, memory, tasks] = await Promise.allSettled([
+  const [blobs, memory, tasks, titles] = await Promise.allSettled([
     Promise.resolve().then(input.recoverResourceBlobs),
     Promise.resolve().then(input.drainMemory),
     Promise.resolve().then(input.drainScheduledTasks),
+    Promise.resolve().then(() => input.drainTitles?.()),
   ]);
   if (
     blobs.status === "rejected" ||
     memory.status === "rejected" ||
     tasks.status === "rejected" ||
+    titles.status === "rejected" ||
     blobs.value.claimed > blobs.value.converged ||
     blobs.value.claimed >= input.resourceBlobBatchLimit
   ) {

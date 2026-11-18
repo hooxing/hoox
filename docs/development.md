@@ -7,7 +7,7 @@
 - Windows PowerShell 5.1 或 PowerShell 7；一键启动脚本当前依赖 Windows 进程与端口能力。
 - Node.js `24.18.0`。
 - Corepack 与 pnpm `10.15.1`。
-- Docker Compose v2，用于 MinIO 和容器 Gate。
+- Docker Compose v2，用于 MinIO。
 - 专用 PostgreSQL 17 数据库。
 - 执行任务前需要可用 Sandbox Provider：CubeSandbox、E2B 或腾讯云 AGS，可在启动后的后台接入。
 - 可选的线上 OpenAI-compatible 模型；可在首次运行页面之后配置，不要求本地模型。
@@ -197,7 +197,7 @@ corepack pnpm lint
 corepack pnpm check:clean-workspace
 ```
 
-真实外部服务和 production 容器 Gate 不会由普通单元测试静默执行，具体入口见[命令参考](reference/commands.md)。
+真实外部服务测试不会由普通单元测试静默执行，具体入口见[命令参考](reference/commands.md)。
 
 ## 停止本地 MinIO
 

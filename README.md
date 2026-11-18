@@ -28,7 +28,7 @@ Hoox 使用 TypeScript Monorepo 开发，核心运行链路由 PostgreSQL、S3 �
 - **多租户隔离**：TenantScope、Membership、PostgreSQL RLS 与统一错误映射共同限制越权探测。
 - **长程上下文**：Thread 持有连续事实，Runtime 自己负责上下文选择、压缩和恢复。
 - **可观测与可审计**：持久事件、内部轨迹和受控模型报文诊断帮助定位执行问题。
-- **供应链可验证**：依赖精确锁定，生产闭包生成 SBOM，并对许可证与 vendored 来源执行 Gate。
+- **依赖可追溯**：依赖精确锁定，vendored 源码保留固定来源与许可证，CI 审计生产依赖漏洞。
 
 ## 核心模型
 
@@ -98,7 +98,7 @@ corepack pnpm dev:identity:provision
 corepack pnpm check:clean-workspace
 ```
 
-真实 PostgreSQL、CubeSandbox、E2B 和容器 Gate 默认按用途单独执行，不会被普通单元测试静默触发。完整命令见[命令参考](docs/reference/commands.md)。
+真实 PostgreSQL、CubeSandbox、E2B 等外部服务测试默认按用途单独执行，不会被普通单元测试静默触发。完整命令见[命令参考](docs/reference/commands.md)。
 
 ## 仓库结构
 
@@ -109,10 +109,9 @@ runtime-ts/
   managed-skills/   由项目维护的 Skill
   vendor/           固定版本并保留许可证证据的第三方源码
 
-docs/               当前文档、架构决策、实施计划和验证记录
-deploy/             生产配置契约与发布清单
-scripts/            开发、校验、供应链和容器 Gate
-supply-chain/       SBOM 与许可证策略证据
+docs/               当前文档、架构约束、实施计划和验证记录
+deploy/             Demo 部署、生产配置契约示例与 Sandbox 镜像
+scripts/            开发、配置校验与 Demo 发布脚本
 tests/              跨包、集成和黑盒测试
 ```
 

@@ -57,8 +57,6 @@ describe("Hoox 项目身份契约", () => {
       '"hoox.team-switcher.expanded"',
     );
     expect(readText("runtime-ts/packages/persistence/src/postgres.ts")).toContain('"hoox"');
-    expect(readText("scripts/production-supply-chain.mjs")).toContain('"hoox:origin"');
-    expect(readText("scripts/production-supply-chain.mjs")).not.toContain('"aisay:origin"');
     expect(readText("scripts/start-development.ps1")).toContain("Hoox - $escapedTitle");
     expect(readText("scripts/start-development.ps1")).not.toContain("Cube Runtime");
   });

@@ -1,21 +1,17 @@
 # 生产就绪说明
 
-本页区分“仓库静态与容器 Gate 已通过”和“目标环境已经可以生产发布”。前者是必要条件，但不能替代真实基础设施、身份、容量、观测和回滚验收。
+本页说明仓库当前能证明的生产边界，以及正式生产发布前仍需在目标环境完成的验收。Hoox 处于 `0.x` 阶段，仓库目前只维护 [Demo 持续部署](demo-cd.md) 一条发布路径，不提供生产镜像、SBOM 或发布清单。
 
 ## 当前可以由仓库证明的内容
 
 - API、Scheduler、Worker 使用独立 production 装配，不回退到 development 身份、Fake Sandbox 或内存队列。
-- production 配置拒绝 development 变量、明文依赖端点、错误 TLS/角色和未声明环境键。
-- 三个核心进程使用 runtime-only、非 root 容器闭包。
-- 基础镜像固定到记录的 digest，pnpm 版本和 registry integrity 固定。
-- 依赖闭包可以离线生成确定排序的 CycloneDX 1.6 SBOM。
-- registry 与 vendor 许可证执行默认拒绝策略。
-- vendored 源码保留上游版本、许可证、来源、patch 和 canonical tree 证据。
-- 静态发布清单校验镜像、迁移、回滚窗口和所需证据字段。
-- 容器 Gate 验证只读 root filesystem、独立 `/tmp`、运行 UID 权限和秘密脱敏。
+- production 配置拒绝 development 变量、明文依赖端点、错误 TLS/角色和未声明环境键；`pnpm config:check:production` 校验示例与契约一致。
+- 依赖使用精确版本并提交锁文件，pnpm 版本和 registry integrity 固定；CI 执行生产依赖漏洞审计。
+- vendored 源码保留上游版本、许可证与来源说明。
 
 ## 仓库不能替目标环境证明的内容
 
+- 生产容器镜像的 runtime-only 闭包、非 root 运行、只读文件系统与 SBOM。
 - 真实 PostgreSQL、S3、Sandbox、模型和代理的联合 readiness。
 - Web/OIDC 产品身份、账号恢复、会话撤销和组织级权限。
 - 完整跨 Tenant 越权矩阵和运维人员访问审计。
@@ -39,40 +35,16 @@ production 入口对非空 `NODE_*` 默认拒绝，只允许镜像固定的 `NOD
 
 `API_PUBLIC_ORIGIN` 是浏览器/API 对外 origin；`S3_PUBLIC_ENDPOINT` 必须使用不同的专用对象 origin，禁止通过应用同源路径代理对象正文。
 
-## 静态与容器 Gate
+## 正式生产发布前必须完成
 
-```powershell
-corepack pnpm config:check:production
-corepack pnpm supply-chain:check
-corepack pnpm license:check
-corepack pnpm release:check
-corepack pnpm test:production-api:container
-corepack pnpm test:production-scheduler:container
-corepack pnpm test:production-worker:container
-```
-
-也可以执行：
-
-```powershell
-corepack pnpm check:production
-```
-
-镜像 builder 只在锁定的 fetch 阶段联网，后续 offline 安装、编译、deploy 和裁剪使用无网络构建步骤。最终镜像不应包含源码、测试、development entry、Python、npm/npx、Corepack/pnpm 或开发工具。这证明锁定依赖后的断网解析和编译，不表示整个 Docker build 在完全无缓存环境中离线可用。
-
-API Gate 会在最终镜像中使用真实 AWS SDK 验证与 Worker 一致的 stable prefix HEAD、GET 和预签名下载路径。Scheduler 在启动循环前探测 PostgreSQL 角色和 Sandbox，并拒绝接收不使用的 S3 密钥。
-
-## 发布前必须完成
-
-1. 从受保护分支的绿色 CI 提交构建一次镜像并记录不可变 digest。
-2. 填写 `deploy/production-release-manifest.example.json` 的正式副本，记录代码、镜像、SBOM、锁文件、迁移和回滚边界。
-3. 在 Linux 预生产环境使用最小权限角色连接真实 PG、S3、Sandbox 与模型。
-4. 验证 API、Scheduler、Worker 的启动、readiness、排空和关闭。
-5. 验证身份、Membership、Tenant/RLS、Artifact 预览下载和对象 origin 越权矩阵。
-6. 验证 CDN/S3 的 CORS、CSP、`nosniff`、缓存和响应头。
-7. 完成备份与恢复演练，确认 migrationFrom、migrationTo 和 rollbackCompatibleThrough。
-8. 定义容量、错误率、队列、租约、外部依赖和资源增长的观察阈值。
-9. 执行灰度、停止扩容、应用回滚和必要时只读/停服的演练。
-10. 由发布负责人签署[生产发布清单](../../deploy/production-release-checklist.md)。
+1. 为 API、Scheduler、Worker 建立生产镜像构建方式，从受保护分支的绿色 CI 提交构建一次并记录不可变 digest。
+2. 在 Linux 预生产环境使用最小权限角色连接真实 PG、S3、Sandbox 与模型。
+3. 验证 API、Scheduler、Worker 的启动、readiness、排空和关闭。
+4. 验证身份、Membership、Tenant/RLS、Artifact 预览下载和对象 origin 越权矩阵。
+5. 验证 CDN/S3 的 CORS、CSP、`nosniff`、缓存和响应头。
+6. 完成备份与恢复演练，确认迁移前后版本与回滚兼容边界。
+7. 定义容量、错误率、队列、租约、外部依赖和资源增长的观察阈值。
+8. 执行灰度、停止扩容、应用回滚和必要时只读/停服的演练。
 
 ## 发布原则
 
@@ -83,10 +55,6 @@ API Gate 会在最终镜像中使用真实 AWS SDK 验证与 Worker 一致的 st
 - 无法证明 Workspace→Revision→Artifact 闭环时，进入只读或停服应急状态。
 - 发布证据不得包含连接串、JWT、API Key、私钥和用户正文。
 
-## 供应链说明
+## 依赖与许可证
 
-`supply-chain:check` 根据 production installed closure 离线生成无时间戳、确定排序的 SBOM，并与已提交文件逐字比较。`license:check` 重算 registry 与 vendor 许可证策略、本地派生 vendor 的上游 commit、patch 和 canonical tree hash；exact patch 还需通过反向应用检查。
-
-安全修复通过精确直接依赖和限定版本线或父依赖的 override 固定版本；升级 Better Auth 时同步 `.pnpmfile.cjs` 的版本匹配，继续裁剪服务端未使用的框架、ORM 和测试 optional peer，避免开发工具进入生产闭包。更新锁文件后重新生成并验证 SBOM，并验证邮件传输、身份配置与 E2B 模板文件匹配的兼容性。
-
-第三方许可证和来源见仓库根目录 `THIRD_PARTY_NOTICES.md`。基础镜像 digest 的现有证据来自记录的 Docker `RepoDigests`；网络不可达时不能宣称已经重新验证远端 digest。
+安全修复通过精确直接依赖和限定版本线或父依赖的 override 固定版本；升级 Better Auth 时同步 `.pnpmfile.cjs` 的版本匹配，继续裁剪服务端未使用的框架、ORM 和测试 optional peer，避免开发工具进入生产闭包。第三方许可证和来源见仓库根目录 `THIRD_PARTY_NOTICES.md`。

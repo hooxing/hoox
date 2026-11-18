@@ -62,7 +62,7 @@ corepack pnpm test
 corepack pnpm check:clean-workspace
 ```
 
-真实外部服务和容器 Gate 的适用范围见[命令参考](docs/reference/commands.md)。测试不得打印秘密值；集成测试必须使用隔离资源并在 `finally` 中清理。
+真实外部服务测试的适用范围见[命令参考](docs/reference/commands.md)。测试不得打印秘密值；集成测试必须使用隔离资源并在 `finally` 中清理。
 
 ## 架构文档
 

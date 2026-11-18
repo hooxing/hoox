@@ -44,10 +44,10 @@ describe("CI 工作流效率契约", () => {
     expect(ciJob("m4-development-blackbox")).toContain("pnpm test:integration:m4:clean");
   });
 
-  it("M4 门禁执行工具选择快照和真实迁移降级边界，不只保留未被筛选的测试", () => {
+  it("M4 门禁先执行 Runtime 模型与模式快照，再运行完整黑盒", () => {
     const gate = ciJob("m4-development-blackbox");
     expect(gate).toContain(
-      'tests/integration/postgres-core.integration.test.ts -t "PostgreSQL Runtime 模型与模式快照|工具选择迁移整批提交"',
+      'tests/integration/postgres-core.integration.test.ts -t "PostgreSQL Runtime 模型与模式快照"',
     );
     expect(gate.indexOf("postgres-core.integration.test.ts")).toBeLessThan(
       gate.indexOf("pnpm test:integration:m4:clean"),

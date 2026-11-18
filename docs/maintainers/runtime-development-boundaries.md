@@ -87,7 +87,7 @@ CI 并行执行三个独立 Job：工程构建与测试（含生产配置契约�
 
 创建请求可省略 `version`，服务端根据操作者与幂等键生成稳定内部标识；显式版本继续兼容旧调用方。页面不展示版本、令牌或推荐选择，发布自动设为推荐，新安装使用推荐包，已有安装仍固定精确版本。撤销确认说明该内容不能继续执行，当前推荐包撤销后停止新安装；原因可省略，审计仍记录真实操作者与状态变化。
 
-每次写请求继续使用独立幂等键，状态推进携带内部 `expectedVersionToken`。409 表示持久状态已改变，应显式刷新后再操作，不能悄悄更新并发检查值重放。迁移 `0060_skill_direct_publication` 放宽直发记录的审核者约束，仍保留 approved/rejected 的真实证据；存在无审核者的 published/revoked 记录时 down 拒绝回退，不得补造审核者。
+每次写请求继续使用独立幂等键，状态推进携带内部 `expectedVersionToken`。409 表示持久状态已改变，应显式刷新后再操作，不能悄悄更新并发检查值重放。Schema 允许直发记录没有审核者，approved/rejected 仍保留真实审核证据；不得为直发记录补造审核者。
 
 开发环境准备顺序如下：
 
@@ -166,13 +166,13 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 
 Worker 通过 `pi-adapter` 直接装配 `pi-ai` 的 `Models`、Provider 和内存凭据，并用 `pi-agent-core` 的 `Agent` 执行受控工具循环。逻辑工作目录固定为 `/workspace`，实际 system prompt 保留固定后缀 `\nCurrent working directory: /workspace`，不使用宿主路径或资源发现。每个内核实例的随机 `sessionId` 跨轮稳定，仅传给 Provider，不进入 prompt。Provider 流默认超时为 300,000ms，重试等待上限为 60,000ms；上层自动重试与自动压缩不启用。内核边界见 [Prompt、上下文预算与模型交互](../architecture/prompt-and-model-io.md#模型绑定)，持久恢复与安全点见 [Thread 连续上下文](../architecture/thread-continuity.md)。
 
-成功 Run 的终态事务仍可登记记忆 Outbox。消费者按 Run 固定配置解析提供方，关闭时以 `skipped` 结束本地消费并释放 claim，保留已有 Provider 事件与提交时间，不伪造成功或计入失败。`skipped` 不参与后续领取、待处理统计和 Tenant 调度；维护成功后正常释放 Tenant 租约。升级必须先应用 0059 迁移，再启动新 Worker；已有积压等待租约到期后自动重领收尾，无需手工改状态。存在 `skipped` 时数据库 down 拒绝回退，应用回退可以保留扩展 schema。Outbox 消费的通用规则见[持久化与数据库边界](../architecture/persistence-and-database.md#outbox-与后台消费)。
+成功 Run 的终态事务仍可登记记忆 Outbox。消费者按 Run 固定配置解析提供方，关闭时以 `skipped` 结束本地消费并释放 claim，保留已有 Provider 事件与提交时间，不伪造成功或计入失败。`skipped` 不参与后续领取、待处理统计和 Tenant 调度；维护成功后正常释放 Tenant 租约。已有积压等待租约到期后自动重领收尾，无需手工改状态。Outbox 消费的通用规则见[持久化与数据库边界](../architecture/persistence-and-database.md#outbox-与后台消费)。
 
 模型与记忆一次保存接口要求幂等键和 `expectedGeneration`，由服务端事务执行授权、generation 比较、不可变配置写入、active 切换及审计；失败不遗留待启用配置。页面保存失败保留输入与原并发检查值，冲突后由管理员显式刷新。记忆保存使用 `PUT /v1/admin/control/memory-providers/current`，独立于后台模型；表单带入当前值并按 `enabled` 显示开启或关闭，Mem0 API Key 支持加密托管与同供应商凭据复用。投影、幂等结果与审计不返回密钥明文或密文。
 
-启用配置会递增全局 generation；首次建立托管模型/记忆快照的 Run 固定对应 revision 与密钥，重试不反查当前 active。0062 允许模型为空及 generation 为零，首次快照也固定未配置的选择；已有空模型快照继续使用部署 `MODEL_*`，不会中途绑定新托管模型。部署回退模型的具体参数仍未持久化，修改其环境变量前应排空在途 Run。独立压缩快照与旧 Run 继承边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
+启用配置会递增全局 generation；首次建立托管模型/记忆快照的 Run 固定对应 revision 与密钥，重试不反查当前 active。运行配置快照允许模型为空及 generation 为零，首次快照也固定未配置的选择；已有空模型快照继续使用部署 `MODEL_*`，不会中途绑定新托管模型。部署回退模型的具体参数仍未持久化，修改其环境变量前应排空在途 Run。独立压缩快照与旧 Run 继承边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
 
-Worker 并发与五项上下文压缩数值参数由后台运行设置优先提供，未保存时采用部署默认；直接保存入口为 `PUT /v1/admin/control/runtime-settings/current`，旧草稿/发布路由不恢复。并发在调度时热读取，失败保留最后有效值。迁移 `0061_run_compaction_settings_snapshots` 以 Tenant/Run 复合键保存实际使用的五项压缩参数，Runtime 只有 SELECT/INSERT，管理角色无权读取；已有快照时拒绝 down。变量默认值、生效时机与预算裁剪规则见[配置参考](../reference/configuration.md)。
+Worker 并发与五项上下文压缩数值参数由后台运行设置优先提供，未保存时采用部署默认；直接保存入口为 `PUT /v1/admin/control/runtime-settings/current`，旧草稿/发布路由不恢复。并发在调度时热读取，失败保留最后有效值。`run_compaction_settings_snapshots` 以 Tenant/Run 复合键保存实际使用的五项压缩参数，Runtime 只有 SELECT/INSERT，管理角色无权读取。变量默认值、生效时机与预算裁剪规则见[配置参考](../reference/configuration.md)。
 
 数据库、角色、JWT、TLS、S3、Sandbox 和监听地址由部署文件管理，没有通用 ENV 写接口。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。在线配置、凭据加密与 Run 快照边界见[后台控制面与运行配置](../architecture/admin-control-plane.md)，Demo 数据 epoch 见[Demo 持续部署](../operations/demo-cd.md)。
 
@@ -252,7 +252,7 @@ corepack pnpm security:audit:production
 
 Runtime 对 Membership 只有 SELECT、INSERT 和恒定 `lock_marker` 的单列 UPDATE，不允许表级 UPDATE，也不允许更新 `status`、`role`、租户/用户关联、ID 或创建时间。`lock_marker` 由 CHECK 约束为 `false`，只用于满足 PostgreSQL `FOR SHARE` 的列权限前提。不得把它改造成业务状态；成员变更只能经独立 Team Coordinator 连接完成，角色分工见[持久化与数据库边界](../architecture/persistence-and-database.md#数据库角色)。
 
-0003 才引入 `lock_marker`。ACL bootstrap 与白名单断言必须按数据库实际列集合工作，partial down 到 0002 时不能引用该列，再次 up 到 0003 后必须恢复单列权限。新增版本相关 ACL 时必须同时增加真实 PostgreSQL 的 `最新→旧版→最新` 往返测试。
+ACL bootstrap 与白名单断言按数据库实际列集合工作。基线之后新增的迁移若引入版本相关 ACL（新表、新列或列级权限），必须同时增加真实 PostgreSQL 的 `最新→上一版→最新` 往返测试。
 
 公开错误中，Schema、超限、畸形 JSON、危险原型键和游标错误统一为 400 `INVALID_REQUEST`；非 `application/json` 的创建请求为 415 `UNSUPPORTED_MEDIA_TYPE`。不能把 Fastify/AJV 的内部错误消息直接返回给客户端。
 

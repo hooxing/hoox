@@ -415,7 +415,7 @@ afterAll(async () => {
       `${schema}.runtime_ptc_dispatches`,
     ]);
     if (table.rows[0]?.name !== null) {
-      // 只清理本套件专用 schema 的夹具；正式 down 对任何已记录调用都必须拒绝删除。
+      // 只清理本套件专用 schema 的夹具。
       await admin.query(`DELETE FROM "${schema}".runtime_ptc_dispatches`);
     }
   }
@@ -992,23 +992,6 @@ describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
         ]),
       );
     }
-  });
-
-  it("down 对非空 journal 明确拒绝且不删除事实、不改变 RLS", async () => {
-    await expect(
-      migrateDown(migrator, {
-        ...migrationSecurity,
-        allowDestructive: true,
-        environment: "test",
-        targetVersion: 65,
-      }),
-    ).rejects.toThrow();
-    const rls = await admin.query(
-      `SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='"${schema}".runtime_ptc_dispatches'::regclass`,
-    );
-    expect(rls.rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
-    const journal = await repository.listPtcDispatchesByParent({ context, parentToolCallId });
-    expect(journal).toMatchObject({ outcome: "loaded" });
   });
 
   it("父 call 闭合后不允许新开始或结果重放；非 run_code 父拒绝，native 路径仍兼容", async () => {

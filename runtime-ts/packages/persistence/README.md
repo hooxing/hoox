@@ -31,8 +31,7 @@ Workspace head、把 uploaded 引用标记为 `released` 并把 candidate 标记
 candidate 与 uploaded 引用；COMMIT 响应未知只能通过原 RuntimeMutation 幂等键读取结果。stable 读取授权
 及续期逐字段绑定 Tenant、Thread、Workspace、revision 和 relative path，不能用同一物理 Blob 越过文件事实。
 
-`released` 是不可逆的生命周期状态，不计入 stable 引用可达性。迁移 down 只删除 candidate 协调表，故意
-保留 released 状态和约束，避免把已释放引用错误恢复为会阻止 GC 的 stable。
+`released` 是不可逆的生命周期状态，不计入 stable 引用可达性，不能被恢复为会阻止 GC 的 stable。
 
 ## Blob Store 约束
 

@@ -56,7 +56,7 @@ SMTP 投递不可达、认证失败、TLS 失败或收件方拒收时，本次�
 
 ## 兼容边界
 
-Better Auth 固定为 `1.7.7`，数据库以 `(provider_id, account_id)` 唯一定位外部或密码账号。迁移 `0070` 保留旧 `issuer` 列与历史值并允许其为空；新版账号不再写入该列。升级发现重复 Provider 账号键时整批失败，不自动合并用户；已有空 `issuer` 或旧来源键冲突时禁止自动降级。
+Better Auth 固定为 `1.7.7`，数据库以 `(provider_id, account_id)` 唯一定位外部或密码账号。账号表保留可为空的 `issuer` 列，新版账号不再写入该列；重复的 Provider 账号键由唯一约束拒绝，不自动合并用户。
 
 production Web 使用内嵌身份入口，旧 `/v1/auth/register` 和 `/v1/auth/login` 不对外注册。development 可以显式保留旧本地账号端点和固定开发身份，用于夹具与兼容测试。生产 JWT 验证仍作为非浏览器调用方的后备，但不会绕过 Hoox 的 User、Membership 和 RLS 授权。
 

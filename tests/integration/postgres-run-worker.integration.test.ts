@@ -119,11 +119,6 @@ import {
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
-import {
-  isThreadV2ReadEnabled,
-  PgLegacyThreadContextAnchor,
-  PgThreadContinuityMetrics,
-} from "../../runtime-ts/packages/persistence/src/thread-continuity-rollout.js";
 import { PgThreadSandboxSessionLifecycle } from "../../runtime-ts/packages/persistence/src/thread-sandbox-session.js";
 import { RUNTIME_TOOL_CATALOG } from "../../runtime-ts/packages/protocol/src/index.js";
 import { createWorkspaceManifest } from "../../runtime-ts/packages/workspace/src/manifest.js";
@@ -1271,298 +1266,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [runtimeRole, schema],
     );
     expect(acl.rows[0]).toEqual({ select_insert_update: true, delete: false });
-  });
-
-  it("阶段 6 只回填可证明旧事实，以 gap+anchor 收敛并按 Tenant policy 开启读取", async () => {
-    const f = await fixture(`legacy-anchor-${suffix}`);
-    const secondRun = createRun({
-      id: runId(`rw-run-legacy-anchor-second-${suffix}`),
-      thread: f.thread,
-      now: isoTimestamp("2099-07-26T00:00:01.000Z"),
-    });
-    expect(
-      await repositories.runs.create({ tenantId: f.scope.tenantId, userId: f.user.id }, secondRun),
-    ).toMatchObject({ outcome: "created" });
-    expect(
-      await setup.initialize({
-        scope: {
-          ...f.scope,
-          runId: secondRun.id,
-          rootRunId: secondRun.id,
-        },
-        input: "第二条可验证旧输入",
-        rolloutProjection: { schemaVersion: 2, checkpointId: "legacy-anchor-second", items: [] },
-      }),
-    ).toBe("created");
-    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
-      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
-        f.scope.tenantId,
-        f.scope.threadId,
-      ]);
-      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
-        f.scope.tenantId,
-        f.scope.threadId,
-      ]);
-    });
-    const anchor = new PgLegacyThreadContextAnchor(runtime);
-    await expect(
-      anchor.anchor({
-        tenantId: f.scope.tenantId,
-        threadId: f.scope.threadId,
-        maxRuns: 1,
-        operationId: `legacy-anchor-busy-${suffix}`,
-      }),
-    ).resolves.toEqual({ outcome: "busy" });
-    await expect(
-      anchor.anchor({
-        tenantId: tenantId(`rw-tenant-missing-${suffix}`),
-        threadId: f.scope.threadId,
-        maxRuns: 1,
-        operationId: `legacy-anchor-cross-tenant-${suffix}`,
-      }),
-    ).resolves.toEqual({ outcome: "not_found" });
-    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
-      await client.query(
-        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND thread_id=$2`,
-        [f.scope.tenantId, f.scope.threadId],
-      );
-    });
-    await withTenantTransaction(migrator, { tenantId: f.scope.tenantId }, async (client) => {
-      await client.query(
-        `INSERT INTO tenant_thread_continuity_policies(
-           tenant_id,policy_version,v2_read_enabled,new_thread_rollout_basis_points,
-           legacy_anchor_read_enabled
-         ) VALUES ($1,1,true,0,true)`,
-        [f.scope.tenantId],
-      );
-    });
-
-    const anchored = await anchor.anchor({
-      tenantId: f.scope.tenantId,
-      threadId: f.scope.threadId,
-      maxRuns: 1,
-      operationId: `legacy-anchor-operation-${suffix}`,
-    });
-    expect(anchored).toMatchObject({
-      outcome: "anchored",
-      selectedRuns: 1,
-      backfilledEntries: 2,
-      gapItems: 3,
-    });
-    if (anchored.outcome !== "anchored") throw new Error("legacy anchor 未完成");
-    await expect(
-      anchor.anchor({
-        tenantId: f.scope.tenantId,
-        threadId: f.scope.threadId,
-        maxRuns: 999,
-        operationId: `legacy-anchor-retry-${suffix}`,
-      }),
-    ).resolves.toMatchObject({ outcome: "replayed", anchorId: anchored.anchorId });
-
-    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
-      const entries = await client.query<{
-        readonly kind: string;
-        readonly body_inline: Record<string, unknown>;
-      }>(
-        `SELECT kind,body_inline FROM thread_context_entries
-          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY sequence`,
-        [f.scope.tenantId, f.scope.threadId],
-      );
-      expect(entries.rows.map((row) => row.kind)).toEqual([
-        "legacy_history_gap",
-        "user_message",
-        "run_terminal",
-        "legacy_v2_anchor",
-      ]);
-      expect(entries.rows[1]?.body_inline).toMatchObject({ text: "第二条可验证旧输入" });
-      expect(entries.rows.some((row) => row.kind === "assistant_message")).toBe(false);
-      const audit = await client.query<{
-        readonly evidence_kind: string;
-        readonly outcome: string;
-        readonly reason_code: string | null;
-      }>(
-        `SELECT evidence_kind,outcome,reason_code FROM thread_context_legacy_backfill_items
-          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY item_ordinal`,
-        [f.scope.tenantId, f.scope.threadId],
-      );
-      expect(audit.rows).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            evidence_kind: "earlier_run_range",
-            outcome: "gap",
-            reason_code: "max_depth_exceeded",
-          }),
-          expect.objectContaining({
-            evidence_kind: "assistant_tool_history",
-            outcome: "gap",
-            reason_code: "not_provable",
-          }),
-          expect.objectContaining({
-            evidence_kind: "workspace_result",
-            outcome: "gap",
-            reason_code: "source_missing",
-          }),
-        ]),
-      );
-      expect(await isThreadV2ReadEnabled(client, f.scope.tenantId, f.scope.threadId)).toBe(true);
-    });
-
-    const metrics = new PgThreadContinuityMetrics(runtime);
-    const observation = {
-      tenantId: f.scope.tenantId,
-      threadId: f.scope.threadId,
-      runId: secondRun.id,
-      observationId: `legacy-anchor-metric-${suffix}`,
-      metricName: "context_rebuild_latency_ms" as const,
-      value: 12,
-      unit: "milliseconds" as const,
-      outcome: "ready",
-    };
-    await metrics.record(observation);
-    await metrics.record(observation);
-    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
-      const count = await client.query<{ readonly count: string }>(
-        `SELECT count(*)::text AS count FROM thread_continuity_metric_observations
-          WHERE tenant_id=$1 AND observation_id=$2`,
-        [f.scope.tenantId, observation.observationId],
-      );
-      expect(count.rows[0]?.count).toBe("1");
-    });
-  });
-
-  it("阶段 6 不把旧历史伪装追加到已有 V2 stream，并在 anchor 末端失败时整笔回滚", async () => {
-    const existing = await fixture(`legacy-anchor-existing-${suffix}`);
-    const existingBody = { code: "preexisting_v2_fact" } as const;
-    await withTenantTransaction(runtime, { tenantId: existing.scope.tenantId }, async (client) => {
-      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
-        existing.scope.tenantId,
-        existing.scope.threadId,
-      ]);
-      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
-        existing.scope.tenantId,
-        existing.scope.threadId,
-      ]);
-      await client.query(
-        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND thread_id=$2`,
-        [existing.scope.tenantId, existing.scope.threadId],
-      );
-      await client.query(
-        `INSERT INTO thread_context_entries(
-           tenant_id,thread_id,sequence,entry_id,kind,body_inline,body_sha256,body_size
-         ) VALUES ($1,$2,1,$3,'legacy_history_gap',$4::jsonb,$5,$6)`,
-        [
-          existing.scope.tenantId,
-          existing.scope.threadId,
-          `preexisting-v2-${suffix}`,
-          JSON.stringify(existingBody),
-          digestCanonical(existingBody),
-          Buffer.byteLength(JSON.stringify(existingBody), "utf8"),
-        ],
-      );
-      await client.query(
-        `UPDATE thread_context_streams SET next_sequence=2
-          WHERE tenant_id=$1 AND thread_id=$2`,
-        [existing.scope.tenantId, existing.scope.threadId],
-      );
-    });
-    await expect(
-      new PgLegacyThreadContextAnchor(runtime).anchor({
-        tenantId: existing.scope.tenantId,
-        threadId: existing.scope.threadId,
-        maxRuns: 10,
-        operationId: `legacy-anchor-existing-${suffix}`,
-      }),
-    ).resolves.toMatchObject({
-      outcome: "anchored",
-      firstSequence: 2,
-      anchorSequence: 3,
-      backfilledEntries: 0,
-      gapItems: 1,
-    });
-    await withTenantTransaction(runtime, { tenantId: existing.scope.tenantId }, async (client) => {
-      const facts = await client.query<{ readonly kind: string }>(
-        `SELECT kind FROM thread_context_entries
-          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY sequence`,
-        [existing.scope.tenantId, existing.scope.threadId],
-      );
-      expect(facts.rows.map((row) => row.kind)).toEqual([
-        "legacy_history_gap",
-        "legacy_history_gap",
-        "legacy_v2_anchor",
-      ]);
-      expect(facts.rows.some((row) => row.kind === "user_message")).toBe(false);
-    });
-
-    const rollback = await fixture(`legacy-anchor-rollback-${suffix}`);
-    await withTenantTransaction(runtime, { tenantId: rollback.scope.tenantId }, async (client) => {
-      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
-        rollback.scope.tenantId,
-        rollback.scope.threadId,
-      ]);
-      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
-        rollback.scope.tenantId,
-        rollback.scope.threadId,
-      ]);
-      await client.query(
-        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND thread_id=$2`,
-        [rollback.scope.tenantId, rollback.scope.threadId],
-      );
-    });
-    const triggerName = `test_anchor_rollback_${process.pid}`;
-    await migrator.query(
-      `CREATE FUNCTION ${triggerName}() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN
-           IF NEW.thread_id='${rollback.scope.threadId}' THEN
-             RAISE EXCEPTION 'test anchor rollback';
-           END IF;
-           RETURN NEW;
-         END $$;
-       CREATE TRIGGER ${triggerName} BEFORE INSERT ON thread_context_legacy_anchors
-         FOR EACH ROW EXECUTE FUNCTION ${triggerName}()`,
-    );
-    try {
-      await expect(
-        new PgLegacyThreadContextAnchor(runtime).anchor({
-          tenantId: rollback.scope.tenantId,
-          threadId: rollback.scope.threadId,
-          maxRuns: 10,
-          operationId: `legacy-anchor-rollback-${suffix}`,
-        }),
-      ).rejects.toThrow();
-    } finally {
-      await migrator.query(
-        `DROP TRIGGER ${triggerName} ON thread_context_legacy_anchors;
-         DROP FUNCTION ${triggerName}()`,
-      );
-    }
-    await withTenantTransaction(runtime, { tenantId: rollback.scope.tenantId }, async (client) => {
-      const state = await client.query<{
-        readonly next_sequence: string;
-        readonly entries: string;
-        readonly anchors: string;
-        readonly profiles: string;
-      }>(
-        `SELECT stream.next_sequence::text,
-                (SELECT count(*)::text FROM thread_context_entries entry
-                  WHERE entry.tenant_id=$1 AND entry.thread_id=$2) AS entries,
-                (SELECT count(*)::text FROM thread_context_legacy_anchors anchor
-                  WHERE anchor.tenant_id=$1 AND anchor.thread_id=$2) AS anchors,
-                (SELECT count(*)::text FROM thread_continuity_profiles profile
-                  WHERE profile.tenant_id=$1 AND profile.thread_id=$2) AS profiles
-           FROM thread_context_streams stream
-          WHERE stream.tenant_id=$1 AND stream.thread_id=$2`,
-        [rollback.scope.tenantId, rollback.scope.threadId],
-      );
-      expect(state.rows[0]).toEqual({
-        next_sequence: "1",
-        entries: "0",
-        anchors: "0",
-        profiles: "0",
-      });
-    });
   });
 
   it("Workspace journal complete 的 COMMIT 响应未知映射为 unknown，原 identity 可读回", async () => {
@@ -3034,14 +2737,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
 
   it("阶段 2 让 Run B 只读取激活时冻结的 Run A 历史，重启重建 digest 稳定", async () => {
     const f = await serialQueueFixture(`context-v2-${suffix}`);
-    await withTenantTransaction(runtime, f.tenantScope, (client) =>
-      client.query(
-        `INSERT INTO thread_continuity_profiles(
-           tenant_id,thread_id,rollout_source,cohort_bucket,rollout_selected,policy_version
-         ) VALUES($1,$2,'manual',0,true,0)`,
-        [f.tenantScope.tenantId, f.thread.id],
-      ),
-    );
     const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
     const contextPersistence = new PgExecutionPersistence(runtime, {
       threadContextWriteEnabled: true,
@@ -4038,15 +3733,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       tenant: personal.tenant,
       membership: personal.ownerMembership,
     });
-    await withTenantTransaction(migrator, { tenantId: scope.tenantId }, (client) =>
-      client.query(
-        `INSERT INTO tenant_thread_continuity_policies(
-           tenant_id,policy_version,v2_read_enabled,new_thread_rollout_basis_points,
-           legacy_anchor_read_enabled
-         ) VALUES ($1,7,true,10000,false)`,
-        [scope.tenantId],
-      ),
-    );
     const thread = createThread({
       id: threadId(`thread-id-${label}`),
       tenant: personal.tenant,
@@ -4103,7 +3789,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       }),
     ).resolves.toEqual({ outcome: "key_conflict" });
     const facts = await withTenantTransaction(runtime, scope, async (client) => {
-      const [threads, workspaces, profile] = await Promise.all([
+      const [threads, workspaces] = await Promise.all([
         client.query<{ count: string }>(
           "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1",
           [scope.tenantId],
@@ -4112,31 +3798,13 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1",
           [scope.tenantId],
         ),
-        client.query<{
-          readonly rollout_source: string;
-          readonly rollout_selected: boolean;
-          readonly policy_version: string;
-        }>(
-          `SELECT rollout_source,rollout_selected,policy_version::text
-             FROM thread_continuity_profiles WHERE tenant_id=$1 AND thread_id=$2`,
-          [scope.tenantId, thread.id],
-        ),
       ]);
       return {
         threads: threads.rows[0]?.count,
         workspaces: workspaces.rows[0]?.count,
-        profile: profile.rows[0],
       };
     });
-    expect(facts).toEqual({
-      threads: "1",
-      workspaces: "1",
-      profile: {
-        rollout_source: "new_thread",
-        rollout_selected: true,
-        policy_version: "7",
-      },
-    });
+    expect(facts).toEqual({ threads: "1", workspaces: "1" });
   });
 
   it("Thread 创建直接命中 TransactionCommitUnknownError 后按原键精确读回", async () => {

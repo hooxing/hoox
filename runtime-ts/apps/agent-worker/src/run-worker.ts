@@ -1247,10 +1247,8 @@ export class RunWorker {
 
       // TODO(codex-alignment): waiting 仍复用历史单轮循环骨架；后续清理不可达 correction 命名。
       for (;;) {
-        const preModel = await measureStartup("pre_model_stop_point", () =>
-          this.stopPoint(context, cancellation),
-        );
-        if (preModel) return await this.finishStopped(context, preModel, sandbox);
+        // 模型许可签发会在数据库内重验双栅栏与 Run 状态，取消、停机或栅栏丢失都会令其拒绝，
+        // 并经外层 catch 收敛为 finishStopped；此前单独的 stopPoint 只多一次续租往返。
         const modelEffect =
           steerReceiptId === undefined && outputLimitContinuationRound === 0
             ? "model_start"

@@ -350,9 +350,16 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       return { outcome: "fence_lost" };
     }
     const now = this.databaseNow();
-    if (!record?.attempt || !this.validFence(record, input.fence) || expired(input.fence, now)) {
+    // 与 PostgreSQL 一致：许可签发按数据库中已存的租约到期时间判定，而不只信任调用方快照。
+    if (
+      !record?.attempt ||
+      !this.validFence(record, input.fence) ||
+      expired(input.fence, now) ||
+      this.isExpired(record)
+    ) {
       return { outcome: "fence_lost" };
     }
+    if (record.run.status === "cancelled") return { outcome: "cancelled" };
     if (record.attempt.version !== input.expectedAttemptVersion) return { outcome: "conflict" };
     if (
       this.permits.some(

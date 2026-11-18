@@ -8,7 +8,7 @@
 - 团队中心展示可选择复制的用户 ID；同名定时任务目标使用创建时间与完整 ID 区分。
 - 个性化弹窗支持 Esc、焦点循环与关闭后恢复焦点。
 - 后台以服务端部署类型判断身份配置适用性；已启用托管模型但未启用长期记忆时，不将 Mem0 密钥计入就绪分母。
-- Migration 0058 恢复 FORCE RLS 下的受限跨 Tenant 统计和用户目录计数，不增加控制角色底表权限。决策见[后台投影与 FORCE RLS](../decisions/20260905180644-admin-projection-forced-rls.md)。
+- Migration 0058 恢复 FORCE RLS 下的受限跨 Tenant 统计和用户目录计数，不增加控制角色底表权限。决策见[后台控制面与运行配置](../architecture/admin-control-plane.md)。
 
 交互与配置修复分别提交为 `f299c9d`、`946be3d`。相关单元与界面测试累计 119 项通过；构建、类型、格式、lint 与 diff 检查通过。
 

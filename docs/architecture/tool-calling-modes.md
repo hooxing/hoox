@@ -1,6 +1,6 @@
 # 工具调用模式
 
-本文面向维护 Worker、后台运行设置和工具恢复协议的开发者，说明正常模式与实验 PTC 模式的当前边界。配置操作见[配置参考](../reference/configuration.md)，选择依据见 [ADR-20261003011415](../decisions/20261003011415-ptc-mode-and-durable-dispatch-journal.md)。
+本文面向维护 Worker、后台运行设置和工具恢复协议的开发者，说明正常模式与实验 PTC 模式的当前边界。配置操作见[配置参考](../reference/configuration.md)。
 
 ## 模式与生效时机
 
@@ -16,7 +16,7 @@ Worker 首次为 Run 解析运行配置时持久化快照；尚未建立快照�
 
 `run_code` 是 PTC 的隔离编排入口，`collapse_process_for_final_answer` 是正常模式的展示机制，不在业务开关中。全部关闭时，PTC 保留纯计算程序入口，但 tools 命名空间为空，不能获得宿主文件、命令或网络能力。
 
-工具开关不是沙箱文件 ACL：保留 `exec_command` 时仍可通过命令读写文件，关闭文件工具不能替代沙箱隔离。后台显示该限制。共享工具目录、规范化规则和数据库约束拒绝未知、重复及非数组选择；选择顺序不改变能力缓存或模型 Schema。工具新增必须同步目录、受控执行和[用户展示契约](../decisions/20261004184828-tool-user-presentation-contract.md)；已显式保存的名单不自动启用新增工具。长期取舍见[后台工具选择决策](../decisions/20261008150709-admin-tool-selection-and-run-snapshot.md)。
+工具开关不是沙箱文件 ACL：保留 `exec_command` 时仍可通过命令读写文件，关闭文件工具不能替代沙箱隔离。后台显示该限制。共享工具目录、规范化规则和数据库约束拒绝未知、重复及非数组选择；选择顺序不改变能力缓存或模型 Schema。工具新增必须同步目录、受控执行和[用户展示契约](#用户可见工具信息与错误处理)；已显式保存的名单不自动启用新增工具。
 
 ## 模型与执行边界
 
@@ -50,7 +50,7 @@ try {
 
 所有 PTC 工具调用都传一个 JSON 对象，无参调用也写成 `tools.list_agents({})`。`exec_command` 的非零退出码保留在 `result.details.exit_code`，不是工具异常的判据；不要用 `; true` 掩盖退出码。`wait_agent` 后续读取使用返回的 `nextAfterSequence`，重复传 0 会重放历史；消息追加的时序与 steer 行为见[智能体协作](agent-collaboration.md)。
 
-新增或修改工具时必须同时设计模型出口和用户展示，维护用途/对象投影、安全失败及历史兼容测试。长期选择见[工具用户展示契约决策](../decisions/20261004184828-tool-user-presentation-contract.md)。
+新增或修改工具时必须同时设计模型出口和用户展示，维护用途/对象投影、安全失败及历史兼容测试。
 
 ## durable 子调用与恢复
 
@@ -71,4 +71,4 @@ try {
 - 运行设置 Revision 一旦保存模式字段，migration 0067 拒绝降级到不支持该字段的约束，包括值为 `native` 的 Revision；切回正常模式不等于删除历史事实。
 
 - 含 `enabledTools` 的任何运行设置 Revision 都会阻止 migration 0068 降级，包括空名单。重新全选工具不删除历史配置，回滚代码必须保留该字段的支持。
-- migration 0069 将工具选择校验改为内联 CHECK，整批迁移提交时不保留数据库 routine。无工具选择历史时可整批回退至 0067 或更早；停在 0068 的函数中间态会被安全检查拒绝并整体回滚。禁止绕过迁移入口直接执行 down 后提交，取舍见[无 routine 迁移终态决策](../decisions/20261008154038-tool-selection-routine-free-migration.md)。
+- migration 0069 将工具选择校验改为内联 CHECK，整批迁移提交时不保留数据库 routine。无工具选择历史时可整批回退至 0067 或更早；停在 0068 的函数中间态会被安全检查拒绝并整体回滚。禁止绕过迁移入口直接执行 down 后提交。

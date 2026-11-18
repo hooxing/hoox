@@ -180,7 +180,7 @@ corepack pnpm dev:admin-control:api
 corepack pnpm dev:admin:web
 ```
 
-统一 Admin API 在同一个 3003 listener 提供模型、记忆、配置、统计与 Skill 管理路由，共用管理身份，但在进程内继续使用 Admin Control 和 Skill Publisher 两套数据库连接；Skill 发布对象存储也保持独立凭据。详细边界见[维护者开发边界](maintainers/runtime-development-boundaries.md#管理员-skill-上架)与[统一后台 API 决策](decisions/20260821115221-unified-admin-api-process.md)。轨迹查看命令见[命令参考](reference/commands.md)。
+统一 Admin API 在同一个 3003 listener 提供模型、记忆、配置、统计与 Skill 管理路由，共用管理身份，但在进程内继续使用 Admin Control 和 Skill Publisher 两套数据库连接；Skill 发布对象存储也保持独立凭据。详细边界见[维护者开发边界](maintainers/runtime-development-boundaries.md#管理员-skill-上架)与[后台控制面与运行配置](architecture/admin-control-plane.md)。轨迹查看命令见[命令参考](reference/commands.md)。
 
 ## 提交前验证
 

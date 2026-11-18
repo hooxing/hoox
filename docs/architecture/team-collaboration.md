@@ -71,4 +71,4 @@ Worker 通过数据库协调取得可服务 Tenant，不依赖固定开发 Tenan
 - 团队云盘治理、配额、回收站、Skill 审批、团队级模型/工具/网络策略仍未形成正式产品契约。
 - 团队能力仍需完成公开身份系统、完整越权矩阵和目标生产环境联合验收后，才能视为生产就绪。
 
-关键决策见 [ADR-20260828111920](../decisions/20260828111920-personal-task-rename-and-soft-delete.md)、[ADR-0139](../decisions/0139-team-workspace-and-snapshot-boundary.md)、[ADR-0140](../decisions/0140-dual-task-navigation-and-team-center.md)、[ADR-0142](../decisions/0142-dynamic-worker-tenant-assignment.md)、[ADR-0146](../decisions/0146-team-directory-personal-scope-recovery.md)、[ADR-0147](../decisions/0147-team-coordinator-database-role.md)、[ADR-0168](../decisions/0168-personalization-settings-and-run-snapshot.md)和[ADR-0169](../decisions/0169-team-member-read-only-authorization-snapshot.md)。
+执行与持久化的通用规则见 [Run 执行与恢复](run-execution-and-recovery.md)，个性化快照与 Prompt 分层见 [Prompt、上下文预算与模型交互](prompt-and-model-io.md)。

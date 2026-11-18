@@ -6,7 +6,7 @@
 
 - 阅读[项目状态](docs/project-status.md)，不要把尚未完成的生产能力当作既有保证。
 - 阅读[仓库导览](docs/architecture/repository-map.md)，确认改动属于应用、共享包还是适配器。
-- 搜索已有 Issue、PR 和[架构决策](docs/decisions/README.md)，避免重复或违反未被替代的约束。
+- 搜索已有 Issue、PR 和[架构文档](docs/architecture/README.md)，避免重复或违反现有约束。
 - 大型功能、公共协议、持久化、安全边界或跨包重构应先创建 Issue，说明问题、范围、备选和验证方式。
 - 安全漏洞不要创建公开 Issue，按[安全策略](SECURITY.md)私下报告。
 
@@ -64,17 +64,13 @@ corepack pnpm check:clean-workspace
 
 真实外部服务和容器 Gate 的适用范围见[命令参考](docs/reference/commands.md)。测试不得打印秘密值；集成测试必须使用隔离资源并在 `finally` 中清理。
 
-## 架构决策
+## 架构文档
 
-满足仓库约束中定义的行为、数据、安全、协议或兼容边界变化时，必须在 `docs/decisions` 新增 ADR：
+改动影响架构边界（行为、数据、安全、协议或兼容边界）时，在同一 PR 中更新 [`docs/architecture`](docs/architecture/README.md) 下对应的现状文档：
 
-1. 复制 [`adr-template.md`](docs/decisions/adr-template.md)。
-2. 使用北京时间时间戳 `YYYYMMDDHHmmss` 作为编号。
-3. 写清背景、约束、至少两个备选、选择、影响、验证和可逆性。
-4. 在 [`catalog.md`](docs/decisions/catalog.md) 追加索引。
-5. 在 PR 和提交中引用 ADR。
-
-历史 ADR 不因编号重复、结论被替代或命名过时而改名；通过状态和替代关系保留可追踪性。
+1. 以仓库 HEAD 的视角描述新的约束、不变量和失败语义，不写变更过程。
+2. 没有合适文档时，在 `docs/architecture` 新增主题文档并加入索引。
+3. 在 PR 描述中说明备选方案、选择理由、验证方式和可逆性；历史讨论以 PR 与 Git 历史为准。
 
 ## Pull Request
 
@@ -82,7 +78,7 @@ PR 应包含：
 
 - 问题和目标；
 - 范围与明确不做的内容；
-- 关键设计和 ADR；
+- 关键设计与已更新的架构文档；
 - 测试与验证命令；
 - 配置、迁移、兼容性和安全影响；
 - 回滚方式；
@@ -95,7 +91,7 @@ PR 应包含：
 - 根 README 只保留项目定位、最短启动路径和导航。
 - 当前事实写入 `docs/architecture`、`docs/reference`、`docs/operations` 或 `docs/development.md`。
 - 实施计划写入 `docs/plans`，并明确它不是当前契约。
-- 历史参考写入 `docs/archive`。
+- 设计约束与不变量写入 `docs/architecture` 的现状文档，不另建 ADR 或归档目录。
 - 链接使用仓库相对路径；命令、端口和环境变量必须能从当前仓库验证。
 
 ## 行为准则

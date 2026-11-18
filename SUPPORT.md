@@ -5,7 +5,7 @@
 - 可复现 Bug：创建 GitHub Issue，并使用 Bug 报告模板。
 - 功能建议：创建 Feature Request，说明用户问题而不仅是实现方案。
 - 开发配置：先阅读[开发指南](docs/development.md)、[配置参考](docs/reference/configuration.md)和[命令参考](docs/reference/commands.md)。
-- 架构问题：阅读[架构总览](docs/architecture/overview.md)、[仓库导览](docs/architecture/repository-map.md)和相关 ADR。
+- 架构问题：阅读[架构总览](docs/architecture/overview.md)、[仓库导览](docs/architecture/repository-map.md)和相关[架构文档](docs/architecture/README.md)。
 - 安全问题：按[安全策略](SECURITY.md)私下报告。
 
 ## Issue 前检查

@@ -11,7 +11,7 @@
 - [x] 建立架构、参考、开发、运维、维护者、计划、决策、验证和历史文档分层。
 - [x] 根 `package.json` 包含 description、license、repository、homepage、bugs 和 keywords。
 - [x] README 中明确 `0.x` 成熟度和未完成的生产验收。
-- [x] ADR 规则统一为北京时间时间戳，历史重复编号保留但不再新增。
+- [x] 设计约束统一维护在 `docs/architecture` 现状文档，不另建 ADR 目录。
 - [x] 文档本地文件链接与锚点检查通过。
 - [x] development 与 production 配置契约、SBOM 和许可证 Gate 通过。
 

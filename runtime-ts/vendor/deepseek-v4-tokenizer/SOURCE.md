@@ -12,4 +12,4 @@
 | `tokenizer_config.json` | `6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547` |
 | `LICENSE` | `f2c6c602815669d292889e5be8c802f2ed950653b77999b1584e8e6aed25d040` |
 
-更新这些资源时必须同时更新固定提交、校验值、自动化测试和对应 ADR。
+更新这些资源时必须同时更新固定提交、校验值、自动化测试和 [Prompt、上下文预算与模型交互](../../../docs/architecture/prompt-and-model-io.md)。

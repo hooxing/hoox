@@ -8,10 +8,6 @@
 
 `@earendil-works/pi-coding-agent@0.82.1` 来源于 `earendil-works/pi` 的 `v0.82.1` 标签（提交 `b4f293684bba718d59cc1157679bcf6157b3a7f5`），上游采用 MIT License，版权人为 Mario Zechner。仓库保留的完整许可证和来源记录见 `third_party/pi/`；依赖图由 pnpm lockfile 固定。
 
-## DeepSeek Harness Trajectory（仅内部 development 诊断）
-
-`runtime-ts/vendor/deepseek-trajectory/` 保存 DeepSeek Harness `packages/client/ui-trajectory` 的固定源码快照，来源提交为 `47f943859bef60e4160492346772ded9b24f765a`，上游包版本为 `0.1.0-rc.5`，许可证为 MIT，版权人为 DeepSeek。完整许可证、来源和集成边界见该目录的 `LICENSE` 与 `SOURCE.md`。该源码不进入用户产品面，也不引入 DeepSeek Harness 的运行时服务依赖。
-
 ## DeepSeek Harness 增量 Markdown
 
 `runtime-ts/vendor/deepseek-markdown/` 保存 DeepSeek Harness `packages/client/ui-primitives/src/markdown/incremental.ts` 的固定源码，来源提交为 `76fda729799fe9b3848dbe2c211d4b231032b81e`，许可证为 MIT，版权人为 DeepSeek。完整许可证与来源见该目录的 `LICENSE` 和 `SOURCE.md`。该解析器进入用户 Web 的正文渲染，不引入 DeepSeek Harness 会话服务或其他 UI 组件。

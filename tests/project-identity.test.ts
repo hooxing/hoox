@@ -30,10 +30,6 @@ describe("Hoox 项目身份契约", () => {
       expect(JSON.stringify(manifest), path).not.toContain("@cube-runtime/");
       expect(JSON.stringify(manifest), path).not.toContain("@aisay/");
     }
-
-    expect(readJson("runtime-ts/vendor/deepseek-trajectory/package.json").name).toBe(
-      "@hoox/vendor-deepseek-trajectory",
-    );
   });
 
   it("部署身份使用 Hoox，但保留 CubeSandbox Provider 契约", () => {

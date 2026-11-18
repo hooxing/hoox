@@ -69,7 +69,7 @@ Accept: text/event-stream
 - API 每进程共用一条专用 PostgreSQL LISTEN 连接，连接失败时自动重建；响应读取服从背压。浏览器断开或 API 关闭会释放该流订阅。
 - 响应使用 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no`。反向代理需要关闭响应缓冲，不能把 SSE 累积为完整响应后才转发。
 
-Worker 的 Pi 适配层在分配持久事件 sequence 前合并连续正文增量：每条 assistant 消息的首段非空正文立即发布，后续按 50ms 或 1KiB UTF-8 缓冲窗口刷新；思考增量保持 100ms 或 1KiB 窗口。控制事件和消息、工具、turn 边界同步排空前驱文字，单个大增量原样交给既有大小门禁。事件分片不对应 Provider token，已提交事件的游标、重放和授权语义不变；内部原始轨迹与完整 Thread 历史不受合并影响。窗口时间受事件循环调度影响，不是端到端延迟保证。取消订阅或释放 Session 会清除计时器和未发布缓冲。决策见 [运行事件与对话展示](../architecture/run-events-and-presentation.md)。
+Worker 的 Pi 适配层在分配持久事件 sequence 前合并连续正文增量：每条 assistant 消息的首段非空正文立即发布，后续按 50ms 或 1KiB UTF-8 缓冲窗口刷新；思考增量使用 500ms 或 1KiB 窗口，以减少串行持久化事务。控制事件和消息、工具、turn 边界同步排空前驱文字，单个大增量原样交给既有大小门禁。事件分片不对应 Provider token，已提交事件的游标、重放和授权语义不变；内部原始轨迹与完整 Thread 历史不受合并影响。窗口时间受事件循环调度影响，不是端到端延迟保证。取消订阅或释放 Session 会清除计时器和未发布缓冲。决策见 [运行事件与对话展示](../architecture/run-events-and-presentation.md)。
 
 Web 正文与交付物、上下文读取独立。首批与控制事件立即显示；连续文字合并三个动画帧，定时器兜底目标为 50ms，实际绘制仍受浏览器调度影响。流中断按已接收游标重连；端点 404 时降级到约 1 秒分页轮询。切换任务取消旧连接和待发布文字。辅助信息约 5 秒刷新一次，关键事件和运行状态变化触发提前刷新。
 

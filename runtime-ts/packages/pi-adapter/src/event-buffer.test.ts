@@ -57,10 +57,10 @@ describe("公开 Runtime 增量缓冲", () => {
     h.stop();
   });
 
-  it("thinking 保持 100ms 窗口，正文和思考切换不会混合或重排", () => {
+  it("thinking 使用 500ms 合并窗口，正文和思考切换不会混合或重排", () => {
     const h = harness();
     h.emit({ type: "thinking.delta", delta: "思考" });
-    vi.advanceTimersByTime(99);
+    vi.advanceTimersByTime(499);
     expect(h.events).toEqual([]);
     vi.advanceTimersByTime(1);
     expect(h.events).toEqual([{ type: "thinking.delta", delta: "思考" }]);

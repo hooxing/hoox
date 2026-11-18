@@ -44,7 +44,6 @@
 | `corepack pnpm db:migrate:up` | 执行向前迁移 |
 | `corepack pnpm db:migrate:down` | 显式允许破坏性回退；只用于受控环境 |
 | `corepack pnpm dev:identity:provision` | 幂等初始化两个 development 身份及个人 Tenant |
-| `corepack pnpm thread:legacy-anchor` | 执行历史 Thread anchor 维护入口 |
 
 数据库角色 bootstrap 见[开发指南](../development.md)。不要对共享或生产数据库执行 development 黑盒和破坏性 down。
 

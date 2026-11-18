@@ -733,9 +733,6 @@ describe("RuntimeApi", () => {
 
   it("读取连续性状态，并在独立开关关闭时兼容 404", async () => {
     const status = {
-      boundary: "legacy_anchor",
-      readMode: "v2",
-      anchorState: "completed",
       queueDepth: 2,
       contextSequence: 17,
       compactionWindow: 3,

@@ -591,9 +591,6 @@ describe("工作台展示组件", () => {
         }}
         run={running}
         continuity={{
-          boundary: "legacy_anchor",
-          readMode: "v2",
-          anchorState: "completed",
           queueDepth: 3,
           contextSequence: 12,
           compactionWindow: 2,

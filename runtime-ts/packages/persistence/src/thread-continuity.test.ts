@@ -1,33 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  PgThreadContinuityMetrics,
-  threadContinuityCohortBucket,
-} from "./thread-continuity-rollout.js";
+import { PgThreadContinuityMetrics } from "./thread-continuity.js";
 
-describe("Thread continuity rollout cohort", () => {
-  it("同一 Tenant/Thread 永远得到同一万分桶", () => {
-    const first = threadContinuityCohortBucket("tenant-a", "thread-a");
-    expect(first).toBe(threadContinuityCohortBucket("tenant-a", "thread-a"));
-    expect(first).toBeGreaterThanOrEqual(0);
-    expect(first).toBeLessThan(10_000);
-  });
-
-  it("Tenant 与 Thread 都参与 cohort identity", () => {
-    expect(threadContinuityCohortBucket("tenant-a", "thread-a")).not.toBe(
-      threadContinuityCohortBucket("tenant-b", "thread-a"),
-    );
-    expect(threadContinuityCohortBucket("tenant-a", "thread-a")).not.toBe(
-      threadContinuityCohortBucket("tenant-a", "thread-b"),
-    );
-  });
-
-  it("拒绝空 identity，不把 rollout 参数偷偷固化进算法", () => {
-    expect(() => threadContinuityCohortBucket("", "thread-a")).toThrow(
-      "Thread rollout identity 无效",
-    );
-    expect(threadContinuityCohortBucket.length).toBe(2);
-  });
-
+describe("Thread continuity 指标", () => {
   it("指标端口在接触数据库前拒绝非有限值和高基数维度", async () => {
     const metrics = new PgThreadContinuityMetrics({} as never);
     const base = {

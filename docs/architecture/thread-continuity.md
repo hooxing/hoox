@@ -1,6 +1,6 @@
 # Thread 连续上下文
 
-本文面向需要理解 Thread、Run、Context 和 Sandbox 恢复关系的开发者。它描述当前运行语义；灰度、旧 Thread anchor、指标和紧急回退见[运维手册](../operations/thread-continuity.md)。
+本文面向需要理解 Thread、Run、Context 和 Sandbox 恢复关系的开发者。它描述当前运行语义；指标和紧急回退见[运维手册](../operations/thread-continuity.md)。
 
 ## 所有权与顺序
 
@@ -32,8 +32,8 @@ Web 的未发送文字草稿保存在当前标签页的 sessionStorage，按账�
 
 - steer 作为真实用户输入持久化，在模型安全点按顺序接纳；结束竞态会原子转入 follow-up。
 - follow-up 按 FIFO 逐项创建后续 Run，Worker 崩溃或当前 Run 取消不能丢失它。
-- 旧 Thread 只有在证据式 anchor 完成后才进入 V2 读取路径；无法恢复的历史以明确 gap 表达，不伪造 Assistant 内容。
-- 全局功能开关用于紧急回退，不删除 profile、anchor、checkpoint 或输入事实。
+- 所有通过 Thread 创建入口建立的 Thread 都直接使用持久 Context 读取路径；无法恢复的历史以明确 gap 表达，不伪造 Assistant 内容。
+- 全局功能开关用于紧急回退，不删除 checkpoint 或输入事实。
 
 当前行为由 `runtime-ts/packages/persistence`、`runtime-ts/apps/agent-worker`、`runtime-ts/apps/api` 和 `runtime-ts/apps/scheduler` 共同实现。
 

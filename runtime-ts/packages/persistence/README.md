@@ -1,6 +1,6 @@
 # `@hoox/persistence`
 
-本包保存 Runtime 的持久化边界。目前已实现核心业务 Repository、S3/MinIO Blob Store、ADR-0012 定义的 PostgreSQL stable blob 生命周期，以及 ADR-0014 定义的 Run Worker 执行事实与事务适配器。
+本包保存 Runtime 的持久化边界。目前已实现核心业务 Repository、S3/MinIO Blob Store、PostgreSQL stable blob 生命周期，以及 Run Worker 执行事实与事务适配器。跨模块不变量见[持久化与数据库边界](../../../docs/architecture/persistence-and-database.md)与 [Run 执行与恢复](../../../docs/architecture/run-execution-and-recovery.md)。
 
 Resource Library 已增加 PostgreSQL 目录与显式提升提交：生产装配只暴露窄的 `ResourceCatalog` 和 verifier-gated `ResourcePromotionCommitPort`，创建运行时必须注入与受控 Tool Router 配对的 `PromotionCapabilityVerifier`，没有默认绕过。ResourceVersion 复合绑定 stable Blob 完整物理身份，pending 不可搜索；授权签发仍等待 Workspace 逐文件 Manifest 持久化，不在本包伪造完成。
 
@@ -20,7 +20,7 @@ Resource Library 已增加 PostgreSQL 目录与显式提升提交：生产装配
 
 ## Workspace candidate 交接
 
-`0015_workspace_candidate_handoff` 实现 ADR-0047 的 Workspace 发布事务边界：Sandbox 快照产生的新 stable
+Workspace candidate 表实现 Workspace 发布事务边界：Sandbox 快照产生的新 stable
 引用必须先绑定到完整 Attempt candidate，candidate 从 `building` 经 manifest 逐文件核验进入 `prepared`。
 最终 `PgExecutionPersistence` 在同一 SERIALIZABLE RuntimeMutation 中写入 revision/manifest/files、推进
 Workspace head、把 uploaded 引用标记为 `released` 并把 candidate 标记为 `committed`。已提交 revision file

@@ -2,10 +2,9 @@
 
 本文面向迁移或新增 Hoox Web、Admin Web 界面的开发者，说明当前共享主题的事实源、语义角色、
 消费方式和已经完成的迁移边界。实施顺序见
-[Hoox UI 重构实施计划](../plans/20260901-hoox-ui-refactor.md)，所有权理由见
-[共享 UI 主题 Token 与渐进迁移边界](../decisions/20260901104943-shared-ui-theme-token-boundary.md)，
+[Hoox UI 重构实施计划](../plans/20260901-hoox-ui-refactor.md)，
 品牌与操作颜色职责见
-[品牌绿稀缺使用并与操作语义解耦](../decisions/20260901155352-brand-green-scarcity-and-action-separation.md)。
+[品牌资产](brand-assets.md)。
 
 ## 当前事实源
 

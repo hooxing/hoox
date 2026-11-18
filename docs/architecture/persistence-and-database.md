@@ -1,0 +1,64 @@
+# 持久化与数据库边界
+
+本文面向新增数据库事实、修改 Repository、迁移或数据库角色的开发者，说明 PostgreSQL 与对象存储的职责划分和必须保持的不变量。精确 ACL、角色 bootstrap 与迁移器校验见[维护者开发边界](../maintainers/runtime-development-boundaries.md#postgresql-角色-bootstrap)，Blob 提交与 GC 协议见 [`@hoox/persistence` README](../../runtime-ts/packages/persistence/README.md)。
+
+## 事实源划分
+
+- PostgreSQL 是业务状态的唯一事实源：状态迁移、唯一性、租约、幂等、Tenant 归属和 Outbox 都通过事务与条件写表达。
+- S3 兼容存储只保存 Blob 字节。大文件不进入数据库热表；数据库保存完整的 Blob 身份（逻辑 SHA-256 与大小、不可复用的 incarnation、精确物理键）。
+- 两者之间没有分布式事务。跨越它们的流程必须持久化协调快照，远端结果未知时只能通过固定事实对账收敛，不能猜测成功或失败。
+- Sandbox、Pi Session 内存、浏览器状态和进程内队列都不是恢复依据。
+
+## Tenant 隔离
+
+- 业务表全部启用并 FORCE RLS，策略基于事务内的 `app.tenant_id`、`app.user_id` 等可信设置。应用授权与 RLS 同时生效，不能只依赖其中一层。
+- 认证只证明 User 身份；Runtime 必须在事务内从 Membership 重建 TenantScope。客户端头部或模型参数不能构造 scope。
+- 跨表引用使用包含 `tenant_id` 的复合外键，阻止跨租户身份拼接。公开错误不泄漏跨 Tenant 实体是否存在。
+- 后台统计只通过 Migrator 拥有的受限视图跨 Tenant 聚合；底表保留 FORCE RLS，专属读取策略只面向 Migrator 并要求有效平台操作者。
+
+## 数据库角色
+
+每个常驻进程只持有完成职责所需的数据库身份：
+
+| 角色 | 使用者 | 边界 |
+| --- | --- | --- |
+| Migrator | 迁移命令 | 拥有 Schema 和受限视图；不被常驻进程使用 |
+| Runtime | API、Worker、Scheduler | 表与列白名单 ACL，无 routine 权限；对 Membership 只有 SELECT、INSERT 与恒定 `lock_marker` 列更新 |
+| Worker Coordinator | Worker 的 Tenant 发现 | 只能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表 |
+| Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Worker 不持有 |
+| Admin Control | 统一 Admin API 控制面 | 控制面配置、审计与统计投影 |
+| Skill Publisher | 统一 Admin API Skill 路由 | Skill 发布状态机与对应对象存储权限 |
+
+角色属于整个 PostgreSQL 集群；同一集群的开发、预览和生产数据库使用不同角色集合。迁移在任何 DDL 前校验全部角色、Schema owner、`search_path` 与跨数据库依赖，并在同一事务中完成 Schema 迁移、迁移记录、策略重绑定和最小 ACL 重建。readiness 探测的是实际连接身份，而不是配置文件中的声明。
+
+## 事务与幂等
+
+- 命令式写入使用显式幂等键，并以 canonical JSON 摘要绑定完整请求；同键异摘要稳定冲突。
+- COMMIT 响应未知（`TransactionCommitUnknownError`）时只按原幂等键精确读回，禁止再次 INSERT 或重写。
+- 序列化冲突只重放完全相同的命令；重试范围和次数见 [Run 执行与恢复](run-execution-and-recovery.md#重试与未知结果)。
+- 租约、TTL、`created_at` 等时间只使用数据库时钟，应用不得提交发生时间。
+- 锁序是正确性的一部分。例如 Membership `FOR SHARE` → Thread `FOR UPDATE`，Blob 引用 → lifecycle → incarnation；新增路径必须沿用既有锁序。
+
+## Outbox 与后台消费
+
+需要异步外部动作的事实（Run dispatch、Sandbox cleanup 与生命周期 effect、记忆写入、标题生成、模型诊断清理等）都在产生事实的同一事务中登记 Outbox。消费者：
+
+- 在可信 Tenant scope 内领取，以 token、generation 和数据库租约作为栅栏，迟到写回是 no-op；
+- 在调用远端前持久化“已开始”事实，之后的崩溃或不确定响应收敛为 `unknown`，不自动重复；
+- 失败按有界退避重试，耗尽后进入明确的终止或人工处理状态。
+
+事件写入在原事务中调用 `pg_notify` 唤醒 API 的事件流；通知只携带散列路由键，不是授权或持久事实，丢失由定时补读覆盖。
+
+## Routine 与迁移
+
+- 迁移 manifest 不允许遗留自定义函数、过程或聚合；runner 在迁移 SQL 执行后、提交前断言目标 routine 集合为空，否则整体回滚。约束优先使用内建 immutable 表达式或内联 CHECK。未来引入 routine 前必须单独审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 与调用权限。
+- 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。
+- `pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作。
+
+## 新增数据库事实检查清单
+
+1. 新表启用并 FORCE RLS，策略与复合外键包含 `tenant_id`。
+2. 更新 `role-bootstrap.ts` 中各角色的精确 ACL 白名单，并补真实 PostgreSQL 测试。
+3. 写入路径具备幂等键、摘要冲突语义和 COMMIT 未知读回。
+4. 需要远端动作时使用同事务 Outbox，并定义 UNKNOWN 收敛。
+5. 不新增 routine，不在迁移中依赖会话外的动态角色名。

@@ -137,7 +137,7 @@ tests/              跨包、集成和黑盒测试
 | 部署演示环境 | [Demo 单机部署指南](docs/operations/demo-cd.md) |
 | 生产发布评估 | [生产就绪说明](docs/operations/production-readiness.md) |
 | 排查内部轨迹 | [诊断指南](docs/maintainers/diagnostics.md) |
-| 理解历史取舍 | [架构决策](docs/decisions/README.md) |
+| 理解设计约束 | [架构文档](docs/architecture/README.md) |
 | 参与贡献 | [贡献指南](CONTRIBUTING.md) |
 | 了解治理和发布变化 | [项目治理](GOVERNANCE.md) · [变更记录](CHANGELOG.md) |
 

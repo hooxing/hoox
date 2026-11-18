@@ -742,7 +742,7 @@ async function findStableReferenceForUpdate(
   tenant: string,
   referenceIdValue: string,
 ): Promise<StableReferenceRow | undefined> {
-  // 与 ADR-0012 的 markReferenceStable 保持相同锁序：reference → lifecycle → incarnation。
+  // 与 Blob 生命周期 markReferenceStable 保持相同锁序：reference → lifecycle → incarnation。
   // GC 虽先锁 lifecycle，但只统计 reference 而不锁 reference，因此不会形成反向等待环。
   const referenceResult = await client.query<StableReferenceRow>(
     `SELECT reference.reference_id, reference.state, reference.purpose,

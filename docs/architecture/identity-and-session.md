@@ -56,11 +56,11 @@ SMTP 投递不可达、认证失败、TLS 失败或收件方拒收时，本次�
 
 ## 兼容边界
 
-Better Auth 固定为 `1.7.7`，数据库以 `(provider_id, account_id)` 唯一定位外部或密码账号。迁移 `0070` 保留旧 `issuer` 列与历史值并允许其为空；新版账号不再写入该列。升级发现重复 Provider 账号键时整批失败，不自动合并用户；已有空 `issuer` 或旧来源键冲突时禁止自动降级。版本升级的取舍与回退边界见[账号键兼容决策](../decisions/20261108180541-better-auth-provider-account-key.md)。
+Better Auth 固定为 `1.7.7`，数据库以 `(provider_id, account_id)` 唯一定位外部或密码账号。迁移 `0070` 保留旧 `issuer` 列与历史值并允许其为空；新版账号不再写入该列。升级发现重复 Provider 账号键时整批失败，不自动合并用户；已有空 `issuer` 或旧来源键冲突时禁止自动降级。
 
 production Web 使用内嵌身份入口，旧 `/v1/auth/register` 和 `/v1/auth/login` 不对外注册。development 可以显式保留旧本地账号端点和固定开发身份，用于夹具与兼容测试。生产 JWT 验证仍作为非浏览器调用方的后备，但不会绕过 Hoox 的 User、Membership 和 RLS 授权。
 
-管理交互与内部持久事实的分工见[后台任务操作决策](../decisions/20260906195752-admin-task-oriented-configuration-and-publication.md)。
+管理交互与内部持久事实的分工见[后台控制面与运行配置](admin-control-plane.md)。
 
 ## 首次管理员与管理面会话
 
@@ -68,4 +68,4 @@ production Web 使用内嵌身份入口，旧 `/v1/auth/register` 和 `/v1/auth/
 
 `POST /v1/installation/login` 只允许有效的本地管理员密码登录，使用既有 scrypt 凭据与 Hoox Session。工作台正常邮箱登录被身份服务以 401 拒绝时可尝试该入口，其他故障不降级。初始管理员不会按邮箱自动绑定后续 Better Auth 注册身份；显式账号关联尚未提供。
 
-管理 API 收到 Hoox Session 后，通过固定主 API 的 `GET /v1/auth/admin-principal` 确认账号和有效管理角色，禁止重定向、限制超时和响应大小；验证失败不会降级固定开发身份。viewer、operator、admin 及已有 Skill 管理身份继续进入各领域授权，页面不能替代服务端权限校验。安装来源、令牌和部署秘密见[配置参考](../reference/configuration.md#后台管理)，决策理由见[首次运行决策](../decisions/20261115122045-first-run-administrator-and-model-setup.md)。
+管理 API 收到 Hoox Session 后，通过固定主 API 的 `GET /v1/auth/admin-principal` 确认账号和有效管理角色，禁止重定向、限制超时和响应大小；验证失败不会降级固定开发身份。viewer、operator、admin 及已有 Skill 管理身份继续进入各领域授权，页面不能替代服务端权限校验。安装来源、令牌和部署秘密见[配置参考](../reference/configuration.md#后台管理)，决策理由见[后台控制面与运行配置](admin-control-plane.md)。

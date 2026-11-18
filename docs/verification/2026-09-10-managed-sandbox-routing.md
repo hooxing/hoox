@@ -1,6 +1,6 @@
 # 托管 Sandbox 供应商路由验收
 
-本文记录 2026-09-10 北京时间对后台托管 Sandbox 供应商配置与 Demo 部署的验收证据，供维护者区分已实现能力、已发布状态与尚未验收的范围。当前契约见 [Sandbox Provider](../architecture/sandbox-providers.md#后台配置与分配)，决策见[后端管理 Sandbox 供应商配置与版本固定](../decisions/20260910005916-managed-sandbox-routing.md)。
+本文记录 2026-09-10 北京时间对后台托管 Sandbox 供应商配置与 Demo 部署的验收证据，供维护者区分已实现能力、已发布状态与尚未验收的范围。当前契约见 [Sandbox Provider](../architecture/sandbox-providers.md#后台配置与分配)，决策见[Sandbox Provider](../architecture/sandbox-providers.md)。
 
 ## 环境
 
@@ -47,7 +47,7 @@
 
 已用现有凭据验证 AGS 域名在 `ap-shanghai`、`ap-hongkong`、`ap-singapore`、`ap-guangzhou`、`ap-beijing` 都可鉴权，只是沙箱工具 `hoox-ags-smoke` 仅存在于上海。按“沙箱地域应参考春川部署”的判断，下一步是在香港地域新建沙箱工具并复验；该操作需要在腾讯云控制台登录后进行。
 
-随后又补上自适应降级：分块写入连续失败时自动换用更小的请求体重试同一文件（4MiB → 1MiB → 256KiB），见 [ADR](../decisions/20260910202709-resourcefs-snapshot-adaptive-chunk-downshift.md)。该改进随 PR #32 部署后在 Demo 上再次用 AGS 单供应商跑真实任务，仍然失败：任务运行约 3 分钟后回到「Sandbox 连续调用失败」，说明三级降级后最小 256KiB 的请求体同样无法通过这条路径。结论收敛为：从春川到 AGS 上海的写入路径在约 20 余次请求后不再投递后续请求，请求体大小不是决定性因素，客户端侧的降级与重试不能修复该路径。
+随后又补上自适应降级：分块写入连续失败时自动换用更小的请求体重试同一文件（4MiB → 1MiB → 256KiB），见 [Sandbox Provider](../architecture/sandbox-providers.md)。该改进随 PR #32 部署后在 Demo 上再次用 AGS 单供应商跑真实任务，仍然失败：任务运行约 3 分钟后回到「Sandbox 连续调用失败」，说明三级降级后最小 256KiB 的请求体同样无法通过这条路径。结论收敛为：从春川到 AGS 上海的写入路径在约 20 余次请求后不再投递后续请求，请求体大小不是决定性因素，客户端侧的降级与重试不能修复该路径。
 
 Demo 已恢复为 E2B 单供应商并复验真实任务通过（`python3 -c "print(6*7)"` 返回 `42`、退出码 0、工作区按空闲策略暂停）。
 

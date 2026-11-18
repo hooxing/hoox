@@ -136,14 +136,6 @@ Remove-Item Env:RUN_MINIO_INTEGRATION
 | --- | --- |
 | `corepack pnpm dev:skill:publish:csv-pdf` | 发布仓库维护的 CSV-to-PDF Skill |
 
-## 评测
-
-```powershell
-corepack pnpm eval:gaia:native -- --limit 3
-```
-
-该入口输出未评分的 Runtime 能力证据，不包含 GAIA 标准答案，也不是官方分数。见[GAIA 说明](../verification/gaia-native-evaluation.md)。
-
 ## 腾讯云 AGS 真实冒烟
 
 `pnpm test:tencent-ags:real` 从 `.env` 或进程环境读取 `TENCENT_AGS_API_KEY`、`TENCENT_AGS_DOMAIN` 和 `TENCENT_AGS_TEMPLATE_ID`，创建真实沙箱并在 finally 中清理。命令验证命令与 Python、JavaScript 执行、文件读写、状态查询、暂停与恢复、恢复后的文件保留，以及销毁后实例不存在；不打印凭据。该冒烟不代替[完整 Provider 验收](../architecture/sandbox-providers.md#接入与验收)。

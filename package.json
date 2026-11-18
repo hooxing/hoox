@@ -48,7 +48,6 @@
     "dev:web": "corepack pnpm --filter @hoox/web dev",
     "dev:worker": "corepack pnpm --filter @hoox/agent-worker^... build && corepack pnpm --filter @hoox/agent-worker dev",
     "dev:worker:check": "corepack pnpm --filter @hoox/agent-worker^... build && corepack pnpm --filter @hoox/agent-worker dev:preflight",
-    "eval:gaia:native": "node --env-file-if-exists=.env scripts/gaia-native-eval.mjs",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",

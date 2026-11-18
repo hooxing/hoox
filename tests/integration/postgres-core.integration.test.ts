@@ -574,35 +574,6 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     ]);
   }, 120000);
 
-  it("AGS Provider 迁移覆盖八个持久边界并支持无数据回退", async () => {
-    const target = await createIsolatedMigrationTarget("ags_provider");
-    const constraints = async () =>
-      (
-        await target.pool.query<{ definition: string }>(
-          "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE connamespace=current_schema()::regnamespace AND conname LIKE '%_provider_key_check' ORDER BY conname",
-        )
-      ).rows;
-    try {
-      await migrateUp(target.pool, target.context);
-      const expanded = await constraints();
-      expect(expanded).toHaveLength(8);
-      expect(expanded.every((row) => row.definition.includes("tencent-ags"))).toBe(true);
-      await migrateDown(target.pool, {
-        ...target.context,
-        allowDestructive: true,
-        environment: "test",
-        targetVersion: 62,
-      });
-      expect((await constraints()).every((row) => !row.definition.includes("tencent-ags"))).toBe(
-        true,
-      );
-      await migrateUp(target.pool, target.context);
-      expect(await constraints()).toEqual(expanded);
-    } finally {
-      await target.close();
-    }
-  }, 120_000);
-
   it("后台聚合策略支持回滚重建和导入后的角色重绑定", async () => {
     const target = await createIsolatedMigrationTarget("admin_projection");
     const policies = () =>
@@ -628,7 +599,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         ...target.context,
         allowDestructive: true,
         environment: "test",
-        targetVersion: 57,
+        targetVersion: 0,
       });
       expect((await policies()).rows).toEqual([]);
       await migrateUp(target.pool, target.context);
@@ -831,13 +802,6 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       );
       expect(JSON.stringify(raw.rows)).not.toContain(command.apiKey);
       expect(raw.rows[0].configuration.credential).toBeDefined();
-      const migration = (await loadMigrations()).find((item) => item.version === 62);
-      if (migration === undefined) throw new Error("托管记忆迁移缺失");
-      await expect(
-        withTenantTransaction(migratorPool, initial.scope, (client) =>
-          client.query(migration.downSql),
-        ),
-      ).rejects.toThrow("DOWN_MIGRATION_BLOCKED:managed_memory_configuration_exists");
       await expect(runtime.resolveForRun(scope)).resolves.toEqual(empty);
       const activeRun = await createFixture("memory_active");
       const activeScope = { tenantId: activeRun.scope.tenantId, runId: activeRun.run.id };
@@ -1463,19 +1427,23 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     try {
       await Promise.all([
         copyFile(
-          join(sourceMigrationDirectory, "0001_core.up.sql"),
-          join(temporary, "0001_core.up.sql"),
+          join(sourceMigrationDirectory, "0001_baseline.up.sql"),
+          join(temporary, "0001_baseline.up.sql"),
         ),
         copyFile(
-          join(sourceMigrationDirectory, "0001_core.down.sql"),
-          join(temporary, "0001_core.down.sql"),
+          join(sourceMigrationDirectory, "0001_baseline.down.sql"),
+          join(temporary, "0001_baseline.down.sql"),
         ),
         copyFile(
-          join(sourceMigrationDirectory, "0001_core.up.sql"),
-          join(orphan, "0001_core.up.sql"),
+          join(sourceMigrationDirectory, "0001_baseline.up.sql"),
+          join(orphan, "0001_baseline.up.sql"),
         ),
       ]);
-      await writeFile(join(temporary, "0001_core.down.sql"), "SELECT 'down 已被篡改';\n", "utf8");
+      await writeFile(
+        join(temporary, "0001_baseline.down.sql"),
+        "SELECT 'down 已被篡改';\n",
+        "utf8",
+      );
       await expect(
         migrateUp(migratorPool, { ...migrationSecurity, directory: temporary }),
       ).rejects.toMatchObject({
@@ -1484,11 +1452,11 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await expect(loadMigrations({ directory: orphan })).rejects.toThrow("未成对");
       await Promise.all([
         copyFile(
-          join(sourceMigrationDirectory, "0001_core.up.sql"),
+          join(sourceMigrationDirectory, "0001_baseline.up.sql"),
           join(orphan, "0001_other.up.sql"),
         ),
         copyFile(
-          join(sourceMigrationDirectory, "0001_core.down.sql"),
+          join(sourceMigrationDirectory, "0001_baseline.down.sql"),
           join(orphan, "0001_other.down.sql"),
         ),
       ]);
@@ -1525,55 +1493,6 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       );
     }
   });
-
-  it("工具选择迁移整批提交不留 routine，拒绝停在 0068 并允许继续无数据降级", async () => {
-    const target = await createIsolatedMigrationTarget("tool_selection_routine_boundary");
-    const facts = async () => ({
-      migrations: (
-        await target.pool.query(
-          "SELECT version,name,checksum FROM runtime_schema_migrations ORDER BY version",
-        )
-      ).rows,
-      routines: (
-        await target.pool.query(
-          "SELECT count(*)::text AS count FROM pg_proc WHERE pronamespace=current_schema()::regnamespace",
-        )
-      ).rows,
-      constraints: (
-        await target.pool.query(
-          "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='admin_control_config_revisions'::regclass AND conname='admin_control_configuration_shape'",
-        )
-      ).rows,
-    });
-    try {
-      await migrateUp(target.pool, target.context);
-      const before = await facts();
-      expect(before.routines).toEqual([{ count: "0" }]);
-      expect(before.constraints[0]?.definition).toContain("enabledTools");
-      await expect(
-        migrateDown(target.pool, {
-          ...target.context,
-          allowDestructive: true,
-          environment: "test",
-          targetVersion: 68,
-        }),
-      ).rejects.toThrow("数据库迁移角色或 Schema 边界不安全");
-      expect(await facts()).toEqual(before);
-      await migrateDown(target.pool, {
-        ...target.context,
-        allowDestructive: true,
-        environment: "test",
-        targetVersion: 67,
-      });
-      const downgraded = await facts();
-      expect(downgraded.routines).toEqual([{ count: "0" }]);
-      expect(downgraded.constraints[0]?.definition).not.toContain("enabledTools");
-      await migrateUp(target.pool, target.context);
-      expect(await facts()).toEqual(before);
-    } finally {
-      await target.close();
-    }
-  }, 120_000);
 
   it("down 只有显式 test 授权可执行并能再次向前", async () => {
     await expect(
@@ -1616,301 +1535,6 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     );
     expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(migrationContract.count);
-  });
-
-  it("从最新版本 partial down 至 2 后按旧 Schema 收敛 ACL，并可再次迁移到最新版本", async () => {
-    const target = await createIsolatedMigrationTarget("partial_down");
-    try {
-      expect(
-        (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual(migrationContract.versions);
-      expect(
-        (
-          await migrateDown(target.pool, {
-            ...target.context,
-            allowDestructive: true,
-            environment: "test",
-            targetVersion: 2,
-          })
-        ).map((record) => record.version),
-      ).toEqual([1, 2]);
-      const downState = await target.pool.query<{ lock_marker: string | null }>(
-        "SELECT column_name AS lock_marker FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'memberships' AND column_name = 'lock_marker'",
-      );
-      expect(downState.rows).toEqual([]);
-      const downColumnPrivileges = await target.pool.query<{
-        column_name: string;
-        allowed: boolean;
-      }>(
-        `SELECT column_name,
-                has_column_privilege($1, 'memberships', column_name, 'UPDATE') AS allowed
-           FROM information_schema.columns
-          WHERE table_schema = current_schema() AND table_name = 'memberships'
-          ORDER BY ordinal_position`,
-        [runtimeRole],
-      );
-      expect(downColumnPrivileges.rows.length).toBeGreaterThan(0);
-      expect(downColumnPrivileges.rows.every((column) => !column.allowed)).toBe(true);
-
-      expect(
-        (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual(migrationContract.versions);
-      const restored = await target.pool.query<{ present: boolean; allowed: boolean }>(
-        `SELECT EXISTS (
-           SELECT 1 FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name = 'memberships' AND column_name = 'lock_marker'
-         ) AS present,
-         has_column_privilege($1, 'memberships', 'lock_marker', 'UPDATE') AS allowed`,
-        [runtimeRole],
-      );
-      expect(restored.rows[0]).toEqual({ present: true, allowed: true });
-    } finally {
-      await target.close();
-    }
-  });
-
-  it("从版本 11 升级 0012 与 0013 时原子收敛恢复指标最小权限", async () => {
-    const target = await createIsolatedMigrationTarget("workspace_runtime_acl_upgrade");
-    try {
-      expect(
-        (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual(migrationContract.versions);
-      expect(
-        (
-          await migrateDown(target.pool, {
-            ...target.context,
-            allowDestructive: true,
-            environment: "test",
-            targetVersion: 11,
-          })
-        ).map((record) => record.version),
-      ).toEqual(migrationContract.versions.filter((version) => version <= 11));
-      expect(
-        (
-          await target.pool.query<{ present: boolean }>(
-            "SELECT to_regclass('runtime_recovery_metrics') IS NOT NULL AS present",
-          )
-        ).rows[0]?.present,
-      ).toBe(false);
-
-      expect(
-        (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual(migrationContract.versions);
-      const privileges = await target.pool.query<{
-        privilege: string;
-        allowed: boolean;
-      }>(
-        `SELECT requested.privilege,
-                has_table_privilege(
-                  $1, 'runtime_recovery_metrics', requested.privilege
-                ) AS allowed
-           FROM unnest($2::text[]) AS requested(privilege)
-          ORDER BY requested.privilege`,
-        [
-          runtimeRole,
-          ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
-        ],
-      );
-      expect(privileges.rows).toEqual([
-        { privilege: "DELETE", allowed: false },
-        { privilege: "INSERT", allowed: true },
-        { privilege: "REFERENCES", allowed: false },
-        { privilege: "SELECT", allowed: true },
-        { privilege: "TRIGGER", allowed: false },
-        { privilege: "TRUNCATE", allowed: false },
-        { privilege: "UPDATE", allowed: false },
-      ]);
-    } finally {
-      await target.close();
-    }
-  });
-
-  it("0007→0006→0007 定向收敛 Thread 幂等表的 FORCE RLS 与最小 ACL", async () => {
-    const target = await createIsolatedMigrationTarget("thread_creation_roundtrip");
-    try {
-      await migrateUp(target.pool, target.context);
-      const beforeDown = await target.pool.query<{
-        readonly enabled_rls: boolean;
-        readonly force_rls: boolean;
-        readonly select_allowed: boolean;
-        readonly insert_allowed: boolean;
-        readonly update_allowed: boolean;
-      }>(
-        `SELECT relation.relrowsecurity AS enabled_rls,
-                relation.relforcerowsecurity AS force_rls,
-                has_table_privilege($1,'api_thread_idempotency_records','SELECT') AS select_allowed,
-                has_table_privilege($1,'api_thread_idempotency_records','INSERT') AS insert_allowed,
-                has_table_privilege($1,'api_thread_idempotency_records','UPDATE') AS update_allowed
-           FROM pg_class relation
-          WHERE relation.oid='api_thread_idempotency_records'::regclass`,
-        [runtimeRole],
-      );
-      expect(beforeDown.rows[0]).toEqual({
-        enabled_rls: true,
-        force_rls: true,
-        select_allowed: true,
-        insert_allowed: true,
-        update_allowed: false,
-      });
-
-      const targetRuntime = createPostgresPool({
-        connectionString: runtimeDatabaseUrl,
-        schema: target.context.schema,
-        maxConnections: 2,
-      });
-      try {
-        expect(
-          (await targetRuntime.query<{ readonly current_user: string }>("SELECT current_user"))
-            .rows[0]?.current_user,
-        ).toBe(runtimeRole);
-        const seedTenant = async (label: string) => {
-          const tenant = `rls_tenant_${label}_${isolatedMigrationCounter}`;
-          const user = `rls_user_${label}_${isolatedMigrationCounter}`;
-          const thread = `rls_thread_${label}_${isolatedMigrationCounter}`;
-          const key = `rls-thread-key-${label}-${isolatedMigrationCounter}`;
-          await withTenantTransaction(
-            targetRuntime,
-            { tenantId: tenant, userId: user },
-            async (client) => {
-              await client.query("INSERT INTO app_users(id,created_at) VALUES ($1,$2)", [
-                user,
-                timestamp(0),
-              ]);
-              await client.query(
-                `INSERT INTO tenants(id,kind,owner_user_id,created_at)
-               VALUES ($1,'personal',$2,$3)`,
-                [tenant, user, timestamp(0)],
-              );
-              await client.query(
-                `INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at)
-               VALUES ($1,$2,$3,'owner','active',$4)`,
-                [tenant, `rls_membership_${label}_${isolatedMigrationCounter}`, user, timestamp(0)],
-              );
-              await client.query(
-                `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
-               VALUES ($1,$2,$3,$4,'active',$5,$5)`,
-                [tenant, thread, user, `RLS ${label}`, timestamp(0)],
-              );
-              await client.query(
-                `INSERT INTO api_thread_idempotency_records(
-                 tenant_id,user_id,idempotency_key,request_hash,thread_id
-               ) VALUES ($1,$2,$3,$4,$5)`,
-                [tenant, user, key, label.repeat(64).slice(0, 64), thread],
-              );
-            },
-          );
-          return { tenant, user, thread, key };
-        };
-        const left = await seedTenant("a");
-        const right = await seedTenant("b");
-        const crossTenantRows = await withTenantTransaction(
-          targetRuntime,
-          { tenantId: left.tenant, userId: left.user },
-          (client) =>
-            client.query<{ readonly count: string }>(
-              `SELECT count(*)::text AS count FROM api_thread_idempotency_records
-                WHERE tenant_id=$1`,
-              [right.tenant],
-            ),
-        );
-        expect(crossTenantRows.rows[0]?.count).toBe("0");
-        await expect(
-          withTenantTransaction(
-            targetRuntime,
-            { tenantId: left.tenant, userId: left.user },
-            (client) =>
-              client.query(
-                `INSERT INTO api_thread_idempotency_records(
-                   tenant_id,user_id,idempotency_key,request_hash,thread_id
-                 ) VALUES ($1,$2,$3,$4,$5)`,
-                [right.tenant, right.user, `${right.key}-cross`, "c".repeat(64), right.thread],
-              ),
-          ),
-        ).rejects.toMatchObject({ code: "42501" });
-        const rightRows = await withTenantTransaction(
-          targetRuntime,
-          { tenantId: right.tenant, userId: right.user },
-          (client) =>
-            client.query<{ readonly count: string }>(
-              `SELECT count(*)::text AS count FROM api_thread_idempotency_records
-                WHERE tenant_id=$1`,
-              [right.tenant],
-            ),
-        );
-        expect(rightRows.rows[0]?.count).toBe("1");
-      } finally {
-        await targetRuntime.end();
-      }
-      expect(
-        (
-          await migrateDown(target.pool, {
-            ...target.context,
-            allowDestructive: true,
-            environment: "test",
-            targetVersion: 6,
-          })
-        ).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6]);
-      expect(
-        (
-          await target.pool.query<{ readonly present: boolean }>(
-            "SELECT to_regclass('api_thread_idempotency_records') IS NOT NULL AS present",
-          )
-        ).rows[0]?.present,
-      ).toBe(false);
-      expect((await migrateUp(target.pool, target.context)).at(-1)?.version).toBe(
-        migrationContract.latestVersion,
-      );
-    } finally {
-      await target.close();
-    }
-  });
-
-  it("从最新版本 partial down 至 3 只保留核心事实，并可再次迁移到最新版本", async () => {
-    const target = await createIsolatedMigrationTarget("run_worker_partial_down");
-    try {
-      expect(
-        (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual(migrationContract.versions);
-      expect(
-        (
-          await migrateDown(target.pool, {
-            ...target.context,
-            allowDestructive: true,
-            environment: "test",
-            targetVersion: 3,
-          })
-        ).map((record) => record.version),
-      ).toEqual([1, 2, 3]);
-      const downState = await target.pool.query<{
-        execution_inputs: string | null;
-        membership_lock_marker: string | null;
-      }>(
-        `SELECT to_regclass('run_execution_inputs')::text AS execution_inputs,
-                (SELECT column_name FROM information_schema.columns
-                  WHERE table_schema=current_schema() AND table_name='memberships'
-                    AND column_name='lock_marker') AS membership_lock_marker`,
-      );
-      expect(downState.rows[0]).toEqual({
-        execution_inputs: null,
-        membership_lock_marker: "lock_marker",
-      });
-      expect(
-        (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual(migrationContract.versions);
-      const restored = await target.pool.query<{
-        table_present: boolean;
-        runtime_can_select: boolean;
-      }>(
-        `SELECT to_regclass('run_execution_inputs') IS NOT NULL AS table_present,
-                has_table_privilege($1,'run_execution_inputs','SELECT') AS runtime_can_select`,
-        [runtimeRole],
-      );
-      expect(restored.rows[0]).toEqual({ table_present: true, runtime_can_select: true });
-    } finally {
-      await target.close();
-    }
   });
 
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {
@@ -2084,16 +1708,19 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const target = await createIsolatedMigrationTarget("migration_routine");
     const temporary = await mkdtemp(join(tmpdir(), "hoox-pg-routine-migration-"));
     try {
-      const originalUp = await readFile(join(sourceMigrationDirectory, "0001_core.up.sql"), "utf8");
+      const originalUp = await readFile(
+        join(sourceMigrationDirectory, "0001_baseline.up.sql"),
+        "utf8",
+      );
       await Promise.all([
         writeFile(
-          join(temporary, "0001_core.up.sql"),
+          join(temporary, "0001_baseline.up.sql"),
           `${originalUp}\nCREATE FUNCTION forbidden_migration() RETURNS integer LANGUAGE sql AS 'SELECT 1';\n`,
           "utf8",
         ),
         copyFile(
-          join(sourceMigrationDirectory, "0001_core.down.sql"),
-          join(temporary, "0001_core.down.sql"),
+          join(sourceMigrationDirectory, "0001_baseline.down.sql"),
+          join(temporary, "0001_baseline.down.sql"),
         ),
       ]);
       await expect(

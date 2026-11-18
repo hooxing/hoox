@@ -1,6 +1,6 @@
 # Skill Runtime
 
-本文面向修改 Skill Center、Run 快照、Prompt 注入或 Skill 资源读取的开发者，说明当前实现的所有权、加载路径和安全边界。历史目标设计见[Skill Center 接入规范](../archive/specs/skill-center-and-runtime-integration.md)，最终取舍以相关 ADR 和当前代码为准。
+本文面向修改 Skill Center、Run 快照、Prompt 注入或 Skill 资源读取的开发者，说明当前实现的所有权、加载路径和安全边界。最终行为以本文和当前代码为准。
 
 ## 事实源与所有权
 
@@ -18,7 +18,7 @@
 
 只有 Skill 管理员可以发布或撤销。历史提交、复核接口仍兼容；已有审核者和审核结果保留，直接发布不会伪造审核者。驳回或撤销的申请不能原地恢复，更新需要新建申请。撤销时页面说明后果并确认一次：被撤销的内容不能继续执行，当前推荐包被撤销后停止该技能的新安装；包和历史引用不删除。
 
-包结构与完整性校验不等于恶意软件或脚本行为分析，Skill 不因此获得平台信任或额外工具权限。发布的幂等、并发和迁移边界见[维护者开发边界](../maintainers/runtime-development-boundaries.md)及[后台任务操作决策](../decisions/20260906195752-admin-task-oriented-configuration-and-publication.md)。
+包结构与完整性校验不等于恶意软件或脚本行为分析，Skill 不因此获得平台信任或额外工具权限。发布的幂等、并发和迁移边界见[维护者开发边界](../maintainers/runtime-development-boundaries.md)及[后台控制面与运行配置](admin-control-plane.md)。
 
 ## Run 快照
 
@@ -66,4 +66,4 @@ System Prompt 契约由 `@hoox/prompt-builder` 的 `RUNTIME_PROMPT_VERSION` 和 
 - API/Web 的当前 Tenant 选择、角色授权和稳定错误；
 - ResourceFS 的只读市场投影、Blob 完整性与延迟 Sandbox 行为。
 
-关键决策见 [ADR-0094](../decisions/0094-skill-center-user-installation.md)、[ADR-0095](../decisions/0095-skill-runtime-snapshot-and-lazy-materialization.md)、[ADR-0107（公开 Skill 市场）](../decisions/0107-public-skill-market-virtual-filesystem.md)、[ADR-0112](../decisions/0112-managed-skill-admin-publication.md)、[统一后台 API 决策](../decisions/20260821115221-unified-admin-api-process.md)和[团队工作空间决策](../decisions/0139-team-workspace-and-snapshot-boundary.md)。
+相关边界见[后台控制面与运行配置](admin-control-plane.md)和[团队协作](team-collaboration.md)。

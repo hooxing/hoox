@@ -20,13 +20,10 @@ export function loadPostgreSqlMigrationContract(): Promise<PostgreSqlMigrationCo
     const strictlyIncreasing = versions.every(
       (version, index) => index === 0 || version > (versions[index - 1] ?? 0),
     );
-    const missingVersions = Array.from({ length: latestVersion }, (_, index) => index + 1).filter(
-      (version) => !versions.includes(version),
-    );
-    // 0038 是已经发布并永久保留的版本号；新迁移只能继续向后追加，不能复用历史空号。
-    const onlyReservedVersionIsMissing = missingVersions.length === 1 && missingVersions[0] === 38;
-    if (versions[0] !== 1 || !strictlyIncreasing || !onlyReservedVersionIsMissing) {
-      throw new Error("PostgreSQL 迁移版本必须严格递增，且仅允许保留版本 38");
+    // 2026-11 基线压缩后版本从 0001 基线开始连续递增，新迁移只能向后追加。
+    const contiguous = versions.every((version, index) => version === index + 1);
+    if (versions[0] !== 1 || !strictlyIncreasing || !contiguous) {
+      throw new Error("PostgreSQL 迁移版本必须从 1 开始连续递增");
     }
     return {
       versions,

@@ -1,6 +1,6 @@
 # 历史文件与 ResourceFS
 
-本文面向使用或维护历史文件能力的开发者，说明 Web/API 云盘与 Sandbox 只读目录的当前契约。历史实施拆解保存在[归档计划](../archive/plans/history-files-virtual-directory.md)。
+本文面向使用或维护历史文件能力的开发者，说明 Web/API 云盘与 Sandbox 只读目录的当前契约。文件事实的所有权与发布不变量见[Workspace、Resource 与交付物](../architecture/workspace-and-files.md)。
 
 ## 用户入口
 

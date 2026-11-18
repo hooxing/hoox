@@ -1,6 +1,6 @@
 # Agent 协作与 Todo
 
-本文面向维护 Agent Worker、Pi Adapter 和协作工具的开发者，说明当前 Root Agent、子 Agent 与 Todo 的运行边界。历史 Codex 调研和实施方案保存在[归档计划](../archive/plans/codex-subagent-runtime-design.md)。
+本文面向维护 Agent Worker、Pi Adapter 和协作工具的开发者，说明当前 Root Agent、子 Agent 与 Todo 的运行边界。
 
 ## 子 Agent
 
@@ -17,7 +17,7 @@ Root Agent 可以创建可复用的独立子 Agent 对话。子 Agent 拥有自�
 | `interrupt_agent` | 中断当前 Turn，并等待 durable settle 后返回 |
 | `list_agents` | 返回当前 Agent 树和稳定状态摘要 |
 
-`wait_agent` 的公开参数只有必填的 `after_sequence` 和可选的 `timeout_ms`；`list_agents` 接收空对象。Runtime 用于识别非法参数的占位字段只参与内部校验，不进入模型工具定义、公开能力摘要或上下文预算。调用方提供内部字段或其他未声明字段时，调用失败并写入 durable 失败回执，不执行控制面操作。分层理由见 [ADR-20260906211950](../decisions/20260906211950-private-tool-validation-schema.md)。
+`wait_agent` 的公开参数只有必填的 `after_sequence` 和可选的 `timeout_ms`；`list_agents` 接收空对象。Runtime 用于识别非法参数的占位字段只参与内部校验，不进入模型工具定义、公开能力摘要或上下文预算。调用方提供内部字段或其他未声明字段时，调用失败并写入 durable 失败回执，不执行控制面操作。分层理由见 [工具调用模式](tool-calling-modes.md)。
 
 Runtime 对可创建的子 Agent 总数和同时运行数量设置上限。Agent Thread、Turn、命令、mailbox 和终态都持久化；Worker 重启后不能依赖内存对象恢复协作状态。子 Agent 不获得 Root 协作工具，创建后也不能扩大工具集合。
 
@@ -34,4 +34,4 @@ Runtime 对可创建的子 Agent 总数和同时运行数量设置上限。Agent
 - 执行与恢复位于 `runtime-ts/apps/agent-worker/src/agent-supervisor.ts`。
 - 持久化命令、Turn、mailbox 和对话位于 `runtime-ts/packages/persistence`。
 
-设计边界见 [ADR-0122](../decisions/0122-shared-sandbox-subagent-control-plane.md)、[ADR-0127](../decisions/0127-thread-scoped-subagent-conversation.md)、[ADR-0153（SubAgent mailbox）](../decisions/0153-subagent-mailbox-terminal-status.md)、[ADR-0154（SubAgent 任务摘要）](../decisions/0154-subagent-initial-and-current-task.md)以及 ADR-0155 至 ADR-0164；Todo 设计见 [ADR-0113](../decisions/0113-agent-todo-writer-and-run-progress.md)。
+持久化与恢复的通用规则见 [Run 执行与恢复](run-execution-and-recovery.md)。

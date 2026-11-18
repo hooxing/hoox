@@ -7,7 +7,7 @@
 - Windows PowerShell 5.1 或 PowerShell 7；一键启动脚本当前依赖 Windows 进程与端口能力。
 - Node.js `24.18.0`。
 - Corepack 与 pnpm `10.15.1`。
-- Docker Compose v2，用于 MinIO 和容器 Gate。
+- Docker Compose v2，用于 MinIO。
 - 专用 PostgreSQL 17 数据库。
 - 执行任务前需要可用 Sandbox Provider：CubeSandbox、E2B 或腾讯云 AGS，可在启动后的后台接入。
 - 可选的线上 OpenAI-compatible 模型；可在首次运行页面之后配置，不要求本地模型。
@@ -56,6 +56,16 @@ pnpm db:setup
 ```
 
 该命令让仓库根 `.env` 覆盖长驻终端中的旧数据库变量，先通过 `DATABASE_BOOTSTRAP_URL` 补齐当前数据库缺少的应用登录角色，再对同一数据库执行迁移。补齐过程可重复执行，不修改已存在角色的密码或属性；如果角色被同一 PostgreSQL 集群中的其他数据库依赖，会在任何角色创建和迁移 DDL 前失败并报告具体角色与数据库。只需检查角色状态时可单独运行 `pnpm db:roles:bootstrap`。
+
+#### 迁移基线重置
+
+2026-11 起迁移目录只保留 `0001_baseline` 基线及其后的递增迁移，压缩前的迁移记录不再被识别。`pnpm db:setup` 若报告“已应用迁移 N 与当前源码不一致”，说明数据库仍是压缩前的 Schema，必须清空后重建：
+
+1. 停止本机 API、Worker、Scheduler 和统一 Admin API；
+2. 由 Database Admin 删除并重建业务 Schema（`DROP SCHEMA <schema> CASCADE`，再按上文第 3 步以 Migrator 为 owner 重新创建），不要只删除迁移记录；
+3. 重新运行 `pnpm db:setup`。
+
+该操作会删除该 Schema 中的全部开发数据，Blob 对象需要时可同时清空对应 MinIO 桶前缀。不得通过改写 `runtime_schema_migrations` 跳过重建。Demo 环境通过切换数据 epoch 完成同样的重置，见 [Demo 持续部署](operations/demo-cd.md)。
 
 精确权限、不变量和迁移器校验见[维护者开发边界](maintainers/runtime-development-boundaries.md#postgresql-角色-bootstrap)。数据库角色属于整个 PostgreSQL 集群，同一集群的开发、预览和生产数据库应使用不同角色集合。
 
@@ -180,7 +190,7 @@ corepack pnpm dev:admin-control:api
 corepack pnpm dev:admin:web
 ```
 
-统一 Admin API 在同一个 3003 listener 提供模型、记忆、配置、统计与 Skill 管理路由，共用管理身份，但在进程内继续使用 Admin Control 和 Skill Publisher 两套数据库连接；Skill 发布对象存储也保持独立凭据。详细边界见[维护者开发边界](maintainers/runtime-development-boundaries.md#管理员-skill-上架)与[统一后台 API 决策](decisions/20260821115221-unified-admin-api-process.md)。轨迹查看命令见[命令参考](reference/commands.md)。
+统一 Admin API 在同一个 3003 listener 提供模型、记忆、配置、统计与 Skill 管理路由，共用管理身份，但在进程内继续使用 Admin Control 和 Skill Publisher 两套数据库连接；Skill 发布对象存储也保持独立凭据。详细边界见[维护者开发边界](maintainers/runtime-development-boundaries.md#管理员-skill-上架)与[后台控制面与运行配置](architecture/admin-control-plane.md)。轨迹查看命令见[命令参考](reference/commands.md)。
 
 ## 提交前验证
 
@@ -197,7 +207,7 @@ corepack pnpm lint
 corepack pnpm check:clean-workspace
 ```
 
-真实外部服务和 production 容器 Gate 不会由普通单元测试静默执行，具体入口见[命令参考](reference/commands.md)。
+真实外部服务测试不会由普通单元测试静默执行，具体入口见[命令参考](reference/commands.md)。
 
 ## 停止本地 MinIO
 

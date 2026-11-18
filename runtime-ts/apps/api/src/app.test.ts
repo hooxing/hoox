@@ -703,9 +703,6 @@ function fixture(
                 ? {
                     outcome: "found" as const,
                     status: {
-                      boundary: "legacy_anchor" as const,
-                      readMode: "v2" as const,
-                      anchorState: "completed" as const,
                       queueDepth: 2,
                       contextSequence: 9,
                       compactionWindow: 1,
@@ -2408,9 +2405,6 @@ describe("Fastify API 契约", () => {
     });
     expect(continuity.statusCode).toBe(200);
     expect(continuity.json().data).toEqual({
-      boundary: "legacy_anchor",
-      readMode: "v2",
-      anchorState: "completed",
       queueDepth: 2,
       contextSequence: 9,
       compactionWindow: 1,

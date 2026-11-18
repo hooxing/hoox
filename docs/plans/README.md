@@ -1,6 +1,6 @@
 # 实施计划索引
 
-本目录只保存正在指导实施的草案、进行中或阻塞计划。当前行为以[架构](../architecture/README.md)、[参考](../reference/README.md)、[运维](../operations/README.md)、代码和测试为准；已完成、被替代或没有形成可执行方案的拆解保存在[历史计划](../archive/plans/README.md)。
+本目录只保存正在指导实施的草案、进行中或阻塞计划。当前行为以[架构](../architecture/README.md)、[参考](../reference/README.md)、[运维](../operations/README.md)、代码和测试为准；已完成、被替代或没有形成可执行方案的计划在迁入当前说明后删除，历史版本以 Git 历史为准。
 
 | 计划 | 状态 | 什么时候阅读 | 回答的问题 |
 | --- | --- | --- | --- |

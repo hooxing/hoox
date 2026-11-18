@@ -74,11 +74,7 @@ import {
   type TenantBlobScope,
   transitionBlobCommit,
 } from "../../runtime-ts/packages/persistence/src/index.js";
-import {
-  loadMigrations,
-  migrateDown,
-  migrateUp,
-} from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
 import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import {
@@ -2474,70 +2470,5 @@ describe("PostgreSQL stable blob 生命周期", () => {
     } finally {
       await single.end();
     }
-  });
-
-  it("0017 在含索引、清理 item 与墓碑事实时可 down 至 0016 后再次 up 并恢复 ACL/RLS", async () => {
-    const before = await withTenantTransaction(runtimePool, scopeA, (client) =>
-      client.query<{ records: string; items: string; tombstones: string }>(
-        `SELECT
-           (SELECT count(*)::text FROM model_wire_trace_records) AS records,
-           (SELECT count(*)::text FROM model_wire_trace_cleanup_items) AS items,
-           (SELECT count(*)::text FROM model_wire_trace_expiry_tombstones) AS tombstones`,
-      ),
-    );
-    expect(Number(before.rows[0]?.records)).toBeGreaterThan(0);
-    expect(Number(before.rows[0]?.items)).toBeGreaterThan(0);
-    expect(Number(before.rows[0]?.tombstones)).toBeGreaterThan(0);
-    await migrateDown(migratorPool, {
-      ...migrationSecurity,
-      allowDestructive: true,
-      environment: "test",
-      targetVersion: 16,
-    });
-    const down = await migratorPool.query<{
-      records: string | null;
-      items: string | null;
-      tombstones: string | null;
-      identity_constraint: string | null;
-    }>(
-      `SELECT to_regclass('model_wire_trace_records')::text AS records,
-              to_regclass('model_wire_trace_cleanup_items')::text AS items,
-              to_regclass('model_wire_trace_expiry_tombstones')::text AS tombstones,
-              (SELECT conname FROM pg_constraint
-                WHERE conrelid='blob_references'::regclass
-                  AND conname='blob_references_model_wire_identity_unique') AS identity_constraint`,
-    );
-    expect(down.rows[0]).toEqual({
-      records: null,
-      items: null,
-      tombstones: null,
-      identity_constraint: null,
-    });
-    const latestVersion = (await loadMigrations()).at(-1)?.version;
-    expect((await migrateUp(migratorPool, migrationSecurity)).at(-1)?.version).toBe(latestVersion);
-    const restored = await migratorPool.query<{
-      table_name: string;
-      rls: boolean;
-      forced: boolean;
-      runtime_select: boolean;
-    }>(
-      `SELECT relation.relname AS table_name,relation.relrowsecurity AS rls,
-              relation.relforcerowsecurity AS forced,
-              has_table_privilege($1,relation.oid,'SELECT') AS runtime_select
-         FROM pg_class relation
-        WHERE relation.relnamespace=current_schema()::regnamespace
-          AND relation.relname IN (
-            'model_wire_trace_records','model_wire_trace_cleanup_commands',
-            'model_wire_trace_cleanup_items','model_wire_trace_expiry_tombstones'
-          ) ORDER BY relation.relname`,
-      [runtimeRole],
-    );
-    expect(restored.rows).toHaveLength(4);
-    expect(restored.rows.every((row) => row.rls && row.forced && row.runtime_select)).toBe(true);
-    const deletePrivilege = await migratorPool.query<{ allowed: boolean }>(
-      "SELECT has_table_privilege($1,'blob_references','DELETE') AS allowed",
-      [runtimeRole],
-    );
-    expect(deletePrivilege.rows[0]?.allowed).toBe(true);
   });
 });

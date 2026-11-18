@@ -436,7 +436,7 @@ export interface PgWaitingRecoveryClaim {
   };
 }
 
-/** ADR-0033 的最小 PG 事实源；所有 lease/TTL 判断均使用数据库 clock_timestamp()。 */
+/** waiting 恢复的最小 PG 事实源；所有 lease/TTL 判断均使用数据库 clock_timestamp()。 */
 class PgWaitingRecoveryStoreImpl {
   readonly #pool: Pool;
   readonly #executeEffect: PgWaitingRecoveryEffectAdapter["execute"];

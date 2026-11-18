@@ -83,14 +83,7 @@ describe("Demo 持续部署契约", () => {
   });
 
   it("CD 所依赖的主 CI 同步 pnpm hook，并完整预置 Admin Control 数据库角色", () => {
-    for (const dockerfilePath of [
-      "Dockerfile.production-api-gate",
-      "Dockerfile.production-scheduler-gate",
-      "Dockerfile.production-worker-gate",
-      "Dockerfile.pi-prompt-gate",
-    ]) {
-      expect(source(dockerfilePath)).toContain(".pnpmfile.cjs ./");
-    }
+    expect(source("Dockerfile.demo")).toContain(".pnpmfile.cjs ./");
 
     const ci = source(".github/workflows/ci.yml");
     expect(ci).toMatch(
@@ -132,8 +125,8 @@ describe("Demo 持续部署契约", () => {
     expect(compose).toContain('mc admin user add runtime "$${S3_ACCESS_KEY_ID}"');
     expect(compose).toContain('mc admin user add runtime "$${SKILL_PUBLISHER_S3_ACCESS_KEY_ID}"');
     expect(compose).toContain("mc admin policy attach runtime readwrite");
-    expect(compose).toContain("name: hoox-demo-postgres-data-20260826");
-    expect(compose).toContain("name: hoox-demo-minio-data-20260826");
+    expect(compose).toContain("name: hoox-demo-postgres-data-20261118");
+    expect(compose).toContain("name: hoox-demo-minio-data-20261118");
     expect(compose).toContain("name: hoox-demo-trajectory-data-20260903");
     expect(compose).not.toContain("name: hoox-demo-trajectory-${HOOX_DEMO_RELEASE_ID");
     expect(compose).not.toMatch(/^\s*name: hoox-demo-(?:postgres|minio)-data\s*$/gmu);

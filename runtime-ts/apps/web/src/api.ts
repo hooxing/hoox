@@ -238,9 +238,6 @@ export type ThreadContextMessage = {
 };
 
 export type ThreadContinuityStatus = {
-  readonly boundary: "new_thread" | "legacy_anchor" | "manual" | "unmigrated";
-  readonly readMode: "legacy" | "v2";
-  readonly anchorState: "none" | "completed";
   readonly queueDepth: number;
   readonly contextSequence: number;
   readonly compactionWindow: number;
@@ -1146,12 +1143,6 @@ function isThreadContinuityStatus(value: unknown): value is ThreadContinuityStat
   const item = record(value);
   return (
     item !== undefined &&
-    (item.boundary === "new_thread" ||
-      item.boundary === "legacy_anchor" ||
-      item.boundary === "manual" ||
-      item.boundary === "unmigrated") &&
-    (item.readMode === "legacy" || item.readMode === "v2") &&
-    (item.anchorState === "none" || item.anchorState === "completed") &&
     Number.isSafeInteger(item.queueDepth) &&
     (item.queueDepth as number) >= 0 &&
     Number.isSafeInteger(item.contextSequence) &&

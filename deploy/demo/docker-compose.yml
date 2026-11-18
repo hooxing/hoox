@@ -161,8 +161,8 @@ services:
 volumes:
   # 一次性测试数据 epoch 必须成对切换；旧卷保留给候选发布失败后的上一 release。
   postgres_data:
-    name: hoox-demo-postgres-data-20260826
+    name: hoox-demo-postgres-data-20261118
   minio_data:
-    name: hoox-demo-minio-data-20260826
+    name: hoox-demo-minio-data-20261118
   trajectory_data:
     name: hoox-demo-trajectory-data-20260903

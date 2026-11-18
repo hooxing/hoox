@@ -26,13 +26,11 @@ corepack pnpm config:check
 
 ## CI 合并门禁
 
-CI 并行执行工程构建与测试、Pi Prompt 容器、生产发布静态检查、API/Scheduler/Worker 三个生产容器、Linux/Windows 进程测试与 M4 PostgreSQL 黑盒。工程检查保留完整 clean build；进程专项与 M4 仍各自清理并构建依赖，不从其他 Job 下载工作区产物。Pi 与生产容器的宿主机脚本只依赖 Node.js，安装与编译在镜像内完成。
+CI 并行执行三个独立 Job：工程构建与测试（含生产配置契约校验与生产依赖漏洞审计）、Linux/Windows 进程测试和 M4 PostgreSQL 黑盒。工程检查保留完整 clean build；进程专项与 M4 各自清理并构建依赖，不从其他 Job 下载工作区产物。
 
-“工程基线校验”汇总工程与 Pi 两项结果，“Production 静态与容器 Gate”汇总静态与三个生产容器结果。汇总 Job 在依赖结束后始终检查结果，只有所有依赖成功才通过；失败、取消或跳过均不能放行。生产矩阵关闭 fail-fast，以保留三个角色的诊断。PR 新提交取消过期 CI，main CI 不取消。
+“工程基线校验”汇总工程 Job 结果，在依赖结束后始终检查，只有成功才通过；失败、取消或跳过均不能放行。PR 新提交取消过期 CI，main CI 不取消。
 
-Pi 和每个生产角色使用独立的 BuildKit GitHub Actions 缓存 scope，缓存由锁文件、Dockerfile 和源码内容决定，不复用宿主机 `dist`。生产容器 Gate 在 CI 中通过 `PRODUCTION_GATE_IMAGE` 接收本次 Buildx 输出的本地镜像 ID，仍执行构建上下文 canary、非 root、只读文件系统、生产入口和失败关闭探针。该变量仅供门禁脚本使用，不属于应用 `.env`。未提供镜像时，本地命令继续自行构建并清理；指定镜像不存在或 ID 非法时直接失败，不拉取或回退构建，也不删除调用方提供的镜像。
-
-仓库管理员应在 main 的 ruleset 或分支保护中要求“工程基线校验”“Production 静态与容器 Gate”“进程骨架（ubuntu-latest）”“进程骨架（windows-latest）”和“M4 开发黑盒（Linux PostgreSQL）”全部成功。工作流文件不会自动启用远端分支保护，不能用其存在代替设置核验。Demo 发布入口见[Demo 持续部署](../operations/demo-cd.md)，并行与缓存的理由见 [CI 门禁决策](../decisions/20260906183557-ci-parallel-gates-and-image-cache.md)。
+仓库管理员应在 main 的 ruleset 或分支保护中要求“工程基线校验”“进程骨架（ubuntu-latest）”“进程骨架（windows-latest）”和“M4 开发黑盒（Linux PostgreSQL）”全部成功。工作流文件不会自动启用远端分支保护，不能用其存在代替设置核验。Demo 发布入口见[Demo 持续部署](../operations/demo-cd.md)。
 
 ## Workspace 边界
 
@@ -89,7 +87,7 @@ Pi 和每个生产角色使用独立的 BuildKit GitHub Actions 缓存 scope，�
 
 创建请求可省略 `version`，服务端根据操作者与幂等键生成稳定内部标识；显式版本继续兼容旧调用方。页面不展示版本、令牌或推荐选择，发布自动设为推荐，新安装使用推荐包，已有安装仍固定精确版本。撤销确认说明该内容不能继续执行，当前推荐包撤销后停止新安装；原因可省略，审计仍记录真实操作者与状态变化。
 
-每次写请求继续使用独立幂等键，状态推进携带内部 `expectedVersionToken`。409 表示持久状态已改变，应显式刷新后再操作，不能悄悄更新并发检查值重放。迁移 `0060_skill_direct_publication` 放宽直发记录的审核者约束，仍保留 approved/rejected 的真实证据；存在无审核者的 published/revoked 记录时 down 拒绝回退，不得补造审核者。
+每次写请求继续使用独立幂等键，状态推进携带内部 `expectedVersionToken`。409 表示持久状态已改变，应显式刷新后再操作，不能悄悄更新并发检查值重放。Schema 允许直发记录没有审核者，approved/rejected 仍保留真实审核证据；不得为直发记录补造审核者。
 
 开发环境准备顺序如下：
 
@@ -123,16 +121,15 @@ corepack pnpm dev:admin:web
 `description`、`license` 以及已显式声明的扩展发布字段。`Proprietary` 声明映射为
 `LicenseRef-Proprietary`，完整条款仍以包内声明为准。浏览器无法从本地目录获得可信仓库来源和提交身份，因此来源
 字段保持可选，不会被猜测；格式兼容性由系统生成。该预填不替代服务端包校验，边界见
-[ADR-0114](../decisions/0114-skill-frontmatter-metadata-prefill.md) 和
-[ADR-0115](../decisions/0115-system-compatibility-optional-provenance-and-skills-cli.md)。
+[Skill Runtime](../architecture/skill-runtime.md)。
 
 production 管理服务必须单独注入 `ADMIN_CONTROL_JWT_*`、`ADMIN_CONTROL_DATABASE_URL`、
 `SKILL_PUBLISHER_DATABASE_URL` 与 `SKILL_PUBLISHER_S3_*`，且 JWT audience 不能复用普通 API。统一进程共用
 listener 与管理身份，但必须保留两套数据库连接池，Skill Publisher 的对象存储客户端只能注入发布 Repository。
 静态管理 Web 与 API 由同源身份网关托管：网关必须
 剥离浏览器伪造的 Authorization，根据已登录管理会话注入短期管理 JWT。没有该网关时不得把 development Token
-或固定生产 Token 写入 Web 构建。完整边界见 [ADR-0112](../decisions/0112-managed-skill-admin-publication.md) 与
-[统一后台 API 决策](../decisions/20260821115221-unified-admin-api-process.md)。
+或固定生产 Token 写入 Web 构建。完整边界见 [Skill Runtime](../architecture/skill-runtime.md) 与
+[后台控制面与运行配置](../architecture/admin-control-plane.md)。
 
 ### 平台控制面
 
@@ -167,36 +164,27 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 
 管理 Web 和控制 API 共用 `@hoox/protocol/pi-model-catalog` 的静态快照与查询。生成器从锁定的 `pi-ai` 读取公开目录，只保留已支持的 `openai-completions` 模型；两个运行时消费者不加载 Pi Provider。连接失败或可重试 5xx 可以降级到浏览器快照，401/403 不得静默降级；保存、测试和启用始终由后台完成。目录更新执行 `pnpm admin:pi-catalog:generate`，一致性由 `pnpm admin:pi-catalog:check` 校验。
 
-Worker 通过 `pi-adapter` 直接装配 `pi-ai` 的 `Models`、Provider 和内存凭据，并用 `pi-agent-core` 的 `Agent` 执行受控工具循环。逻辑工作目录固定为 `/workspace`，实际 system prompt 保留固定后缀 `\nCurrent working directory: /workspace`，不使用宿主路径或资源发现。每个内核实例的随机 `sessionId` 跨轮稳定，仅传给 Provider，不进入 prompt。Provider 流默认超时为 300,000ms，重试等待上限为 60,000ms；上层自动重试与自动压缩不启用。内核和目录取舍见 [Pi 内核收敛决策](../decisions/20260906001531-pi-kernel-and-shared-model-catalog.md)，持久恢复与安全点见 [Thread 连续上下文](../architecture/thread-continuity.md)。
+Worker 通过 `pi-adapter` 直接装配 `pi-ai` 的 `Models`、Provider 和内存凭据，并用 `pi-agent-core` 的 `Agent` 执行受控工具循环。逻辑工作目录固定为 `/workspace`，实际 system prompt 保留固定后缀 `\nCurrent working directory: /workspace`，不使用宿主路径或资源发现。每个内核实例的随机 `sessionId` 跨轮稳定，仅传给 Provider，不进入 prompt。Provider 流默认超时为 300,000ms，重试等待上限为 60,000ms；上层自动重试与自动压缩不启用。内核边界见 [Prompt、上下文预算与模型交互](../architecture/prompt-and-model-io.md#模型绑定)，持久恢复与安全点见 [Thread 连续上下文](../architecture/thread-continuity.md)。
 
-成功 Run 的终态事务仍可登记记忆 Outbox。消费者按 Run 固定配置解析提供方，关闭时以 `skipped` 结束本地消费并释放 claim，保留已有 Provider 事件与提交时间，不伪造成功或计入失败。`skipped` 不参与后续领取、待处理统计和 Tenant 调度；维护成功后正常释放 Tenant 租约。升级必须先应用 0059 迁移，再启动新 Worker；已有积压等待租约到期后自动重领收尾，无需手工改状态。存在 `skipped` 时数据库 down 拒绝回退，应用回退可以保留扩展 schema。决策及兼容边界见[关闭记忆的消费终态](../decisions/20260906163952-disabled-memory-ingestion-terminal-state.md)。
+成功 Run 的终态事务仍可登记记忆 Outbox。消费者按 Run 固定配置解析提供方，关闭时以 `skipped` 结束本地消费并释放 claim，保留已有 Provider 事件与提交时间，不伪造成功或计入失败。`skipped` 不参与后续领取、待处理统计和 Tenant 调度；维护成功后正常释放 Tenant 租约。已有积压等待租约到期后自动重领收尾，无需手工改状态。Outbox 消费的通用规则见[持久化与数据库边界](../architecture/persistence-and-database.md#outbox-与后台消费)。
 
 模型与记忆一次保存接口要求幂等键和 `expectedGeneration`，由服务端事务执行授权、generation 比较、不可变配置写入、active 切换及审计；失败不遗留待启用配置。页面保存失败保留输入与原并发检查值，冲突后由管理员显式刷新。记忆保存使用 `PUT /v1/admin/control/memory-providers/current`，独立于后台模型；表单带入当前值并按 `enabled` 显示开启或关闭，Mem0 API Key 支持加密托管与同供应商凭据复用。投影、幂等结果与审计不返回密钥明文或密文。
 
-启用配置会递增全局 generation；首次建立托管模型/记忆快照的 Run 固定对应 revision 与密钥，重试不反查当前 active。0062 允许模型为空及 generation 为零，首次快照也固定未配置的选择；已有空模型快照继续使用部署 `MODEL_*`，不会中途绑定新托管模型。部署回退模型的具体参数仍未持久化，修改其环境变量前应排空在途 Run。独立压缩快照与旧 Run 继承边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
+启用配置会递增全局 generation；首次建立托管模型/记忆快照的 Run 固定对应 revision 与密钥，重试不反查当前 active。运行配置快照允许模型为空及 generation 为零，首次快照也固定未配置的选择；已有空模型快照继续使用部署 `MODEL_*`，不会中途绑定新托管模型。部署回退模型的具体参数仍未持久化，修改其环境变量前应排空在途 Run。独立压缩快照与旧 Run 继承边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
 
-Worker 并发与五项上下文压缩数值参数由后台运行设置优先提供，未保存时采用部署默认；直接保存入口为 `PUT /v1/admin/control/runtime-settings/current`，旧草稿/发布路由不恢复。并发在调度时热读取，失败保留最后有效值。迁移 `0061_run_compaction_settings_snapshots` 以 Tenant/Run 复合键保存实际使用的五项压缩参数，Runtime 只有 SELECT/INSERT，管理角色无权读取；已有快照时拒绝 down。变量默认值、生效时机与预算裁剪规则见[配置参考](../reference/configuration.md)。
+Worker 并发与五项上下文压缩数值参数由后台运行设置优先提供，未保存时采用部署默认；直接保存入口为 `PUT /v1/admin/control/runtime-settings/current`，旧草稿/发布路由不恢复。并发在调度时热读取，失败保留最后有效值。`run_compaction_settings_snapshots` 以 Tenant/Run 复合键保存实际使用的五项压缩参数，Runtime 只有 SELECT/INSERT，管理角色无权读取。变量默认值、生效时机与预算裁剪规则见[配置参考](../reference/configuration.md)。
 
-数据库、角色、JWT、TLS、S3、Sandbox 和监听地址由部署文件管理，没有通用 ENV 写接口。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。在线配置与密钥边界见[后台在线配置决策](../decisions/20260906211335-admin-live-configuration-and-memory-credentials.md)，操作边界见[后台任务操作决策](../decisions/20260906195752-admin-task-oriented-configuration-and-publication.md)、
-[模型供应商列表、编辑、测试与切换决策](../decisions/20260826115031-model-provider-list-edit-test-switch.md)、
-[模型配置保存即启用决策](../decisions/20260825180549-direct-model-configuration-activation.md)、
-[Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、
-[模型 Provider 凭据托管决策](../decisions/20260825173500-managed-model-provider-credentials.md)、
-[模型能力事实归属决策](../decisions/20260826000935-published-model-capabilities-are-runtime-facts.md)、
-[Demo 数据 epoch 与持久化读取决策](../decisions/20260826091622-demo-data-epoch-and-stored-provider-read-boundary.md)、
-[独立控制面决策](../decisions/20260819165254-independent-admin-control-plane.md)、
-[Provider 模型目录决策](../decisions/20260820090402-provider-owned-model-catalog.md)与
-[Pi 目录初始值决策](../decisions/20260820095113-pi-catalog-seeds-admin-model-metadata.md)。
+数据库、角色、JWT、TLS、S3、Sandbox 和监听地址由部署文件管理，没有通用 ENV 写接口。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。在线配置、凭据加密与 Run 快照边界见[后台控制面与运行配置](../architecture/admin-control-plane.md)，Demo 数据 epoch 见[Demo 持续部署](../operations/demo-cd.md)。
 
 `admin-web` 保留 React 19 与 Vite，使用 Ant Design 统一控件和视觉，通过 React Router 暴露可复制的模块路径，并由
 TanStack Query 协调控制面读取、去重和失效。页面按工作台、运营、AI 能力和系统分组，运行配置不在导航中，旧 `/settings` 跳转身份设置。操作审计拥有独立只读入口，展示配置动作与操作者；身份和用户治理审计仍在各自事实表中，尚未汇总到该列表。
 现有类型化 API Client 仍是协议适配边界，浏览器路由、菜单可见性和 Query 缓存都不构成授权或审计事实。完整取舍见
-[后台管理 Web 外壳决策](../decisions/20260824115942-admin-web-routable-ant-design-shell.md)。
+[后台控制面与运行配置](../architecture/admin-control-plane.md)。
 
 数据运营页按最近 24 小时展示输入 Token、输出 Token、Assistant 生成吞吐和缓存命中率。Worker 只把未缓存输入、输出、
 缓存读取和生成时长原子写入租户隔离的低基数指标账本，不保存 Provider 身份或模型正文；控制服务只能读取跨 Tenant 的
 受限聚合视图。development 页面新窗口打开回环轨迹查看器；受控 Demo 构建新窗口打开同源 `/trajectory/`，轨迹 API 由 Demo 管理员 Hoox Session 保护；其他 production 构建不显示该入口。
-统计口径和诊断边界见[后台模型用量指标决策](../decisions/20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md)。
+统计与诊断边界见[运行事件与对话展示](../architecture/run-events-and-presentation.md#诊断数据)。
 
 使用一键开发脚本时，既有 `-IncludeSkill` 兼容开关会启动统一 Admin API 与 Admin Web；默认核心拓扑仍不启动任何
 管理服务。
@@ -205,9 +193,9 @@ PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/P
 
 `agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 仍严格等于 `DEV_AUTH_USER_A_TENANT_ID`，但只用于启动兼容；个人与团队 dispatch 都会原子唤醒动态 Tenant 控制面。`DATABASE_WORKER_COORDINATOR_URL` 必须使用独立的 `DATABASE_WORKER_COORDINATOR_ROLE` 登录，该角色只能领取无业务载荷的 Tenant 租约；实际任务始终回到 `DATABASE_URL` 对应的 Runtime 角色和 Tenant RLS 内读取。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它会同时检查两个数据库身份，但不会启动 polling 或领取 dispatch。无模型时 Worker 保持运行且不领取任务，后台保存配置后自动恢复。预检对已配置模型使用受限 `chat/completions`；部署回退模型存在时，`MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
 
-新增或修改工具必须同时交付模型调用契约与用户展示契约：安全用途或操作对象、真实生命周期、受控失败信息，以及正常/PTC 共用投影。同步维护 `pi-adapter` 展示与错误映射，并测试前端终态、旧事件缺字段和重放一致性；不得从完整参数、源码或输出推断界面摘要。当前字段、失败和兼容边界见[工具调用模式](../architecture/tool-calling-modes.md#用户可见工具信息与错误处理)，长期原则见[工具用户展示契约决策](../decisions/20261004184828-tool-user-presentation-contract.md)。
+新增或修改工具必须同时交付模型调用契约与用户展示契约：安全用途或操作对象、真实生命周期、受控失败信息，以及正常/PTC 共用投影。同步维护 `pi-adapter` 展示与错误映射，并测试前端终态、旧事件缺字段和重放一致性；不得从完整参数、源码或输出推断界面摘要。当前字段、失败和兼容边界见[工具调用模式](../architecture/tool-calling-modes.md#用户可见工具信息与错误处理)，
 
-发送给 OpenAI-compatible Provider 的函数参数 Schema 顶层必须明确声明为 `object`。`automation_update` 向 Provider 暴露不含顶层 `anyOf` 的稳定 object 形状，Runtime 再用复用同一组字段 Schema 的严格 action 联合校验必填字段和多余字段；Schema 错误必须返回字段级 `details`，字段值错误、权限拒绝、状态冲突与服务不可用使用不同稳定码。详见[定时任务工具 Schema 与错误语义决策](../decisions/20260828113059-automation-tool-schema-and-error-semantics.md)。
+发送给 OpenAI-compatible Provider 的函数参数 Schema 顶层必须明确声明为 `object`。`automation_update` 向 Provider 暴露不含顶层 `anyOf` 的稳定 object 形状，Runtime 再用复用同一组字段 Schema 的严格 action 联合校验必填字段和多余字段；Schema 错误必须返回字段级 `details`，字段值错误、权限拒绝、状态冲突与服务不可用使用不同稳定码。详见[工具调用模式](../architecture/tool-calling-modes.md)。
 
 VMware 内的 Cubelet 挂载附件与 `/resources/skills` 公开市场视图时，不能直接访问只监听 Windows loopback 的
 API。所有 Sandbox 工具现在都依赖该 ResourceFS 数据面。先为宿主虚拟网卡生成独立的开发 TLS 证书，把 CA 公钥
@@ -224,9 +212,9 @@ node scripts/development-resourcefs-proxy.mjs
 
 Sidecar 只接受 `/v1/resource-filesystem`，不得用它转发其他 API 路由。证书、CA 私钥和日志必须放在 `.arts` 等
 忽略目录。节点 endpoint 使用该证书覆盖的 HTTPS 地址；未携带 ResourceFS capability 的探针应快速返回 401，
-而不是超时。配置与安全边界见 [ADR-0105](../decisions/0105-development-resourcefs-https-sidecar.md)。
+而不是超时。配置与安全边界见 [Sandbox Provider](../architecture/sandbox-providers.md)。
 
-production Worker 使用 `pnpm --filter @hoox/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、已配置部署模型的严格元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。
+production Worker 使用 `pnpm --filter @hoox/agent-worker start:production`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、已配置部署模型的严格元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。
 
 装配器按业务接收顺序实现 `stopAccepting`，将数据库连接池、HTTP listener、消费者和遥测等资源按确定顺序登记。关闭时先停止接收，再等待 `lifecycle.track()` 登记的在途操作，最后串行关闭资源。资源错误只上报稳定名称；库不调用 `process.exit`。部署平台的强制终止宽限期必须大于 `PROCESS_SHUTDOWN_TIMEOUT_MS`。
 
@@ -234,19 +222,11 @@ production Worker 使用 `pnpm --filter @hoox/agent-worker start:production` 或
 
 ```powershell
 corepack pnpm test:process-runtime
-corepack pnpm test:process:container
 corepack pnpm config:check:production
 corepack pnpm security:audit:production
-corepack pnpm supply-chain:check
-corepack pnpm license:check
-corepack pnpm release:check
-corepack pnpm test:production-api:container
-corepack pnpm test:production-scheduler:container
-corepack pnpm test:production-worker:container
 ```
 
-第一条在 Windows/Linux 运行相同单元与入口测试；第二条需要 Docker，构建 Linux 非 root 最小镜像并验证配置、就绪和关闭顺序。
-后八条依次校验独立 production 配置、生产依赖漏洞、离线 SBOM、许可证、发布回滚以及 API/Scheduler/Worker runtime-only 容器边界；容器 Gate 故意不连接真实外部依赖。部署必须分片注入秘密：API 使用 PG/S3/JWT/TLS，Scheduler 只使用 PG/Cube，Worker 使用 PG/S3/Cube/模型，不能把共享 env 文件整包注入。部署前仍必须在 Linux 上用最小权限 Runtime 角色、真实 PostgreSQL/S3/CubeSandbox/模型完成 readiness 和其余 M7 Gate；Web/OIDC 产品身份仍是未完成的外部集成。
+第一条在 Windows/Linux 运行相同单元与入口测试；后两条校验独立 production 配置契约与生产依赖漏洞。部署必须分片注入秘密：API 使用 PG/S3/JWT/TLS，Scheduler 只使用 PG/Cube，Worker 使用 PG/S3/Cube/模型，不能把共享 env 文件整包注入。仓库不提供生产镜像，部署前仍必须在 Linux 上用最小权限 Runtime 角色、真实 PostgreSQL/S3/CubeSandbox/模型完成 readiness 与[生产就绪说明](../operations/production-readiness.md)中的验收；Web/OIDC 产品身份仍是未完成的外部集成。
 
 ## PostgreSQL 角色 bootstrap
 
@@ -270,9 +250,9 @@ corepack pnpm test:production-worker:container
 
 `PgThreadCreation` 与 `PgRunDispatchCreation` 分别提供 Thread+初始 Workspace、Run+不可变输入+Dispatch Outbox 的原子 PostgreSQL 适配；两者均以租户事务、成员资格重验、advisory lock 和幂等记录收敛首次并发竞争。COMMIT 响应未知或提交后响应丢失时，只允许按同一 scope+idempotency key+request hash 精确读回，禁止再次写入。只有 `createApiCreateCapability` 同时签发两个原子端口时才注册 POST；签发和 App 创建都会快照能力，运行中替换对象无效。不注入能力时服务保持可读、可归档、可取消且 `/ready` 正常。`ArchiveThreadCommandPort` 已有 PostgreSQL 适配，必须保持 Membership `FOR SHARE`→Thread `FOR UPDATE` 锁序、事务内角色重验和数据库单调时间，禁止退化为 API 层 Repository 读改写。
 
-Runtime 对 Membership 只有 SELECT、INSERT 和恒定 `lock_marker` 的单列 UPDATE，不允许表级 UPDATE，也不允许更新 `status`、`role`、租户/用户关联、ID 或创建时间。`lock_marker` 由 CHECK 约束为 `false`，只用于满足 PostgreSQL `FOR SHARE` 的列权限前提。不得把它改造成业务状态；成员变更只能经独立 Team Coordinator 连接完成，详见 ADR-0147。
+Runtime 对 Membership 只有 SELECT、INSERT 和恒定 `lock_marker` 的单列 UPDATE，不允许表级 UPDATE，也不允许更新 `status`、`role`、租户/用户关联、ID 或创建时间。`lock_marker` 由 CHECK 约束为 `false`，只用于满足 PostgreSQL `FOR SHARE` 的列权限前提。不得把它改造成业务状态；成员变更只能经独立 Team Coordinator 连接完成，角色分工见[持久化与数据库边界](../architecture/persistence-and-database.md#数据库角色)。
 
-0003 才引入 `lock_marker`。ACL bootstrap 与白名单断言必须按数据库实际列集合工作，partial down 到 0002 时不能引用该列，再次 up 到 0003 后必须恢复单列权限。新增版本相关 ACL 时必须同时增加真实 PostgreSQL 的 `最新→旧版→最新` 往返测试。
+ACL bootstrap 与白名单断言按数据库实际列集合工作。基线之后新增的迁移若引入版本相关 ACL（新表、新列或列级权限），必须同时增加真实 PostgreSQL 的 `最新→上一版→最新` 往返测试。
 
 公开错误中，Schema、超限、畸形 JSON、危险原型键和游标错误统一为 400 `INVALID_REQUEST`；非 `application/json` 的创建请求为 415 `UNSUPPORTED_MEDIA_TYPE`。不能把 Fastify/AJV 的内部错误消息直接返回给客户端。
 
@@ -289,7 +269,7 @@ Runtime 对 Membership 只有 SELECT、INSERT 和恒定 `lock_marker` 的单列 
 ## 提交前检查
 
 1. 行为变化有测试。
-2. 架构或兼容性取舍写入 `docs/decisions`。
+2. 影响架构边界或兼容性的变化同步更新 `docs/architecture` 中对应的现状文档。
 3. 关键边界、不变量和失败语义有必要的中文注释。
 4. `pnpm check` 通过。
 5. `git status` 中没有 `.env`、构建产物或无关文件。

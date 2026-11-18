@@ -5,13 +5,12 @@
 - 适用范围：`runtime-ts/packages/domain`、`persistence`、`protocol`、`admin-control`、`run-contracts`、`pi-adapter`、`prompt-builder`、`tool-router`、`runtime-ts/apps/api`、`agent-worker`、`admin-control-api`、`admin-web`
 - 目标读者：负责外部工具接入、管理面发布、Run 快照、副作用授权与恢复的开发者与维护者
 - 当前事实入口：[架构总览](../architecture/overview.md) · [Skill Runtime](../architecture/skill-runtime.md) · [仓库导览](../architecture/repository-map.md)
-- 既有决策：[MCP 与外部工具接入采用发布期固化与 Run 快照](../decisions/20260911162421-mcp-and-external-tool-integration-boundary.md)
 
 ## 1. 生命周期与权威边界
 
 本文是尚未实现的目标契约，说明 MCP Server 与其他外部工具接入必须满足的能力模型、边界、失败语义和验收，不描述当前已经具备的行为。当前模型只能使用内置工具集合，MCP 未接入，外部工具只有经 `@hoox/tool-router` 的 `deliver_file`。
 
-全部切片实现并验证后，稳定的工具装配与副作用规则迁入[架构总览](../architecture/overview.md)与相应参考文档，本文转为“已完成”并退出目标规范索引。若命名、Transport 或 schema 转换结论改变，必须新增 ADR 替代，不就地改写已接受结论。
+全部切片实现并验证后，稳定的工具装配与副作用规则迁入[架构总览](../architecture/overview.md)与相应参考文档，本文转为“已完成”并退出目标规范索引。若命名、Transport 或 schema 转换结论改变，直接修订本文并在变更中说明原因。
 
 ## 2. 当前基线
 

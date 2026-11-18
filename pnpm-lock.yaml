@@ -645,8 +645,6 @@ importers:
         specifier: 4.0.4
         version: 4.0.4
 
-  runtime-ts/vendor/deepseek-trajectory: {}
-
   runtime-ts/vendor/deepseek-v4-tokenizer: {}
 
   runtime-ts/vendor/iconfont-file-types-33437: {}

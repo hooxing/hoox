@@ -1,6 +1,6 @@
 # 仓库导览
 
-本页回答“一个改动应该放在哪里”。路径以仓库根目录为基准；更细的设计原因见对应包文档和[架构决策](../decisions/README.md)。
+本页回答“一个改动应该放在哪里”。路径以仓库根目录为基准；更细的设计约束见对应包文档和[架构文档](README.md)。
 
 ## 顶层目录
 
@@ -10,10 +10,9 @@
 | `runtime-ts/packages/` | 领域、契约、运行时编排与基础设施模块 | 不通过跨目录相对路径绕过包边界 |
 | `runtime-ts/managed-skills/` | Hoox 自维护的 Skill | 必须保留明确许可证和可重复发布方式 |
 | `runtime-ts/vendor/` | 固定版本的第三方源码 | 必须有 `LICENSE`、`SOURCE.md`，派生修改还需 `PATCHES` |
-| `docs/` | 当前文档、决策、计划和验证记录 | 当前说明与历史资料必须明确区分 |
-| `deploy/` | 生产配置示例、发布与回滚契约 | 样例不是可直接上线的共享秘密文件 |
-| `scripts/` | 开发、CI、配置、供应链和容器 Gate | 脚本错误不得输出秘密值 |
-| `supply-chain/` | SBOM、许可证策略与生成证据 | 必须与锁文件和生产闭包保持一致 |
+| `docs/` | 当前文档、架构约束、计划和验证记录 | 当前说明与时点证据必须明确区分 |
+| `deploy/` | Demo 部署、生产配置示例与 Sandbox 镜像 | 样例不是可直接上线的共享秘密文件 |
+| `scripts/` | 开发、CI、配置校验与 Demo 发布 | 脚本错误不得输出秘密值 |
 | `tests/` | 跨包、集成和黑盒验证 | 外部服务测试必须显式开启并隔离清理 |
 | `third_party/` | 非 vendored 依赖的许可证和来源补充 | 不作为运行时源码导入 |
 
@@ -76,12 +75,12 @@
 
 | 改动 | 首选位置 | 同步检查 |
 | --- | --- | --- |
-| 新领域不变量 | `packages/domain` 或对应领域包 | rehydrate、错误映射、领域测试、ADR |
+| 新领域不变量 | `packages/domain` 或对应领域包 | rehydrate、错误映射、领域测试、架构文档 |
 | 新 HTTP 字段或错误码 | `packages/protocol`、`protocol-mapper`、`apps/api` | Schema、兼容性、API 测试和参考文档 |
 | 新工具 | `packages/tool-router` 与所需端口 | 能力清单、审计、Sandbox 边界、工具测试 |
 | 新模型 Provider | `packages/pi-adapter` | 配置契约、能力元数据、流式与失败测试 |
 | 新 Sandbox Provider | `packages/sandbox` | Session 持久化、Scheduler、生产配置和真实冒烟 |
-| 新数据库事实 | `packages/persistence` | migration、RLS、角色权限、往返测试和 ADR |
+| 新数据库事实 | `packages/persistence` | migration、RLS、角色权限、往返测试和架构文档 |
 | 新后台协调任务 | `apps/scheduler` 与共享领域包 | 租约、幂等、Tenant 分片和 readiness |
 | 新用户页面 | `apps/web` | 只使用公开协议，不直接依赖 Repository |
 | 新后台管理能力 | `admin-control-api`、`admin-web` 与对应共享包 | 独立身份、领域授权、数据库角色和秘密边界 |
@@ -101,7 +100,7 @@
 
 ## 当前复杂度热点
 
-以下位置承担较多跨领域职责，修改前应先阅读测试和相关 ADR：
+以下位置承担较多跨领域职责，修改前应先阅读测试和相关架构文档：
 
 - `@hoox/persistence`：数据库、Outbox、Blob 生命周期和多个领域 Repository 的集中实现。
 - `@hoox/agent-worker`：模型、工具、上下文、Sandbox、Artifact 和恢复语义的装配中心。

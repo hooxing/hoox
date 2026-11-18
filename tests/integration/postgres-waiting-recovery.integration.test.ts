@@ -455,22 +455,21 @@ beforeAll(async () => {
 afterAll(async () => {
   if (runtime) await runtime.end();
   if (migrator) {
-    await expect(
-      migrateDown(migrator, {
-        ...migrationSecurity,
-        allowDestructive: true,
-        environment: "test",
-        targetVersion: 0,
-      }),
-    ).rejects.toMatchObject({ code: "UNEXPECTED", message: "执行回退迁移失败" });
-    const rollback = await migrator.query<{ checkpoint_table: string; version_12: string }>(
-      `SELECT to_regclass('waiting_recovery_checkpoints')::text AS checkpoint_table,
-              (SELECT count(*)::text FROM runtime_schema_migrations WHERE version=12) AS version_12`,
-    );
-    expect(rollback.rows[0]).toEqual({
-      checkpoint_table: "waiting_recovery_checkpoints",
-      version_12: "1",
+    // 基线 down 删除全部对象，即使 waiting 恢复事实非空也必须整体回退成功。
+    await migrateDown(migrator, {
+      ...migrationSecurity,
+      allowDestructive: true,
+      environment: "test",
+      targetVersion: 0,
     });
+    const rollback = await migrator.query<{
+      checkpoint_table: string | null;
+      migration_count: string;
+    }>(
+      `SELECT to_regclass('waiting_recovery_checkpoints')::text AS checkpoint_table,
+              (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
+    );
+    expect(rollback.rows[0]).toEqual({ checkpoint_table: null, migration_count: "0" });
     await migrator.end();
   }
   if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);

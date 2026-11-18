@@ -17,7 +17,7 @@ const forbiddenProductionInheritedEnvironmentKeys = new Set<string>([
 
 /**
  * Node/OpenSSL 的继承环境可在声明配置之外改变 TLS、预加载代码或代理路由。production 在投影
- * 服务环境前拒绝任意非空覆盖；NODE_EXTRA_CA_CERTS 是 ADR 明示的唯一 CA 扩展通道。
+ * 服务环境前拒绝任意非空覆盖；NODE_EXTRA_CA_CERTS 是约定的唯一 CA 扩展通道。
  */
 export function assertProductionInheritedEnvironment(
   source: Readonly<Record<string, string | undefined>>,

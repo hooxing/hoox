@@ -1,6 +1,6 @@
 # 文件预览与选区引用
 
-本页供维护 Web 文件交付、输入附件及预览接口的开发者查找当前能力、限制和失败语义。设计取舍见 [ADR-20260908104231](../decisions/20260908104231-browser-file-preview-and-versioned-references.md)。
+本页供维护 Web 文件交付、输入附件及预览接口的开发者查找当前能力、限制和失败语义。设计取舍见 [Workspace、Resource 与交付物](../architecture/workspace-and-files.md)。
 
 ## 用户流程
 

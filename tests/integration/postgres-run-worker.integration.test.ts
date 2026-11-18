@@ -554,7 +554,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     }
     runtimeConnectionString = runtimeUrl.toString();
     migrator = createPostgresPool({ connectionString: migratorUrl.toString(), schema });
-    runtime = createPostgresPool({ connectionString: runtimeConnectionString, schema });
+    // 与生产 Worker 一致开启预备语句缓存，让整套黑盒在真实 PostgreSQL 上覆盖计划复用路径。
+    runtime = createPostgresPool({
+      connectionString: runtimeConnectionString,
+      schema,
+      preparedStatements: true,
+    });
     workerCoordinator = createPostgresPool({
       connectionString: workerCoordinatorUrl.toString(),
       schema,

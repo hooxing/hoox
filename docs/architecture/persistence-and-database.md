@@ -37,6 +37,7 @@
 - COMMIT 响应未知（`TransactionCommitUnknownError`）时只按原幂等键精确读回，禁止再次 INSERT 或重写。
 - 序列化冲突只重放完全相同的命令；重试范围和次数见 [Run 执行与恢复](run-execution-and-recovery.md#重试与未知结果)。
 - 租约、TTL、`created_at` 等时间只使用数据库时钟，应用不得提交发生时间。
+- Agent Worker 的连接池开启预备语句缓存（`createPostgresPool({ preparedStatements: true })`）：带参数的单语句查询按 SQL 文本哈希命名，同一连接执行 5 次后复用通用计划。带 RLS 的多表 fence 查询规划约 4.5ms、执行约 0.4ms，因此这是事件持久化的主要提速手段。查询文本必须由常量拼成，不能把参数内联进 SQL，否则每个不同值都会产生一条新的预备语句；经过事务级连接池（如 PgBouncer transaction 模式）连接时不得开启。
 - 锁序是正确性的一部分。例如 Membership `FOR SHARE` → Thread `FOR UPDATE`，Blob 引用 → lifecycle → incarnation；新增路径必须沿用既有锁序。
 
 ## Outbox 与后台消费

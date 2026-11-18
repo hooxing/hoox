@@ -12,10 +12,28 @@ docker() {
   fi
   if [[ "$*" == *'config --services'* ]]; then
     printf 'postgres\nminio\napi\nweb\nadmin-control\nadmin-web\ntrajectory\nscheduler\nworker\n'
+  elif [[ "$*" == *'exec -T postgres pg_dump'* ]]; then
+    if [[ "$MOCK_MODE" == config-export-dump-failure ]]; then
+      return 23
+    fi
+    printf 'INSERT INTO test_schema.admin_control_config_revisions VALUES (1);\n'
+  elif [[ "$*" == *'exec -T postgres psql'*'--single-transaction'* ]]; then
+    printf 'config restore %s\n' "$(cat | tr '\n' ' ')" >>"$MOCK_LOG"
   elif [[ "$*" == *'exec -T postgres psql'* ]]; then
     local query
     query="$(cat)"
-    if [[ "$query" == 'SELECT EXISTS('* ]]; then
+    if [[ "$query" == 'SELECT ((SELECT count(*)'* ]]; then
+      # 模拟发布前旧库已有配置、迁移后的新库为空。
+      if [[ "$MOCK_MODE" == config-export* ]]; then
+        printf '5\n'
+      elif [[ "$MOCK_MODE" == config-restore ]]; then
+        printf '0\n'
+      fi
+    elif [[ "$query" == *"format('INSERT INTO %I.app_users"* ]]; then
+      printf 'INSERT INTO test_schema.app_users VALUES (1);\n'
+    elif [[ "$query" == *"format('UPDATE %I.admin_control_generation"* ]]; then
+      printf 'UPDATE test_schema.admin_control_generation SET generation=5;\n'
+    elif [[ "$query" == 'SELECT EXISTS('* ]]; then
       if [[ "$MOCK_MODE" == existing-account* ]]; then
         printf 'true\n'
       elif [[ "$MOCK_MODE" == account-lookup-invalid ]]; then

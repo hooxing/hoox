@@ -247,7 +247,6 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       "agent_session_create",
       "post_session_stop_point",
       "model_checkpoint",
-      "pre_model_stop_point",
       "prepare_input",
       "model_authorization",
     ]);
@@ -2072,6 +2071,22 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
     expect(session.prompts).toEqual([]);
     expect(h.persistence.permits.some(({ permit }) => permit.effect === "model_start")).toBe(false);
+  });
+
+  it("model_execution_started 提交后仅在数据库取消，模型许可拒绝并收敛为 cancelled", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = harness([session]);
+    h.persistence.afterMutation = (command) => {
+      if (command.idempotencyKey.includes("model-execution-started")) {
+        h.persistence.cancelRunExternally(h.scope);
+      }
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "cancelled" });
+
+    expect(session.prompts).toEqual([]);
+    expect(h.persistence.permits.some(({ permit }) => permit.effect === "model_start")).toBe(false);
+    expect(h.persistence.record(h.scope).attempt).toMatchObject({ status: "cancelled" });
   });
 
   it("每次工具执行都重新领取 DB 许可，许可拒绝时中止 Session 且工具调用方失败", async () => {

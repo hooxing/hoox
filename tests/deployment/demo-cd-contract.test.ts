@@ -125,8 +125,8 @@ describe("Demo 持续部署契约", () => {
     expect(compose).toContain('mc admin user add runtime "$${S3_ACCESS_KEY_ID}"');
     expect(compose).toContain('mc admin user add runtime "$${SKILL_PUBLISHER_S3_ACCESS_KEY_ID}"');
     expect(compose).toContain("mc admin policy attach runtime readwrite");
-    expect(compose).toContain("name: hoox-demo-postgres-data-20260826");
-    expect(compose).toContain("name: hoox-demo-minio-data-20260826");
+    expect(compose).toContain("name: hoox-demo-postgres-data-20261118");
+    expect(compose).toContain("name: hoox-demo-minio-data-20261118");
     expect(compose).toContain("name: hoox-demo-trajectory-data-20260903");
     expect(compose).not.toContain("name: hoox-demo-trajectory-${HOOX_DEMO_RELEASE_ID");
     expect(compose).not.toMatch(/^\s*name: hoox-demo-(?:postgres|minio)-data\s*$/gmu);

@@ -150,7 +150,7 @@ jobs:
         # 管理凭据只用于一次性测试夹具的角色和 Schema 准备、清理；迁移与业务查询均使用受限角色。
         run: pnpm --filter @hoox/persistence prepare:ci:m4
 
-      - name: 验证 Runtime 快照与工具选择迁移边界
+      - name: 验证 Runtime 模型与模式快照
         env:
           DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
           MIGRATION_DATABASE_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
@@ -160,7 +160,7 @@ jobs:
         # M4 套件结束会删除受限角色；快照验证先运行，随后 M4 仍从无 dist 状态启动。
         run: |
           pnpm build:m4-runtime-dependencies
-          pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "PostgreSQL Runtime 模型与模式快照|工具选择迁移整批提交"
+          pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "PostgreSQL Runtime 模型与模式快照"
 
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:

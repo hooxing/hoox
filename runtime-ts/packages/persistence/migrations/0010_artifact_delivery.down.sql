@@ -1,6 +1,0 @@
-DROP TABLE artifact_publication_commands;
-ALTER TABLE artifact_publications DROP CONSTRAINT artifact_replacement_failed_fk;
-DROP TABLE artifact_publication_settlements;
-DROP TABLE artifact_publications;
-DROP TABLE artifact_deliverable_declarations;
-DROP TABLE artifact_deliverable_commands;

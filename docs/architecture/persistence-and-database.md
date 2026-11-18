@@ -52,7 +52,8 @@
 ## Routine 与迁移
 
 - 迁移 manifest 不允许遗留自定义函数、过程或聚合；runner 在迁移 SQL 执行后、提交前断言目标 routine 集合为空，否则整体回滚。约束优先使用内建 immutable 表达式或内联 CHECK。未来引入 routine 前必须单独审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 与调用权限。
-- 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。
+- 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。2026-11 起全部历史迁移已合并为 `0001_baseline`；基线及之后的迁移一经提交不可修改，新变化只能追加 `0002` 起的递增版本。压缩前建立的数据库会因迁移记录不一致而失败关闭，必须清空 Schema 后重建，见[开发环境准备](../development.md#迁移基线重置)。
+- 基线 down 删除基线创建的全部表、视图与函数，不按数据内容阻止回退；新增迁移的 down 若可能丢失不可恢复事实，应自行失败关闭。
 - `pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作。
 
 ## 新增数据库事实检查清单

@@ -19,26 +19,6 @@ interface Migration {
   readonly checksum: string;
 }
 
-const historicalDownChecksums = Object.freeze({
-  adminControlPlane: "799aee36463d5520efd57b03de3619678387d92024ed6c85f46dae54f6d019f8",
-  adminUserOperations: "80a8293017276bedb2eda063e3ecd0c33a635d46810245a02d8a249cdee5ac7a",
-  managedSandboxConfiguration: "ef2616c64165552f3474af0453940fe34b3e9174e378770bf14e56a8f6f9900e",
-  modelUsageMetrics: "93d9244d34e54403e187867916f4a4ecc3b7f5ab856e17a2e1b26060fdbe1f54",
-});
-
-const legacyMemoryIngestionLineage = Object.freeze({
-  legacy: Object.freeze({
-    version: 43,
-    name: "memory_ingestion_outbox",
-    checksum: "175f914a06d706fe40fa9ef838235bf348513a4ebd65fdcdb7e39371064688c5",
-  }),
-  current: Object.freeze({
-    version: 45,
-    name: "memory_ingestion_outbox",
-    checksum: "8623caa030ded4431fac618166d9502d2df7c60b39aba422cebc14f55d57cbf5",
-  }),
-});
-
 export interface MigrationRecord {
   readonly version: number;
   readonly name: string;
@@ -116,78 +96,6 @@ export async function loadMigrations(
   );
 }
 
-function replaceHistoricalDownFragment(
-  source: Migration,
-  pattern: RegExp,
-  replacement: string,
-): string {
-  const repaired = source.downSql.replace(pattern, replacement);
-  if (repaired === source.downSql) {
-    throw new PersistenceError(
-      "MIGRATION_MISMATCH",
-      `已发布迁移 ${source.version} 的回退兼容修复无法安全应用`,
-    );
-  }
-  return repaired;
-}
-
-/**
- * 0050/0052/0053/0064 的已发布 down SQL 存在 PostgreSQL 依赖顺序问题。迁移文件本身必须保持
- * 不可变以匹配生产 checksum；仅在执行已知指纹的破坏性回退时修复语句顺序。
- */
-export function executableDownSql(source: Migration): string {
-  if (
-    source.version === 50 &&
-    source.name === "admin_control_plane" &&
-    source.checksum === historicalDownChecksums.adminControlPlane
-  ) {
-    return replaceHistoricalDownFragment(
-      source,
-      /DROP VIEW admin_runtime_statistics;\r?\nDROP TABLE run_runtime_config_snapshots;/u,
-      "DROP VIEW admin_runtime_statistics;\n" +
-        "DROP POLICY runtime_control_revisions_read_policy ON admin_control_config_revisions;\n" +
-        "DROP TABLE run_runtime_config_snapshots;",
-    );
-  }
-  if (
-    source.version === 52 &&
-    source.name === "admin_user_operations" &&
-    source.checksum === historicalDownChecksums.adminUserOperations
-  ) {
-    return replaceHistoricalDownFragment(
-      source,
-      /DROP TABLE admin_user_account_audits;\r?\nALTER TABLE user_accounts DROP COLUMN status;\r?\n\r?\nDROP VIEW admin_runtime_statistics;/u,
-      "DROP TABLE admin_user_account_audits;\n" +
-        "DROP VIEW admin_runtime_statistics;\n" +
-        "ALTER TABLE user_accounts DROP COLUMN status;",
-    );
-  }
-  if (
-    source.version === 53 &&
-    source.name === "model_usage_metrics" &&
-    source.checksum === historicalDownChecksums.modelUsageMetrics
-  ) {
-    return replaceHistoricalDownFragment(
-      source,
-      /CREATE OR REPLACE VIEW admin_runtime_statistics/u,
-      "DROP VIEW admin_runtime_statistics;\nCREATE VIEW admin_runtime_statistics",
-    );
-  }
-  if (
-    source.version === 64 &&
-    source.name === "managed_sandbox_configuration" &&
-    source.checksum === historicalDownChecksums.managedSandboxConfiguration
-  ) {
-    return replaceHistoricalDownFragment(
-      source,
-      /DROP TABLE sandbox_configuration_bindings;/u,
-      "DROP POLICY runtime_profile_read ON sandbox_provider_profiles;\n" +
-        "DROP TABLE sandbox_configuration_bindings;",
-    );
-  }
-  return source.downSql;
-}
-
 async function ensureMigrationTable(client: PoolClient): Promise<void> {
   await client.query(`
     CREATE TABLE IF NOT EXISTS runtime_schema_migrations (
@@ -204,51 +112,6 @@ async function appliedMigrations(client: PoolClient): Promise<readonly Migration
     "SELECT version, name, checksum FROM runtime_schema_migrations ORDER BY version",
   );
   return result.rows;
-}
-
-/**
- * 0043 曾在并行分支中发布为 memory_ingestion_outbox，合并后被顺延到 0045。
- * 只对已知历史指纹执行原子换号；任何未知 checksum 或目标占用仍交给严格校验拒绝。
- */
-export async function reconcileKnownMigrationLineages(
-  client: Pick<PoolClient, "query">,
-  applied: readonly MigrationRecord[],
-  migrations: readonly Migration[],
-): Promise<void> {
-  const lineage = legacyMemoryIngestionLineage;
-  const legacy = applied.find((record) => record.version === lineage.legacy.version);
-  if (legacy?.name !== lineage.legacy.name || legacy.checksum !== lineage.legacy.checksum) {
-    return;
-  }
-  if (applied.some((record) => record.version === lineage.current.version)) {
-    throw new PersistenceError(
-      "MIGRATION_MISMATCH",
-      `迁移谱系目标 ${lineage.current.version} 已被占用`,
-    );
-  }
-  const current = migrations.find((migration) => migration.version === lineage.current.version);
-  if (current?.name !== lineage.current.name || current.checksum !== lineage.current.checksum) {
-    throw new PersistenceError(
-      "MIGRATION_MISMATCH",
-      `迁移谱系目标 ${lineage.current.version} 与已接受指纹不一致`,
-    );
-  }
-  const moved = await client.query(
-    `UPDATE runtime_schema_migrations
-        SET version=$4,name=$5,checksum=$6
-      WHERE version=$1 AND name=$2 AND checksum=$3`,
-    [
-      lineage.legacy.version,
-      lineage.legacy.name,
-      lineage.legacy.checksum,
-      lineage.current.version,
-      lineage.current.name,
-      lineage.current.checksum,
-    ],
-  );
-  if (moved.rowCount !== 1) {
-    throw new PersistenceError("MIGRATION_MISMATCH", "迁移谱系换号未命中唯一历史记录");
-  }
 }
 
 export async function migrateUp(
@@ -276,9 +139,9 @@ export async function migrateUp(
         options.workerCoordinatorRole,
       ]);
       await ensureMigrationTable(client);
-      const beforeReconciliation = await appliedMigrations(client);
-      await reconcileKnownMigrationLineages(client, beforeReconciliation, migrations);
       const applied = await appliedMigrations(client);
+      // 2026-11 基线压缩后，压缩前的迁移记录（任意 0001 以外版本或旧 0001 名称）都会在此失败关闭；
+      // 这类数据库必须清空 Schema 后重新执行 db:setup，不能改写迁移记录。
       for (const record of applied) {
         const source = migrations.find((migration) => migration.version === record.version);
         if (
@@ -353,7 +216,7 @@ export async function migrateDown(
         // 某个 down migration 可能为冲刷自身约束临时切到 IMMEDIATE；下一项必须恢复
         // DEFERRABLE 约束的初始语义，避免一个迁移的会话状态污染后续回退脚本。
         await client.query("SET CONSTRAINTS ALL DEFERRED");
-        await client.query(executableDownSql(source));
+        await client.query(source.downSql);
         await client.query("DELETE FROM runtime_schema_migrations WHERE version = $1", [
           record.version,
         ]);

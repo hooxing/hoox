@@ -49,7 +49,7 @@ import {
   withTenantTransaction,
 } from "./postgres.js";
 import { PgThreadContextReadRepository } from "./thread-context.js";
-import { PgThreadContinuityReadRepository } from "./thread-continuity-rollout.js";
+import { PgThreadContinuityReadRepository } from "./thread-continuity.js";
 
 export interface PersistenceRuntime {
   readonly repositories: CoreRepositories;

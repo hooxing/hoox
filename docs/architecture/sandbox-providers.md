@@ -1,6 +1,6 @@
 # Sandbox Provider
 
-本文面向接入或运维 Sandbox 的开发者，说明当前 Provider 注册、路由和持久身份。环境变量见[配置参考](../reference/configuration.md)，真实环境 Gate 见[生产就绪说明](../operations/production-readiness.md)，历史实施方案见[归档计划](../archive/plans/multi-sandbox-provider.md)。
+本文面向接入或运维 Sandbox 的开发者，说明当前 Provider 注册、路由和持久身份。环境变量见[配置参考](../reference/configuration.md)，真实环境 Gate 见[生产就绪说明](../operations/production-readiness.md)。
 
 ## 当前支持
 

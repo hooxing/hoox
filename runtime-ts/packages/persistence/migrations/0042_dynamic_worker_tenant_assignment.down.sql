@@ -1,9 +1,0 @@
-DROP POLICY IF EXISTS worker_tenant_assignments_control_plane_policy
-  ON worker_tenant_assignments;
-DROP POLICY IF EXISTS worker_tenant_assignments_runtime_policy
-  ON worker_tenant_assignments;
-DROP POLICY IF EXISTS worker_tenant_assignments_coordinator_select_policy
-  ON worker_tenant_assignments;
-DROP POLICY IF EXISTS worker_tenant_assignments_coordinator_claim_policy
-  ON worker_tenant_assignments;
-DROP TABLE worker_tenant_assignments;

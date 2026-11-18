@@ -1,6 +1,6 @@
 # `todo_write` 参考
 
-本文面向维护 Agent 工具、事件投影和运行进度 UI 的开发者，描述 `todo_write` 当前协议。设计理由见 [ADR-0113](../decisions/0113-agent-todo-writer-and-run-progress.md)。
+本文面向维护 Agent 工具、事件投影和运行进度 UI 的开发者，描述 `todo_write` 当前协议。设计理由见 [Agent 协作与 Todo](../architecture/agent-collaboration.md)。
 
 `todo_write` 是复杂或长程任务的可选规划工具。简单任务可以直接执行；Runtime 不要求每个 Run 都存在 Todo，也不会因为没有 `in_progress` 项而拒绝其他工具。
 

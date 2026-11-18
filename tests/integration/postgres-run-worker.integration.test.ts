@@ -63,17 +63,9 @@ import {
   AdminControlService,
   digestControlRequest,
 } from "../../runtime-ts/packages/admin-control/src/index.js";
-import {
-  createEmbeddedBetterAuth,
-  emptyIdentityConfiguration,
-} from "../../runtime-ts/packages/identity/src/index.js";
 import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
 import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
-import {
-  loadMigrations,
-  migrateDown,
-  migrateUp,
-} from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
 import { PgAdminControlRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
 import {
@@ -119,13 +111,7 @@ import {
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
-import {
-  isThreadV2ReadEnabled,
-  PgLegacyThreadContextAnchor,
-  PgThreadContinuityMetrics,
-} from "../../runtime-ts/packages/persistence/src/thread-continuity-rollout.js";
 import { PgThreadSandboxSessionLifecycle } from "../../runtime-ts/packages/persistence/src/thread-sandbox-session.js";
-import { RUNTIME_TOOL_CATALOG } from "../../runtime-ts/packages/protocol/src/index.js";
 import { createWorkspaceManifest } from "../../runtime-ts/packages/workspace/src/manifest.js";
 import {
   loadPostgreSqlMigrationContract,
@@ -633,127 +619,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     await admin?.end();
   });
 
-  it("0070 保留旧密码账号并支持新版注册、登录和 Cookie 会话", async () => {
-    const migration = (await loadMigrations()).find((source) => source.version === 70);
-    if (migration === undefined) throw new Error("缺少 Better Auth 账号键迁移");
-    const legacyId = randomUUID();
-    const newEmail = `new-${suffix}@example.invalid`;
-    const legacyEmail = `legacy-${suffix}@example.invalid`;
-    const password = "test-placeholder-password-for-identity-upgrade";
-    const auth = createEmbeddedBetterAuth({
-      database: runtime,
-      baseURL: "https://hoox.example.invalid",
-      secret: "test-placeholder-secret-for-identity-upgrade-at-least-32-bytes",
-      trustedOrigins: ["https://hoox.example.invalid"],
-      configuration: {
-        ...emptyIdentityConfiguration(),
-        emailPasswordEnabled: true,
-        registrationEnabled: true,
-      },
-      secrets: { providerSecrets: {} },
-    });
-    const context = await auth.$context;
-    const passwordHash = await context.password.hash(password);
-    const request = (path: string, body: unknown) =>
-      auth.handler(
-        new Request(`https://hoox.example.invalid/api/auth/${path}`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            origin: "https://hoox.example.invalid",
-            "x-hoox-client-ip": "203.0.113.70",
-          },
-          body: JSON.stringify(body),
-        }),
-      );
-    try {
-      await withTransaction(admin, async (client) => {
-        await client.query(`SET LOCAL search_path TO "${schema}"`);
-        await client.query(migration.downSql);
-        await client.query(
-          "INSERT INTO better_auth_users(id,name,email,email_verified) VALUES($1,'旧版账号',$2,true)",
-          [legacyId, legacyEmail],
-        );
-        await client.query(
-          `INSERT INTO better_auth_accounts(issuer,account_id,provider_id,user_id,password,updated_at)
-           VALUES('credential',$1,'credential',$1,$2,clock_timestamp())`,
-          [legacyId, passwordHash],
-        );
-        await client.query(migration.upSql);
-      });
-      const legacy = await request("sign-in/email", { email: legacyEmail, password });
-      expect(legacy.status).toBe(200);
-      expect(((await legacy.json()) as { user: { id: string } }).user.id).toBe(legacyId);
-      const signup = await request("sign-up/email", {
-        name: "新版账号",
-        email: newEmail,
-        password,
-      });
-      expect(signup.status).toBe(200);
-      const newUserId = ((await signup.json()) as { user: { id: string } }).user.id;
-      const account = await runtime.query(
-        "SELECT issuer FROM better_auth_accounts WHERE user_id=$1 AND provider_id='credential'",
-        [newUserId],
-      );
-      expect(account.rows).toEqual([{ issuer: null }]);
-      const signin = await request("sign-in/email", { email: newEmail, password });
-      expect(signin.status).toBe(200);
-      const cookies = signin.headers
-        .getSetCookie()
-        .map((cookie) => cookie.split(";")[0])
-        .join("; ");
-      const session = await auth.api.getSession({ headers: new Headers({ cookie: cookies }) });
-      expect(session?.user.id).toBe(newUserId);
-      const original = await runtime.query(
-        "SELECT issuer FROM better_auth_accounts WHERE user_id=$1",
-        [legacyId],
-      );
-      expect(original.rows).toEqual([{ issuer: "credential" }]);
-    } finally {
-      await runtime.query("DELETE FROM better_auth_users WHERE email IN ($1,$2)", [
-        legacyEmail,
-        newEmail,
-      ]);
-      await runtime.query("DELETE FROM better_auth_rate_limits");
-    }
-  });
-
-  it("0070 拒绝合并重复 Provider 账号键及丢失 issuer 的自动降级", async () => {
-    const migration = (await loadMigrations()).find((source) => source.version === 70);
-    if (migration === undefined) throw new Error("缺少 Better Auth 账号键迁移");
-    for (const mode of ["duplicate-provider", "missing-issuer"] as const) {
-      await expect(
-        withTransaction(admin, async (client) => {
-          // 仅在事务内重建历史约束；失败后回滚，不能污染其他黑盒用例的迁移终态。
-          await client.query(`SET LOCAL search_path TO "${schema}"`);
-          if (mode === "duplicate-provider") await client.query(migration.downSql);
-          const id = randomUUID();
-          await client.query(
-            "INSERT INTO better_auth_users(id,name,email) VALUES($1,'迁移夹具',$2)",
-            [id, `${id}@example.invalid`],
-          );
-          if (mode === "duplicate-provider") {
-            await client.query(
-              `INSERT INTO better_auth_accounts(issuer,account_id,provider_id,user_id,updated_at)
-               VALUES('legacy-a',$1,'credential',$1,clock_timestamp()),
-                     ('legacy-b',$1,'credential',$1,clock_timestamp())`,
-              [id],
-            );
-            await client.query(migration.upSql);
-          } else {
-            await client.query(
-              `INSERT INTO better_auth_accounts(account_id,provider_id,user_id,updated_at)
-               VALUES($1,'credential',$1,clock_timestamp())`,
-              [id],
-            );
-            await client.query(migration.downSql);
-          }
-        }),
-      ).rejects.toThrow(mode === "duplicate-provider" ? "禁止自动合并身份" : "禁止自动回退");
-    }
-  });
-
-  it("0067 受限控制角色保存工具模式、恢复历史配置并拒绝非法直写", async () => {
+  it("受限控制角色保存工具模式、恢复历史配置并拒绝非法直写", async () => {
     // 全局 generation 与运行设置不能影响同套件的 Worker 和历史迁移回退用例。
     const isolatedSchema = `it_rw_tool_mode_${suffix}`;
     if (!safePgIdentifier.test(isolatedSchema)) throw new Error("工具模式测试 Schema 名称无效");
@@ -976,204 +842,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     }
   }, 90_000);
 
-  it.each([68, 69])(
-    "%i 隔离 Schema 校验工具选择，并在保留历史字段时阻止降级与回滚事务",
-    async (version) => {
-      const isolatedSchema = `it_rw_tool_selection_${version}_${suffix}`;
-      if (!safePgIdentifier.test(isolatedSchema)) throw new Error("工具选择测试 Schema 名称无效");
-      const migrations = await loadMigrations();
-      const previous = migrations.find((migration) => migration.version === 67);
-      const selection = migrations.find((migration) => migration.version === 68);
-      const correction = migrations.find((migration) => migration.version === 69);
-      if (previous === undefined || selection === undefined || correction === undefined)
-        throw new Error("缺少工具选择迁移夹具");
-      const isolated = createPostgresPool({
-        connectionString: adminUrl,
-        schema: isolatedSchema,
-        maxConnections: 2,
-      });
-      let schemaPrepared = false;
-      const historicalConfiguration = {
-        workerMaxConcurrentRuns: 20,
-        userMaxConcurrentRunsPerTenant: 2,
-        compactionSoftLimitPercent: 80,
-        compactionTargetPercent: 50,
-        compactionRecentUserTokens: 2048,
-        compactionMaxOutputTokens: 4096,
-        compactionTimeoutMs: 30_000,
-      };
-      const toolNames = RUNTIME_TOOL_CATALOG.map((tool) => tool.name);
-      const insertSql = `INSERT INTO admin_control_config_revisions(id,object_kind,object_key,configuration)
-      VALUES($1,'runtime_settings','global',$2::jsonb)`;
-      const readFacts = async () => ({
-        revisions: (
-          await isolated.query<{ readonly id: number; readonly configuration: unknown }>(
-            "SELECT id,configuration FROM admin_control_config_revisions ORDER BY id",
-          )
-        ).rows,
-        constraints: (
-          await isolated.query<{ readonly definition: string }>(
-            `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
-           WHERE conrelid='admin_control_config_revisions'::regclass
-             AND conname='admin_control_configuration_shape'`,
-          )
-        ).rows,
-        helper:
-          (
-            await isolated.query<{ readonly helper: string | null }>(
-              "SELECT to_regprocedure('runtime_tool_selection_is_valid(jsonb)')::text AS helper",
-            )
-          ).rows[0]?.helper ?? null,
-      });
-      try {
-        await admin.query(`CREATE SCHEMA "${isolatedSchema}"`);
-        schemaPrepared = true;
-        // 只装载受测约束，隔离真实 SQL 行为，避免夹具依赖完整迁移链与开发数据库历史。
-        await withTransaction(isolated, async (client) => {
-          await client.query(`CREATE TABLE admin_control_config_revisions(
-          id integer PRIMARY KEY,
-          object_kind text NOT NULL,
-          object_key text NOT NULL,
-          configuration jsonb NOT NULL,
-          CONSTRAINT admin_control_configuration_shape CHECK (true)
-        )`);
-          await client.query(previous.upSql);
-          await client.query(insertSql, [1, JSON.stringify(historicalConfiguration)]);
-        });
-        const previousFacts = await readFacts();
-        expect(previousFacts.constraints).toHaveLength(1);
-        expect(previousFacts.helper).toBeNull();
-        await withTransaction(isolated, async (client) => {
-          await client.query(selection.upSql);
-          if (version === 69) await client.query(correction.upSql);
-        });
-        const expandedFacts = await readFacts();
-        expect(expandedFacts.revisions).toEqual(previousFacts.revisions);
-        expect(expandedFacts.constraints).toHaveLength(1);
-        expect(expandedFacts.constraints[0]?.definition).toContain("enabledTools");
-        expect(expandedFacts.helper).toBe(
-          version === 68 ? "runtime_tool_selection_is_valid(jsonb)" : null,
-        );
-        expect(toolNames).toHaveLength(14);
-        const validConfigurations = [
-          historicalConfiguration,
-          { ...historicalConfiguration, enabledTools: [] },
-          { ...historicalConfiguration, toolCallingMode: "native", enabledTools: toolNames },
-          { ...historicalConfiguration, toolCallingMode: "ptc", enabledTools: ["write", "read"] },
-        ];
-        for (const [index, configuration] of validConfigurations.entries()) {
-          await isolated.query(insertSql, [index + 2, JSON.stringify(configuration)]);
-        }
-        const acceptedFacts = await readFacts();
-        expect(acceptedFacts.revisions.map((row) => row.configuration)).toEqual([
-          historicalConfiguration,
-          ...validConfigurations,
-        ]);
-        if (version === 68) {
-          const nullGuards = await isolated.query<{
-            readonly sql_null: boolean;
-            readonly json_null: boolean;
-          }>(`SELECT runtime_tool_selection_is_valid(NULL::jsonb) AS sql_null,
-                runtime_tool_selection_is_valid('null'::jsonb) AS json_null`);
-          expect(nullGuards.rows).toEqual([{ sql_null: false, json_null: false }]);
-        }
-        const invalidSelections = [
-          null,
-          "read",
-          1,
-          true,
-          {},
-          { read: true },
-          ["unknown"],
-          ["READ"],
-          ["run_code"],
-          ["collapse_process_for_final_answer"],
-          ["read", "read"],
-          ["read", null],
-          ["read", 1],
-          ["read", true],
-          ["read", {}],
-          ["read", []],
-          [...toolNames, "read"],
-        ];
-        const invalidConfigurations = [
-          ...invalidSelections.map((enabledTools) => ({
-            ...historicalConfiguration,
-            enabledTools,
-          })),
-          { ...historicalConfiguration, enabledTools: [], unexpectedSetting: true },
-          { ...historicalConfiguration, enabledTools: [], toolCallingMode: "auto" },
-          { ...historicalConfiguration, enabledTools: [], workerMaxConcurrentRuns: 101 },
-        ];
-        for (const configuration of invalidConfigurations) {
-          // 非法 JSON 必须触发 CHECK 失败，而不是展开非数组时的 SQL 错误；每次失败独立回滚。
-          await expect(
-            withTransaction(isolated, (client) =>
-              client.query(insertSql, [100, JSON.stringify(configuration)]),
-            ),
-          ).rejects.toMatchObject({
-            code: "23514",
-            constraint: "admin_control_configuration_shape",
-          });
-        }
-        expect(await readFacts()).toEqual(acceptedFacts);
-        for (const enabledTools of [[], toolNames, ["read"]]) {
-          await withTransaction(isolated, async (client) => {
-            await client.query("DELETE FROM admin_control_config_revisions WHERE id<>1");
-            await client.query(insertSql, [
-              2,
-              JSON.stringify({ ...historicalConfiguration, enabledTools }),
-            ]);
-          });
-          const beforeDown = await readFacts();
-          await expect(
-            withTransaction(isolated, async (client) => {
-              // 先写事务标记；降级受阻后该标记也必须消失，不能仅断言错误消息。
-              await client.query(insertSql, [99, JSON.stringify(historicalConfiguration)]);
-              if (version === 69) await client.query(correction.downSql);
-              await client.query(selection.downSql);
-            }),
-          ).rejects.toMatchObject({
-            code: "P0001",
-            message: "DOWN_MIGRATION_BLOCKED:runtime_tool_selection_configuration_exists",
-          });
-          expect(await readFacts()).toEqual(beforeDown);
-        }
-        await isolated.query("DELETE FROM admin_control_config_revisions");
-        await withTransaction(isolated, async (client) => {
-          if (version === 69) await client.query(correction.downSql);
-          await client.query(selection.downSql);
-        });
-        const restoredFacts = await readFacts();
-        expect(restoredFacts.revisions).toEqual([]);
-        expect(restoredFacts.constraints).toEqual(previousFacts.constraints);
-        expect(restoredFacts.helper).toBeNull();
-        for (const [index, configuration] of [
-          historicalConfiguration,
-          { ...historicalConfiguration, toolCallingMode: "native" },
-          { ...historicalConfiguration, toolCallingMode: "ptc" },
-        ].entries()) {
-          await isolated.query(insertSql, [index + 1, JSON.stringify(configuration)]);
-        }
-        const factsBeforeLegacyRejection = await readFacts();
-        await expect(
-          withTransaction(isolated, (client) =>
-            client.query(insertSql, [
-              100,
-              JSON.stringify({ ...historicalConfiguration, enabledTools: [] }),
-            ]),
-          ),
-        ).rejects.toMatchObject({ code: "23514", constraint: "admin_control_configuration_shape" });
-        expect(await readFacts()).toEqual(factsBeforeLegacyRejection);
-      } finally {
-        await isolated.end();
-        if (schemaPrepared) await admin.query(`DROP SCHEMA "${isolatedSchema}" CASCADE`);
-      }
-    },
-    90_000,
-  );
-
-  it("0014 journal 保持 completed 单调，manifest 外键、RLS 与 runtime ACL 均受约束", async () => {
+  it("Workspace journal 保持 completed 单调，manifest 外键、RLS 与 runtime ACL 均受约束", async () => {
     const f = await fixture(`workspace-manifest-contract-${suffix}`);
     const policy = {
       maxEntries: 8,
@@ -1271,298 +940,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [runtimeRole, schema],
     );
     expect(acl.rows[0]).toEqual({ select_insert_update: true, delete: false });
-  });
-
-  it("阶段 6 只回填可证明旧事实，以 gap+anchor 收敛并按 Tenant policy 开启读取", async () => {
-    const f = await fixture(`legacy-anchor-${suffix}`);
-    const secondRun = createRun({
-      id: runId(`rw-run-legacy-anchor-second-${suffix}`),
-      thread: f.thread,
-      now: isoTimestamp("2099-07-26T00:00:01.000Z"),
-    });
-    expect(
-      await repositories.runs.create({ tenantId: f.scope.tenantId, userId: f.user.id }, secondRun),
-    ).toMatchObject({ outcome: "created" });
-    expect(
-      await setup.initialize({
-        scope: {
-          ...f.scope,
-          runId: secondRun.id,
-          rootRunId: secondRun.id,
-        },
-        input: "第二条可验证旧输入",
-        rolloutProjection: { schemaVersion: 2, checkpointId: "legacy-anchor-second", items: [] },
-      }),
-    ).toBe("created");
-    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
-      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
-        f.scope.tenantId,
-        f.scope.threadId,
-      ]);
-      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
-        f.scope.tenantId,
-        f.scope.threadId,
-      ]);
-    });
-    const anchor = new PgLegacyThreadContextAnchor(runtime);
-    await expect(
-      anchor.anchor({
-        tenantId: f.scope.tenantId,
-        threadId: f.scope.threadId,
-        maxRuns: 1,
-        operationId: `legacy-anchor-busy-${suffix}`,
-      }),
-    ).resolves.toEqual({ outcome: "busy" });
-    await expect(
-      anchor.anchor({
-        tenantId: tenantId(`rw-tenant-missing-${suffix}`),
-        threadId: f.scope.threadId,
-        maxRuns: 1,
-        operationId: `legacy-anchor-cross-tenant-${suffix}`,
-      }),
-    ).resolves.toEqual({ outcome: "not_found" });
-    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
-      await client.query(
-        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND thread_id=$2`,
-        [f.scope.tenantId, f.scope.threadId],
-      );
-    });
-    await withTenantTransaction(migrator, { tenantId: f.scope.tenantId }, async (client) => {
-      await client.query(
-        `INSERT INTO tenant_thread_continuity_policies(
-           tenant_id,policy_version,v2_read_enabled,new_thread_rollout_basis_points,
-           legacy_anchor_read_enabled
-         ) VALUES ($1,1,true,0,true)`,
-        [f.scope.tenantId],
-      );
-    });
-
-    const anchored = await anchor.anchor({
-      tenantId: f.scope.tenantId,
-      threadId: f.scope.threadId,
-      maxRuns: 1,
-      operationId: `legacy-anchor-operation-${suffix}`,
-    });
-    expect(anchored).toMatchObject({
-      outcome: "anchored",
-      selectedRuns: 1,
-      backfilledEntries: 2,
-      gapItems: 3,
-    });
-    if (anchored.outcome !== "anchored") throw new Error("legacy anchor 未完成");
-    await expect(
-      anchor.anchor({
-        tenantId: f.scope.tenantId,
-        threadId: f.scope.threadId,
-        maxRuns: 999,
-        operationId: `legacy-anchor-retry-${suffix}`,
-      }),
-    ).resolves.toMatchObject({ outcome: "replayed", anchorId: anchored.anchorId });
-
-    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
-      const entries = await client.query<{
-        readonly kind: string;
-        readonly body_inline: Record<string, unknown>;
-      }>(
-        `SELECT kind,body_inline FROM thread_context_entries
-          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY sequence`,
-        [f.scope.tenantId, f.scope.threadId],
-      );
-      expect(entries.rows.map((row) => row.kind)).toEqual([
-        "legacy_history_gap",
-        "user_message",
-        "run_terminal",
-        "legacy_v2_anchor",
-      ]);
-      expect(entries.rows[1]?.body_inline).toMatchObject({ text: "第二条可验证旧输入" });
-      expect(entries.rows.some((row) => row.kind === "assistant_message")).toBe(false);
-      const audit = await client.query<{
-        readonly evidence_kind: string;
-        readonly outcome: string;
-        readonly reason_code: string | null;
-      }>(
-        `SELECT evidence_kind,outcome,reason_code FROM thread_context_legacy_backfill_items
-          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY item_ordinal`,
-        [f.scope.tenantId, f.scope.threadId],
-      );
-      expect(audit.rows).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            evidence_kind: "earlier_run_range",
-            outcome: "gap",
-            reason_code: "max_depth_exceeded",
-          }),
-          expect.objectContaining({
-            evidence_kind: "assistant_tool_history",
-            outcome: "gap",
-            reason_code: "not_provable",
-          }),
-          expect.objectContaining({
-            evidence_kind: "workspace_result",
-            outcome: "gap",
-            reason_code: "source_missing",
-          }),
-        ]),
-      );
-      expect(await isThreadV2ReadEnabled(client, f.scope.tenantId, f.scope.threadId)).toBe(true);
-    });
-
-    const metrics = new PgThreadContinuityMetrics(runtime);
-    const observation = {
-      tenantId: f.scope.tenantId,
-      threadId: f.scope.threadId,
-      runId: secondRun.id,
-      observationId: `legacy-anchor-metric-${suffix}`,
-      metricName: "context_rebuild_latency_ms" as const,
-      value: 12,
-      unit: "milliseconds" as const,
-      outcome: "ready",
-    };
-    await metrics.record(observation);
-    await metrics.record(observation);
-    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
-      const count = await client.query<{ readonly count: string }>(
-        `SELECT count(*)::text AS count FROM thread_continuity_metric_observations
-          WHERE tenant_id=$1 AND observation_id=$2`,
-        [f.scope.tenantId, observation.observationId],
-      );
-      expect(count.rows[0]?.count).toBe("1");
-    });
-  });
-
-  it("阶段 6 不把旧历史伪装追加到已有 V2 stream，并在 anchor 末端失败时整笔回滚", async () => {
-    const existing = await fixture(`legacy-anchor-existing-${suffix}`);
-    const existingBody = { code: "preexisting_v2_fact" } as const;
-    await withTenantTransaction(runtime, { tenantId: existing.scope.tenantId }, async (client) => {
-      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
-        existing.scope.tenantId,
-        existing.scope.threadId,
-      ]);
-      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
-        existing.scope.tenantId,
-        existing.scope.threadId,
-      ]);
-      await client.query(
-        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND thread_id=$2`,
-        [existing.scope.tenantId, existing.scope.threadId],
-      );
-      await client.query(
-        `INSERT INTO thread_context_entries(
-           tenant_id,thread_id,sequence,entry_id,kind,body_inline,body_sha256,body_size
-         ) VALUES ($1,$2,1,$3,'legacy_history_gap',$4::jsonb,$5,$6)`,
-        [
-          existing.scope.tenantId,
-          existing.scope.threadId,
-          `preexisting-v2-${suffix}`,
-          JSON.stringify(existingBody),
-          digestCanonical(existingBody),
-          Buffer.byteLength(JSON.stringify(existingBody), "utf8"),
-        ],
-      );
-      await client.query(
-        `UPDATE thread_context_streams SET next_sequence=2
-          WHERE tenant_id=$1 AND thread_id=$2`,
-        [existing.scope.tenantId, existing.scope.threadId],
-      );
-    });
-    await expect(
-      new PgLegacyThreadContextAnchor(runtime).anchor({
-        tenantId: existing.scope.tenantId,
-        threadId: existing.scope.threadId,
-        maxRuns: 10,
-        operationId: `legacy-anchor-existing-${suffix}`,
-      }),
-    ).resolves.toMatchObject({
-      outcome: "anchored",
-      firstSequence: 2,
-      anchorSequence: 3,
-      backfilledEntries: 0,
-      gapItems: 1,
-    });
-    await withTenantTransaction(runtime, { tenantId: existing.scope.tenantId }, async (client) => {
-      const facts = await client.query<{ readonly kind: string }>(
-        `SELECT kind FROM thread_context_entries
-          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY sequence`,
-        [existing.scope.tenantId, existing.scope.threadId],
-      );
-      expect(facts.rows.map((row) => row.kind)).toEqual([
-        "legacy_history_gap",
-        "legacy_history_gap",
-        "legacy_v2_anchor",
-      ]);
-      expect(facts.rows.some((row) => row.kind === "user_message")).toBe(false);
-    });
-
-    const rollback = await fixture(`legacy-anchor-rollback-${suffix}`);
-    await withTenantTransaction(runtime, { tenantId: rollback.scope.tenantId }, async (client) => {
-      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
-        rollback.scope.tenantId,
-        rollback.scope.threadId,
-      ]);
-      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
-        rollback.scope.tenantId,
-        rollback.scope.threadId,
-      ]);
-      await client.query(
-        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND thread_id=$2`,
-        [rollback.scope.tenantId, rollback.scope.threadId],
-      );
-    });
-    const triggerName = `test_anchor_rollback_${process.pid}`;
-    await migrator.query(
-      `CREATE FUNCTION ${triggerName}() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN
-           IF NEW.thread_id='${rollback.scope.threadId}' THEN
-             RAISE EXCEPTION 'test anchor rollback';
-           END IF;
-           RETURN NEW;
-         END $$;
-       CREATE TRIGGER ${triggerName} BEFORE INSERT ON thread_context_legacy_anchors
-         FOR EACH ROW EXECUTE FUNCTION ${triggerName}()`,
-    );
-    try {
-      await expect(
-        new PgLegacyThreadContextAnchor(runtime).anchor({
-          tenantId: rollback.scope.tenantId,
-          threadId: rollback.scope.threadId,
-          maxRuns: 10,
-          operationId: `legacy-anchor-rollback-${suffix}`,
-        }),
-      ).rejects.toThrow();
-    } finally {
-      await migrator.query(
-        `DROP TRIGGER ${triggerName} ON thread_context_legacy_anchors;
-         DROP FUNCTION ${triggerName}()`,
-      );
-    }
-    await withTenantTransaction(runtime, { tenantId: rollback.scope.tenantId }, async (client) => {
-      const state = await client.query<{
-        readonly next_sequence: string;
-        readonly entries: string;
-        readonly anchors: string;
-        readonly profiles: string;
-      }>(
-        `SELECT stream.next_sequence::text,
-                (SELECT count(*)::text FROM thread_context_entries entry
-                  WHERE entry.tenant_id=$1 AND entry.thread_id=$2) AS entries,
-                (SELECT count(*)::text FROM thread_context_legacy_anchors anchor
-                  WHERE anchor.tenant_id=$1 AND anchor.thread_id=$2) AS anchors,
-                (SELECT count(*)::text FROM thread_continuity_profiles profile
-                  WHERE profile.tenant_id=$1 AND profile.thread_id=$2) AS profiles
-           FROM thread_context_streams stream
-          WHERE stream.tenant_id=$1 AND stream.thread_id=$2`,
-        [rollback.scope.tenantId, rollback.scope.threadId],
-      );
-      expect(state.rows[0]).toEqual({
-        next_sequence: "1",
-        entries: "0",
-        anchors: "0",
-        profiles: "0",
-      });
-    });
   });
 
   it("Workspace journal complete 的 COMMIT 响应未知映射为 unknown，原 identity 可读回", async () => {
@@ -1861,62 +1238,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         leaseMilliseconds: 30_000,
       }),
     ).resolves.toEqual([]);
-  });
-
-  it("0042 回退后可从 durable outbox 重建动态 Tenant 控制面及双角色 ACL", async () => {
-    const label = `dynamic-migration-${suffix}`;
-    const f = await serialQueueFixture(label);
-    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
-    const inputText = "迁移往返后仍可发现的动态 Tenant 任务";
-    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
-    const created = await creation.createQueuedRun({
-      scope: f.tenantScope,
-      run: createRun({ id: runId(`dynamic-migration-run-${suffix}`), thread: f.thread, now }),
-      thread: f.thread,
-      inputText,
-      idempotency: {
-        key: `dynamic-migration-key-${suffix}`,
-        requestHash: requestDigest(`${f.thread.id}\u0000${inputText}`),
-      },
-    });
-    expect(created.outcome).toBe("created");
-
-    const down = await migrateDown(migrator, {
-      runtimeRole,
-      migratorRole,
-      skillPublisherRole,
-      workerCoordinatorRole,
-      teamCoordinatorRole,
-      adminControlRole,
-      schema,
-      targetVersion: 41,
-      allowDestructive: true,
-      environment: "test",
-    });
-    expect(down.at(-1)?.version).toBe(41);
-    const removed = await admin.query<{ readonly present: boolean }>(
-      "SELECT to_regclass(format('%I.worker_tenant_assignments',$1::text)) IS NOT NULL AS present",
-      [schema],
-    );
-    expect(removed.rows[0]?.present).toBe(false);
-
-    const restored = await migrateUp(migrator, {
-      runtimeRole,
-      migratorRole,
-      skillPublisherRole,
-      workerCoordinatorRole,
-      teamCoordinatorRole,
-      adminControlRole,
-      schema,
-    });
-    expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);
-    const assignment = await workerTenantAssignments.claim({
-      workerId: "dynamic-migration-worker",
-      leaseMilliseconds: 30_000,
-    });
-    expect(assignment).toMatchObject({ tenantId: f.tenantScope.tenantId, generation: 1 });
-    if (assignment === undefined) throw new Error("迁移回填没有恢复动态 Tenant assignment");
-    await expect(workerTenantAssignments.settle(assignment)).resolves.toBe(true);
   });
 
   it("V2 并发 100 次 follow-up 只激活一个 Run，重试不复制 receipt、Run 或 dispatch", async () => {
@@ -2777,23 +2098,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
   it.each(["pending", "expired", "submitted"] as const)(
     "关闭记忆将 %s 任务收尾为 skipped，释放租户租约并立即领取新 Run",
     async (initialState) => {
-      const migrationContext = {
-        runtimeRole,
-        migratorRole,
-        skillPublisherRole,
-        workerCoordinatorRole,
-        teamCoordinatorRole,
-        adminControlRole,
-        schema,
-      };
-      if (initialState === "pending") {
-        await migrateDown(migrator, {
-          ...migrationContext,
-          targetVersion: 58,
-          allowDestructive: true,
-          environment: "test",
-        });
-      }
       const base = await serialQueueFixture(`memory-skip-${initialState}-${suffix}`);
       const sourceRun = createRun({
         id: runId(`memory-source-${initialState}-${suffix}`),
@@ -2919,9 +2223,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           ),
         ),
       ).rejects.toMatchObject({ code: "23514" });
-      if (initialState === "pending") {
-        await migrateUp(migrator, migrationContext);
-      }
       const eventId = "ba2763d6-284d-4d01-b5ca-cac9f98d99db";
       if (initialState === "submitted") {
         await store.submitted(claim, { eventId, status: "PENDING" });
@@ -2985,21 +2286,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         claim_expires_at: null,
         claim_generation: "2",
       });
-      if (initialState === "pending") {
-        await expect(
-          migrateDown(migrator, {
-            ...migrationContext,
-            targetVersion: 58,
-            allowDestructive: true,
-            environment: "test",
-          }),
-        ).rejects.toMatchObject({ code: "UNEXPECTED" });
-        const protection = await admin.query(
-          "SELECT relforcerowsecurity FROM pg_class WHERE oid=to_regclass($1)",
-          [`${schema}.memory_ingestion_outbox`],
-        );
-        expect(protection.rows[0]?.relforcerowsecurity).toBe(true);
-      }
       const settled = await workerCoordinator.query(
         "SELECT state,lease_expires_at FROM worker_tenant_assignments WHERE tenant_id=$1",
         [f.scope.tenantId],
@@ -3034,14 +2320,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
 
   it("阶段 2 让 Run B 只读取激活时冻结的 Run A 历史，重启重建 digest 稳定", async () => {
     const f = await serialQueueFixture(`context-v2-${suffix}`);
-    await withTenantTransaction(runtime, f.tenantScope, (client) =>
-      client.query(
-        `INSERT INTO thread_continuity_profiles(
-           tenant_id,thread_id,rollout_source,cohort_bucket,rollout_selected,policy_version
-         ) VALUES($1,$2,'manual',0,true,0)`,
-        [f.tenantScope.tenantId, f.thread.id],
-      ),
-    );
     const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
     const contextPersistence = new PgExecutionPersistence(runtime, {
       threadContextWriteEnabled: true,
@@ -4038,15 +3316,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       tenant: personal.tenant,
       membership: personal.ownerMembership,
     });
-    await withTenantTransaction(migrator, { tenantId: scope.tenantId }, (client) =>
-      client.query(
-        `INSERT INTO tenant_thread_continuity_policies(
-           tenant_id,policy_version,v2_read_enabled,new_thread_rollout_basis_points,
-           legacy_anchor_read_enabled
-         ) VALUES ($1,7,true,10000,false)`,
-        [scope.tenantId],
-      ),
-    );
     const thread = createThread({
       id: threadId(`thread-id-${label}`),
       tenant: personal.tenant,
@@ -4103,7 +3372,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       }),
     ).resolves.toEqual({ outcome: "key_conflict" });
     const facts = await withTenantTransaction(runtime, scope, async (client) => {
-      const [threads, workspaces, profile] = await Promise.all([
+      const [threads, workspaces] = await Promise.all([
         client.query<{ count: string }>(
           "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1",
           [scope.tenantId],
@@ -4112,31 +3381,13 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1",
           [scope.tenantId],
         ),
-        client.query<{
-          readonly rollout_source: string;
-          readonly rollout_selected: boolean;
-          readonly policy_version: string;
-        }>(
-          `SELECT rollout_source,rollout_selected,policy_version::text
-             FROM thread_continuity_profiles WHERE tenant_id=$1 AND thread_id=$2`,
-          [scope.tenantId, thread.id],
-        ),
       ]);
       return {
         threads: threads.rows[0]?.count,
         workspaces: workspaces.rows[0]?.count,
-        profile: profile.rows[0],
       };
     });
-    expect(facts).toEqual({
-      threads: "1",
-      workspaces: "1",
-      profile: {
-        rollout_source: "new_thread",
-        rollout_selected: true,
-        policy_version: "7",
-      },
-    });
+    expect(facts).toEqual({ threads: "1", workspaces: "1" });
   });
 
   it("Thread 创建直接命中 TransactionCommitUnknownError 后按原键精确读回", async () => {
@@ -7341,178 +6592,5 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         leaseMs: 210_000,
       }),
     ).toBeUndefined();
-  });
-
-  it("0016 写入 workspace Artifact 事实后可安全回退并重新迁移", async () => {
-    const workspaceRoot = await admin.query<{
-      readonly tenant_id: string;
-      readonly id: string;
-    }>(
-      `SELECT tenant_id,id FROM "${schema}".artifact_publications
-        WHERE blob_purpose='workspace' ORDER BY id LIMIT 1`,
-    );
-    const root = workspaceRoot.rows[0];
-    if (root === undefined) throw new Error("缺少 workspace Artifact 回退 fixture");
-    const legacyArtifactId = `workspace-legacy-artifact-${suffix}`;
-    const legacyCorrectionId = `workspace-legacy-correction-${suffix}`;
-    await withTenantTransaction(runtime, { tenantId: tenantId(root.tenant_id) }, async (client) => {
-      await client.query(
-        `INSERT INTO artifact_publications(
-           tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,
-           resource_id,resource_version_id,replaces_artifact_id,name,purpose,
-           deliverable_key,status,blob_reference_id,blob_purpose,blob_lifecycle_id,
-           blob_incarnation_id,physical_object_key,digest,media_type,size,
-           source_workspace_id,workspace_revision_id,source_relative_path,created_at,updated_at
-         )
-         SELECT tenant_id,$2,thread_id,run_id,attempt_id,workspace_id,root_run_id,
-                resource_id,resource_version_id,NULL,'兼容旧发布',purpose,
-                deliverable_key,'publishing',blob_reference_id,blob_purpose,blob_lifecycle_id,
-                blob_incarnation_id,physical_object_key,digest,media_type,size,
-                source_workspace_id,workspace_revision_id,source_relative_path,
-                clock_timestamp(),clock_timestamp()
-           FROM artifact_publications WHERE tenant_id=$1 AND id=$3`,
-        [root.tenant_id, legacyArtifactId, root.id],
-      );
-      await client.query(
-        `INSERT INTO artifact_publication_commands(
-           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
-           idempotency_key,command_digest,artifact_id
-         )
-         SELECT tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
-                $3,$4,$2 FROM artifact_publications WHERE tenant_id=$1 AND id=$2`,
-        [root.tenant_id, legacyArtifactId, `legacy-${suffix}`, "7".repeat(64)],
-      );
-      await client.query(
-        `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target)
-         VALUES($1,$2,'failed')`,
-        [root.tenant_id, legacyArtifactId],
-      );
-      await client.query(
-        `INSERT INTO artifact_publications(
-           tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,
-           resource_id,resource_version_id,replaces_artifact_id,name,purpose,
-           deliverable_key,status,blob_reference_id,blob_purpose,blob_lifecycle_id,
-           blob_incarnation_id,physical_object_key,digest,media_type,size,
-           source_workspace_id,workspace_revision_id,source_relative_path,created_at,updated_at
-         )
-         SELECT tenant_id,$2,thread_id,run_id,attempt_id,workspace_id,root_run_id,
-                resource_id,resource_version_id,$3,'兼容旧发布修正',purpose,
-                deliverable_key,'publishing',blob_reference_id,blob_purpose,blob_lifecycle_id,
-                blob_incarnation_id,physical_object_key,digest,media_type,size,
-                source_workspace_id,workspace_revision_id,source_relative_path,
-                clock_timestamp(),clock_timestamp()
-           FROM artifact_publications WHERE tenant_id=$1 AND id=$3`,
-        [root.tenant_id, legacyCorrectionId, legacyArtifactId],
-      );
-      await client.query(
-        `INSERT INTO artifact_publication_commands(
-           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
-           idempotency_key,command_digest,artifact_id
-         )
-         SELECT tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
-                $3,$4,$2 FROM artifact_publications WHERE tenant_id=$1 AND id=$2`,
-        [root.tenant_id, legacyCorrectionId, `legacy-correction-${suffix}`, "8".repeat(64)],
-      );
-      await client.query(
-        `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target)
-         VALUES($1,$2,'published')`,
-        [root.tenant_id, legacyCorrectionId],
-      );
-    });
-    const workspaceFactsBefore = await admin.query<{
-      readonly artifact_count: number;
-      readonly resource_version_count: number;
-    }>(
-      `SELECT
-         (SELECT count(*)::int FROM "${schema}".artifact_publications
-           WHERE blob_purpose='workspace') AS artifact_count,
-         (SELECT count(*)::int FROM "${schema}".resource_versions
-           WHERE blob_purpose='workspace') AS resource_version_count`,
-    );
-    expect(workspaceFactsBefore.rows[0]?.artifact_count).toBeGreaterThan(0);
-    expect(workspaceFactsBefore.rows[0]?.resource_version_count).toBeGreaterThan(0);
-    // 此用例验证 0016 的可逆性；共享集成 schema 中其他用例产生的 0018+ 事实必须先从
-    // 一次性测试数据库清空，否则各阶段的防破坏 down guard 会正确拒绝跨功能回退。
-    await admin.query(
-      `TRUNCATE TABLE
-         "${schema}".thread_continuity_metric_observations,
-         "${schema}".thread_continuity_profiles,
-         "${schema}".thread_context_legacy_backfill_items,
-         "${schema}".thread_context_legacy_anchors,
-         "${schema}".sandbox_lifecycle_effects,
-         "${schema}".thread_sandbox_leases,
-         "${schema}".thread_sandbox_sessions,
-         "${schema}".thread_input_receipt_events,
-         "${schema}".thread_follow_up_queue,
-         "${schema}".thread_input_receipts,
-         "${schema}".memory_ingestion_outbox,
-         "${schema}".run_workspace_results,
-         "${schema}".thread_context_entries
-       CASCADE`,
-    );
-    const artifactDown = await migrateDown(migrator, {
-      runtimeRole,
-      migratorRole,
-      skillPublisherRole,
-      workerCoordinatorRole,
-      teamCoordinatorRole,
-      adminControlRole,
-      schema,
-      targetVersion: 15,
-      allowDestructive: true,
-      environment: "test",
-    });
-    expect(artifactDown.at(-1)?.version).toBe(15);
-    const workspaceFactsAfter = await admin.query<{
-      readonly artifact_count: number;
-      readonly resource_version_count: number;
-      readonly restored_checks: number;
-    }>(
-      `SELECT
-         (SELECT count(*)::int FROM "${schema}".artifact_publications
-           WHERE blob_purpose='workspace') AS artifact_count,
-         (SELECT count(*)::int FROM "${schema}".resource_versions
-           WHERE blob_purpose='workspace') AS resource_version_count,
-         (SELECT count(*)::int FROM pg_constraint
-           WHERE conname IN (
-             'artifact_publications_blob_purpose_check',
-             'resource_versions_blob_purpose_check'
-           ) AND connamespace='"${schema}"'::regnamespace) AS restored_checks`,
-    );
-    expect(workspaceFactsAfter.rows[0]).toEqual({
-      artifact_count: 0,
-      resource_version_count: 0,
-      restored_checks: 2,
-    });
-    const legacyFactsAfter = await admin.query<{ readonly count: number }>(
-      `SELECT (
-         (SELECT count(*) FROM "${schema}".artifact_publications WHERE id=ANY($1::text[]))
-         +(SELECT count(*) FROM "${schema}".artifact_publication_commands
-            WHERE artifact_id=ANY($1::text[]))
-         +(SELECT count(*) FROM "${schema}".artifact_publication_settlements
-            WHERE artifact_id=ANY($1::text[]))
-       )::int AS count`,
-      [[legacyArtifactId, legacyCorrectionId]],
-    );
-    expect(legacyFactsAfter.rows[0]?.count).toBe(0);
-    const restored = await migrateUp(migrator, {
-      runtimeRole,
-      migratorRole,
-      skillPublisherRole,
-      workerCoordinatorRole,
-      teamCoordinatorRole,
-      adminControlRole,
-      schema,
-    });
-    expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);
-    const acl = await admin.query<{
-      readonly select_allowed: boolean;
-      readonly update_allowed: boolean;
-    }>(
-      `SELECT has_table_privilege($1::text, format('%I.workspace_artifact_publication_intents', $2::text), 'SELECT') AS select_allowed,
-              has_table_privilege($1::text, format('%I.workspace_artifact_publication_intents', $2::text), 'UPDATE') AS update_allowed`,
-      [runtimeRole, schema],
-    );
-    expect(acl.rows[0]).toEqual({ select_allowed: true, update_allowed: false });
   });
 });

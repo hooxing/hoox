@@ -98,7 +98,7 @@ Agent Worker 使用有界并发而不是“单任务串行”或无限异步启�
 
 Tenant assignment 负责发现和公平选择。启用维护的 Worker 先领取并启动至多一个 Run，再把 assignment 的收敛交给有界后台维护；没有维护时仍在执行前释放 assignment。单 Worker 进程最多并行维护四个 Tenant，同 Tenant 在单进程内不并发维护。维护失败、Blob 部分收敛或满批，以及维护容量不足时保留 claimed 租约，依靠到期重领；停机先停止新生产者，再等待在途 Run、已启动维护和 settle。
 
-首个已领取 Run 和其他 Tenant 的发现不等待慢维护；同 Tenant 的后续领取仍可能等待维护结束或 assignment 租约到期。维护租约不以 Run 完成为释放条件，数据库中的短时调度锁也不包住模型、Sandbox 或工具执行。该取舍保留了已有恢复机会，尚未引入独立 Blob 定时唤醒机制，见[维护调度边界](../decisions/20260905225738-worker-background-maintenance.md)。
+首个已领取 Run 和其他 Tenant 的发现不等待慢维护；同 Tenant 的后续领取仍可能等待维护结束或 assignment 租约到期。维护租约不以 Run 完成为释放条件，数据库中的短时调度锁也不包住模型、Sandbox 或工具执行。该取舍保留了已有恢复机会，尚未引入独立 Blob 定时唤醒机制，见[Run 执行与恢复](run-execution-and-recovery.md)。
 
 ## 进程职责
 
@@ -111,7 +111,7 @@ Tenant assignment 负责发现和公平选择。启用维护的 Worker 先领取
 | Admin API | 模型、记忆、配置、统计及 Skill 发布管理；内部隔离两套数据库连接 | 复用普通 Runtime 权限或合并 Admin Control 与 Skill Publisher 数据库角色 |
 | Trajectory Viewer | 仅在受控 development 环境读取内部诊断 | 暴露为公开产品 API 或生产默认入口 |
 
-后台统计通过 Migrator 拥有的受限视图跨 Tenant 聚合。底表保留 FORCE RLS；专属读取策略只面向 Migrator，并要求有效平台操作者，用户目录另要求管理员。Admin Control 不增加业务底表读取权限，普通 Runtime 仍按 Tenant 隔离。策略在数据库角色引导时重绑定至当前 Migrator，具体取舍见 [后台投影与 FORCE RLS](../decisions/20260905180644-admin-projection-forced-rls.md)。
+后台统计通过 Migrator 拥有的受限视图跨 Tenant 聚合。底表保留 FORCE RLS；专属读取策略只面向 Migrator，并要求有效平台操作者，用户目录另要求管理员。Admin Control 不增加业务底表读取权限，普通 Runtime 仍按 Tenant 隔离。策略在数据库角色引导时重绑定至当前 Migrator，具体取舍见 [后台控制面与运行配置](admin-control-plane.md)。
 
 ## 分层与依赖方向
 
@@ -160,4 +160,5 @@ vendor
 - [配置参考](../reference/configuration.md)
 - [开发 API 契约](../reference/development-api.md)
 - [生产就绪说明](../operations/production-readiness.md)
-- [架构决策](../decisions/README.md)
+- [Run 执行与恢复](run-execution-and-recovery.md)
+- [持久化与数据库边界](persistence-and-database.md)

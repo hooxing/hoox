@@ -5,10 +5,6 @@
 - 适用范围：`runtime-ts/apps/web`、`runtime-ts/apps/admin-web`、共享品牌资产与后续 UI 基础包
 - 目标读者：负责 Hoox 品牌资产、Web 工作台、Admin Web 和视觉验收的开发者与维护者
 - 当前事实入口：[品牌资产参考](../reference/brand-assets.md) · [UI 主题 Token](../reference/ui-theme.md)
-- 既有决策：[共享 Hoox 品牌资产并替代字母占位](../decisions/20260901003001-shared-brand-assets-and-product-surfaces.md)
-- 实施决策：[共享 UI 主题 Token 与渐进迁移边界](../decisions/20260901104943-shared-ui-theme-token-boundary.md)
-- 品牌衍生决策：[固定品牌栅格衍生资产与入口尺寸](../decisions/20260901110046-raster-brand-derivative-contract.md)
-- 矢量候选决策：[手工几何重建品牌矢量候选](../decisions/20260901114930-hand-rebuilt-brand-vector-candidates.md)
 
 ## 1. 生命周期与权威边界
 
@@ -35,7 +31,7 @@ Hoox 以现有黑绿 Logo 为品牌原点，形成一套可复用、可测试、
 
 - API、数据库、身份、Thread、Run、Artifact、Skill、Automation 或团队领域语义；
 - Web 与 Admin Web 的路由和部署路径；
-- 当前四个公开 PNG 文件名，除非后续 ADR 同时定义兼容路径；
+- 当前四个公开 PNG 文件名，除非品牌资产参考同时定义兼容路径；
 - Logo 的双钩负空间 `H`、相向开口 `O` 和断笔 `X` 图形关系；
 - 第三方 Vendor、Trajectory Web 或非产品调试页面的完整视觉重写；
 - 未经几何复核的自动描摹 SVG；
@@ -235,12 +231,12 @@ Admin Web 与 Web 共享颜色、字体、间距、圆角、阴影和状态 Toke
 - 获取原始矢量设计文件，或手工重建并复核 SVG；
 - 确定透明、单色、favicon、PWA 和 maskable 版本；
 - 增加资产生成脚本和 Alpha/尺寸/安全区测试；
-- 更新品牌参考与 ADR；
+- 更新品牌参考；
 - 保持当前四个 PNG 路径兼容。
 
 ### 切片 1：共享 Token 与静态约束
 
-- 接受共享 UI Token ADR；
+- 确认共享 UI Token 边界并写入 UI 主题参考；
 - 建立颜色、字体、间距、圆角、阴影与动效 Token；
 - 建立 Light 语义映射；
 - 增加检查，禁止 Token 文件外新增颜色字面量；

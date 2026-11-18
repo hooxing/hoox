@@ -70,9 +70,6 @@ export interface ThreadContextReadPort {
 }
 
 export interface ThreadContinuityStatusView {
-  readonly boundary: "new_thread" | "legacy_anchor" | "manual" | "unmigrated";
-  readonly readMode: "legacy" | "v2";
-  readonly anchorState: "none" | "completed";
   readonly queueDepth: number;
   readonly contextSequence: number;
   readonly compactionWindow: number;

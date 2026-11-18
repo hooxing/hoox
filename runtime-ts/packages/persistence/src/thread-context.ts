@@ -20,7 +20,6 @@ import type { Pool, PoolClient } from "pg";
 import type { BlobStore, StableBlobRef } from "./blob-store.js";
 import type { ThreadContextMessageView, ThreadContextReadPort } from "./ports.js";
 import { withTenantTransaction } from "./postgres.js";
-import { isThreadV2ReadEnabled } from "./thread-continuity-rollout.js";
 
 export interface ThreadContextAppendBinding {
   readonly scope: ExecutionScope;
@@ -310,9 +309,6 @@ export class PgThreadContextHistoryRepository implements ThreadContextHistoryPor
             [input.scope.tenantId, input.attemptId, input.scope.runId, input.scope.threadId],
           );
           if (attempt.rowCount !== 1) return { outcome: "unavailable" } as const;
-          if (!(await isThreadV2ReadEnabled(client, input.scope.tenantId, input.scope.threadId))) {
-            return { outcome: "unsupported" } as const;
-          }
           const history = await readCheckpointAwareHistory(
             client,
             this.blobs,
@@ -649,9 +645,6 @@ export class PgThreadContextReadRepository implements ThreadContextReadPort {
           [input.scope.tenantId, input.scope.userId, input.threadId],
         );
         if (authorized.rowCount !== 1) return { outcome: "not_found" } as const;
-        if (!(await isThreadV2ReadEnabled(client, input.scope.tenantId, input.threadId))) {
-          return { outcome: "not_found" } as const;
-        }
         const result = await client.query<ContextRow & { run_id: string | null }>(
           `SELECT sequence::text,run_id,kind,tool_call_id,tool_name,body_inline,body_reference_id,
                   body_sha256,body_size::text,body_incarnation_id::text,

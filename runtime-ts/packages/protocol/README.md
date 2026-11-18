@@ -10,4 +10,4 @@ Protocol 与 Domain 有意解耦：
 
 生产输出 Mapper 位于 `@hoox/protocol-mapper`：把 Domain 显式投影为公开 DTO，并集中归一化公共错误。外部 JSON 的 Schema 校验由接收它的协议适配层负责；持久化数据仍直接通过 Domain 的 `rehydrate*` 校验，不经过公开 DTO。
 
-默认对象 Schema 拒绝额外字段。公开错误不包含内部错误、资源 ID 或 Tenant 存在性信息。Schema 库选择与迁移边界见 `docs/decisions/domain-schema-library.md`。
+默认对象 Schema 拒绝额外字段。公开错误不包含内部错误、资源 ID 或 Tenant 存在性信息。选择 TypeBox 是因为 Schema 本身就是 JSON Schema，可同时推导静态类型与运行时校验；领域包不依赖 TypeBox，协议包也不导入领域包。

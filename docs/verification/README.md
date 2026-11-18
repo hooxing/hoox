@@ -9,5 +9,4 @@
 | [部署版本体验与功能测试](2026-09-05-deployment-ux-test.md) | 复查工作台、管理端的布局、交互、配置与真实任务验收问题 | 2026-09-05 部署时点、实测范围和待复核项 |
 | [已复核问题修复验证](2026-09-05-reviewed-fixes-validation.md) | 核对指定问题的修复与数据库权限回归结果 | 修复分支、通过用例和已复现的基线失败，不含线上部署验收 |
 | [Workspace Artifact 端到端验证](2026-07-30-workspace-artifact-e2e.md) | 追溯 Workspace 到 Artifact 纵向链路的早期验收 | 文档记录的提交与环境 |
-| [GAIA Runtime 原生评测](gaia-native-evaluation.md) | 比较特定模型、工具和 Runtime 配置下的 GAIA 结果 | 文档记录的评测配置，不代表未来版本持续结果 |
 | [Spike 记录](../spikes/README.md) | 查找实现前的能力实验和风险验证 | 对应实验时点 |

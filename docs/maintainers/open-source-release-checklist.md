@@ -8,12 +8,12 @@
 - [x] 添加项目级 Apache License 2.0、NOTICE 和第三方许可证说明。
 - [x] 添加贡献指南、安全策略、行为准则、支持说明和治理规则。
 - [x] 添加 Bug、Feature Request 和 PR 模板。
-- [x] 建立架构、参考、开发、运维、维护者、计划、决策、验证和历史文档分层。
+- [x] 建立架构、参考、开发、运维、维护者、计划和验证文档分层。
 - [x] 根 `package.json` 包含 description、license、repository、homepage、bugs 和 keywords。
 - [x] README 中明确 `0.x` 成熟度和未完成的生产验收。
-- [x] ADR 规则统一为北京时间时间戳，历史重复编号保留但不再新增。
+- [x] 设计约束统一维护在 `docs/architecture` 现状文档，不另建 ADR 目录。
 - [x] 文档本地文件链接与锚点检查通过。
-- [x] development 与 production 配置契约、SBOM 和许可证 Gate 通过。
+- [x] development 与 production 配置契约校验通过。
 
 ## 本地敏感信息与历史
 
@@ -40,7 +40,7 @@
 
 - [ ] 确定首个公开 tag、版本说明和兼容性承诺。
 - [ ] 从受保护提交执行 clean install、完整 CI 和所需真实外部 Gate。
-- [ ] 生成并校验 SBOM、许可证和第三方来源证据。
+- [ ] 复核许可证和第三方来源证据；如需对外发布镜像，补充 SBOM。
 - [ ] 发布版本说明，明确已知限制、升级方式、安全渠道和生产就绪边界。
 - [ ] 验证匿名用户可以阅读 README、文档、许可证、Issue 模板和安全入口。
 

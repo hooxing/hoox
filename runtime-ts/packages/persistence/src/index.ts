@@ -66,7 +66,7 @@ export {
 } from "./s3-blob-store.js";
 export * from "./skill-publication-object-store.js";
 export * from "./thread-context.js";
-export * from "./thread-continuity-rollout.js";
+export * from "./thread-continuity.js";
 export * from "./thread-sandbox-session.js";
 export * from "./tool-observation-rollout-adapter.js";
 export * from "./trace-blob-persistence-adapter.js";

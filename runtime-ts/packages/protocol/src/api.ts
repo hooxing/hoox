@@ -253,14 +253,6 @@ export type ThreadContextPageDto = Static<typeof ThreadContextPageDtoSchema>;
 
 export const ThreadContinuityStatusDtoSchema = Type.Object(
   {
-    boundary: Type.Union([
-      Type.Literal("new_thread"),
-      Type.Literal("legacy_anchor"),
-      Type.Literal("manual"),
-      Type.Literal("unmigrated"),
-    ]),
-    readMode: Type.Union([Type.Literal("legacy"), Type.Literal("v2")]),
-    anchorState: Type.Union([Type.Literal("none"), Type.Literal("completed")]),
     queueDepth: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
     contextSequence: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
     compactionWindow: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),

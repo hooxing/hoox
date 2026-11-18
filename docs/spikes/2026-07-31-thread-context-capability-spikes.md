@@ -77,7 +77,7 @@ create(TTL=120)
 - pause/connect/terminate 的网络超时、结果未知与状态查询收敛；
 - 并发 pause/connect、pausing 时输入和后台进程漂移。
 
-因此 ADR-0066 的 retention、TTL、操作超时、重试与 manifest 校验仍必须保持配置化或待决。
+因此当时 Thread Sandbox 生命周期设计的 retention、TTL、操作超时、重试与 manifest 校验仍必须保持配置化或待决。
 
 ## 2. Provider `/chat/completions` 实测
 
@@ -103,7 +103,7 @@ create(TTL=120)
 - 尚未验证 reasoning、图片、音频、Provider 特殊 compaction item、模型切换和远程 compaction；
 - 尚未完成 adapter 规范化后“在线 history digest = 重启恢复 digest”的实现级验证。
 
-因此 ADR-0065 保持事实 kind 与 wire role 分离；阶段 0 仍需审阅最终 adapter capability matrix。
+因此当时 Compaction 设计保持事实 kind 与 wire role 分离；阶段 0 仍需审阅最终 adapter capability matrix。
 
 ## 3. 对阶段 0 Gate 的影响
 

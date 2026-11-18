@@ -18,7 +18,7 @@ Hoox 采用维护者审阅和证据驱动的协作方式。治理目标是保护
 
 ### Release Manager
 
-负责一次发布的镜像、SBOM、迁移、观察窗口和回滚证据。该角色可以由 Maintainer 临时承担，但发布清单中的责任必须明确。
+负责一次发布的镜像、迁移、观察窗口和回滚证据。该角色可以由 Maintainer 临时承担，但发布记录中的责任必须明确。
 
 ### Security Responder
 
@@ -45,7 +45,7 @@ Maintainer 不应绕过失败的必需检查。紧急安全修复如果需要特
 
 ## 发布
 
-发布依据受保护分支的不可变提交和镜像 digest，不在目标环境现场重建。Release Manager 按[生产发布清单](deploy/production-release-checklist.md)记录迁移、SBOM、观察阈值和回滚证据。
+发布依据受保护分支的不可变提交和镜像 digest，不在目标环境现场重建。Release Manager 按[生产就绪说明](docs/operations/production-readiness.md)记录迁移、观察阈值和回滚证据。
 
 ## 权限与继任
 

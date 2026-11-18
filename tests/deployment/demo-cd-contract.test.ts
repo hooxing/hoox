@@ -83,14 +83,7 @@ describe("Demo 持续部署契约", () => {
   });
 
   it("CD 所依赖的主 CI 同步 pnpm hook，并完整预置 Admin Control 数据库角色", () => {
-    for (const dockerfilePath of [
-      "Dockerfile.production-api-gate",
-      "Dockerfile.production-scheduler-gate",
-      "Dockerfile.production-worker-gate",
-      "Dockerfile.pi-prompt-gate",
-    ]) {
-      expect(source(dockerfilePath)).toContain(".pnpmfile.cjs ./");
-    }
+    expect(source("Dockerfile.demo")).toContain(".pnpmfile.cjs ./");
 
     const ci = source(".github/workflows/ci.yml");
     expect(ci).toMatch(

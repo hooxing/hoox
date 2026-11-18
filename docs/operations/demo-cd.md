@@ -1,6 +1,6 @@
 # Demo 单机持续部署
 
-本页供维护者在受控演示环境发布 Hoox。该路径用于功能测试和演示，不是生产发布替代品；生产上线仍必须遵守[生产就绪说明](production-readiness.md)和[生产发布清单](../../deploy/production-release-checklist.md)。
+本页供维护者在受控演示环境发布 Hoox。该路径用于功能测试和演示，不是生产发布替代品；生产上线仍必须完成[生产就绪说明](production-readiness.md)中的目标环境验收。
 
 ## 当前拓扑
 

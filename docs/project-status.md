@@ -14,9 +14,9 @@ Hoox 目前处于 `0.x` 开发阶段。本页只描述仓库当前能够证明�
 - Skill 管理、发布目录和独立管理面。
 - 个人/团队双空间、Owner/Admin/Member 管理、团队任务分支发布、跨空间文件副本、Tenant Skill 与动态 Worker 调度。
 - 内部无损轨迹、逻辑会话查看和受控模型报文诊断。
-- API、Scheduler、Worker 的生产配置契约、非 root runtime-only 容器 Gate、SBOM、许可证与发布清单。
+- API、Scheduler、Worker 的生产配置契约与生产依赖漏洞审计；仓库不提供生产镜像。
 
-这些能力由不同层级的单元测试、跨包测试、真实 PostgreSQL 黑盒、显式外部服务冒烟或容器 Gate 覆盖。测试入口见[命令参考](reference/commands.md)。
+这些能力由不同层级的单元测试、跨包测试、真实 PostgreSQL 黑盒或显式外部服务冒烟覆盖。测试入口见[命令参考](reference/commands.md)。
 
 ## 当前最适合的用途
 

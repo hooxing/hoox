@@ -1,3 +1,0 @@
-# 仅由 production API 容器 Gate 使用；canary 若进入 build context，此 COPY 会意外成功。
-FROM scratch
-COPY .env.production-api-gate-canary /proof/.env.production-api-gate-canary

@@ -13,7 +13,7 @@
 | `corepack pnpm format:check` | 只检查格式 |
 | `corepack pnpm lint` | 执行 Biome lint |
 | `corepack pnpm typecheck` | 构建并执行根与各包类型检查 |
-| `corepack pnpm toolchain:check` | 校验 Node.js、pnpm、CI 与 Docker 工具链版本契约 |
+| `corepack pnpm toolchain:check` | 校验 Node.js、pnpm、CI 与 Dockerfile 工具链版本契约 |
 
 ## 测试与工程 Gate
 
@@ -24,8 +24,6 @@
 | `corepack pnpm check` | Compose 配置解析 | 单次拓扑构建后复用产物执行格式、lint、补充类型检查、测试和 development 配置检查 |
 | `corepack pnpm check:clean-workspace` | Compose 配置解析 | 删除全部 Workspace `dist` 后执行单次构建的完整工程 Gate |
 | `corepack pnpm test:process-runtime` | 否 | API、Worker、Scheduler、统一 Admin API 的进程生命周期 |
-| `corepack pnpm test:process:container` | Docker | Linux 最小容器进程 Gate |
-| `corepack pnpm test:pi-prompt:container` | Docker | Pi Prompt 与能力清单容器 Gate |
 
 日常小改动执行受影响包测试、`format:check`、`lint` 和类型检查即可；跨 Workspace 依赖、构建、发布或无法确定影响范围时执行完整 Gate。
 
@@ -35,6 +33,7 @@
 | --- | --- |
 | `corepack pnpm config:check` | 校验 `.env.example` 与 development Compose 契约 |
 | `corepack pnpm config:check:production` | 校验 production 环境变量示例与契约 |
+| `corepack pnpm security:audit:production` | 审计生产依赖漏洞（访问 npm registry） |
 
 校验器只允许输出变量名和稳定错误分类，不能输出真实值。
 
@@ -145,21 +144,6 @@ corepack pnpm eval:gaia:native -- --limit 3
 ```
 
 该入口输出未评分的 Runtime 能力证据，不包含 GAIA 标准答案，也不是官方分数。见[GAIA 说明](../verification/gaia-native-evaluation.md)。
-
-## 供应链与 Production Gate
-
-```powershell
-corepack pnpm config:check:production
-corepack pnpm security:audit:production
-corepack pnpm supply-chain:check
-corepack pnpm license:check
-corepack pnpm release:check
-corepack pnpm test:production-api:container
-corepack pnpm test:production-scheduler:container
-corepack pnpm test:production-worker:container
-```
-
-`corepack pnpm check:production` 串联 production 配置、生产依赖漏洞扫描、供应链与许可证、发布契约和三个容器 Gate。`license:check` 是供应链检查的兼容入口，聚合 Gate 不会重复执行同一个扫描脚本。这些命令需要 Docker，但仍不能替代真实基础设施 readiness。见[生产就绪说明](../operations/production-readiness.md)。
 
 ## 腾讯云 AGS 真实冒烟
 

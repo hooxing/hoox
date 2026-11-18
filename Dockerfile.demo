@@ -1,4 +1,4 @@
-# Demo 镜像只用于受控演示环境；生产发布继续使用三个 production gate Dockerfile。
+# Demo 镜像只用于受控演示环境，不作为生产发布镜像。
 FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS build
 
 WORKDIR /opt/hoox

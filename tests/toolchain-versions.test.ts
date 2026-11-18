@@ -64,10 +64,8 @@ describe("工具链版本契约", () => {
 
   it("CI、Docker 与 pnpm 的重复声明发生漂移时失败关闭", () => {
     const input = readToolchainVersionInputs();
-    const piPromptGate = input.dockerfiles.find(
-      (dockerfile) => dockerfile.name === "Dockerfile.pi-prompt-gate",
-    );
-    expect(piPromptGate).toBeDefined();
+    const demoImage = input.dockerfiles.find((dockerfile) => dockerfile.name === "Dockerfile.demo");
+    expect(demoImage).toBeDefined();
 
     expect(
       validateToolchainVersions({
@@ -77,12 +75,13 @@ describe("工具链版本契约", () => {
           "node-version: 24.17.0",
         ),
         dockerfiles: input.dockerfiles.map((dockerfile) =>
-          dockerfile.name === "Dockerfile.pi-prompt-gate"
+          dockerfile.name === "Dockerfile.demo"
             ? {
                 ...dockerfile,
-                content: dockerfile.content
-                  .replace("node:24.18.0", "node:24.17.0")
-                  .replace("pnpm@10.15.1", "pnpm@10.14.0"),
+                content: [
+                  dockerfile.content.replace("node:24.18.0", "node:24.17.0"),
+                  "RUN corepack prepare pnpm@10.14.0 --activate",
+                ].join("\n"),
               }
             : dockerfile,
         ),
@@ -91,8 +90,8 @@ describe("工具链版本契约", () => {
       expect.arrayContaining([
         "CI 中所有 setup-node 步骤都必须读取 .node-version",
         "CI 不得重复硬编码 Node.js 版本",
-        "Dockerfile.pi-prompt-gate 的 Node.js 基础镜像版本不一致",
-        "Dockerfile.pi-prompt-gate 的 pnpm 版本不一致",
+        "Dockerfile.demo 的 Node.js 基础镜像版本不一致",
+        "Dockerfile.demo 的 pnpm 版本不一致",
       ]),
     );
   });

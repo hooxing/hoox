@@ -16,16 +16,15 @@ jobs:
   verify:
     name: 工程基线校验
     if: ${{ always() }}
-    needs: [engineering-checks, pi-prompt-gate]
+    needs: [engineering-checks]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: 确认工程与 Pi 容器检查均成功
+      - name: 确认工程检查成功
         env:
           ENGINEERING_RESULT: ${{ needs.engineering-checks.result }}
-          PI_PROMPT_RESULT: ${{ needs.pi-prompt-gate.result }}
         # 跳过、取消和失败都不能让兼容旧名称的合并门禁显示成功。
-        run: test "$ENGINEERING_RESULT" = success && test "$PI_PROMPT_RESULT" = success
+        run: test "$ENGINEERING_RESULT" = success
 
   engineering-checks:
     name: 工程构建与测试
@@ -56,115 +55,8 @@ jobs:
         # 回归脚本清除所有 workspace 生成物；typecheck 必须按依赖拓扑自行构建，不能依赖缓存或前序任务残留。
         run: pnpm check:clean-workspace
 
-      - name: Linux 最小容器启动门禁
-        run: pnpm test:process:container
-
-  pi-prompt-gate:
-    name: Linux Pi Prompt 容器 Gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: 安装 Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-
-      - name: 初始化 Pi Prompt Gate Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-
-      - name: 构建 Pi Prompt Gate 镜像
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
-        with:
-          context: .
-          file: Dockerfile.pi-prompt-gate
-          load: true
-          tags: hoox/pi-prompt-gate:${{ github.sha }}
-          cache-from: type=gha,scope=hoox-pi-prompt-gate
-          cache-to: type=gha,mode=max,scope=hoox-pi-prompt-gate
-
-      - name: Linux Pi Prompt 与能力清单容器门禁
-        env:
-          PI_PROMPT_GATE_IMAGE: hoox/pi-prompt-gate:${{ github.sha }}
-        run: node scripts/run-pi-prompt-container-gate.mjs
-
-  production-gates:
-    name: Production 静态与容器 Gate
-    if: ${{ always() }}
-    needs: [production-static, production-containers]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: 确认静态检查与全部生产容器均成功
-        env:
-          STATIC_RESULT: ${{ needs.production-static.result }}
-          CONTAINERS_RESULT: ${{ needs.production-containers.result }}
-        run: test "$STATIC_RESULT" = success && test "$CONTAINERS_RESULT" = success
-
-  production-static:
-    name: Production 发布静态检查
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: 检出代码
-        # actions/checkout v4.2.2
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: 安装 pnpm
-        uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d
-        with:
-          run_install: false
-
-      - name: 安装 Node.js
-        # actions/setup-node v4.4.0
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-
-      - name: 冻结安装依赖
-        run: pnpm install --frozen-lockfile
-
-      - name: Production 配置、漏洞、SBOM、许可证与发布静态 Gate
-        run: pnpm config:check:production && pnpm security:audit:production && pnpm supply-chain:check && pnpm release:check
-
-  production-containers:
-    name: Production 容器（${{ matrix.role }}）
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        role: [api, scheduler, worker]
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: 安装 Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-
-      - name: 初始化 Production Gate Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-
-      - name: 构建 Production Gate 镜像
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
-        with:
-          context: .
-          file: Dockerfile.production-${{ matrix.role }}-gate
-          load: true
-          cache-from: type=gha,scope=hoox-production-${{ matrix.role }}
-          cache-to: type=gha,mode=max,scope=hoox-production-${{ matrix.role }}
-
-      - name: 验证 Production 容器边界
-        env:
-          PRODUCTION_GATE_IMAGE: ${{ steps.build.outputs.imageid }}
-          PRODUCTION_GATE_ROLE: ${{ matrix.role }}
-        run: node "scripts/production-${PRODUCTION_GATE_ROLE}-container-gate.mjs"
+      - name: 生产配置契约与依赖漏洞审计
+        run: pnpm config:check:production && pnpm security:audit:production
 
   process-portability:
     name: 进程骨架（${{ matrix.os }}）

@@ -917,6 +917,8 @@ async function assembleWorkerRuntime(
       runtimeMode === "production"
         ? "hoox-agent-worker-production"
         : "hoox-agent-worker-development",
+    // Worker 每个事件都走同一组带 RLS 的事务查询；复用执行计划可把单笔事务的规划开销降到原来的约 1/10。
+    preparedStatements: true,
   });
   const coordinatorPool = createPostgresPool({
     connectionString: configuration.databaseWorkerCoordinatorUrl,

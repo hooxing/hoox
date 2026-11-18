@@ -2,6 +2,10 @@ import type { RuntimeAgentEvent } from "./events.js";
 
 type DeltaEvent = Extract<RuntimeAgentEvent, { type: "thinking.delta" | "message.delta" }>;
 const FLUSH_BYTES = 1_024;
+const MESSAGE_FLUSH_MS = 50;
+// 每次刷新都是一笔串行持久化事务；思考增量通常折叠展示且单片只有几十字节，
+// 用更长窗口合并可把事务数降到约五分之一，正文窗口保持不变以免影响打字体感。
+const THINKING_FLUSH_MS = 500;
 
 /**
  * 每个订阅独占公开增量缓冲；首段正文立即发布，控制事件始终先排空前驱文字。
@@ -64,7 +68,11 @@ export function subscribeBufferedRuntimeEvents(
     const buffered = { type: event.type, delta: (pending?.delta ?? "") + event.delta };
     pending = buffered;
     if (Buffer.byteLength(buffered.delta, "utf8") >= FLUSH_BYTES) flush();
-    else timer ??= setTimeout(flush, event.type === "message.delta" ? 50 : 100);
+    else
+      timer ??= setTimeout(
+        flush,
+        event.type === "message.delta" ? MESSAGE_FLUSH_MS : THINKING_FLUSH_MS,
+      );
   });
   return () => {
     if (!active) return;

@@ -1439,7 +1439,11 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           join(orphan, "0001_baseline.up.sql"),
         ),
       ]);
-      await writeFile(join(temporary, "0001_baseline.down.sql"), "SELECT 'down 已被篡改';\n", "utf8");
+      await writeFile(
+        join(temporary, "0001_baseline.down.sql"),
+        "SELECT 'down 已被篡改';\n",
+        "utf8",
+      );
       await expect(
         migrateUp(migratorPool, { ...migrationSecurity, directory: temporary }),
       ).rejects.toMatchObject({
@@ -1704,7 +1708,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const target = await createIsolatedMigrationTarget("migration_routine");
     const temporary = await mkdtemp(join(tmpdir(), "hoox-pg-routine-migration-"));
     try {
-      const originalUp = await readFile(join(sourceMigrationDirectory, "0001_baseline.up.sql"), "utf8");
+      const originalUp = await readFile(
+        join(sourceMigrationDirectory, "0001_baseline.up.sql"),
+        "utf8",
+      );
       await Promise.all([
         writeFile(
           join(temporary, "0001_baseline.up.sql"),

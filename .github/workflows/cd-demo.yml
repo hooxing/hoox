@@ -116,7 +116,7 @@ jobs:
           set -Eeuo pipefail
           archive="$RUNNER_TEMP/hoox-demo-deploy.tar.gz"
           tar -C deploy/demo -czf "$archive" \
-            docker-compose.yml postgres-init.sh nginx.conf.template remote-deploy.sh
+            docker-compose.yml postgres-init.sh nginx.conf.template remote-deploy.sh runtime-config.sh
           ssh -i "$HOME/.ssh/hoox-demo" "$SSH_USER@$SSH_HOST" \
             "mkdir -p '$HOOX_DEMO_ROOT/releases/$RELEASE_ID'"
           scp -i "$HOME/.ssh/hoox-demo" "$archive" "$SSH_USER@$SSH_HOST:/tmp/hoox-demo-deploy-$RELEASE_ID.tar.gz"

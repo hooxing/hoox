@@ -67,6 +67,9 @@ compose() {
   docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" "$@"
 }
 
+# shellcheck source=deploy/demo/runtime-config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/runtime-config.sh"
+
 wait_http() {
   local url="$1"
   local attempts="${2:-60}"
@@ -160,9 +163,12 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=$shared_dir/worker.env,dst=/config/worker.env" \
   --mount "type=bind,src=$shared_dir/scheduler.env,dst=/config/scheduler.env" \
   "$image" node scripts/prepare-demo-sandbox-key.mjs
+# 重建前仍连着上一 epoch 的数据库；切换数据卷时这是保住配置的最后时机。
+export_runtime_config before-deploy
 compose up -d --force-recreate postgres minio
 compose --profile ops run --rm minio-init
 compose --profile ops run --rm migrate
+restore_runtime_config
 compose up -d api web trajectory
 wait_http "http://127.0.0.1:3001/live"
 wait_http "http://127.0.0.1:4173/"
@@ -362,6 +368,7 @@ if (( ${#temporary_files[@]} > 0 )); then
   rm -f -- "${temporary_files[@]}"
 fi
 trap - EXIT
+export_runtime_config after-deploy
 
 find "$root/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
   | sort -nr \

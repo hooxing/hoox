@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -23,7 +24,7 @@ afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function deploy(mode: string) {
+function deploy(mode: string, prepare?: (root: string) => void) {
   const root = mkdtempSync(join(tmpdir(), "hoox-demo-deploy-test-"));
   temporaryRoots.push(root);
   for (const directory of ["releases/candidate", "releases/previous", "shared", "tmp"]) {
@@ -54,6 +55,7 @@ function deploy(mode: string) {
       writeFileSync(join(root, "shared", file), value);
     }
   }
+  prepare?.(root);
   const log = join(root, "commands.log");
   const result = spawnSync(bash, [mockScript], {
     env: {
@@ -148,6 +150,64 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
       expect(result.stderr).toContain(
         mode === "account-lookup-invalid" ? "账号存在性检查失败" : "HTTP 401",
       );
+    }
+  });
+
+  it("发布前后备份已有运行配置，只保留完整快照且权限受限", () => {
+    const result = deploy("config-export");
+    expect(result.status, result.stderr).toBe(0);
+    const directory = join(result.root, "shared/runtime-config");
+    const latest = readFileSync(join(directory, "latest.sql"), "utf8");
+    expect(latest).toBe(
+      [
+        "INSERT INTO test_schema.app_users VALUES (1);",
+        "INSERT INTO test_schema.admin_control_config_revisions VALUES (1);",
+        "UPDATE test_schema.admin_control_generation SET generation=5;",
+        "",
+      ].join("\n"),
+    );
+    expect(result.stdout).toContain("已备份 Demo 运行配置：before-deploy");
+    expect(result.stdout).toContain("已备份 Demo 运行配置：after-deploy");
+    expect(readdirSync(directory).filter((name) => name.startsWith(".candidate"))).toEqual([]);
+    if (process.platform !== "win32") {
+      expect(statSync(join(directory, "latest.sql")).mode & 0o777).toBe(0o600);
+    }
+    expect(result.log).not.toContain("config restore");
+  });
+
+  it("备份导出失败时告警并保留上一份备份，不阻断发布", () => {
+    const result = deploy("config-export-dump-failure", (root) => {
+      mkdirSync(join(root, "shared/runtime-config"));
+      writeFileSync(join(root, "shared/runtime-config/latest.sql"), "previous\n");
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain("运行配置备份失败");
+    expect(readFileSync(join(result.root, "shared/runtime-config/latest.sql"), "utf8")).toBe(
+      "previous\n",
+    );
+    expect(result.stdout).toContain("Hoox Demo 发布完成：candidate");
+  });
+
+  it("迁移后新库没有配置时在启动应用前单事务恢复备份", () => {
+    const result = deploy("config-restore", (root) => {
+      mkdirSync(join(root, "shared/runtime-config"));
+      writeFileSync(join(root, "shared/runtime-config/latest.sql"), "SELECT 'restored';\n");
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("已从备份恢复 Demo 运行配置");
+    const restore = result.log.indexOf("config restore SELECT 'restored';");
+    expect(restore).toBeGreaterThan(result.log.indexOf("run --rm migrate"));
+    expect(restore).toBeLessThan(result.log.indexOf("up -d api web trajectory"));
+  });
+
+  it("新库已有配置或没有备份时不执行恢复", () => {
+    for (const mode of ["config-export", "success"]) {
+      const result = deploy(mode, (root) => {
+        mkdirSync(join(root, "shared/runtime-config"));
+        writeFileSync(join(root, "shared/runtime-config/latest.sql"), "SELECT 1;\n");
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.log).not.toContain("config restore");
     }
   });
 

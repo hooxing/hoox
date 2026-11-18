@@ -157,5 +157,9 @@ docker compose --project-name hoox-demo \
   旧卷必须保留到候选 release 完成全部验收，以便失败时由上一 release 重新挂载；新版本稳定并处理外部 Sandbox 残留后，
   才可按确切卷名清理旧卷。发布脚本在候选和回滚时都必须显式强制重建 PostgreSQL 与 MinIO，不能依赖 Compose 自动
   识别顶层卷名变化；自动发布不得无条件执行 `down --volumes`。
+- 模型、运行设置和沙箱配置不会随数据 epoch 切换丢失。发布脚本会在重建 PostgreSQL 之前、以及发布成功之后，把这些全局配置导出到 `/opt/hoox-demo/shared/runtime-config/latest.sql`，并保留最近 10 份带时间戳的快照（目录 `0700`，文件 `0600`）。迁移完成后，如果新库里还没有任何模型或沙箱配置，脚本会在启动应用之前用单事务恢复这份备份；新库里已有配置时绝不覆盖。
+  - 备份范围：`admin_control_config_revisions`、`admin_control_active_configs`、`sandbox_provider_profiles`、`sandbox_profile_probes`、`sandbox_routing_revisions`、`sandbox_routing_targets`、它们引用的 `app_users` ID，以及两个配置代数（generation）指针。不包含 Tenant、账号、Thread、Run 或文件。
+  - 凭证在备份里仍是数据库中的密文，只有共享 env 里的模型与沙箱加密密钥不变时才能解密。轮换密钥后，恢复出来的配置需要在后台重新填写凭证。
+  - 备份失败或恢复失败只输出告警，不阻断发布；恢复失败时数据库保持原样。需要手工恢复时，在服务器上执行 `docker exec -i hoox-demo-postgres-1 psql -U <POSTGRES_USER> -d <POSTGRES_DB> -v ON_ERROR_STOP=1 --single-transaction < /opt/hoox-demo/shared/runtime-config/latest.sql`，前提同样是新库里尚无这些配置。
 - 首次发布没有上一版本可恢复；失败后数据库和对象存储可保留用于诊断，但公开应用进程必须保持停止，修正配置后重新发布。
 - 主机断连、Runner 被强制终止或主机进程被强制杀死时，自动恢复和凭据清理无法保证完成。应先检查 Actions 的失败步骤及目标主机状态；凭据清理失败时，检查对应 `/opt/hoox-demo/shared/.docker-<run_id>-<run_attempt>` 目录并清理该次发布的凭据，不要删除其他发布或运维账号的 Docker 配置。

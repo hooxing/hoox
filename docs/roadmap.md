@@ -14,6 +14,10 @@
 - 补齐 Tenant 越权矩阵、配额、限流、审计访问和运营权限模型。
 - 现有团队协作基线见[团队协作](architecture/team-collaboration.md)；邀请、成员完整生命周期、资产治理和运营策略完成后，相关能力才能进入正式发布范围。
 
+## 管理面
+
+- 后台提供运行配置导出与导入：模型、运行设置和沙箱配置导出为可移植文件，凭证保持加密，用于换服务器或清库后恢复。Demo 目前由发布脚本自动备份和恢复，见 [Demo 持续部署](operations/demo-cd.md)。
+
 ## 运行质量
 
 - 用真实流量校准 Context compaction、Sandbox retention、恢复延迟和外部副作用 UNKNOWN 的阈值。

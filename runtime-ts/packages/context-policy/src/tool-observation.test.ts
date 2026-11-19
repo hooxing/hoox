@@ -216,3 +216,47 @@ describe("PTC Observation 父调用传递", () => {
     expect(rollout.calls).toHaveLength(0);
   });
 });
+
+describe("未截断固定回执内联写入 Rollout", () => {
+  it("不上传 trace Blob，以 schemaVersion 3 内联完整回执", async () => {
+    const { subject, traces, rollout } = pipeline(4096);
+    const result = await subject.record(input("ok"));
+    expect(result).toEqual({ outcome: "recorded", observation: currentOutput, isTruncated: false });
+    expect(traces.calls).toHaveLength(0);
+    expect(rollout.calls).toHaveLength(1);
+    const call = rollout.calls[0];
+    expect(call).not.toHaveProperty("blob");
+    expect(call?.isTruncated).toBe(false);
+    expect(call?.idempotencyKey).toBe("observation_command.rollout");
+    expect(call?.body).toEqual({
+      schemaVersion: 3,
+      toolName: "sandbox_command",
+      receipt: parseControlledToolReceipt(currentOutput),
+      truncation: {
+        isTruncated: false,
+        modelVisibleBytes: Buffer.byteLength(currentOutput, "utf8"),
+      },
+      observation: currentOutput,
+    });
+  });
+
+  it("Rollout 重放与失败结果原样返回，失败时不宣称已保存", async () => {
+    const replay = pipeline(4096);
+    replay.rollout.outcome = "replayed";
+    await expect(replay.subject.record(input("ok"))).resolves.toMatchObject({
+      outcome: "replayed",
+      isTruncated: false,
+    });
+    const failed = pipeline(4096);
+    failed.rollout.outcome = "unknown";
+    await expect(failed.subject.record(input("ok"))).resolves.toEqual({ outcome: "unknown" });
+    expect(failed.traces.calls).toHaveLength(0);
+  });
+
+  it("模型预算不足以容纳完整回执时仍先保存 trace Blob", async () => {
+    const { subject, traces, rollout } = pipeline(Buffer.byteLength(currentOutput, "utf8") - 1);
+    await expect(subject.record(input("ok"))).resolves.toMatchObject({ isTruncated: true });
+    expect(traces.calls).toHaveLength(1);
+    expect(rollout.calls[0]?.body).toMatchObject({ schemaVersion: 2 });
+  });
+});

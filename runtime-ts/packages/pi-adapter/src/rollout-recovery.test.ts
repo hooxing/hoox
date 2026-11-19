@@ -470,3 +470,48 @@ async function sessionHarness() {
     },
   };
 }
+
+describe("内联固定回执（schemaVersion 3）恢复", () => {
+  function inlineResultEntry(
+    sequence: number,
+    toolCallId: string,
+    overrides: Record<string, unknown> = {},
+    isTruncated = false,
+  ): RuntimeRolloutEntry {
+    const receipt = encodeControlledToolReceipt("sandbox_read_file", "succeeded");
+    const body = {
+      schemaVersion: 3,
+      toolName: "sandbox_read_file",
+      receipt: JSON.parse(receipt),
+      truncation: { isTruncated: false, modelVisibleBytes: Buffer.byteLength(receipt) },
+      observation: receipt,
+      ...overrides,
+    };
+    return { ...entry(sequence, "tool_result", body, toolCallId), isTruncated };
+  }
+  const call = entry(0, "tool_call", { toolName: "sandbox_read_file" }, "call-0");
+
+  it("不引用 Blob 时与 Blob 版本恢复出相同的受控观察", () => {
+    expect(projectLoadedRuntimeRecovery(loaded([call, inlineResultEntry(1, "call-0")]))).toEqual(
+      projectLoadedRuntimeRecovery(loaded([call, controlledResultEntry(1, "call-0")])),
+    );
+  });
+
+  it.each([
+    ["标记为截断", inlineResultEntry(1, "call-0", {}, true)],
+    ["携带 traceBlob", inlineResultEntry(1, "call-0", { traceBlob: { referenceId: "x" } })],
+    ["版本仍为 2", inlineResultEntry(1, "call-0", { schemaVersion: 2 })],
+    ["回执被篡改", inlineResultEntry(1, "call-0", { observation: "伪造观察" })],
+  ])("%s 时拒绝恢复", (_label, result) => {
+    expect(() => projectLoadedRuntimeRecovery(loaded([call, result]))).toThrow(
+      new RuntimeRecoveryError("MALFORMED_FACTS"),
+    );
+  });
+
+  it("schemaVersion 2 缺少 Blob 引用时拒绝恢复", () => {
+    const { blob: _blob, ...withoutBlob } = controlledResultEntry(1, "call-0");
+    expect(() => projectLoadedRuntimeRecovery(loaded([call, withoutBlob]))).toThrow(
+      new RuntimeRecoveryError("MALFORMED_FACTS"),
+    );
+  });
+});

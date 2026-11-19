@@ -240,6 +240,30 @@ describe("PTC journal 分流", () => {
     });
   });
 
+  it("内联回执不带 Blob 进入 native 与 PTC 写入，不再以缺 Blob 拒绝", async () => {
+    const native: { entries: readonly Record<string, unknown>[] }[] = [];
+    const results: Record<string, unknown>[] = [];
+    const repository = {
+      append: async (input: { entries: readonly Record<string, unknown>[] }) => {
+        native.push(input);
+        return { outcome: "created", value: [] } as const;
+      },
+      appendPtcToolResult: async (input: Record<string, unknown>) => {
+        results.push(input);
+        return { outcome: "created", value: undefined } as const;
+      },
+    } as unknown as PgRuntimeRolloutRepository;
+    const adapter = new PgToolObservationRolloutAdapter(repository, context);
+    const { blob: _blob, ...inline } = command;
+    expect(await adapter.appendToolResult(inline)).toEqual({ outcome: "created" });
+    expect(await adapter.appendToolResult({ ...inline, parentToolCallId: "outer_call" })).toEqual({
+      outcome: "created",
+    });
+    expect(native[0]?.entries[0]).not.toHaveProperty("blob");
+    expect(results[0]).not.toHaveProperty("blob");
+    expect(results[0]).toMatchObject({ parentToolCallId: "outer_call", body: command.body });
+  });
+
   it("缺失 PTC 能力不能静默写回 Rollout", async () => {
     let calls = 0;
     const adapter = new PgToolObservationRolloutAdapter(

@@ -44,7 +44,9 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
       toolCallId: input.toolCallId,
       body: input.body,
       isTruncated: input.isTruncated,
-      blob: { ...input.blob, sha256: sha256Digest(input.blob.sha256) },
+      ...(input.blob === undefined
+        ? {}
+        : { blob: { ...input.blob, sha256: sha256Digest(input.blob.sha256) } }),
     };
     return this.append(input.idempotencyKey, draft, input.parentToolCallId);
   }
@@ -78,12 +80,8 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
       toolName: frozenDraft.body.toolName as string,
       body: frozenDraft.body,
       isTruncated: frozenDraft.isTruncated ?? false,
-      blob: frozenDraft.blob,
+      ...(frozenDraft.blob === undefined ? {} : { blob: frozenDraft.blob }),
     });
-    const ptcResultCommand =
-      ptcCommand.blob === undefined
-        ? undefined
-        : Object.freeze({ ...ptcCommand, blob: ptcCommand.blob });
     let result: { readonly outcome: string } | undefined;
     for (const [attempt, delayMs] of OBSERVATION_REPLAY_DELAYS_MS.entries()) {
       if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
@@ -96,10 +94,9 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
           if (appendPtcToolCall === undefined) return { outcome: "unavailable" };
           result = await appendPtcToolCall.call(this.repository, ptcCommand);
         } else {
-          if (ptcResultCommand === undefined) return { outcome: "conflict" };
           const appendPtcToolResult = this.repository.appendPtcToolResult;
           if (appendPtcToolResult === undefined) return { outcome: "unavailable" };
-          result = await appendPtcToolResult.call(this.repository, ptcResultCommand);
+          result = await appendPtcToolResult.call(this.repository, ptcCommand);
         }
         break;
       } catch (error) {

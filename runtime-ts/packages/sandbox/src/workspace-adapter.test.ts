@@ -48,7 +48,33 @@ describe("CubeSandbox Workspace 适配器契约", () => {
     expect(Buffer.concat(await collect(adapter.readRegularFile(first, "a.txt"))).toString()).toBe(
       "hello",
     );
-    expect(fake.operations.filter((value) => value === "scan")).toHaveLength(1);
+    expect(fake.operations.filter((value) => value === "snapshot")).toHaveLength(1);
+    expect(fake.readPaths).toEqual([]);
+  });
+
+  it("快照内容在捕获后不可变，Sandbox 文件再变化也只返回捕获时内容", async () => {
+    const fake = fakeWorkspaceSandbox({ "a.txt": "hello" });
+    const adapter = await open(fake);
+    const snapshot = await adapter.captureSnapshot({ operationKey: "immutable", scope: SCOPE });
+    fake.files.set("a.txt", Buffer.from("changed"));
+    expect(
+      Buffer.concat(await collect(adapter.readRegularFile(snapshot, "a.txt"))).toString(),
+    ).toBe("hello");
+    expect(fake.operations.filter((value) => value === "snapshot")).toHaveLength(1);
+  });
+
+  it("打包读取期间文件被改动时失败关闭，不缓存半成品快照", async () => {
+    const fake = fakeWorkspaceSandbox({ "a.txt": "hello" });
+    fake.snapshotExitCode = 48;
+    const adapter = await open(fake);
+    await expect(
+      adapter.captureSnapshot({ operationKey: "changed", scope: SCOPE }),
+    ).rejects.toMatchObject({ result: "known", dependencyCode: "FILE_CHANGED_DURING_READ" });
+    fake.snapshotExitCode = 0;
+    const retried = await adapter.captureSnapshot({ operationKey: "changed", scope: SCOPE });
+    expect(await collect(adapter.listWorkspace(retried))).toEqual([
+      { relativePath: "a.txt", kind: "file", size: 5 },
+    ]);
   });
 
   it("快照排除可由锁文件重建的 node_modules 依赖缓存", async () => {
@@ -68,7 +94,14 @@ describe("CubeSandbox Workspace 适配器契约", () => {
       { relativePath: "packages/app/src/index.ts", kind: "file", size: 23 },
       { relativePath: "pnpm-lock.yaml", kind: "file", size: 22 },
     ]);
-    expect(fake.readPaths).toEqual(["packages/app/src/index.ts", "pnpm-lock.yaml"]);
+    // 打包快照在同一次命令内带回内容，不再逐文件 read。
+    expect(fake.readPaths).toEqual([]);
+    expect(
+      Buffer.concat(
+        await collect(adapter.readRegularFile(snapshot, "packages/app/src/index.ts")),
+      ).toString(),
+    ).toBe("export const value = 1;");
+    expect(fake.operations.filter((value) => value === "snapshot")).toHaveLength(1);
   });
 
   it("Session 与 Snapshot 只返回端口规定字段并可经严格 Journal JSON 往返", async () => {
@@ -101,7 +134,7 @@ describe("CubeSandbox Workspace 适配器契约", () => {
     await Promise.resolve();
     release();
     expect(await second).toBe(await first);
-    expect(fake.operations.filter((value) => value === "scan")).toHaveLength(1);
+    expect(fake.operations.filter((value) => value === "snapshot")).toHaveLength(1);
   });
 
   it("release 与同 key capture 原子互斥，释放完成后才允许确定性重建", async () => {
@@ -142,7 +175,7 @@ describe("CubeSandbox Workspace 适配器契约", () => {
         scope: { ...SCOPE, workspaceId: "workspace-other" },
       }),
     ).rejects.toMatchObject({ result: "known", dependencyCode: "WORKSPACE_SCOPE_MISMATCH" });
-    expect(fake.operations.filter((value) => value === "scan")).toHaveLength(0);
+    expect(fake.operations.filter((value) => value === "snapshot")).toHaveLength(0);
   });
 
   it("helper 拒绝响应时适配器不会回退 SDK 路径读取", async () => {
@@ -206,7 +239,7 @@ describe("CubeSandbox Workspace 适配器契约", () => {
     });
     const second = await adapter.captureSnapshot({ operationKey: "release", scope: SCOPE });
     expect(second.snapshotToken).toBe(first.snapshotToken);
-    expect(fake.operations.filter((value) => value === "scan")).toHaveLength(2);
+    expect(fake.operations.filter((value) => value === "snapshot")).toHaveLength(2);
   });
 
   it("原子写已知拒绝后清理外部临时文件", async () => {
@@ -317,7 +350,7 @@ describe("CubeSandbox Workspace 适配器契约", () => {
         expect(escaped.status).not.toBe(0);
         expect(escaped.stdout).not.toContain("secret");
 
-        const scanned = run("scan", "", {
+        const scanned = run("snapshot", "", {
           CUBE_WS_MAX_ENTRIES: "16",
           CUBE_WS_MAX_FILE_BYTES: "1024",
           CUBE_WS_MAX_TOTAL_BYTES: "4096",
@@ -330,6 +363,13 @@ describe("CubeSandbox Workspace 适配器契约", () => {
           (entry) => Buffer.from(entry.relativePathB64, "base64").toString("utf8"),
         );
         expect(scannedPaths).toContain("inside.txt");
+        const inside = (
+          JSON.parse(scanned.stdout) as Array<{ relativePathB64: string; contentB64?: string }>
+        ).find(
+          (entry) => Buffer.from(entry.relativePathB64, "base64").toString("utf8") === "inside.txt",
+        );
+        expect(Buffer.from(inside?.contentB64 ?? "", "base64").toString("utf8")).toBe("inside");
+        expect(scanned.stdout).not.toContain(Buffer.from("secret").toString("base64"));
         expect(scannedPaths.some((path) => path.includes("node_modules"))).toBe(false);
 
         const mountpoint = join(root, "tree", "mounted");
@@ -394,6 +434,7 @@ function fakeWorkspaceSandbox(initial: Record<string, string>) {
     unsafeAncestors,
     temporaryFiles,
     beforeScan: undefined as (() => Promise<void>) | undefined,
+    snapshotExitCode: 0,
     finalizeExitCode: 0,
     forceEmptyMutationAck: false,
     lastScript: "",
@@ -406,7 +447,7 @@ function fakeWorkspaceSandbox(initial: Record<string, string>) {
         const env = commandOptions?.envs ?? {};
         const operation = env.CUBE_WS_OP ?? "";
         operations.push(operation);
-        if (operation === "scan") {
+        if (operation === "snapshot") {
           await state.beforeScan?.();
           const excludedDirectories = new Set(
             (env.CUBE_WS_EXCLUDED_DIRECTORY_NAMES ?? "").split(",").filter(Boolean),
@@ -417,7 +458,12 @@ function fakeWorkspaceSandbox(initial: Record<string, string>) {
               relativePathB64: Buffer.from(path).toString("base64"),
               type: "FILE_TYPE_FILE",
               size: body.byteLength,
+              fingerprint: `${body.byteLength}:1:2:3:4:81a4`,
+              contentB64: body.toString("base64"),
             }));
+          if (state.snapshotExitCode !== 0) {
+            return { stdout: "", stderr: "", exitCode: state.snapshotExitCode };
+          }
           return { stdout: JSON.stringify(entries), stderr: "", exitCode: 0 };
         }
         if (operation === "stat") {

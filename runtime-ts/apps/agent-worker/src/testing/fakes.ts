@@ -1075,7 +1075,15 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
   nextAcquire: ThreadSandboxAcquireResult | undefined;
   nextRenew: "renewed" | "lease_lost" | "unavailable" | undefined;
   nextTerminalEffect: "settled" | "unknown" | "not_owner" | undefined;
+  queuedFollowUp: boolean | "unavailable" = false;
+  queuedFollowUpChecks = 0;
   readonly handle = new FakeSandboxHandle("thread-worker-fake");
+
+  async hasQueuedFollowUp(): Promise<boolean> {
+    this.queuedFollowUpChecks += 1;
+    if (this.queuedFollowUp === "unavailable") throw new Error("follow-up 查询不可用");
+    return this.queuedFollowUp;
+  }
   readonly lease: ThreadSandboxLeaseRefV1 = {
     schemaVersion: 1,
     sessionId: "thread-session-test",

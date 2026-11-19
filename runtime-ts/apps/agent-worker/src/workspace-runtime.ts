@@ -187,6 +187,12 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
         candidate: identity,
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
+      if (sameWorkspaceContent(base, change.candidateManifest)) {
+        // 内容与当前 head 完全一致时不形成新 Revision：候选以 superseded 释放，Run 按
+        // workspace_unchanged 收口。未变更文件不会上传 Blob，因此释放不涉及新增引用。
+        await this.options.candidates.release({ identity, reason: "superseded" });
+        return undefined;
+      }
       await this.options.candidates.prepare({ identity, manifest: change.candidateManifest });
       return Object.freeze({
         tenantId: input.scope.tenantId,
@@ -302,6 +308,13 @@ function trustedScope(
     threadId: input.threadId,
     workspaceId: input.workspaceId,
   });
+}
+
+function sameWorkspaceContent(
+  base: WorkspaceManifest | undefined,
+  candidate: WorkspaceManifest,
+): boolean {
+  return base === undefined ? candidate.entries.length === 0 : base.digest === candidate.digest;
 }
 
 function emptyManifest(

@@ -252,7 +252,7 @@ export class PgWorkspaceCandidateHandoff implements WorkspaceCandidateHandoffPor
 
   async release(input: {
     readonly identity: WorkspaceCandidateIdentity;
-    readonly reason: "publish_failed" | "manual_recovery";
+    readonly reason: "publish_failed" | "manual_recovery" | "superseded";
   }): Promise<void> {
     assertIdentity(input.identity);
     await withTenantTransaction(

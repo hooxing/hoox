@@ -984,6 +984,12 @@ export interface ThreadSandboxSessionLifecyclePort {
     readonly lease: ThreadSandboxLeaseRefV1;
     readonly reason: string;
   }): Promise<"settled" | "unknown" | "lease_lost">;
+  /**
+   * Thread 是否有排队中（未取消）的 follow-up。为 true 时 Run 终态通常会把仍在运行的 Sandbox
+   * 直接交接给下一个 Run，Worker 据此推迟 Workspace 快照到真正暂停或回收前。
+   * 这只是性能提示：读取后队列仍可能变化，调用方不得据此改变任何持久事实的正确性。
+   */
+  hasQueuedFollowUp?(input: { readonly scope: ExecutionScope }): Promise<boolean>;
 }
 
 /**

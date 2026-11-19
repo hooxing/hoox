@@ -22,7 +22,7 @@ Runtime 在完整 `turn_end` 后提交事实并准备下一轮历史，Provider 
 
 ## Sandbox 与 Workspace
 
-Sandbox 是可复用缓存，不是业务事实源。Run 完成且没有待执行 follow-up 时，Thread Sandbox Session 进入 pause；新输入优先 resume。Sandbox 不存在、超过保留策略或无法安全复用时，Runtime 创建新 Sandbox，并从最新 Workspace Revision 和 ResourceFS 能力重建环境。
+Sandbox 是可复用缓存，不是业务事实源。Run 完成且没有待执行 follow-up 时，Thread Sandbox Session 进入 pause；新输入优先 resume。Sandbox 不存在、超过保留策略或无法安全复用时，Runtime 创建新 Sandbox，并从最新 Workspace Revision 和 ResourceFS 能力重建环境。Workspace 只在 Sandbox 即将暂停或关闭前快照，交接给排队 follow-up 时文件随 Sandbox 延续，未快照改动的丢失边界见 [Workspace 快照时机](workspace-and-files.md#快照时机与采集)。
 
 Run 交接必须在 Context、Workspace、租约和 Session 身份完成持久提交后发生。失去租约、generation 或 capability 的 Worker 不能继续复用或提交结果。
 

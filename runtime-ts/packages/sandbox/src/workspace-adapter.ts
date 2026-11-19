@@ -77,6 +77,8 @@ interface AdapterOpenInput {
 interface CapturedFile {
   readonly sha256: string;
   readonly fingerprint: string;
+  /** 快照内容常驻进程内存，总量受 maxTotalBytes × maxSnapshots 约束。 */
+  readonly bytes: Uint8Array;
 }
 
 interface CapturedSnapshot {
@@ -220,21 +222,7 @@ export class SandboxWorkspacePort implements WorkspacePort {
     operationKey: string,
     scopeDigest: string,
   ): Promise<CapturedSnapshot> {
-    const entries = await this.scanWorkspace();
-    const files = new Map<string, CapturedFile>();
-    let totalBytes = 0;
-    for (const entry of entries) {
-      if (entry.kind !== "file") continue;
-      totalBytes = addBounded(totalBytes, entry.size ?? 0, this.options.maxTotalBytes);
-      const read = await this.readLiveRegularFile(entry.relativePath, entry.size ?? 0);
-      files.set(
-        entry.relativePath,
-        Object.freeze({
-          sha256: sha256(read.bytes),
-          fingerprint: read.fingerprint,
-        }),
-      );
-    }
+    const { entries, files } = await this.readPackedWorkspace();
     await this.assertBound("known");
 
     const token = snapshotDigest(this.bound, operationKey, scopeDigest, entries, files);
@@ -430,37 +418,49 @@ export class SandboxWorkspacePort implements WorkspacePort {
     );
     const expected = captured.files.get(relative);
     if (entry === undefined || expected === undefined) throw known("SNAPSHOT_FILE_NOT_FOUND");
-    const read = await this.readLiveRegularFile(relative, entry.size ?? 0, control.signal);
-    if (read.fingerprint !== expected.fingerprint || sha256(read.bytes) !== expected.sha256) {
-      throw known("SNAPSHOT_CHANGED");
-    }
-    for (const chunk of chunks(read.bytes, this.options.readChunkBytes)) {
+    // 快照是捕获时刻的不可变内容：直接从进程内副本读取，不再回到 Sandbox 逐文件往返。
+    for (const chunk of chunks(expected.bytes, this.options.readChunkBytes)) {
       abortPoint(control.signal);
       yield chunk;
     }
     await this.assertBound("known", control.signal);
   }
 
-  private async scanWorkspace(): Promise<readonly SandboxWorkspaceEntry[]> {
+  /**
+   * 一次命令扫描 `/workspace` 并打包所有普通文件内容。旧实现每个文件要读 2～3 次、每次一个远端
+   * 命令；打包后整个快照只有一次往返，输出上限按总字节数与条目数推导。
+   */
+  private async readPackedWorkspace(): Promise<{
+    readonly entries: readonly SandboxWorkspaceEntry[];
+    readonly files: ReadonlyMap<string, CapturedFile>;
+  }> {
+    const outputLimit = packedSnapshotOutputLimit(this.options);
     const raw = await this.command(
       SECURE_FS_SCRIPT,
       {
-        CUBE_WS_OP: "scan",
+        CUBE_WS_OP: "snapshot",
         CUBE_WS_MAX_ENTRIES: String(this.options.maxEntries),
         CUBE_WS_MAX_FILE_BYTES: String(this.options.maxFileBytes),
         CUBE_WS_MAX_TOTAL_BYTES: String(this.options.maxTotalBytes),
         CUBE_WS_MAX_PATH_BYTES: String(this.options.maxPathUtf8Bytes),
-        CUBE_WS_MAX_OUTPUT_BYTES: String(this.options.maxCommandOutputBytes),
+        CUBE_WS_MAX_OUTPUT_BYTES: String(outputLimit),
         CUBE_WS_EXCLUDED_DIRECTORY_NAMES: "node_modules",
       },
-      "scan_workspace",
+      "snapshot_workspace",
       undefined,
-      this.options.maxCommandOutputBytes,
+      outputLimit,
     );
+    if (raw.exitCode === 48) throw known("FILE_CHANGED_DURING_READ");
     if (raw.exitCode !== 0 || raw.stderr !== "") throw known("FILESYSTEM_SCAN_FAILED");
-    const parsed: unknown = JSON.parse(raw.stdout);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw.stdout);
+    } catch {
+      throw known("FILESYSTEM_PROTOCOL");
+    }
     if (!Array.isArray(parsed)) throw known("FILESYSTEM_PROTOCOL");
     const result: SandboxWorkspaceEntry[] = [];
+    const files = new Map<string, CapturedFile>();
     let totalBytes = 0;
     for (const rawEntry of parsed) {
       if (result.length >= this.options.maxEntries || !plainRecord(rawEntry)) {
@@ -472,6 +472,7 @@ export class SandboxWorkspacePort implements WorkspacePort {
       if (size !== undefined) {
         if (size > this.options.maxFileBytes) throw known("FILE_LIMIT_EXCEEDED");
         totalBytes = addBounded(totalBytes, size, this.options.maxTotalBytes);
+        files.set(relative, parsePackedFile(rawEntry, size));
       }
       result.push(
         Object.freeze({ relativePath: relative, kind, ...(size === undefined ? {} : { size }) }),
@@ -480,7 +481,7 @@ export class SandboxWorkspacePort implements WorkspacePort {
     result.sort((left, right) =>
       Buffer.compare(Buffer.from(left.relativePath), Buffer.from(right.relativePath)),
     );
-    return Object.freeze(result);
+    return { entries: Object.freeze(result), files };
   }
 
   private async readLiveRegularFile(
@@ -885,6 +886,33 @@ function decodePathField(value: unknown): string {
   return decoded;
 }
 
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+const FINGERPRINT_PATTERN = /^[0-9]+:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+:[0-9a-f]+$/u;
+
+/** 打包快照的 stdout 上限：全部内容的 base64 加上每个条目的路径与元数据开销。 */
+function packedSnapshotOutputLimit(options: SandboxWorkspaceAdapterOptions): number {
+  const content = Math.ceil((options.maxTotalBytes * 4) / 3);
+  const perEntry = Math.ceil((options.maxPathUtf8Bytes * 4) / 3) + 256;
+  return Math.max(options.maxCommandOutputBytes, content + options.maxEntries * perEntry);
+}
+
+function parsePackedFile(entry: Record<string, unknown>, size: number): CapturedFile {
+  const { contentB64, fingerprint } = entry;
+  if (
+    typeof contentB64 !== "string" ||
+    !BASE64_PATTERN.test(contentB64) ||
+    typeof fingerprint !== "string" ||
+    !FINGERPRINT_PATTERN.test(fingerprint)
+  ) {
+    throw known("FILESYSTEM_PROTOCOL");
+  }
+  const bytes = Buffer.from(contentB64, "base64");
+  if (bytes.byteLength !== size || Number(fingerprint.split(":", 1)[0]) !== size) {
+    throw known("FILESYSTEM_PROTOCOL");
+  }
+  return Object.freeze({ sha256: sha256(bytes), fingerprint, bytes });
+}
+
 function parseReadOutput(stdout: string, maxBytes: number): LiveRead {
   if (!stdout.endsWith("\n")) {
     throw known("COMMAND_PROTOCOL");
@@ -1124,14 +1152,42 @@ try:
             if stat.S_ISREG(value.st_mode): result["size"] = value.st_size
             sys.stdout.write(json.dumps(result, separators=(",", ":")))
 
-        elif OP == "scan":
+        elif OP == "snapshot":
             max_entries = int(os.environ["CUBE_WS_MAX_ENTRIES"])
             max_file = int(os.environ["CUBE_WS_MAX_FILE_BYTES"])
             max_total = int(os.environ["CUBE_WS_MAX_TOTAL_BYTES"])
             max_path = int(os.environ["CUBE_WS_MAX_PATH_BYTES"])
             max_output = int(os.environ["CUBE_WS_MAX_OUTPUT_BYTES"])
             excluded_directories = set(filter(None, os.environ.get("CUBE_WS_EXCLUDED_DIRECTORY_NAMES", "").split(",")))
-            found, total = [], 0
+            found, total = [], [0]
+            def fingerprint(value):
+                return f"{value.st_size}:{value.st_dev}:{value.st_ino}:{value.st_mtime_ns}:{value.st_ctime_ns}:{value.st_mode:x}"
+            def read_entry(fd, name, item):
+                # 打包快照在同一次命令内读取内容：相对已打开的父 dirfd 以 O_NOFOLLOW 打开，
+                # O_NONBLOCK 防止 stat 后被替换成 FIFO 时阻塞；读前读后 fingerprint 不同即失败关闭。
+                try:
+                    file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=fd)
+                except OSError:
+                    fail(48)
+                try:
+                    before = os.fstat(file_fd)
+                    if not stat.S_ISREG(before.st_mode): fail(48)
+                    if before.st_size > max_file: fail(45)
+                    total[0] += before.st_size
+                    if total[0] > max_total: fail(45)
+                    body = bytearray()
+                    while len(body) <= max_file:
+                        chunk = os.read(file_fd, min(65536, max_file + 1 - len(body)))
+                        if not chunk: break
+                        body.extend(chunk)
+                    after = os.fstat(file_fd)
+                finally:
+                    os.close(file_fd)
+                first = fingerprint(before)
+                if first != fingerprint(after) or len(body) != before.st_size: fail(48)
+                item["size"] = before.st_size
+                item["fingerprint"] = first
+                item["contentB64"] = base64.b64encode(body).decode("ascii")
             def walk(fd, prefix):
                 with os.scandir(fd) as entries:
                     names = sorted((entry.name for entry in entries), key=os.fsencode)
@@ -1149,18 +1205,16 @@ try:
                     if kind == "FILE_TYPE_DIRECTORY" and name in excluded_directories:
                         continue
                     item = {"relativePathB64": base64.b64encode(rel_bytes).decode("ascii"), "type": kind}
-                    if kind == "FILE_TYPE_FILE":
-                        if value.st_size > max_file: fail(45)
-                        item["size"] = value.st_size
                     found.append(item)
                     if len(found) > max_entries: fail(44)
+                    if kind == "FILE_TYPE_FILE":
+                        if value.st_size > max_file: fail(45)
+                        read_entry(fd, name, item)
                     if kind == "FILE_TYPE_DIRECTORY":
                         child = open_beneath(fd, name, DIR_FLAGS)
                         try: walk(child, rel)
                         finally: os.close(child)
             walk(root, "")
-            total = sum(item.get("size", 0) for item in found)
-            if total > max_total: fail(45)
             payload = json.dumps(found, separators=(",", ":"), sort_keys=True)
             if len(payload.encode("utf-8")) > max_output: fail(47)
             sys.stdout.write(payload)

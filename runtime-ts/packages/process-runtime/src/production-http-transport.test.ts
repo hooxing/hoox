@@ -6,7 +6,7 @@ import {
   loadProductionTlsCredentials,
   parseProductionApiTransport,
   productionTrustProxy,
-} from "./production-transport.js";
+} from "./production-http-transport.js";
 
 // 仅用于文件边界回归的短期自签名测试材料，不是部署凭据。
 const testCertificate = `-----BEGIN CERTIFICATE-----

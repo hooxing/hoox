@@ -9,8 +9,8 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@hoox/api": "workspace:*",
     "@hoox/domain": "workspace:*",
+    "@hoox/identity": "workspace:*",
     "@hoox/protocol": "workspace:*",
     "@hoox/skill": "workspace:*",
     "@sinclair/typebox": "0.34.52",

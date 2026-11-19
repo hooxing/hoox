@@ -85,9 +85,6 @@ importers:
       '@hoox/admin-control':
         specifier: workspace:*
         version: link:../../packages/admin-control
-      '@hoox/api':
-        specifier: workspace:*
-        version: link:../api
       '@hoox/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -278,12 +275,12 @@ importers:
 
   runtime-ts/apps/skill-admin-api:
     dependencies:
-      '@hoox/api':
-        specifier: workspace:*
-        version: link:../api
       '@hoox/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@hoox/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -416,6 +413,9 @@ importers:
 
   runtime-ts/packages/identity:
     dependencies:
+      '@hoox/domain':
+        specifier: workspace:*
+        version: link:../domain
       better-auth:
         specifier: 1.7.7
         version: 1.7.7(pg@8.22.0)
@@ -504,6 +504,9 @@ importers:
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@hoox/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
       '@hoox/sandbox':
         specifier: workspace:*
         version: link:../sandbox
@@ -553,12 +556,6 @@ importers:
       '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
-      '@hoox/pi-adapter':
-        specifier: workspace:*
-        version: link:../pi-adapter
-      '@hoox/sandbox':
-        specifier: workspace:*
-        version: link:../sandbox
       '@hoox/skill':
         specifier: workspace:*
         version: link:../skill
@@ -574,6 +571,9 @@ importers:
       '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
+      '@hoox/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
       '@hoox/workspace':
         specifier: workspace:*
         version: link:../workspace

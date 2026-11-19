@@ -10,7 +10,6 @@
   "types": "./src/app.ts",
   "dependencies": {
     "@hoox/admin-control": "workspace:*",
-    "@hoox/api": "workspace:*",
     "@hoox/domain": "workspace:*",
     "@hoox/identity": "workspace:*",
     "@hoox/persistence": "workspace:*",

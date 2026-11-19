@@ -1,6 +1,5 @@
 import {
   applyTodoWrite,
-  type ExecutionPhaseTimingObserver,
   measureExecutionPhase,
   type RunPersonalizationSnapshot,
   type TodoSnapshot,
@@ -18,6 +17,7 @@ import {
 } from "./mutation-protocol.js";
 import type {
   AgentControlPersistencePort,
+  AgentUserInput,
   AgentSessionFactoryPort,
   ArtifactPublicationPort,
   CancellationPort,
@@ -30,7 +30,6 @@ import type {
   ExternalEffectPermit,
   OrphanSandboxCleanupPort,
   RecoveryMetricsPort,
-  RunStartupTimingPhase,
   RuntimeMutation,
   RuntimeMutationResult,
   RuntimeOutboxV1,
@@ -48,20 +47,21 @@ import type {
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
 import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
+import type { RunPhaseTimingDiagnosticsPort } from "./run-phase-diagnostics.js";
+import type { RunStartupTimingDiagnosticsPort } from "./run-startup-diagnostics.js";
 import {
-  RunPhaseTimingCollector,
-  type RunPhaseTimingDiagnosticsPort,
-} from "./run-phase-diagnostics.js";
+  type AppliedMutation,
+  type ClaimedExecution,
+  createExecutionContext,
+  type ExecutionContext,
+} from "./run-worker-context.js";
+import { type PendingThreadSteer, RunEventPipeline } from "./run-worker-event-pipeline.js";
+import { directAttachmentProbePaths } from "./run-worker-resource-probe.js";
 import {
-  RunStartupTimingCollector,
-  type RunStartupTimingDiagnosticsPort,
-} from "./run-startup-diagnostics.js";
-import type { AppliedMutation, ExecutionContext } from "./run-worker-context.js";
-import {
-  directAttachmentProbePaths,
-  prepareHistoryEntrypoints,
-  probeResourceFilesystemDataPlane,
-} from "./run-worker-resource-probe.js";
+  type EnsureSandboxReady,
+  RunSandboxPreparation,
+} from "./run-worker-sandbox-preparation.js";
+import { createRunTimings, type RunTimings } from "./run-worker-timing.js";
 import {
   agentEvent,
   agentEventAt,
@@ -82,17 +82,13 @@ import {
   terminalSandboxCommand,
 } from "./run-worker-outbox.js";
 import {
-  reportWorkspaceMaterializeFailure,
   reportWorkspaceVerifyFailure,
   validateWorkspaceCandidate,
 } from "./run-worker-workspace-failures.js";
 import {
-  applyFinalizationTransition,
-  classifyFinalizationTurn,
   closeEventAcceptance,
   refreshLocalStop,
-  registerToolStarted,
-  updateAgentState,
+  stopReasonForPendingSteers,
 } from "./run-worker-execution-state.js";
 import {
   acceptInspection,
@@ -122,10 +118,23 @@ export interface RunWorkerOptions {
   readonly subagentsEnabled?: boolean;
 }
 
-type PendingThreadSteer = Extract<
-  Awaited<ReturnType<ExecutionPersistencePort["readPendingThreadSteers"]>>,
-  { readonly outcome: "pending" }
->["items"][number];
+type AgentTurnResult = Awaited<ReturnType<WorkerAgentSessionPort["runPrompt"]>>;
+
+/** 单次 execute 的阶段间共享状态；只活在本次 Attempt 内，不是恢复事实源。 */
+interface ActiveRun {
+  readonly scope: ExecutionScope;
+  readonly snapshot: ClaimedExecution["snapshot"];
+  readonly context: ExecutionContext;
+  readonly cancellation: AbortSignal;
+  readonly executionAbort: AbortController;
+  readonly timings: RunTimings;
+  readonly events: RunEventPipeline;
+  readonly requestAbort: () => Promise<void>;
+  /** 输入校验通过后才建立；之前的失败不可能已取得 Sandbox。 */
+  sandboxes?: RunSandboxPreparation<RunWorkerResult>;
+  session?: WorkerAgentSessionPort;
+  unsubscribe?: () => void;
+}
 
 export type RunWorkerResult =
   | { readonly outcome: "succeeded" | "waiting" | "failed" | "cancelled" }
@@ -231,6 +240,10 @@ export class RunWorker {
     }
   }
 
+  /**
+   * 单次 Attempt 状态机：claim → 会话建立 → 模型循环 → Workspace 校验 → waiting/succeeded 收口。
+   * 任一阶段抛出都由 #failAttempt 统一收敛；finally 只释放本地资源，cleanup 由持久 Outbox/Saga 接管。
+   */
   async execute(scope: ExecutionScope): Promise<RunWorkerResult> {
     assertScope(scope);
     const startupStartedAt = performance.now();
@@ -239,50 +252,7 @@ export class RunWorker {
       workerId: this.options.workerId,
       leaseDurationMs: this.#leaseDurationMs,
     });
-    if (claim.outcome !== "claimed") {
-      if (claim.outcome === "recovery_required") {
-        // 过期 Attempt 不能继续由普通 claim 重领，但也不能只返回 ignored 让 dispatch
-        // 每五秒空转。这里切换到窄恢复命令，只固化“执行已停止”和 Sandbox 清理事实，
-        // 不重放模型、工具或猜测业务 succeeded/failed。
-        const recovered = await this.dependencies.persistence.recoverExpiredAttempt({
-          scope,
-          decision: "require_manual_recovery",
-        });
-        if (recovered === "recovered") {
-          return { outcome: "recovery_required", code: "INTERNAL" };
-        }
-        if (recovered === "unavailable") {
-          return { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
-        }
-        return {
-          outcome: "ignored",
-          reason:
-            recovered === "not_expired"
-              ? "busy"
-              : recovered === "scope_mismatch"
-                ? "scope_mismatch"
-                : "not_found",
-        };
-      }
-      if (claim.outcome === "unavailable") {
-        return { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
-      }
-      if (claim.outcome === "busy") {
-        await this.dependencies.continuityMetrics
-          ?.record({
-            tenantId: scope.tenantId,
-            threadId: scope.threadId,
-            runId: scope.runId,
-            observationId: `${scope.runId}:thread-writer-conflict`,
-            metricName: "thread_writer_conflict_total",
-            value: 1,
-            unit: "count",
-            outcome: "busy",
-          })
-          .catch(() => undefined);
-      }
-      return { outcome: "ignored", reason: claim.outcome };
-    }
+    if (claim.outcome !== "claimed") return await this.#handleUnclaimed(scope, claim);
     const durableLane = new DurableOperationLane();
     if (
       !snapshotMatches(
@@ -293,124 +263,163 @@ export class RunWorker {
         claim.snapshot.attempt,
       )
     ) {
-      const unsigned: Omit<RuntimeMutation, "commandDigest"> = {
-        schemaVersion: 1,
-        idempotencyKey: `${claim.snapshot.attempt.attemptId}/claim/scope-mismatch`,
-        fence: claim.fence,
-        expectedAttemptVersion: claim.snapshot.attempt.version,
-        nextAttemptStatus: "recovery_required",
-        events: [
-          agentEventAt(claim.snapshot.attempt.nextEventSequence, {
-            type: "runtime.notice",
-            level: "error",
-            code: "PROTOCOL",
-            message: terminalFailureMessage("recovery_required", "PROTOCOL"),
-            source: "terminal_fallback",
-          }),
-          rawAttemptEvent(
-            claim.snapshot.attempt.nextEventSequence + 1,
-            "recovery_required",
-            "claimed",
-            "PROTOCOL",
-          ),
-        ],
-        outbox: [rawAlertOutbox(claim.snapshot.attempt.attemptId, "PROTOCOL")],
-        releaseFences: true,
-      };
-      const released = await durableLane.run(() =>
-        this.dependencies.persistence.mutate({
-          ...unsigned,
-          commandDigest: runtimeMutationDigest(unsigned),
-        }),
-      );
-      return isApplied(released)
-        ? { outcome: "ignored", reason: "scope_mismatch" }
-        : { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
+      return await this.#releaseScopeMismatch(claim, durableLane);
     }
 
-    const context: ExecutionContext = {
-      scope,
-      fence: claim.fence,
-      attemptVersion: claim.snapshot.attempt.version,
-      nextEventSequence: claim.snapshot.attempt.nextEventSequence,
-      databaseNow: claim.databaseNow,
-      attemptId: claim.snapshot.attempt.attemptId,
-      run: claim.snapshot.run,
-      workspace: claim.snapshot.workspace,
-      ...(claim.snapshot.attempt.currentRevisionId === undefined
+    const context = createExecutionContext(scope, claim, durableLane);
+    const timings = createRunTimings({
+      context,
+      claimedAt: claim.databaseNow,
+      startupStartedAt,
+      ...(this.dependencies.phaseTimingDiagnostics === undefined
         ? {}
-        : { currentRevisionId: claim.snapshot.attempt.currentRevisionId }),
-      actualCommittedStage: claim.snapshot.attempt.stage,
-      actualAttemptStatus: claim.snapshot.attempt.status,
-      projectionVersion: claim.snapshot.attempt.projectionVersion,
-      durableLane,
-      toolStartedGates: new Map(),
-      cleanupFacts: new Map(),
-      modelCompleted: false,
-      eventAcceptanceOpen: true,
-      adapterRejected: false,
-      contextTurnOrdinal: 0,
-    };
-    const phaseTiming =
-      this.dependencies.phaseTimingDiagnostics === undefined
-        ? undefined
-        : new RunPhaseTimingCollector(
-            {
-              tenantId: scope.tenantId,
-              threadId: scope.threadId,
-              runId: scope.runId,
-              attemptId: context.attemptId,
-            },
-            this.dependencies.phaseTimingDiagnostics,
-          );
-    if (phaseTiming !== undefined) {
-      context.phaseTiming = phaseTiming;
-      // 同一数据库时钟的创建到领取间隔，重试 Attempt 仍以 Run 创建为起点，不冒充 Broker 排队。
-      phaseTiming.record({
-        phase: "run_queue_wait",
-        startedAt: context.run.createdAt,
-        durationMs: Math.max(0, Date.parse(claim.databaseNow) - Date.parse(context.run.createdAt)),
-        status: "succeeded",
-      });
-    }
-    const startupTiming =
-      this.dependencies.startupTimingDiagnostics === undefined
-        ? undefined
-        : new RunStartupTimingCollector(
-            {
-              tenantId: scope.tenantId,
-              threadId: scope.threadId,
-              runId: scope.runId,
-              attemptId: context.attemptId,
-            },
-            this.dependencies.startupTimingDiagnostics,
-            startupStartedAt,
-          );
-    startupTiming?.record("run_claim", performance.now() - startupStartedAt);
-    const measureStartup = <T>(
-      phase: RunStartupTimingPhase,
-      operation: () => Promise<T>,
-    ): Promise<T> =>
-      startupTiming === undefined ? operation() : startupTiming.measure(phase, operation);
-    const startupTimingObserver =
-      startupTiming === undefined
-        ? undefined
-        : {
-            record: (phase: RunStartupTimingPhase, durationMs: number) =>
-              startupTiming.record(phase, durationMs),
-            modelInvocationStarting: () => startupTiming.publish(),
-          };
+        : { phaseDiagnostics: this.dependencies.phaseTimingDiagnostics }),
+      ...(this.dependencies.startupTimingDiagnostics === undefined
+        ? {}
+        : { startupDiagnostics: this.dependencies.startupTimingDiagnostics }),
+    });
     const cancellation = this.dependencies.cancellation.signalFor(scope);
-    const shutdown = this.dependencies.shutdownSignal;
-    let session: WorkerAgentSessionPort | undefined;
-    let sandbox: SandboxSessionRef | undefined;
-    let sandboxResourceFilesystemMounted = false;
-    let sandboxPreparation: Promise<SandboxSessionRef> | undefined;
-    let sandboxPreparationResult: RunWorkerResult | undefined;
-    let unsubscribe: (() => void) | undefined;
-    let eventChain = Promise.resolve();
     const executionAbort = new AbortController();
+    const stopSignals = this.#installStopSignals(context, cancellation, executionAbort);
+    const run: ActiveRun = {
+      scope,
+      snapshot: claim.snapshot,
+      context,
+      cancellation,
+      executionAbort,
+      timings,
+      requestAbort: stopSignals.requestAbort,
+      events: new RunEventPipeline(
+        context,
+        {
+          applyMutation: (input) => this.applyMutation(context, input),
+          requestAbort: stopSignals.requestAbort,
+          prepareTurnContextAppend: (event, phase) =>
+            this.prepareTurnContextAppend(context, event, phase),
+          applyThreadSteer: (item) => this.applyThreadSteer(context, item),
+          readPendingThreadSteers: () =>
+            this.dependencies.persistence.readPendingThreadSteers({ fence: context.fence }),
+        },
+        this.options.threadInputRoutingV2Enabled === true,
+      ),
+    };
 
+    try {
+      return await this.#runAttempt(run);
+    } catch {
+      return await this.#failAttempt(run);
+    } finally {
+      timings.startup?.publish();
+      await stopSignals.dispose();
+      await context.durableLane.drain();
+      await Promise.allSettled([context.abortPromise ?? Promise.resolve()]);
+      await Promise.allSettled([
+        timings.startup?.drain() ?? Promise.resolve(),
+        timings.phase?.drain() ?? Promise.resolve(),
+        Promise.resolve().then(() => run.unsubscribe?.()),
+        Promise.resolve().then(() => run.session?.dispose()),
+      ]);
+    }
+  }
+
+  async #handleUnclaimed(
+    scope: ExecutionScope,
+    claim: Exclude<Awaited<ReturnType<ExecutionPersistencePort["claim"]>>, ClaimedExecution>,
+  ): Promise<RunWorkerResult> {
+    if (claim.outcome === "recovery_required") {
+      // 过期 Attempt 不能继续由普通 claim 重领，但也不能只返回 ignored 让 dispatch
+      // 每五秒空转。这里切换到窄恢复命令，只固化“执行已停止”和 Sandbox 清理事实，
+      // 不重放模型、工具或猜测业务 succeeded/failed。
+      const recovered = await this.dependencies.persistence.recoverExpiredAttempt({
+        scope,
+        decision: "require_manual_recovery",
+      });
+      if (recovered === "recovered") {
+        return { outcome: "recovery_required", code: "INTERNAL" };
+      }
+      if (recovered === "unavailable") {
+        return { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
+      }
+      return {
+        outcome: "ignored",
+        reason:
+          recovered === "not_expired"
+            ? "busy"
+            : recovered === "scope_mismatch"
+              ? "scope_mismatch"
+              : "not_found",
+      };
+    }
+    if (claim.outcome === "unavailable") {
+      return { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
+    }
+    if (claim.outcome === "busy") {
+      await this.dependencies.continuityMetrics
+        ?.record({
+          tenantId: scope.tenantId,
+          threadId: scope.threadId,
+          runId: scope.runId,
+          observationId: `${scope.runId}:thread-writer-conflict`,
+          metricName: "thread_writer_conflict_total",
+          value: 1,
+          unit: "count",
+          outcome: "busy",
+        })
+        .catch(() => undefined);
+    }
+    return { outcome: "ignored", reason: claim.outcome };
+  }
+
+  /** claim 快照与调度作用域不一致：不执行任何副作用，只释放栅栏并告警。 */
+  async #releaseScopeMismatch(
+    claim: ClaimedExecution,
+    durableLane: DurableOperationLane,
+  ): Promise<RunWorkerResult> {
+    const unsigned: Omit<RuntimeMutation, "commandDigest"> = {
+      schemaVersion: 1,
+      idempotencyKey: `${claim.snapshot.attempt.attemptId}/claim/scope-mismatch`,
+      fence: claim.fence,
+      expectedAttemptVersion: claim.snapshot.attempt.version,
+      nextAttemptStatus: "recovery_required",
+      events: [
+        agentEventAt(claim.snapshot.attempt.nextEventSequence, {
+          type: "runtime.notice",
+          level: "error",
+          code: "PROTOCOL",
+          message: terminalFailureMessage("recovery_required", "PROTOCOL"),
+          source: "terminal_fallback",
+        }),
+        rawAttemptEvent(
+          claim.snapshot.attempt.nextEventSequence + 1,
+          "recovery_required",
+          "claimed",
+          "PROTOCOL",
+        ),
+      ],
+      outbox: [rawAlertOutbox(claim.snapshot.attempt.attemptId, "PROTOCOL")],
+      releaseFences: true,
+    };
+    const released = await durableLane.run(() =>
+      this.dependencies.persistence.mutate({
+        ...unsigned,
+        commandDigest: runtimeMutationDigest(unsigned),
+      }),
+    );
+    return isApplied(released)
+      ? { outcome: "ignored", reason: "scope_mismatch" }
+      : { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
+  }
+
+  /**
+   * 取消、停机、超时与心跳续租都只设置本地停止原因并请求中止 Session；
+   * 是否提交 cancelled/failed 由后续停止点在持久事实上判定。
+   */
+  #installStopSignals(
+    context: ExecutionContext,
+    cancellation: AbortSignal,
+    executionAbort: AbortController,
+  ): { readonly requestAbort: () => Promise<void>; dispose(): Promise<void> } {
+    const shutdown = this.dependencies.shutdownSignal;
     const requestAbort = (): Promise<void> => {
       closeEventAcceptance(context);
       if (!context.abortPromise) {
@@ -458,946 +467,613 @@ export class RunWorker {
       void task.then(clearHeartbeat, clearHeartbeat);
       return task;
     });
+    return {
+      requestAbort,
+      dispose: async () => {
+        timeout.cancel();
+        cancellation.removeEventListener("abort", onCancel);
+        this.dependencies.cancellation.release?.(context.scope);
+        shutdown?.removeEventListener("abort", onShutdown);
+        closeEventAcceptance(context);
+        // abort 完成后才允许取消订阅、释放 Session；在途心跳必须先落定，避免与终态 mutation 交错。
+        await Promise.allSettled([heartbeat.stop()]);
+        if (heartbeatInFlight) await Promise.allSettled([heartbeatInFlight]);
+      },
+    };
+  }
 
+  async #runAttempt(run: ActiveRun): Promise<RunWorkerResult> {
+    const { context, snapshot, scope, cancellation } = run;
     try {
-      try {
-        assertControlledRolloutProjection(claim.snapshot.rolloutProjection);
-      } catch {
-        return await this.requireRecovery(context, "EVENT_REJECTED", []);
-      }
-      let directAttachmentPaths: readonly string[];
-      try {
-        directAttachmentPaths = directAttachmentProbePaths(
-          claim.snapshot.input,
-          claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
-        );
-      } catch {
-        return await this.requireRecovery(context, "PROTOCOL", []);
-      }
-      const ensureSandboxReady: Parameters<
-        AgentSessionFactoryPort["create"]
-      >[0]["ensureSandboxReady"] = async (request) => {
-        const preparationTiming =
-          phaseTiming === undefined || request.reason !== "tool"
-            ? phaseTiming
-            : {
-                record: (span: Parameters<ExecutionPhaseTimingObserver["record"]>[0]) =>
-                  phaseTiming.record({
-                    ...span,
-                    toolCallId: request.call.callId,
-                    toolName: request.call.toolName,
-                  }),
-              };
-        if (request.reason === "tool") {
-          const call = request.call;
-          const gate = context.toolStartedGates.get(call.callId);
-          if (gate === undefined || gate.name !== call.toolName) {
-            context.adapterRejected = true;
-            context.agentFailure = "PROTOCOL";
-            throw new Error("Sandbox 准备缺少匹配的 tool.started");
-          }
-          await gate.committed;
-          if (!context.eventAcceptanceOpen || context.adapterRejected) {
-            throw new Error("tool.started 未能持久化，拒绝准备 Sandbox");
-          }
-        }
-        // acquire 后会先设置 ref，再继续物化 Workspace；并发调用必须等待同一个完整准备 Promise，
-        // 不能仅因 ref 已可见就提前取得尚未 ready 的 Sandbox。
-        // /resources 同时承载附件与公开 Skill 市场；任何 Sandbox 工具都必须看到同一虚拟目录。
-        const requiresResourceFilesystem = true;
-        if (sandboxPreparation !== undefined) {
-          const prepared = await sandboxPreparation;
-          if (requiresResourceFilesystem && !sandboxResourceFilesystemMounted) {
-            context.agentFailure = "SANDBOX_FAILED";
-            throw new Error("当前 Run 的 Sandbox 无法在创建后追加 ResourceFS mount");
-          }
-          return prepared;
-        }
-        if (sandbox !== undefined) {
-          if (requiresResourceFilesystem && !sandboxResourceFilesystemMounted) {
-            context.agentFailure = "SANDBOX_FAILED";
-            throw new Error("当前 Run 的 Sandbox 无法在创建后追加 ResourceFS mount");
-          }
-          return sandbox;
-        }
-        sandboxPreparation ??= (async () => {
-          const preAcquire = await this.stopPoint(context, cancellation);
-          if (preAcquire) throw new Error("Sandbox acquire 前运行已停止");
-
-          let requiresMaterialization = true;
-          if (this.options.threadSandboxSessionReuseEnabled === true) {
-            const lifecycle = this.dependencies.threadSandboxes;
-            if (lifecycle === undefined) throw new Error("Thread Sandbox lifecycle 缺失");
-            let acquisition = await measureExecutionPhase(
-              preparationTiming,
-              "sandbox_acquire",
-              () =>
-                lifecycle.acquire({
-                  scope,
-                  attemptId: context.attemptId,
-                  owner: this.options.workerId,
-                  leaseDurationMs: this.#leaseDurationMs,
-                  signal: executionAbort.signal,
-                  requiresResourceFilesystem,
-                  ...(preparationTiming === undefined ? {} : { phaseTiming: preparationTiming }),
-                }),
-            );
-            if (acquisition.outcome !== "ready") {
-              context.agentFailure =
-                acquisition.outcome === "unknown" ? "SANDBOX_UNKNOWN" : acquisition.code;
-              throw new Error("Thread Sandbox acquire 失败");
-            }
-            sandbox = acquisition.session;
-            sandboxResourceFilesystemMounted = acquisition.resourceFilesystemMounted;
-            context.threadSandboxLease = acquisition.lease;
-            requiresMaterialization = acquisition.requiresMaterialization;
-            if (!acquisition.resourceFilesystemMounted) {
-              context.agentFailure = "SANDBOX_FAILED";
-              throw new Error("Thread Sandbox ResourceFS 能力事实缺失");
-            }
-            if (acquisition.source !== "cold_created") {
-              const probeSession = acquisition.session;
-              const probe = await measureExecutionPhase(
-                preparationTiming,
-                "sandbox_resource_probe",
-                () =>
-                  probeResourceFilesystemDataPlane(probeSession.sandbox, {
-                    threadId: scope.threadId,
-                    historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
-                    directAttachmentPaths,
-                    signal: executionAbort.signal,
-                  }),
-              );
-              if (probe.outcome === "failed") {
-                context.agentFailure = "SANDBOX_FAILED";
-                throw new Error("复用 Thread Sandbox 的 ResourceFS 数据面验证失败");
-              }
-              if (probe.outcome === "missing") {
-                const stale = acquisition;
-                delete context.threadSandboxLease;
-                const retired = await lifecycle
-                  .terminate({
-                    scope,
-                    attemptId: context.attemptId,
-                    session: stale.session,
-                    lease: stale.lease,
-                    reason: "resource_filesystem_data_plane_missing",
-                  })
-                  .catch(() => "unknown" as const);
-                sandbox = undefined;
-                sandboxResourceFilesystemMounted = false;
-                if (retired !== "settled") {
-                  context.agentFailure =
-                    retired === "unknown" ? "SANDBOX_UNKNOWN" : "SANDBOX_FAILED";
-                  throw new Error("失效 Thread Sandbox generation 退役失败");
-                }
-                acquisition = await measureExecutionPhase(
-                  preparationTiming,
-                  "sandbox_acquire",
-                  () =>
-                    lifecycle.acquire({
-                      scope,
-                      attemptId: context.attemptId,
-                      owner: this.options.workerId,
-                      leaseDurationMs: this.#leaseDurationMs,
-                      signal: executionAbort.signal,
-                      requiresResourceFilesystem,
-                      ...(preparationTiming === undefined
-                        ? {}
-                        : { phaseTiming: preparationTiming }),
-                    }),
-                );
-                if (acquisition.outcome !== "ready") {
-                  context.agentFailure =
-                    acquisition.outcome === "unknown" ? "SANDBOX_UNKNOWN" : acquisition.code;
-                  throw new Error("Thread Sandbox 冷恢复 acquire 失败");
-                }
-                sandbox = acquisition.session;
-                sandboxResourceFilesystemMounted = acquisition.resourceFilesystemMounted;
-                context.threadSandboxLease = acquisition.lease;
-                requiresMaterialization = acquisition.requiresMaterialization;
-                if (
-                  acquisition.source !== "cold_created" ||
-                  acquisition.lease.generation <= stale.lease.generation ||
-                  acquisition.lease.sessionId === stale.lease.sessionId ||
-                  !acquisition.resourceFilesystemMounted ||
-                  !acquisition.requiresMaterialization
-                ) {
-                  context.agentFailure = "SANDBOX_FAILED";
-                  throw new Error("Thread Sandbox 冷恢复没有切换到新的完整 generation");
-                }
-                const recoveredSession = acquisition.session;
-                const recoveredProbe = await measureExecutionPhase(
-                  preparationTiming,
-                  "sandbox_resource_probe",
-                  () =>
-                    probeResourceFilesystemDataPlane(recoveredSession.sandbox, {
-                      threadId: scope.threadId,
-                      historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
-                      directAttachmentPaths,
-                      signal: executionAbort.signal,
-                    }),
-                );
-                if (recoveredProbe.outcome !== "ready") {
-                  context.agentFailure = "SANDBOX_FAILED";
-                  throw new Error("冷恢复 Thread Sandbox 的 ResourceFS 数据面仍不可用");
-                }
-              }
-            }
-          } else {
-            let acquisition: Awaited<ReturnType<SandboxSessionRegistryPort["acquire"]>>;
-            try {
-              acquisition = await measureExecutionPhase(preparationTiming, "sandbox_acquire", () =>
-                this.dependencies.sandboxes.acquire({
-                  scope,
-                  signal: executionAbort.signal,
-                  requiresResourceFilesystem,
-                  ...(preparationTiming === undefined ? {} : { phaseTiming: preparationTiming }),
-                }),
-              );
-            } catch {
-              context.agentFailure = "SANDBOX_FAILED";
-              throw new Error("Sandbox acquire 失败");
-            }
-            if (acquisition.outcome === "unknown") {
-              const unknownFact = await this.applyMutation(context, {
-                idempotencyKey: `${context.attemptId}/sandbox/acquire-unknown/${acquisition.event.requestId}`,
-                events: [],
-                outbox: [cleanupUnknownOutbox(context, acquisition.event)],
-              });
-              if (!isApplied(unknownFact)) {
-                sandboxPreparationResult = await this.handleMutationFailure(unknownFact);
-                throw new Error("Sandbox acquire UNKNOWN 事实未能持久化");
-              }
-              context.agentFailure = "SANDBOX_UNKNOWN";
-              throw new Error("Sandbox acquire 结果未知");
-            }
-            if (acquisition.outcome === "failed") {
-              context.agentFailure = acquisition.code;
-              throw new Error("Sandbox acquire 失败");
-            }
-            sandbox = acquisition.session;
-            sandboxResourceFilesystemMounted = requiresResourceFilesystem;
-          }
-
-          const acquired = sandbox;
-          if (acquired === undefined) {
-            context.agentFailure = "SANDBOX_FAILED";
-            throw new Error("Sandbox acquire 未返回 Session");
-          }
-          const postAcquire = await this.stopPoint(context, cancellation);
-          if (
-            postAcquire !== undefined &&
-            postAcquire !== "cancelled" &&
-            postAcquire !== "timeout"
-          ) {
-            if (context.threadSandboxLease === undefined) {
-              await this.bestEffortOrphanCleanup(scope, acquired, postAcquire);
-            } else {
-              await this.dependencies.threadSandboxes
-                ?.terminate({
-                  scope,
-                  attemptId: context.attemptId,
-                  session: acquired,
-                  lease: context.threadSandboxLease,
-                  reason: "checkpoint_failed",
-                })
-                .catch(() => "unknown");
-            }
-            sandbox = undefined;
-            delete context.threadSandboxLease;
-            throw new Error("Sandbox acquire 后运行已停止");
-          }
-
-          // acquire 可能发生在模型执行阶段；cleanup intent 是正交生命周期事实，不回退主阶段。
-          const intent = await this.applyMutation(context, {
-            idempotencyKey: `${context.attemptId}/sandbox/cleanup-intent`,
-            events: [],
-            outbox:
-              context.threadSandboxLease === undefined
-                ? [cleanupOutbox(context, acquired, "pending")]
-                : [],
-          });
-          if (!isApplied(intent)) {
-            if (context.threadSandboxLease === undefined) {
-              await this.bestEffortOrphanCleanup(scope, acquired, intent.outcome);
-            } else {
-              await this.dependencies.threadSandboxes
-                ?.terminate({
-                  scope,
-                  attemptId: context.attemptId,
-                  session: acquired,
-                  lease: context.threadSandboxLease,
-                  reason: "checkpoint_failed",
-                })
-                .catch(() => "unknown");
-            }
-            sandbox = undefined;
-            delete context.threadSandboxLease;
-            sandboxPreparationResult = await this.handleMutationFailure(intent);
-            throw new Error("Sandbox cleanup intent 未能持久化");
-          }
-          if (postAcquire) throw new Error("Sandbox acquire 后运行已停止");
-
-          const preMaterialize = await this.stopPoint(context, cancellation);
-          if (preMaterialize) throw new Error("Workspace 物化前运行已停止");
-          const materializeStartedAt = Date.now();
-          try {
-            if (requiresMaterialization) {
-              await measureExecutionPhase(preparationTiming, "workspace_materialize", () =>
-                this.dependencies.revisions.materialize({
-                  scope,
-                  attemptId: context.attemptId,
-                  ...(context.currentRevisionId === undefined
-                    ? {}
-                    : { expectedCurrentRevisionId: context.currentRevisionId }),
-                  sandbox: acquired,
-                  // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
-                  operationKey: `${context.attemptId}:workspace:materialize`,
-                  signal: executionAbort.signal,
-                }),
-              );
-            }
-            if (context.threadSandboxLease !== undefined && requiresMaterialization) {
-              const attested = await this.dependencies.threadSandboxes?.attestMaterialized({
-                scope,
-                attemptId: context.attemptId,
-                lease: context.threadSandboxLease,
-                ...(context.currentRevisionId === undefined
-                  ? {}
-                  : { revisionId: context.currentRevisionId }),
-              });
-              if (attested !== "attested") {
-                throw new Error("THREAD_SANDBOX_ATTESTATION_FAILED");
-              }
-            }
-            if (requiresMaterialization) {
-              await this.recordWorkspaceMaterialization(context, materializeStartedAt, "ready");
-            }
-          } catch (error) {
-            if (requiresMaterialization) {
-              await this.recordWorkspaceMaterialization(context, materializeStartedAt, "failed");
-            }
-            reportWorkspaceMaterializeFailure(error);
-            context.agentFailure = "WORKSPACE_CONFLICT";
-            throw new Error("Workspace 物化失败");
-          }
-          if (this.options.historyFilesystemEnabled === true) {
-            try {
-              await measureExecutionPhase(preparationTiming, "workspace_history_prepare", () =>
-                prepareHistoryEntrypoints(acquired.sandbox, scope.threadId, executionAbort.signal),
-              );
-            } catch {
-              context.agentFailure = "SANDBOX_FAILED";
-              throw new Error("历史目录固定入口准备失败");
-            }
-          }
-          const postMaterialize = await this.stopPoint(context, cancellation);
-          if (postMaterialize) throw new Error("Workspace 物化后运行已停止");
-          return acquired;
-        })();
-        return await sandboxPreparation;
-      };
-
-      const initialUserText = claim.snapshot.answer ?? claim.snapshot.input;
-      const personalizationUserId =
-        claim.snapshot.requestedByUserId ?? claim.snapshot.memorySubjectUserId;
-      if (this.dependencies.personalizations !== undefined && personalizationUserId === undefined) {
-        throw new Error("Run 缺少个性化用户身份");
-      }
-      const personalizationSnapshot =
-        this.dependencies.personalizations === undefined
-          ? undefined
-          : await measureStartup(
-              "personalization_resolve",
-              () =>
-                this.dependencies.personalizations?.resolveForRun({
-                  scope: {
-                    tenantId: scope.tenantId,
-                    userId: userId(personalizationUserId as string),
-                  },
-                }) as Promise<RunPersonalizationSnapshot>,
-            );
-      let promptInput = {
-        text: await measureStartup("memory_retrieve", () =>
-          this.withRetrievedMemory(claim.snapshot, scope, initialUserText),
-        ),
-        attachments: claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
-      };
-      const preSession = await measureStartup("pre_session_stop_point", () =>
-        this.stopPoint(context, cancellation),
+      assertControlledRolloutProjection(snapshot.rolloutProjection);
+    } catch {
+      return await this.requireRecovery(context, "EVENT_REJECTED", []);
+    }
+    let directAttachmentPaths: readonly string[];
+    try {
+      directAttachmentPaths = directAttachmentProbePaths(
+        snapshot.input,
+        snapshot.answer === undefined ? (snapshot.attachments ?? []) : [],
       );
-      if (preSession) return await this.finishStopped(context, preSession);
-      const agentSupervisor =
-        this.options.subagentsEnabled !== true || this.dependencies.agentControl === undefined
-          ? undefined
-          : new AgentSupervisor({
-              persistence: this.dependencies.agentControl,
-              rootAgentThreadId: rootAgentThreadId(context.attemptId),
-              attemptId: context.attemptId,
-              fence: context.fence,
-              createSession: async (child) =>
-                await this.dependencies.sessions.create({
-                  scope,
-                  attemptId: context.attemptId,
-                  fence: context.fence,
-                  agent: child.identity,
-                  enabledToolNames: child.tools,
-                  ensureSandboxReady,
-                  rolloutProjection: Object.freeze({
-                    schemaVersion: 2 as const,
-                    checkpointId: `${child.identity.agentThreadId}:${child.identity.agentTurnId}`,
-                    items: Object.freeze([]),
-                  }),
-                  ...(claim.snapshot.skills === undefined
-                    ? {}
-                    : { skillSnapshot: claim.snapshot.skills }),
-                  ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
-                  ...(child.history === undefined ? {} : { threadActiveHistory: child.history }),
-                  authorizeToolEffect: (call) =>
-                    this.authorizeToolEffectAfterStarted(context, cancellation, call),
-                  writeTodo: async () => {
-                    throw new Error("SUBAGENT_TODO_FORBIDDEN");
-                  },
-                }),
-              authorizeModelStart: (child) =>
-                this.authorizeEffect(context, cancellation, "agent_model_start", {
-                  callId: `${child.identity.agentThreadId}:${child.identity.agentTurnId}:model`,
-                  toolName: "pi_model",
-                  argsDigest: digestCanonical({ prompt: child.prompt, attachments: [] }),
-                }),
-              onToolEvent: async (_identity, event) => {
-                const gate =
-                  event.type === "tool.started" ? registerToolStarted(context, event) : undefined;
-                // root 与 Child 共享 Attempt event sequence；必须共用一条编码队列，禁止在进入
-                // durable lane 前分别读取同一个 nextEventSequence 并制造伪 conflict。
-                const persistence = eventChain.then(async () => {
-                  try {
-                    if (!context.eventAcceptanceOpen) {
-                      throw new Error("SubAgent 工具事件入口已关闭");
-                    }
-                    const encoded = agentEvent(context, event);
-                    const persisted = await this.applyMutation(context, {
-                      idempotencyKey: `${context.attemptId}/subagent/tool/${event.callId}/${event.type}`,
-                      events: [encoded],
-                      outbox: [],
-                      ...(event.type === "tool.started"
-                        ? { effectInvocation: { callId: event.callId, toolName: event.name } }
-                        : {}),
-                    });
-                    if (!isApplied(persisted)) {
-                      closeEventAcceptance(context);
-                      context.stopped =
-                        persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
-                          ? "fence_lost"
-                          : "unavailable";
-                      throw new Error(`SubAgent ${event.type} 持久化失败`);
-                    }
-                  } finally {
-                    gate?.resolve();
-                  }
-                });
-                eventChain = persistence.catch(() => undefined);
-                return persistence;
-              },
-            });
-      if (agentSupervisor !== undefined) {
-        await measureStartup("agent_supervisor_initialize", () => agentSupervisor.initialize());
-      }
-      const createdSession = await measureStartup("agent_session_create", () =>
-        this.dependencies.sessions.create({
+    } catch {
+      return await this.requireRecovery(context, "PROTOCOL", []);
+    }
+    const sandboxes = new RunSandboxPreparation<RunWorkerResult>({
+      context,
+      workerId: this.options.workerId,
+      leaseDurationMs: this.#leaseDurationMs,
+      threadSandboxSessionReuseEnabled: this.options.threadSandboxSessionReuseEnabled === true,
+      historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
+      directAttachmentPaths,
+      signal: run.executionAbort.signal,
+      ...(run.timings.phase === undefined ? {} : { phaseTiming: run.timings.phase }),
+      sandboxes: this.dependencies.sandboxes,
+      ...(this.dependencies.threadSandboxes === undefined
+        ? {}
+        : { threadSandboxes: this.dependencies.threadSandboxes }),
+      revisions: this.dependencies.revisions,
+      operations: {
+        stopPoint: () => this.stopPoint(context, cancellation),
+        applyMutation: (input) => this.applyMutation(context, input),
+        handleMutationFailure: (result) => this.handleMutationFailure(result),
+        bestEffortOrphanCleanup: (sandbox, reason) =>
+          this.bestEffortOrphanCleanup(scope, sandbox, reason),
+        recordWorkspaceMaterialization: (startedAt, outcome) =>
+          this.recordWorkspaceMaterialization(context, startedAt, outcome),
+      },
+    });
+    run.sandboxes = sandboxes;
+
+    const initialUserText = snapshot.answer ?? snapshot.input;
+    const personalizationUserId = snapshot.requestedByUserId ?? snapshot.memorySubjectUserId;
+    if (this.dependencies.personalizations !== undefined && personalizationUserId === undefined) {
+      throw new Error("Run 缺少个性化用户身份");
+    }
+    const personalizationSnapshot =
+      this.dependencies.personalizations === undefined
+        ? undefined
+        : await run.timings.measureStartup(
+            "personalization_resolve",
+            () =>
+              this.dependencies.personalizations?.resolveForRun({
+                scope: {
+                  tenantId: scope.tenantId,
+                  userId: userId(personalizationUserId as string),
+                },
+              }) as Promise<RunPersonalizationSnapshot>,
+          );
+    const promptInput: AgentUserInput = {
+      text: await run.timings.measureStartup("memory_retrieve", () =>
+        this.withRetrievedMemory(snapshot, scope, initialUserText),
+      ),
+      attachments: snapshot.answer === undefined ? (snapshot.attachments ?? []) : [],
+    };
+    const preSession = await run.timings.measureStartup("pre_session_stop_point", () =>
+      this.stopPoint(context, cancellation),
+    );
+    if (preSession) return await this.finishStopped(context, preSession);
+    const agentSupervisor = this.#createAgentSupervisor(
+      run,
+      sandboxes.ensureReady,
+      personalizationSnapshot,
+    );
+    if (agentSupervisor !== undefined) {
+      await run.timings.measureStartup("agent_supervisor_initialize", () =>
+        agentSupervisor.initialize(),
+      );
+    }
+    const session = await run.timings.measureStartup("agent_session_create", () =>
+      this.#createRootSession(run, {
+        ensureSandboxReady: sandboxes.ensureReady,
+        initialInputText: promptInput.text,
+        personalizationSnapshot,
+        agentSupervisor,
+      }),
+    );
+    run.session = session;
+    context.abortSession = async () => {
+      await session.drainRejectedToolReceipts?.();
+      await Promise.all([
+        session.abort().catch(() => undefined),
+        agentSupervisor?.abortAll().catch(() => undefined),
+      ]);
+    };
+    const postSession = await run.timings.measureStartup("post_session_stop_point", () =>
+      this.stopPoint(context, cancellation),
+    );
+    if (postSession) return await this.finishStopped(context, postSession, sandboxes.current);
+
+    run.unsubscribe = run.events.subscribe(session);
+
+    const modelCheckpoint = await run.timings.measureStartup("model_checkpoint", () =>
+      this.applyMutation(context, {
+        idempotencyKey: `${context.attemptId}/stage/model-execution-started`,
+        nextAttemptStatus: "running",
+        nextStage: "model_execution_started",
+        events: [attemptEvent(context, "running", "model_execution_started")],
+        outbox: [],
+      }),
+    );
+    if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
+
+    const settled = await this.#runModelLoop(run, session, agentSupervisor, promptInput);
+    if (settled.kind === "result") return settled.result;
+    return await this.#finishSucceeded(run, settled.workspaceChange);
+  }
+
+  #createAgentSupervisor(
+    run: ActiveRun,
+    ensureSandboxReady: EnsureSandboxReady,
+    personalizationSnapshot: RunPersonalizationSnapshot | undefined,
+  ): AgentSupervisor | undefined {
+    if (this.options.subagentsEnabled !== true || this.dependencies.agentControl === undefined) {
+      return undefined;
+    }
+    const { context, scope, snapshot, cancellation } = run;
+    return new AgentSupervisor({
+      persistence: this.dependencies.agentControl,
+      rootAgentThreadId: rootAgentThreadId(context.attemptId),
+      attemptId: context.attemptId,
+      fence: context.fence,
+      createSession: async (child) =>
+        await this.dependencies.sessions.create({
           scope,
           attemptId: context.attemptId,
           fence: context.fence,
+          agent: child.identity,
+          enabledToolNames: child.tools,
           ensureSandboxReady,
-          rolloutProjection: claim.snapshot.rolloutProjection,
-          initialInputText: promptInput.text,
-          ...(claim.snapshot.skills === undefined ? {} : { skillSnapshot: claim.snapshot.skills }),
+          rolloutProjection: Object.freeze({
+            schemaVersion: 2 as const,
+            checkpointId: `${child.identity.agentThreadId}:${child.identity.agentTurnId}`,
+            items: Object.freeze([]),
+          }),
+          ...(snapshot.skills === undefined ? {} : { skillSnapshot: snapshot.skills }),
           ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
-          ...(startupTimingObserver === undefined ? {} : { startupTiming: startupTimingObserver }),
-          ...(phaseTiming === undefined ? {} : { phaseTiming }),
-          ...(claim.snapshot.contextThroughSequence === undefined
-            ? {}
-            : { contextThroughSequence: claim.snapshot.contextThroughSequence }),
-          ...(this.options.threadContextWriteEnabled !== true
-            ? {}
-            : {
-                onTurnSafePoint: async (
-                  event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
-                ) => {
-                  // turn 安全点可能从 Pi 的 prepare hook 进入，而流式公开事件仍在异步持久化队列中。
-                  // 必须先排空已发布事件，禁止 Thread Context 越过 thinking/message 终态。
-                  await eventChain;
-                  if (!context.eventAcceptanceOpen) throw new Error("Thread Context 写入口已关闭");
-                  const finalization = classifyFinalizationTurn(context, event);
-                  const append = await this.prepareTurnContextAppend(
-                    context,
-                    event,
-                    finalization.phase,
-                  );
-                  const persisted = await this.applyMutation(context, {
-                    idempotencyKey: append.idempotencyKey,
-                    events:
-                      finalization.event === undefined
-                        ? []
-                        : [agentEvent(context, finalization.event)],
-                    outbox: [],
-                    threadContextAppend: append,
-                  });
-                  if (!isApplied(persisted) || persisted.receipt.threadContext === undefined) {
-                    closeEventAcceptance(context);
-                    context.stopped =
-                      persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
-                        ? "fence_lost"
-                        : "unavailable";
-                    throw new Error("Thread Context turn 安全点提交失败");
-                  }
-                  applyFinalizationTransition(context, finalization);
-                  const throughSequence = persisted.receipt.threadContext.lastSequence;
-                  if (this.options.threadInputRoutingV2Enabled !== true) return { throughSequence };
-                  // 先持久化完整 assistant/tool 配对，再一次读取当前安全点已经排队的全部 steer；
-                  // 新到达的输入留给后续安全点，避免持续写入让本次 Provider continuation 饥饿。
-                  const pending = await this.dependencies.persistence.readPendingThreadSteers({
-                    fence: context.fence,
-                  });
-                  if (pending.outcome === "pending") {
-                    const steers = [];
-                    for (const item of pending.items) {
-                      const steered = await this.applyThreadSteer(context, item);
-                      if (!isApplied(steered)) {
-                        closeEventAcceptance(context);
-                        context.stopped =
-                          steered.outcome === "fence_lost" || steered.outcome === "scope_mismatch"
-                            ? "fence_lost"
-                            : "unavailable";
-                        throw new Error("Thread steer 安全点提交失败");
-                      }
-                      steers.push({
-                        receiptId: item.receiptId,
-                        inputText: item.inputText,
-                        ...(item.attachments === undefined
-                          ? {}
-                          : { attachments: item.attachments }),
-                      });
-                    }
-                    return { throughSequence, steers };
-                  }
-                  if (pending.outcome !== "none") {
-                    closeEventAcceptance(context);
-                    context.stopped =
-                      pending.outcome === "cancelled"
-                        ? "cancelled"
-                        : pending.outcome === "fence_lost" || pending.outcome === "scope_mismatch"
-                          ? "fence_lost"
-                          : "unavailable";
-                    throw new Error("Thread steer 安全点不可继续");
-                  }
-                  return { throughSequence };
-                },
-              }),
+          ...(child.history === undefined ? {} : { threadActiveHistory: child.history }),
           authorizeToolEffect: (call) =>
             this.authorizeToolEffectAfterStarted(context, cancellation, call),
-          writeTodo: (call) => this.writeTodoAfterStarted(context, cancellation, call),
-          ...(agentSupervisor === undefined ? {} : { agentControl: agentSupervisor }),
+          writeTodo: async () => {
+            throw new Error("SUBAGENT_TODO_FORBIDDEN");
+          },
         }),
-      );
-      session = createdSession;
-      context.abortSession = async () => {
-        await session?.drainRejectedToolReceipts?.();
-        await Promise.all([
-          session?.abort().catch(() => undefined),
-          agentSupervisor?.abortAll().catch(() => undefined),
-        ]);
-      };
-      const postSession = await measureStartup("post_session_stop_point", () =>
-        this.stopPoint(context, cancellation),
-      );
-      if (postSession) return await this.finishStopped(context, postSession, sandbox);
-
-      unsubscribe = session.subscribe((event) => {
-        if (!context.eventAcceptanceOpen) return;
-        const toolStartedGate =
-          event.type === "tool.started" ? registerToolStarted(context, event) : undefined;
-        eventChain = eventChain.then(async () => {
-          // 协议拒绝或持久化失败会原子关闭入口；已排队事件只 drain。
-          if (!context.eventAcceptanceOpen) {
-            toolStartedGate?.resolve();
-            return;
-          }
-          try {
-            // turn.completed 由 awaited onTurnSafePoint 原子提交；这里不能异步重复写入。
-            if (event.type === "turn.completed") return;
-            const encoded = agentEvent(context, event);
-            const persisted = await this.applyMutation(context, {
-              idempotencyKey: `${context.attemptId}/event/${encoded.sequence}`,
-              events: [encoded],
-              outbox: [],
-              ...(event.type === "tool.started"
-                ? { effectInvocation: { callId: event.callId, toolName: event.name } }
-                : {}),
-            });
-            if (!isApplied(persisted)) {
-              closeEventAcceptance(context);
-              context.stopped =
-                persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
-                  ? "fence_lost"
-                  : "unavailable";
-              await requestAbort();
-              return;
-            }
-            if (!context.eventAcceptanceOpen) return;
-            updateAgentState(context, event);
-          } catch {
-            context.adapterRejected = true;
-            context.agentFailure = "EVENT_REJECTED";
-            closeEventAcceptance(context);
-            await requestAbort();
-          } finally {
-            toolStartedGate?.resolve();
-          }
-        });
-      });
-
-      const modelCheckpoint = await measureStartup("model_checkpoint", () =>
-        this.applyMutation(context, {
-          idempotencyKey: `${context.attemptId}/stage/model-execution-started`,
-          nextAttemptStatus: "running",
-          nextStage: "model_execution_started",
-          events: [attemptEvent(context, "running", "model_execution_started")],
-          outbox: [],
+      authorizeModelStart: (child) =>
+        this.authorizeEffect(context, cancellation, "agent_model_start", {
+          callId: `${child.identity.agentThreadId}:${child.identity.agentTurnId}:model`,
+          toolName: "pi_model",
+          argsDigest: digestCanonical({ prompt: child.prompt, attachments: [] }),
         }),
+      onToolEvent: (_identity, event) => run.events.persistSubagentToolEvent(event),
+    });
+  }
+
+  #createRootSession(
+    run: ActiveRun,
+    input: {
+      readonly ensureSandboxReady: EnsureSandboxReady;
+      readonly initialInputText: string;
+      readonly personalizationSnapshot: RunPersonalizationSnapshot | undefined;
+      readonly agentSupervisor: AgentSupervisor | undefined;
+    },
+  ): Promise<WorkerAgentSessionPort> {
+    const { context, scope, snapshot, cancellation, timings } = run;
+    const { personalizationSnapshot, agentSupervisor } = input;
+    return this.dependencies.sessions.create({
+      scope,
+      attemptId: context.attemptId,
+      fence: context.fence,
+      ensureSandboxReady: input.ensureSandboxReady,
+      rolloutProjection: snapshot.rolloutProjection,
+      initialInputText: input.initialInputText,
+      ...(snapshot.skills === undefined ? {} : { skillSnapshot: snapshot.skills }),
+      ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
+      ...(timings.startupObserver === undefined ? {} : { startupTiming: timings.startupObserver }),
+      ...(timings.phase === undefined ? {} : { phaseTiming: timings.phase }),
+      ...(snapshot.contextThroughSequence === undefined
+        ? {}
+        : { contextThroughSequence: snapshot.contextThroughSequence }),
+      ...(this.options.threadContextWriteEnabled !== true
+        ? {}
+        : { onTurnSafePoint: (event) => run.events.commitTurnSafePoint(event) }),
+      authorizeToolEffect: (call) =>
+        this.authorizeToolEffectAfterStarted(context, cancellation, call),
+      writeTodo: (call) => this.writeTodoAfterStarted(context, cancellation, call),
+      ...(agentSupervisor === undefined ? {} : { agentControl: agentSupervisor }),
+    });
+  }
+
+  /**
+   * 模型循环：每轮先签发模型许可再执行 prompt。允许的续跑只有两种——一次有界的输出长度续跑，
+   * 以及 Pi 已 settled 后逐条消费的 Thread steer；其余结果都在本轮收口。
+   */
+  async #runModelLoop(
+    run: ActiveRun,
+    session: WorkerAgentSessionPort,
+    agentSupervisor: AgentSupervisor | undefined,
+    initialPrompt: AgentUserInput,
+  ): Promise<
+    | { readonly kind: "result"; readonly result: RunWorkerResult }
+    | { readonly kind: "completed"; readonly workspaceChange?: ValidatedWorkspaceChange }
+  > {
+    const { context, cancellation } = run;
+    const result = (value: RunWorkerResult) => ({ kind: "result", result: value }) as const;
+    let promptInput = initialPrompt;
+    let steerReceiptId: string | undefined;
+    let outputLimitContinuationRound = 0;
+    let outputLimitContinuationUsed = false;
+
+    for (;;) {
+      // 模型许可签发会在数据库内重验双栅栏与 Run 状态，取消、停机或栅栏丢失都会令其拒绝，
+      // 并经外层 catch 收敛为 finishStopped；此前单独的 stopPoint 只多一次续租往返。
+      const modelEffect =
+        steerReceiptId === undefined && outputLimitContinuationRound === 0
+          ? "model_start"
+          : "model_continue";
+      const modelCallId =
+        outputLimitContinuationRound > 0
+          ? `${context.attemptId}/model/output-limit/${outputLimitContinuationRound}`
+          : steerReceiptId === undefined
+            ? `${context.attemptId}/model/start`
+            : `${context.attemptId}/model/steer/${steerReceiptId}`;
+      const currentPrompt = promptInput;
+      const preparedInput = await run.timings.measureStartup("prepare_input", () =>
+        session.prepareInput(currentPrompt),
       );
-      if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
-
-      let steerReceiptId: string | undefined;
-      let outputLimitContinuationRound = 0;
-      let outputLimitContinuationUsed = false;
-      const correctionRound = 0;
-      let workspaceChange: ValidatedWorkspaceChange | undefined;
-
-      // TODO(codex-alignment): waiting 仍复用历史单轮循环骨架；后续清理不可达 correction 命名。
-      for (;;) {
-        // 模型许可签发会在数据库内重验双栅栏与 Run 状态，取消、停机或栅栏丢失都会令其拒绝，
-        // 并经外层 catch 收敛为 finishStopped；此前单独的 stopPoint 只多一次续租往返。
-        const modelEffect =
-          steerReceiptId === undefined && outputLimitContinuationRound === 0
-            ? "model_start"
-            : "model_continue";
-        const modelCallId =
-          outputLimitContinuationRound > 0
-            ? `${context.attemptId}/model/output-limit/${outputLimitContinuationRound}`
-            : steerReceiptId === undefined
-              ? `${context.attemptId}/model/start`
-              : `${context.attemptId}/model/steer/${steerReceiptId}`;
-        const preparedInput = await measureStartup("prepare_input", () =>
-          createdSession.prepareInput(promptInput),
-        );
-        const modelAuthorization = await measureStartup("model_authorization", () =>
-          this.authorizeEffect(context, cancellation, modelEffect, {
-            callId: modelCallId,
-            toolName: "pi_model",
-            argsDigest: digestCanonical({
-              prompt: promptInput.text,
-              attachments: promptInput.attachments,
-            }),
+      const modelAuthorization = await run.timings.measureStartup("model_authorization", () =>
+        this.authorizeEffect(context, cancellation, modelEffect, {
+          callId: modelCallId,
+          toolName: "pi_model",
+          argsDigest: digestCanonical({
+            prompt: currentPrompt.text,
+            attachments: currentPrompt.attachments,
           }),
-        );
-        context.modelCompleted = false;
-        delete context.modelStopReason;
-        const turn = await session.runPrompt(preparedInput, modelAuthorization);
-        await eventChain;
-        if (context.abortPromise) await context.abortPromise;
-        const postModel = await this.stopPoint(context, cancellation);
-        if (postModel) return await this.finishStopped(context, postModel, sandbox);
-        if (turn.kind === "context_too_large") {
-          return await this.finalizeWithCleanup(
+        }),
+      );
+      context.modelCompleted = false;
+      delete context.modelStopReason;
+      const turn = await session.runPrompt(preparedInput, modelAuthorization);
+      await run.events.drained;
+      if (context.abortPromise) await context.abortPromise;
+      // SubAgent 在 drain 前仍可能触发 Sandbox 懒准备，因此每次收口都实时读取当前 Sandbox。
+      const postModel = await this.stopPoint(context, cancellation);
+      if (postModel) {
+        return result(await this.finishStopped(context, postModel, run.sandboxes?.current));
+      }
+      const failed = await this.#settleFailedTurn(run, turn);
+      if (failed !== undefined) return result(failed);
+      if (
+        turn.kind === "completed" &&
+        context.modelStopReason === "length" &&
+        !outputLimitContinuationUsed
+      ) {
+        // Provider 已完整提交 length 终态；追加一次有界续跑，避免把推理预算耗尽误报为协议损坏。
+        outputLimitContinuationRound = 1;
+        outputLimitContinuationUsed = true;
+        steerReceiptId = undefined;
+        promptInput = { text: OUTPUT_LIMIT_CONTINUATION_PROMPT, attachments: [] };
+        continue;
+      }
+      if (turn.kind === "completed" && !context.modelCompleted) {
+        return result(
+          await this.finalizeWithCleanup(
             context,
-            sandbox,
-            "failed",
-            "CONTEXT_TOO_LARGE",
-            cancellation,
-          );
-        }
-        if (context.adapterRejected) {
-          return await this.recoverWithCleanup(
-            context,
-            sandbox,
-            context.agentFailure ?? "EVENT_REJECTED",
-            cancellation,
-          );
-        }
-        if (turn.kind === "recovery_required") {
-          return await this.recoverWithCleanup(context, sandbox, turn.code, cancellation);
-        }
-        if (context.agentFailure) {
-          return await this.finalizeWithCleanup(
-            context,
-            sandbox,
-            "failed",
-            context.agentFailure,
-            cancellation,
-          );
-        }
-        if (
-          turn.kind === "completed" &&
-          context.modelStopReason === "length" &&
-          !outputLimitContinuationUsed
-        ) {
-          // Provider 已完整提交 length 终态；追加一次有界续跑，避免把推理预算耗尽误报为协议损坏。
-          outputLimitContinuationRound = 1;
-          outputLimitContinuationUsed = true;
-          steerReceiptId = undefined;
-          promptInput = { text: OUTPUT_LIMIT_CONTINUATION_PROMPT, attachments: [] };
-          continue;
-        }
-        if (turn.kind === "completed" && !context.modelCompleted) {
-          return await this.finalizeWithCleanup(
-            context,
-            sandbox,
+            run.sandboxes?.current,
             "failed",
             "PROTOCOL",
             cancellation,
-          );
-        }
-        outputLimitContinuationRound = 0;
-
-        if (this.options.threadInputRoutingV2Enabled === true) {
-          const pending = await this.dependencies.persistence.readPendingThreadSteers({
-            fence: context.fence,
-          });
-          if (pending.outcome === "pending") {
-            // Pi 已经 settled 时没有可承载批量 steering 的活跃 prompt；只消费队首，
-            // 其余 receipt 保持 pending，等这次 prompt 的安全点再合并进入后续请求。
-            const [item] = pending.items;
-            if (item === undefined) throw new Error("Thread steer 批次不能为空");
-            const applied = await this.applyThreadSteer(context, item);
-            if (!isApplied(applied)) return await this.handleMutationFailure(applied);
-            promptInput = {
-              text: await this.withRetrievedMemory(claim.snapshot, scope, item.inputText),
-              attachments: item.attachments ?? [],
-            };
-            steerReceiptId = item.receiptId;
-            continue;
-          }
-          if (pending.outcome !== "none") {
-            context.stopped =
-              pending.outcome === "cancelled"
-                ? "cancelled"
-                : pending.outcome === "fence_lost" || pending.outcome === "scope_mismatch"
-                  ? "fence_lost"
-                  : "unavailable";
-            return await this.finishStopped(context, context.stopped, sandbox);
-          }
-        }
-
-        await agentSupervisor?.drain();
-        const postAgents = await this.stopPoint(context, cancellation);
-        if (postAgents) return await this.finishStopped(context, postAgents, sandbox);
-        const modelSettled = await this.applyMutation(context, {
-          idempotencyKey:
-            correctionRound === 0
-              ? `${context.attemptId}/stage/model-settled`
-              : `${context.attemptId}/correction/${correctionRound}/model-settled`,
-          ...(correctionRound === 0 ? { nextStage: "model_settled" as const } : {}),
-          events: [
-            attemptEvent(
-              context,
-              "running",
-              correctionRound === 0 ? "model_settled" : "workspace_verified",
-            ),
-          ],
-          outbox: [],
-        });
-        if (!isApplied(modelSettled)) return await this.handleMutationFailure(modelSettled);
-
-        if (sandbox !== undefined && !(await this.shouldDeferWorkspaceSnapshot(context, turn))) {
-          const preVerify = await this.stopPoint(context, cancellation);
-          if (preVerify) return await this.finishStopped(context, preVerify, sandbox);
-          const verifiedSandbox = sandbox;
-          let candidate: WorkspaceRevisionCandidate | undefined;
-          try {
-            candidate = await measureExecutionPhase(context.phaseTiming, "workspace_verify", () =>
-              this.dependencies.revisions.verify({
-                scope,
-                attemptId: context.attemptId,
-                ...(context.currentRevisionId === undefined
-                  ? {}
-                  : { expectedCurrentRevisionId: context.currentRevisionId }),
-                sandbox: verifiedSandbox,
-                operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
-                signal: executionAbort.signal,
-              }),
-            );
-          } catch (error) {
-            reportWorkspaceVerifyFailure(error);
-            return await this.recoverWithCleanup(
-              context,
-              sandbox,
-              "WORKSPACE_CONFLICT",
-              cancellation,
-            );
-          }
-          const postVerify = await this.stopPoint(context, cancellation);
-          if (postVerify) return await this.finishStopped(context, postVerify, sandbox);
-          try {
-            workspaceChange = validateWorkspaceCandidate(context, candidate);
-          } catch {
-            return await this.recoverWithCleanup(
-              context,
-              sandbox,
-              "WORKSPACE_CONFLICT",
-              cancellation,
-            );
-          }
-          const verified = await this.applyMutation(context, {
-            idempotencyKey:
-              correctionRound === 0
-                ? `${context.attemptId}/stage/workspace-verified`
-                : `${context.attemptId}/correction/${correctionRound}/workspace-verified`,
-            ...(correctionRound === 0 ? { nextStage: "workspace_verified" as const } : {}),
-            events: [attemptEvent(context, "running", "workspace_verified")],
-            outbox: [],
-          });
-          if (!isApplied(verified)) return await this.handleMutationFailure(verified);
-        }
-
-        if (turn.kind === "waiting") {
-          try {
-            assertControlledRolloutProjection(turn.rolloutProjection);
-          } catch {
-            return await this.recoverWithCleanup(context, sandbox, "EVENT_REJECTED", cancellation);
-          }
-          const preSettle = await this.stopPoint(context, cancellation);
-          if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
-          if (sandbox !== undefined) {
-            if (context.threadSandboxLease === undefined) {
-              const settled = await measureExecutionPhase(
-                context.phaseTiming,
-                "sandbox_settle",
-                this.settleSandbox.bind(this, context, sandbox, "pause"),
-              );
-              if (settled.outcome !== "settled") return settled.result;
-              const postSettle = await this.stopPoint(context, cancellation);
-              if (postSettle) return await this.finishStopped(context, postSettle);
-            } else {
-              const finalizing = await this.prepareThreadSandboxTerminal(context);
-              if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
-            }
-          }
-          const waiting = await this.applyMutation(context, {
-            idempotencyKey: `${context.attemptId}/final/waiting`,
-            nextAttemptStatus: "waiting",
-            nextStage: "finished",
-            events: [waitingEvent(context, turn.question, turn.rolloutProjection.checkpointId)],
-            outbox: [],
-            rolloutProjection: turn.rolloutProjection,
-            ...(workspaceChange === undefined ? {} : { workspaceChange }),
-            nextRunStatus: "waiting",
-            releaseFences: true,
-            ...(context.threadSandboxLease === undefined
-              ? {}
-              : { threadSandboxTerminal: terminalSandboxCommand(context.threadSandboxLease) }),
-            ...(this.options.threadContextWriteEnabled === true
-              ? { threadContextAppend: terminalContextAppend(context, "waiting") }
-              : {}),
-          });
-          if (!isApplied(waiting)) return await this.handleMutationFailure(waiting);
-          if (sandbox !== undefined) {
-            await measureExecutionPhase(
-              context.phaseTiming,
-              "sandbox_settle",
-              this.completeThreadSandboxTerminalEffect.bind(this, context, sandbox, waiting),
-            );
-          }
-          return { outcome: "waiting" };
-        }
-
-        // deliver_file 的成功已是 published 事实；Run 完成不再依赖声明或修正轮次。
-        break;
-      }
-
-      if (sandbox === undefined) {
-        const finalizing = await this.prepareNoSandboxTerminal(context);
-        if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
-      } else {
-        if (context.threadSandboxLease === undefined) {
-          const settled = await measureExecutionPhase(
-            context.phaseTiming,
-            "sandbox_settle",
-            this.settleSandbox.bind(this, context, sandbox, "close"),
-          );
-          if (settled.outcome !== "settled") return settled.result;
-          // settle 与 Run success 之间必须同步重验，避免取消被成功覆盖。
-          const postSettle = await this.stopPoint(context, cancellation);
-          if (postSettle) return await this.finishStopped(context, postSettle);
-        } else {
-          const finalizing = await this.prepareThreadSandboxTerminal(context);
-          if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
-        }
-      }
-      const final = await this.applyMutation(context, {
-        idempotencyKey: `${context.attemptId}/final/succeeded`,
-        nextAttemptStatus: "succeeded",
-        nextStage: "finished",
-        events: [attemptEvent(context, "succeeded", "finished")],
-        outbox: [],
-        ...(workspaceChange === undefined ? {} : { workspaceChange }),
-        nextRunStatus: "succeeded",
-        releaseFences: true,
-        ...(context.threadSandboxLease === undefined
-          ? {}
-          : { threadSandboxTerminal: terminalSandboxCommand(context.threadSandboxLease) }),
-        ...(this.options.threadContextWriteEnabled === true
-          ? {
-              threadContextAppend: terminalContextAppend(context, "succeeded", workspaceChange),
-            }
-          : {}),
-      });
-      if (!isApplied(final)) return await this.handleMutationFailure(final);
-      if (sandbox !== undefined) {
-        await measureExecutionPhase(
-          context.phaseTiming,
-          "sandbox_settle",
-          this.completeThreadSandboxTerminalEffect.bind(this, context, sandbox, final),
+          ),
         );
       }
-      return { outcome: "succeeded" };
-    } catch {
-      closeEventAcceptance(context);
-      await eventChain.catch(() => undefined);
-      await requestAbort();
-      if (sandboxPreparationResult !== undefined) return sandboxPreparationResult;
-      if (context.stopped) return await this.finishStopped(context, context.stopped, sandbox);
-      if (context.agentFailure !== undefined) {
-        if (sandbox === undefined && context.agentFailure === "SANDBOX_FAILED") {
-          return await this.finalizeWithoutRevision(context, "failed", "SANDBOX_FAILED");
-        }
-        return sandbox === undefined
-          ? await this.requireRecovery(context, context.agentFailure, [])
-          : await this.recoverWithCleanup(context, sandbox, context.agentFailure, cancellation);
+      outputLimitContinuationRound = 0;
+
+      const steer = await this.#takeSettledSteer(run);
+      if (steer.kind === "result") return steer;
+      if (steer.kind === "steer") {
+        promptInput = steer.promptInput;
+        steerReceiptId = steer.receiptId;
+        continue;
       }
-      return sandbox
-        ? await this.recoverWithCleanup(context, sandbox, "INTERNAL", cancellation)
-        : await this.requireRecovery(context, "INTERNAL", []);
-    } finally {
-      startupTiming?.publish();
-      timeout.cancel();
-      cancellation.removeEventListener("abort", onCancel);
-      this.dependencies.cancellation.release?.(scope);
-      shutdown?.removeEventListener("abort", onShutdown);
-      closeEventAcceptance(context);
-      // abort 完成后才允许取消订阅、释放 Session；cleanup 已由持久 Outbox/Saga 接管。
-      await Promise.allSettled([heartbeat.stop()]);
-      if (heartbeatInFlight) await Promise.allSettled([heartbeatInFlight]);
-      await context.durableLane.drain();
-      await Promise.allSettled([context.abortPromise ?? Promise.resolve()]);
-      await Promise.allSettled([
-        startupTiming?.drain() ?? Promise.resolve(),
-        phaseTiming?.drain() ?? Promise.resolve(),
-        Promise.resolve().then(() => unsubscribe?.()),
-        Promise.resolve().then(() => session?.dispose()),
-      ]);
+
+      await agentSupervisor?.drain();
+      const postAgents = await this.stopPoint(context, cancellation);
+      if (postAgents) {
+        return result(await this.finishStopped(context, postAgents, run.sandboxes?.current));
+      }
+      const modelSettled = await this.applyMutation(context, {
+        idempotencyKey: `${context.attemptId}/stage/model-settled`,
+        nextStage: "model_settled",
+        events: [attemptEvent(context, "running", "model_settled")],
+        outbox: [],
+      });
+      if (!isApplied(modelSettled)) return result(await this.handleMutationFailure(modelSettled));
+
+      const verified = await this.#verifyWorkspace(run, turn);
+      if (verified.kind === "result") return verified;
+      if (turn.kind === "waiting") {
+        return result(await this.#finishWaiting(run, turn, verified.workspaceChange));
+      }
+      // deliver_file 的成功已是 published 事实；Run 完成不再依赖声明或修正轮次。
+      return {
+        kind: "completed",
+        ...(verified.workspaceChange === undefined
+          ? {}
+          : { workspaceChange: verified.workspaceChange }),
+      };
     }
+  }
+
+  /** 模型轮次结束后的失败判定；顺序即优先级，返回 undefined 表示可继续收口。 */
+  async #settleFailedTurn(
+    run: ActiveRun,
+    turn: AgentTurnResult,
+  ): Promise<RunWorkerResult | undefined> {
+    const { context, cancellation } = run;
+    const sandbox = run.sandboxes?.current;
+    if (turn.kind === "context_too_large") {
+      return await this.finalizeWithCleanup(
+        context,
+        sandbox,
+        "failed",
+        "CONTEXT_TOO_LARGE",
+        cancellation,
+      );
+    }
+    if (context.adapterRejected) {
+      return await this.recoverWithCleanup(
+        context,
+        sandbox,
+        context.agentFailure ?? "EVENT_REJECTED",
+        cancellation,
+      );
+    }
+    if (turn.kind === "recovery_required") {
+      return await this.recoverWithCleanup(context, sandbox, turn.code, cancellation);
+    }
+    if (context.agentFailure) {
+      return await this.finalizeWithCleanup(
+        context,
+        sandbox,
+        "failed",
+        context.agentFailure,
+        cancellation,
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Pi 已经 settled 时没有可承载批量 steering 的活跃 prompt；只消费队首，
+   * 其余 receipt 保持 pending，等下一次 prompt 的安全点再合并进入后续请求。
+   */
+  async #takeSettledSteer(
+    run: ActiveRun,
+  ): Promise<
+    | { readonly kind: "none" }
+    | { readonly kind: "steer"; readonly receiptId: string; readonly promptInput: AgentUserInput }
+    | { readonly kind: "result"; readonly result: RunWorkerResult }
+  > {
+    if (this.options.threadInputRoutingV2Enabled !== true) return { kind: "none" };
+    const { context } = run;
+    const pending = await this.dependencies.persistence.readPendingThreadSteers({
+      fence: context.fence,
+    });
+    if (pending.outcome === "pending") {
+      const [item] = pending.items;
+      if (item === undefined) throw new Error("Thread steer 批次不能为空");
+      const applied = await this.applyThreadSteer(context, item);
+      if (!isApplied(applied)) {
+        return { kind: "result", result: await this.handleMutationFailure(applied) };
+      }
+      return {
+        kind: "steer",
+        receiptId: item.receiptId,
+        promptInput: {
+          text: await this.withRetrievedMemory(run.snapshot, run.scope, item.inputText),
+          attachments: item.attachments ?? [],
+        },
+      };
+    }
+    if (pending.outcome !== "none") {
+      const stopped = stopReasonForPendingSteers(pending.outcome);
+      context.stopped = stopped;
+      return {
+        kind: "result",
+        result: await this.finishStopped(context, stopped, run.sandboxes?.current),
+      };
+    }
+    return { kind: "none" };
+  }
+
+  /** 有 Sandbox 时校验并固化 Workspace 候选 Revision；校验失败只能进入人工恢复。 */
+  async #verifyWorkspace(
+    run: ActiveRun,
+    turn: AgentTurnResult,
+  ): Promise<
+    | { readonly kind: "verified"; readonly workspaceChange?: ValidatedWorkspaceChange }
+    | { readonly kind: "result"; readonly result: RunWorkerResult }
+  > {
+    const { context, cancellation, scope } = run;
+    const sandbox = run.sandboxes?.current;
+    if (sandbox === undefined) return { kind: "verified" };
+    // Sandbox 将交接给已排队的 follow-up 时延后快照，由最终暂停前的 Run 一并生成 Revision。
+    if (await this.shouldDeferWorkspaceSnapshot(context, turn)) return { kind: "verified" };
+    const result = (value: RunWorkerResult) => ({ kind: "result", result: value }) as const;
+    const preVerify = await this.stopPoint(context, cancellation);
+    if (preVerify) return result(await this.finishStopped(context, preVerify, sandbox));
+    let candidate: WorkspaceRevisionCandidate | undefined;
+    try {
+      candidate = await measureExecutionPhase(context.phaseTiming, "workspace_verify", () =>
+        this.dependencies.revisions.verify({
+          scope,
+          attemptId: context.attemptId,
+          ...(context.currentRevisionId === undefined
+            ? {}
+            : { expectedCurrentRevisionId: context.currentRevisionId }),
+          sandbox,
+          // 历史修正轮次已移除，`:0` 只为保持 Workspace journal 操作键稳定。
+          operationKey: `${context.attemptId}:workspace:publish:0`,
+          signal: run.executionAbort.signal,
+        }),
+      );
+    } catch (error) {
+      reportWorkspaceVerifyFailure(error);
+      return result(
+        await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation),
+      );
+    }
+    const postVerify = await this.stopPoint(context, cancellation);
+    if (postVerify) return result(await this.finishStopped(context, postVerify, sandbox));
+    let workspaceChange: ValidatedWorkspaceChange | undefined;
+    try {
+      workspaceChange = validateWorkspaceCandidate(context, candidate);
+    } catch {
+      return result(
+        await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation),
+      );
+    }
+    const verified = await this.applyMutation(context, {
+      idempotencyKey: `${context.attemptId}/stage/workspace-verified`,
+      nextStage: "workspace_verified",
+      events: [attemptEvent(context, "running", "workspace_verified")],
+      outbox: [],
+    });
+    if (!isApplied(verified)) return result(await this.handleMutationFailure(verified));
+    return { kind: "verified", ...(workspaceChange === undefined ? {} : { workspaceChange }) };
+  }
+
+  async #finishWaiting(
+    run: ActiveRun,
+    turn: Extract<AgentTurnResult, { readonly kind: "waiting" }>,
+    workspaceChange: ValidatedWorkspaceChange | undefined,
+  ): Promise<RunWorkerResult> {
+    const { context, cancellation } = run;
+    const sandbox = run.sandboxes?.current;
+    try {
+      assertControlledRolloutProjection(turn.rolloutProjection);
+    } catch {
+      return await this.recoverWithCleanup(context, sandbox, "EVENT_REJECTED", cancellation);
+    }
+    const preSettle = await this.stopPoint(context, cancellation);
+    if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
+    if (sandbox !== undefined) {
+      if (context.threadSandboxLease === undefined) {
+        const settled = await measureExecutionPhase(
+          context.phaseTiming,
+          "sandbox_settle",
+          this.settleSandbox.bind(this, context, sandbox, "pause"),
+        );
+        if (settled.outcome !== "settled") return settled.result;
+        const postSettle = await this.stopPoint(context, cancellation);
+        if (postSettle) return await this.finishStopped(context, postSettle);
+      } else {
+        const finalizing = await this.prepareThreadSandboxTerminal(context);
+        if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+      }
+    }
+    const waiting = await this.applyMutation(context, {
+      idempotencyKey: `${context.attemptId}/final/waiting`,
+      nextAttemptStatus: "waiting",
+      nextStage: "finished",
+      events: [waitingEvent(context, turn.question, turn.rolloutProjection.checkpointId)],
+      outbox: [],
+      rolloutProjection: turn.rolloutProjection,
+      ...(workspaceChange === undefined ? {} : { workspaceChange }),
+      nextRunStatus: "waiting",
+      releaseFences: true,
+      ...(context.threadSandboxLease === undefined
+        ? {}
+        : { threadSandboxTerminal: terminalSandboxCommand(context.threadSandboxLease) }),
+      ...(this.options.threadContextWriteEnabled === true
+        ? { threadContextAppend: terminalContextAppend(context, "waiting") }
+        : {}),
+    });
+    if (!isApplied(waiting)) return await this.handleMutationFailure(waiting);
+    if (sandbox !== undefined) {
+      await measureExecutionPhase(
+        context.phaseTiming,
+        "sandbox_settle",
+        this.completeThreadSandboxTerminalEffect.bind(this, context, sandbox, waiting),
+      );
+    }
+    return { outcome: "waiting" };
+  }
+
+  async #finishSucceeded(
+    run: ActiveRun,
+    workspaceChange: ValidatedWorkspaceChange | undefined,
+  ): Promise<RunWorkerResult> {
+    const { context, cancellation } = run;
+    const sandbox = run.sandboxes?.current;
+    if (sandbox === undefined) {
+      const finalizing = await this.prepareNoSandboxTerminal(context);
+      if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+    } else if (context.threadSandboxLease === undefined) {
+      const settled = await measureExecutionPhase(
+        context.phaseTiming,
+        "sandbox_settle",
+        this.settleSandbox.bind(this, context, sandbox, "close"),
+      );
+      if (settled.outcome !== "settled") return settled.result;
+      // settle 与 Run success 之间必须同步重验，避免取消被成功覆盖。
+      const postSettle = await this.stopPoint(context, cancellation);
+      if (postSettle) return await this.finishStopped(context, postSettle);
+    } else {
+      const finalizing = await this.prepareThreadSandboxTerminal(context);
+      if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+    }
+    const final = await this.applyMutation(context, {
+      idempotencyKey: `${context.attemptId}/final/succeeded`,
+      nextAttemptStatus: "succeeded",
+      nextStage: "finished",
+      events: [attemptEvent(context, "succeeded", "finished")],
+      outbox: [],
+      ...(workspaceChange === undefined ? {} : { workspaceChange }),
+      nextRunStatus: "succeeded",
+      releaseFences: true,
+      ...(context.threadSandboxLease === undefined
+        ? {}
+        : { threadSandboxTerminal: terminalSandboxCommand(context.threadSandboxLease) }),
+      ...(this.options.threadContextWriteEnabled === true
+        ? {
+            threadContextAppend: terminalContextAppend(context, "succeeded", workspaceChange),
+          }
+        : {}),
+    });
+    if (!isApplied(final)) return await this.handleMutationFailure(final);
+    if (sandbox !== undefined) {
+      await measureExecutionPhase(
+        context.phaseTiming,
+        "sandbox_settle",
+        this.completeThreadSandboxTerminalEffect.bind(this, context, sandbox, final),
+      );
+    }
+    return { outcome: "succeeded" };
+  }
+
+  /**
+   * 任意阶段抛出后的统一收敛。优先级：Sandbox 准备已得出的终态 > 本地停止原因 >
+   * Agent 失败码 > INTERNAL；有 Sandbox 时必须走带清理的恢复路径。
+   */
+  async #failAttempt(run: ActiveRun): Promise<RunWorkerResult> {
+    const { context, cancellation } = run;
+    closeEventAcceptance(context);
+    await run.events.drained.catch(() => undefined);
+    await run.requestAbort();
+    const sandbox = run.sandboxes?.current;
+    const preparationResult = run.sandboxes?.failureResult;
+    if (preparationResult !== undefined) return preparationResult;
+    if (context.stopped) return await this.finishStopped(context, context.stopped, sandbox);
+    if (context.agentFailure !== undefined) {
+      if (sandbox === undefined && context.agentFailure === "SANDBOX_FAILED") {
+        return await this.finalizeWithoutRevision(context, "failed", "SANDBOX_FAILED");
+      }
+      return sandbox === undefined
+        ? await this.requireRecovery(context, context.agentFailure, [])
+        : await this.recoverWithCleanup(context, sandbox, context.agentFailure, cancellation);
+    }
+    return sandbox
+      ? await this.recoverWithCleanup(context, sandbox, "INTERNAL", cancellation)
+      : await this.requireRecovery(context, "INTERNAL", []);
   }
 
   private async recordWorkspaceMaterialization(

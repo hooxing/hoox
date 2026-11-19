@@ -1,5 +1,6 @@
 // 模型事件驱动的执行状态迁移：终答收口、工具开始门与本地停止信号。
 import type { RuntimeAgentEvent } from "@hoox/pi-adapter";
+import type { RuntimeMutationResult } from "./ports.js";
 import type { ExecutionContext, ToolStartedGate } from "./run-worker-context.js";
 
 export function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): void {
@@ -127,4 +128,18 @@ export function refreshLocalStop(
   } else if (cancellation.aborted && context.stopped !== "shutdown") {
     context.stopped = "cancelled";
   }
+}
+
+/** 持久化失败的停止原因：栅栏或作用域失配表示已失去所有权，其余一律按不可用处理。 */
+export function stopReasonForFailedMutation(
+  outcome: RuntimeMutationResult["outcome"],
+): "fence_lost" | "unavailable" {
+  return outcome === "fence_lost" || outcome === "scope_mismatch" ? "fence_lost" : "unavailable";
+}
+
+/** 读取待合并 steer 失败的停止原因；Run 已取消时保留用户取消语义。 */
+export function stopReasonForPendingSteers(
+  outcome: "cancelled" | "fence_lost" | "scope_mismatch" | "unavailable",
+): "cancelled" | "fence_lost" | "unavailable" {
+  return outcome === "cancelled" ? "cancelled" : stopReasonForFailedMutation(outcome);
 }

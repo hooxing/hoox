@@ -1,4 +1,7 @@
-import type { PgClaimedRunDispatch, PgClaimedWorkerTenantAssignment } from "@hoox/persistence";
+import type {
+  PgClaimedRunDispatch,
+  PgClaimedWorkerTenantAssignment,
+} from "@hoox/persistence/run-execution";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentWorkerPollingLoop } from "./production-worker-runtime.js";
 import { performWorkerMaintenance } from "./worker-maintenance.js";

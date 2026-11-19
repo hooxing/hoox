@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AuthContextResolver } from "@hoox/api";
+import type { AuthContextResolver } from "@hoox/identity/auth";
 import type { UserId } from "@hoox/domain";
 import {
   CreateSkillSubmissionRequestSchema,

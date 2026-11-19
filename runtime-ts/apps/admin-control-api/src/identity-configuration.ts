@@ -7,7 +7,7 @@ import {
 import type {
   IdentityConfigurationRepository,
   PersistedIdentityConfiguration,
-} from "@hoox/persistence";
+} from "@hoox/persistence/admin";
 
 export interface IdentityAdminMutationContext {
   readonly actorUserId: string;

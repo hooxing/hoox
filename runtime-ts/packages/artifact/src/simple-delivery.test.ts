@@ -1,6 +1,6 @@
 import type { ExecutionPhaseTiming } from "@hoox/domain";
 import { isoTimestamp, runId, sha256Digest, tenantId, threadId, workspaceId } from "@hoox/domain";
-import type { StableBlobRef } from "@hoox/persistence";
+import type { StableBlobRef } from "@hoox/persistence/blob";
 import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@hoox/run-contracts";
 import { describe, expect, it } from "vitest";
 import { createArtifactExecutionAuthorizationAuthority } from "./authorization.js";

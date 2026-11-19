@@ -1,7 +1,7 @@
 import { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type PtcProgramInput, runPtcProgram } from "./ptc-runtime.js";
-import { projectToolFailure, PtcToolCallError } from "./tool-failure.js";
+import { projectToolFailure, PtcToolCallError } from "@hoox/tool-router";
 
 const noTools = async (): Promise<unknown> => {
   throw new Error("不应调用工具");

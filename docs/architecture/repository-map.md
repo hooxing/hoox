@@ -39,16 +39,16 @@
 | `@hoox/domain` | Tenant、Thread、Run、Workspace 等领域实体、品牌类型和状态机不变量 |
 | `@hoox/protocol` | HTTP DTO、事件、错误信封和运行时 Schema |
 | `@hoox/protocol-mapper` | Domain 到 Protocol 的显式投影和公共错误归一化 |
-| `@hoox/run-contracts` | Worker 执行所需端口、事实和运行期契约 |
+| `@hoox/run-contracts` | Worker 执行所需端口、事实和运行期契约，并拥有 Runtime 事件、受控 Rollout 投影、Thread 历史格式与 Sandbox 端口类型 |
 
 ### Runtime 编排
 
 | 包 | 职责 |
 | --- | --- |
-| `@hoox/pi-adapter` | `pi-ai` Provider/模型绑定、`pi-agent-core` 工具循环、流式事件与 Runtime 恢复适配 |
+| `@hoox/pi-adapter` | `pi-ai` Provider/模型绑定、`pi-agent-core` 工具循环、工具选择与 PTC 包装、流式事件与 Runtime 恢复适配 |
 | `@hoox/prompt-builder` | 稳定、可审计的系统提示词组装 |
 | `@hoox/context-policy` | 上下文预算、选择、截断和压缩策略 |
-| `@hoox/tool-router` | 工具能力校验、路由、结果归一化和审计边界 |
+| `@hoox/tool-router` | 全部 Agent 工具的定义、参数 Schema、授权调用、Sandbox 副作用、受控回执与安全失败投影 |
 | `@hoox/automation` | Thread 定时任务领域与运行契约 |
 | `@hoox/memory` | Memory 端口和作用域边界 |
 | `@hoox/thread-title` | Thread 标题生成契约与纯逻辑 |
@@ -69,7 +69,8 @@
 | 包 | 职责 |
 | --- | --- |
 | `@hoox/persistence` | PostgreSQL Repository、事务、迁移、Outbox 和 S3/MinIO Blob 适配 |
-| `@hoox/process-runtime` | 严格配置、健康状态、信号、排空和进程关闭 |
+| `@hoox/process-runtime` | 严格配置、生产 HTTP/TLS 传输解析、开发回环监听约束、健康状态、信号、排空和进程关闭 |
+| `@hoox/identity` | 身份供应商配置；`@hoox/identity/auth` 提供认证端口与生产 JWT 校验，不加载 better-auth 与数据库驱动 |
 
 ## 常见改动落点
 
@@ -93,7 +94,10 @@
 - 应用和包不能绕过 `tool-router` 直接执行宿主机命令或读写宿主机工作目录。
 - PostgreSQL、S3、Sandbox 和模型 SDK 都应位于适配器边界，不进入纯领域代码。
 - 跨包依赖使用 pnpm Workspace 声明，不使用越目录相对导入。
-- 只使用 Thread 历史格式与校验时，从 `@hoox/pi-adapter/thread-history` 导入；`run-contracts` 经此窄入口重导出历史校验，避免 API、Scheduler 随契约加载模型会话和 Provider SDK。Pi 根入口继续兼容，包级依赖声明并未因此移除。
+- 契约层不得依赖实现层：`run-contracts` 不依赖 `pi-adapter`、`sandbox`、`persistence` 或 `tool-router`。Thread 历史格式从 `@hoox/run-contracts/thread-history` 导入；`@hoox/pi-adapter/thread-history` 与 `@hoox/sandbox` 的同名类型只是兼容重导出。
+- 工具实现只在 `tool-router`。`pi-adapter` 依赖 `tool-router` 选择和注册工具，运行时依赖中不得出现 `sandbox` 或 `persistence`；新增工具不能在模型适配器内直接调用 Sandbox。
+- 应用之间不互相依赖；唯一例外是 `admin-control-api` 装配 `skill-admin-api` 路由模块。多个进程共用的认证、传输解析等能力下沉到 `identity`、`process-runtime` 等共享包。
+- `corepack pnpm deps:check`（已纳入 `pnpm check`）校验上述依赖方向，并要求生产源码导入的每个包都在本包 `dependencies` 中声明，不能依赖 pnpm 提升。新增例外须同时修改 `scripts/validate-workspace-dependencies.mjs` 与本节。
 - 管理 Web 和控制 API 从 `@hoox/protocol/pi-model-catalog` 共用公开模型快照与查询；Protocol 根入口不加载快照。修改目录来源时更新 `scripts/generate-admin-pi-model-catalog.mjs`，执行 `pnpm admin:pi-catalog:generate` 与 `pnpm admin:pi-catalog:check`，不手工编辑生成文件。
 - Pi 生产能力限于 `pi-ai` 与 `pi-agent-core`；不经 `pi-coding-agent` 装配 Session、设置或宿主资源发现。工具按 `AgentTool` 注册，业务授权和持久观察仍属于 Runtime；恢复顺序与屏障见 [Thread 连续上下文](thread-continuity.md)。
 - `vendor` 代码不能成为不受审查的复制区；版本、许可证、来源和修改必须可追踪。
@@ -102,9 +106,9 @@
 
 以下位置承担较多跨领域职责，修改前应先阅读测试和相关架构文档：
 
-- `@hoox/persistence`：数据库、Outbox、Blob 生命周期和多个领域 Repository 的集中实现。
-- `@hoox/agent-worker`：模型、工具、上下文、Sandbox、Artifact 和恢复语义的装配中心。
-- `@hoox/run-contracts`：连接 Worker 编排与多个执行端口，命名上的“contracts”不表示它是零依赖类型包。
+- `@hoox/persistence`：数据库、Outbox、Blob 生命周期和多个领域 Repository 的集中实现；已按职责拆分[子入口](persistence-and-database.md#包入口)，但仍是同一个包。
+- `@hoox/agent-worker`：模型、工具、上下文、Sandbox、Artifact 和恢复语义的装配中心。`RunWorker.execute` 的执行状态机仍在 `run-worker.ts`；事件构造、Outbox、持久事实回读比对、Workspace 失败分类、执行状态迁移与资源探测分别位于同目录的 `run-worker-*.ts`。
+- `@hoox/run-contracts`：连接 Worker 编排与多个执行端口；它不依赖实现包，但仍依赖 `context-policy`、`skill`、`workspace` 等领域包，不是零依赖类型包。
 - `@hoox/admin-control-api` 对控制面和 Skill 路由的统一装配：新增复用前应确认是否应下沉到共享包，并保持两套数据库权限边界。
 
 这些说明不是要求立即拆包，而是提醒维护者避免继续扩大隐式耦合。

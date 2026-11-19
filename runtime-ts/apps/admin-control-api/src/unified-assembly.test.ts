@@ -26,9 +26,7 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("@hoox/persistence", () => ({
-  createPostgresPool: mocks.createPool,
-  probePostgres: mocks.probePostgres,
+vi.mock("@hoox/persistence/admin", () => ({
   probeS3StableSkillPublisher: mocks.probePublisher,
   ModelProviderCredentialCipher: class {},
   PgSandboxControlRepository: class {
@@ -102,6 +100,10 @@ vi.mock("@hoox/persistence", () => ({
       mocks.publisherClose();
     }
   },
+}));
+vi.mock("@hoox/persistence/postgres", () => ({
+  createPostgresPool: mocks.createPool,
+  probePostgres: mocks.probePostgres,
 }));
 
 vi.mock("./app.js", () => ({ createAdminControlApiApp: mocks.createApp }));

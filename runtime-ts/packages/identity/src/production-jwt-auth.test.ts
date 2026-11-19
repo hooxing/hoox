@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createProductionJwtAuthResolver,
   parseProductionJwtSigningKeys,
-} from "./production-auth.js";
+} from "./production-jwt-auth.js";
 
 const encodedKey = Buffer.alloc(32, 17).toString("base64url");
 const nowSeconds = 1_800_000_000;

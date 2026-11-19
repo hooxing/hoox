@@ -6,7 +6,7 @@ import {
   type TenantId,
   type UserId,
 } from "@hoox/domain";
-import type { ThreadListCursor } from "@hoox/persistence";
+import type { ThreadListCursor } from "@hoox/persistence/postgres";
 import type { ThreadCursorCodec } from "./ports.js";
 
 const kidPattern = /^[A-Za-z0-9_-]{3,32}$/u;

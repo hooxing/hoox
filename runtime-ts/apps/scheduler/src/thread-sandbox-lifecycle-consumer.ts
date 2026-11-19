@@ -1,9 +1,9 @@
 import { runId, tenantId, threadId } from "@hoox/domain";
 import type {
-  PgThreadContinuityMetrics,
   ThreadSandboxLifecycleClaim,
   ThreadSandboxLifecycleResolution,
-} from "@hoox/persistence";
+} from "@hoox/persistence/maintenance";
+import type { PgThreadContinuityMetrics } from "@hoox/persistence/thread";
 import {
   type SandboxGateway,
   type SandboxProviderRegistry,

@@ -1,3 +1,6 @@
+import type { ControlledRolloutProjection } from "@hoox/run-contracts/rollout-projection";
+
+export type { ControlledRolloutProjection } from "@hoox/run-contracts/rollout-projection";
 import {
   normalizeRuntimeToolSelection,
   RUNTIME_TOOL_NAMES,
@@ -23,7 +26,7 @@ import {
   type RuntimePromptInput,
   type ToolCapabilityManifest,
 } from "@hoox/prompt-builder";
-import type { SandboxHandle } from "@hoox/sandbox";
+import type { SandboxHandle } from "@hoox/run-contracts/sandbox-port";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import type {
@@ -46,12 +49,12 @@ import {
   type AgentControlPiToolExecutorPort,
   createAgentControlPiTools,
   type DelegablePiToolName,
-} from "./agent-control-tools.js";
+} from "@hoox/tool-router";
 import {
   createAutomationUpdatePiTool,
   type AutomationUpdatePiToolExecutorPort,
-} from "./automation-update-tool.js";
-import { createCollapseProcessForFinalAnswerPiTool } from "./collapse-process-for-final-answer-tool.js";
+} from "@hoox/tool-router";
+import { createCollapseProcessForFinalAnswerPiTool } from "@hoox/tool-router";
 import {
   normalizeOfficialDeepSeekV4FlashPayload,
   defaultModelThinkingLevel,
@@ -60,26 +63,23 @@ import {
   isTrustedModelTokenizerCapability,
   type TrustedModelTokenizerCapability,
 } from "./deepseek-v4-tokenizer.js";
-import {
-  createDeliverFilePiTool,
-  type DeliverFilePiToolExecutorPort,
-} from "./deliver-file-tool.js";
+import { createDeliverFilePiTool, type DeliverFilePiToolExecutorPort } from "@hoox/tool-router";
 import { subscribeBufferedRuntimeEvents } from "./event-buffer.js";
 import { mapPiEvent, type PiAgentEvent, type RuntimeAgentEvent } from "./events.js";
 import { createPtcTool, type PtcToolEvent, type ToolCallingMode } from "./ptc-tools.js";
-import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
+import { createSkillPiTool, type SkillPiToolExecutorPort } from "@hoox/tool-router";
 import {
   assertThreadActiveHistory,
   providerVisibleThreadHistoryMessages,
   type ThreadActiveHistoryV1,
 } from "./thread-history.js";
-import { publicToolParameters, runtimeToolParameters } from "./tool-parameter-schemas.js";
-import { createTodoWritePiTool, type TodoWritePiToolExecutorPort } from "./todo-write-tool.js";
+import { publicToolParameters, runtimeToolParameters } from "@hoox/tool-router";
+import { createTodoWritePiTool, type TodoWritePiToolExecutorPort } from "@hoox/tool-router";
 import {
   createObservedSandboxTools,
   type SandboxToolEffectAuthorizer,
   type SandboxToolHandleProvider,
-} from "./tools.js";
+} from "@hoox/tool-router";
 
 export interface PiContextBudgetDiagnostics {
   readonly outcome: ContextBudgetDecision["outcome"];
@@ -486,28 +486,6 @@ export interface CreateSafePiSessionOptions {
   ) => Promise<ThreadActiveHistoryV1 | undefined>;
   /** 每次真实 Provider stream 创建前进入；适配器不依赖具体诊断实现。 */
   withProviderInvocation?<T>(operation: () => T): T;
-}
-
-/**
- * Runtime 持久化并审计的受控上下文投影。它不是 Pi Session 文件，也不允许携带工具结果、
- * 宿主路径或任意 Pi 内部 entry；恢复时只把经过裁剪的文本上下文重新投影给新 Session。
- */
-export interface ControlledRolloutProjection {
-  readonly schemaVersion: 2;
-  readonly checkpointId: string;
-  readonly items: readonly (
-    | { readonly kind: "turn"; readonly role: "user" | "assistant"; readonly text: string }
-    | {
-        readonly kind: "tool_receipt";
-        readonly toolCallId: string;
-        readonly toolName: string;
-        readonly outcome: "succeeded" | "failed";
-        readonly observation: string;
-        readonly isTruncated: boolean;
-        readonly modelVisibleBytes: number;
-        readonly reason?: "model_utf8_budget_or_rollout_body_budget";
-      }
-  )[];
 }
 
 const LOGICAL_WORKSPACE = "/workspace" as const;

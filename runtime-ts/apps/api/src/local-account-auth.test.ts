@@ -5,7 +5,7 @@ import type {
   LocalAccountProfileRecord,
   LocalAccountRepository,
   RegisterLocalAccountInput,
-} from "@hoox/persistence";
+} from "@hoox/persistence/thread";
 import { describe, expect, it } from "vitest";
 import { createLocalAccountAuthService } from "./local-account-auth.js";
 import { ApiFailure } from "./service.js";

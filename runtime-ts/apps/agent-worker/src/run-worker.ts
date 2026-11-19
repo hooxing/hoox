@@ -1,31 +1,20 @@
 import {
   applyTodoWrite,
   type ExecutionPhaseTimingObserver,
-  type IsoTimestamp,
   measureExecutionPhase,
-  type Run,
   type RunPersonalizationSnapshot,
-  type Sha256Digest,
   type TodoSnapshot,
   type TodoWriteCommand,
   userId,
-  type Workspace,
-  type WorkspaceRevisionId,
 } from "@hoox/domain";
 import { injectRetrievedMemories, type MemoryRetriever } from "@hoox/memory";
 import type { RuntimeAgentEvent } from "@hoox/pi-adapter";
-import type { SandboxHandle } from "@hoox/sandbox";
-import { WorkspaceApplicationError, WorkspaceDependencyError } from "@hoox/workspace";
 import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
 import { DurableOperationLane } from "./durable-operation-lane.js";
 import {
   assertControlledRolloutProjection,
   digestCanonical,
-  outboxPayloadDigest,
-  rolloutProjectionDigest,
   runtimeMutationDigest,
-  sandboxCleanupIdentityDigest,
-  workspaceChangeDigest,
 } from "./mutation-protocol.js";
 import type {
   AgentControlPersistencePort,
@@ -35,21 +24,15 @@ import type {
   ClaimedExecutionSnapshot,
   ClockPort,
   ConsumedExternalEffectAuthorization,
-  ExecutionAttemptSnapshot,
-  ExecutionAttemptStatus,
-  ExecutionFence,
   ExecutionPersistencePort,
   ExecutionScope,
-  ExecutionStage,
   ExternalEffectCall,
   ExternalEffectPermit,
   OrphanSandboxCleanupPort,
   RecoveryMetricsPort,
   RunStartupTimingPhase,
-  RuntimeEventV1,
   RuntimeMutation,
   RuntimeMutationResult,
-  RuntimeOutboxReceiptV1,
   RuntimeOutboxV1,
   SandboxSessionRef,
   SandboxSessionRegistryPort,
@@ -57,9 +40,7 @@ import type {
   ThreadContextAppendCommandV1,
   ThreadContextBodyPersistencePort,
   ThreadContinuityMetricsPort,
-  ThreadSandboxLeaseRefV1,
   ThreadSandboxSessionLifecyclePort,
-  UserInputAttachmentReference,
   ValidatedWorkspaceChange,
   WorkerAgentSessionPort,
   WorkspaceRevisionCandidate,
@@ -75,7 +56,54 @@ import {
   RunStartupTimingCollector,
   type RunStartupTimingDiagnosticsPort,
 } from "./run-startup-diagnostics.js";
-import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
+import type { AppliedMutation, ExecutionContext } from "./run-worker-context.js";
+import {
+  directAttachmentProbePaths,
+  prepareHistoryEntrypoints,
+  probeResourceFilesystemDataPlane,
+} from "./run-worker-resource-probe.js";
+import {
+  agentEvent,
+  agentEventAt,
+  attemptEvent,
+  rawAttemptEvent,
+  terminalContextAppend,
+  terminalFailureEvents,
+  terminalFailureMessage,
+  waitingEvent,
+} from "./run-worker-events.js";
+import {
+  alertOutbox,
+  cleanupIntentKey,
+  cleanupOutbox,
+  cleanupUnknownOutbox,
+  rawAlertOutbox,
+  recoveryCleanupOutbox,
+  terminalSandboxCommand,
+} from "./run-worker-outbox.js";
+import {
+  reportWorkspaceMaterializeFailure,
+  reportWorkspaceVerifyFailure,
+  validateWorkspaceCandidate,
+} from "./run-worker-workspace-failures.js";
+import {
+  applyFinalizationTransition,
+  classifyFinalizationTurn,
+  closeEventAcceptance,
+  refreshLocalStop,
+  registerToolStarted,
+  updateAgentState,
+} from "./run-worker-execution-state.js";
+import {
+  acceptInspection,
+  acceptOutboxReceipts,
+  appliedSnapshotMatches,
+  inspectionMatches,
+  isApplied,
+  permitMatches,
+  receiptMatches,
+  snapshotMatches,
+} from "./run-worker-fact-matching.js";
 
 export interface RunWorkerOptions {
   readonly workerId: string;
@@ -94,162 +122,10 @@ export interface RunWorkerOptions {
   readonly subagentsEnabled?: boolean;
 }
 
-const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
-const ATTACHMENT_FACT_MARKERS = Object.freeze([
-  "\n\n# 用户在本轮提供的文件\n",
-  "\n\n# 用户在本轮上传的文件\n",
-]);
-
-type ResourceFilesystemProbeResult =
-  | { readonly outcome: "ready" }
-  | { readonly outcome: "missing"; readonly category: string }
-  | { readonly outcome: "failed"; readonly category: string };
-
 type PendingThreadSteer = Extract<
   Awaited<ReturnType<ExecutionPersistencePort["readPendingThreadSteers"]>>,
   { readonly outcome: "pending" }
 >["items"][number];
-
-function directAttachmentProbePaths(
-  input: string,
-  attachments: readonly UserInputAttachmentReference[],
-): readonly string[] {
-  if (attachments.length === 0) return Object.freeze([]);
-  const markerIndex = Math.max(
-    ...ATTACHMENT_FACT_MARKERS.map((marker) => input.lastIndexOf(marker)),
-  );
-  // 老 Run 只有附件 ID、没有 API 追加的结构化路径事实；兼容读取，但不能猜测文件名。
-  if (markerIndex < 0) return Object.freeze([]);
-  const candidates: string[] = [];
-  for (const line of input.slice(markerIndex).split("\n")) {
-    if (!line.startsWith("- ")) continue;
-    try {
-      const fact: unknown = JSON.parse(line.slice(2));
-      if (typeof fact !== "object" || fact === null || Array.isArray(fact)) continue;
-      const path = (fact as Readonly<Record<string, unknown>>).文件地址;
-      if (typeof path === "string") candidates.push(path);
-    } catch {
-      // marker 后的事实由 API 生成；解析失败最终会按缺失可信路径拒绝，而不是采用部分结果。
-    }
-  }
-  const paths = attachments.map((attachment) => {
-    const prefix = `/resources/${attachment.resourceId}/${attachment.versionId}/`;
-    const matches = candidates.filter((path) => {
-      if (!path.startsWith(prefix) || path.length > 1_024) return false;
-      const fileName = path.slice(prefix.length);
-      return (
-        fileName.length > 0 && !fileName.includes("/") && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(fileName)
-      );
-    });
-    if (matches.length !== 1) throw new Error("当前输入附件路径事实不完整");
-    return matches[0] as string;
-  });
-  if (new Set(paths).size !== paths.length) throw new Error("当前输入附件路径事实重复");
-  return Object.freeze(paths);
-}
-
-async function probeResourceFilesystemDataPlane(
-  sandbox: SandboxHandle,
-  input: {
-    readonly threadId: string;
-    readonly historyFilesystemEnabled: boolean;
-    readonly directAttachmentPaths: readonly string[];
-    readonly signal: AbortSignal;
-  },
-): Promise<ResourceFilesystemProbeResult> {
-  if (!THREAD_ID_PATTERN.test(input.threadId)) {
-    return { outcome: "failed", category: "invalid_thread_id" };
-  }
-  const checks = ["[ -d '/resources' ] || exit 70"];
-  if (input.historyFilesystemEnabled) {
-    checks.push("[ -d '/resources/history' ] || exit 71");
-    checks.push(
-      `[ -d ${shellSingleQuote(`/resources/.thread-files/${input.threadId}/files`)} ] || exit 72`,
-    );
-  }
-  for (const path of input.directAttachmentPaths) {
-    checks.push(`[ -f ${shellSingleQuote(path)} ] || exit 75`);
-  }
-  let result: Awaited<ReturnType<SandboxHandle["command"]>>;
-  try {
-    result = await sandbox.command(["set -u", ...checks].join("\n"), {
-      signal: input.signal,
-      timeoutMs: 30_000,
-    });
-  } catch (error) {
-    const category = historyEntrypointFailureCategory(error);
-    console.warn(`RESOURCEFS_REUSE_PROBE_FAILED category=${category}`);
-    return { outcome: "failed", category };
-  }
-  if (result.exitCode === 0) return { outcome: "ready" };
-  const category = `exit_${result.exitCode}`;
-  console.warn(`RESOURCEFS_REUSE_PROBE_FAILED category=${category}`);
-  return [70, 71, 72, 75].includes(result.exitCode)
-    ? { outcome: "missing", category }
-    : { outcome: "failed", category };
-}
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-async function prepareHistoryEntrypoints(
-  sandbox: SandboxHandle,
-  threadId: string,
-  signal: AbortSignal,
-): Promise<void> {
-  if (!THREAD_ID_PATTERN.test(threadId)) throw new Error("历史目录 Thread ID 无效");
-  const internalTarget = `/resources/.thread-files/${threadId}/files`;
-  const command = `set -eu
-history_target='/resources/history'
-thread_target='${internalTarget}'
-[ -d "$history_target" ] || exit 71
-ensure_link() {
-  link="$1"
-  target="$2"
-  if [ -L "$link" ]; then
-    [ "$(readlink "$link")" = "$target" ] || exit 73
-  elif [ -e "$link" ]; then
-    exit 74
-  else
-    ln -s "$target" "$link"
-  fi
-}
-ensure_link /history "$history_target"
-prepare_thread_entrypoint() {
-  link='/thread-files'
-  if [ -L "$link" ]; then
-    [ "$(readlink "$link")" = "$thread_target" ] || exit 73
-  elif [ -d "$link" ]; then
-    [ -z "$(find "$link" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 74
-    rmdir "$link"
-    ln -s "$thread_target" "$link"
-  elif [ -e "$link" ]; then
-    exit 74
-  else
-    ln -s "$thread_target" "$link"
-  fi
-}
-prepare_thread_entrypoint`;
-  const result = await sandbox.command(command, { signal, timeoutMs: 30_000 }).catch((error) => {
-    console.warn(`HISTORY_ENTRYPOINT_FAILED category=${historyEntrypointFailureCategory(error)}`);
-    throw error;
-  });
-  if (result.exitCode !== 0) {
-    console.warn(`HISTORY_ENTRYPOINT_FAILED category=exit_${result.exitCode}`);
-    throw new Error("历史目录固定入口准备失败");
-  }
-}
-
-function historyEntrypointFailureCategory(error: unknown): string {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return "command_exception";
-  }
-  const code = (error as { readonly code?: unknown }).code;
-  return typeof code === "string" && /^[A-Z_]{1,64}$/u.test(code)
-    ? code.toLowerCase()
-    : "command_exception";
-}
 
 export type RunWorkerResult =
   | { readonly outcome: "succeeded" | "waiting" | "failed" | "cancelled" }
@@ -301,56 +177,10 @@ interface WorkerDependencies {
   }>;
 }
 
-interface ExecutionContext {
-  phaseTiming?: ExecutionPhaseTimingObserver;
-  readonly scope: ExecutionScope;
-  fence: ExecutionFence;
-  attemptVersion: number;
-  nextEventSequence: number;
-  databaseNow: IsoTimestamp;
-  readonly attemptId: string;
-  run: Run;
-  workspace: Workspace;
-  currentRevisionId?: WorkspaceRevisionId;
-  actualCommittedStage: ExecutionStage;
-  actualAttemptStatus: ExecutionAttemptStatus;
-  projectionVersion: number;
-  readonly durableLane: DurableOperationLane;
-  readonly toolStartedGates: Map<string, ToolStartedGate>;
-  readonly cleanupFacts: Map<string, CleanupReceiptFacts>;
-  todo?: TodoSnapshot;
-  stopped?: "cancelled" | "shutdown" | "timeout" | "fence_lost" | "unavailable" | "scope_mismatch";
-  agentFailure?: StableWorkerErrorCode;
-  modelCompleted: boolean;
-  modelStopReason?: "stop" | "length" | "toolUse";
-  eventAcceptanceOpen: boolean;
-  adapterRejected: boolean;
-  contextTurnOrdinal: number;
-  finalization?: { readonly callId: string };
-  abortPromise?: Promise<void>;
-  abortSession?: () => Promise<void>;
-  threadSandboxLease?: ThreadSandboxLeaseRefV1;
-}
-
 const OUTPUT_LIMIT_CONTINUATION_PROMPT =
   "上一轮因模型输出长度上限中止。请从当前状态继续：若任务尚未完成，继续使用工具完成剩余工作；若已完成，只给出简洁最终答复。不要重复已经完成的步骤。";
 const INSPECTION_UNAVAILABLE_RETRY_DELAYS_MS = Object.freeze([5, 15, 45]);
 
-interface ToolStartedGate {
-  readonly name: string;
-  readonly committed: Promise<void>;
-  authorizationRequested: boolean;
-  todoWriteRequested: boolean;
-  resolve(): void;
-}
-
-interface CleanupReceiptFacts {
-  readonly armedAt: IsoTimestamp;
-  readonly identityDigest: Sha256Digest;
-  readonly disposition?: "pause" | "close";
-}
-
-type AppliedMutation = Extract<RuntimeMutationResult, { outcome: "applied" | "already_applied" }>;
 const MUTATION_READBACK_RETRY_DELAYS_MS = Object.freeze([0, 25, 100, 250]);
 const MUTATION_UNAVAILABLE_RETRY_DELAYS_MS = Object.freeze([25, 100, 500]);
 
@@ -2467,756 +2297,6 @@ export class RunWorker {
       .recordOrphanCleanup({ scope, registryId: sandbox.registryId, reason, cleanupOutcome })
       .catch(() => undefined);
   }
-}
-
-function terminalFailureEvents(
-  context: ExecutionContext,
-  status: "failed" | "cancelled" | "recovery_required",
-  stage: ExecutionStage,
-  code: StableWorkerErrorCode,
-  responseAlreadyProvided: boolean,
-): readonly RuntimeEventV1[] {
-  if (responseAlreadyProvided) return [attemptEvent(context, status, stage, code)];
-  return [
-    agentEventAt(context.nextEventSequence, {
-      type: "runtime.notice",
-      level: "error",
-      code,
-      message: terminalFailureMessage(status, code),
-      source: "terminal_fallback",
-    }),
-    rawAttemptEvent(context.nextEventSequence + 1, status, stage, code),
-  ];
-}
-
-function terminalFailureMessage(
-  status: "failed" | "cancelled" | "recovery_required" | "waiting" | "succeeded",
-  code: StableWorkerErrorCode,
-): string {
-  if (status === "cancelled" || code === "CANCELLED") {
-    return "任务已取消；未完成或未提交的工作不视为成功。";
-  }
-  const messages: Readonly<Record<StableWorkerErrorCode, string>> = {
-    CANCELLED: "任务已取消；未完成或未提交的工作不视为成功。",
-    CONTEXT_TOO_LARGE: "上下文仍然超出模型窗口，本次任务未能完成。",
-    TIMEOUT: "任务运行超时，本次任务未能完成。",
-    PROVIDER: "模型服务调用失败，本次任务未能完成，请稍后重试。",
-    PROTOCOL: "模型响应未形成有效终态，本次任务未能完成。",
-    EVENT_REJECTED: "运行事件无法可靠保存，本次任务已中断。",
-    WORKER_SHUTDOWN: "执行 Worker 已停止，本次任务已中断。",
-    PERSISTENCE_UNAVAILABLE: "运行状态暂时无法可靠保存，本次任务已中断。",
-    FENCE_LOST: "运行执行权已转移，本次任务已中断，未确认的工作不视为成功。",
-    SANDBOX_UNKNOWN: "Sandbox 状态无法确认，本次任务已中断，未确认的修改不视为成功。",
-    SANDBOX_FAILED: "Sandbox 连续调用失败，本次任务未能完成。",
-    WORKSPACE_CONFLICT: "工作区验证或提交发生冲突，本次修改未确认成功。",
-    ARTIFACT_NOT_READY: "交付文件尚未可靠发布，本次交付未确认成功。",
-    IDEMPOTENCY_CONFLICT: "运行状态发生幂等冲突，本次任务已中断。",
-    INTERNAL: "系统内部处理失败，本次任务未能完成。",
-  };
-  return messages[code];
-}
-
-function rawAttemptEvent(
-  sequence: number,
-  status: ExecutionAttemptStatus,
-  stage: ExecutionStage,
-  code?: StableWorkerErrorCode,
-): RuntimeEventV1 {
-  return {
-    schemaVersion: 1,
-    kind: "attempt_state_changed",
-    sequence,
-    payload: { status, stage, ...(code === undefined ? {} : { code }) },
-  };
-}
-
-function attemptEvent(
-  context: ExecutionContext,
-  status: ExecutionAttemptStatus,
-  stage: ExecutionStage,
-  code?: StableWorkerErrorCode,
-): RuntimeEventV1 {
-  const event = rawAttemptEvent(context.nextEventSequence, status, stage, code);
-  assertProtocolSize(event);
-  return event;
-}
-
-function waitingEvent(
-  context: ExecutionContext,
-  question: string,
-  checkpointId: string,
-): RuntimeEventV1 {
-  const event: RuntimeEventV1 = {
-    schemaVersion: 1,
-    kind: "run_waiting",
-    sequence: context.nextEventSequence,
-    payload: { question: question.slice(0, 4_000), checkpointId },
-  };
-  assertProtocolSize(event);
-  return event;
-}
-
-function terminalContextAppend(
-  context: ExecutionContext,
-  status: "waiting" | "succeeded" | "failed" | "cancelled",
-  workspaceChange?: ValidatedWorkspaceChange,
-  code?: StableWorkerErrorCode,
-): ThreadContextAppendCommandV1 {
-  const key = `${context.attemptId}/context/final/${status}`;
-  const entries: ThreadContextAppendCommandV1["entries"][number][] = [];
-  if (status === "succeeded") {
-    const workspaceBody =
-      workspaceChange !== undefined
-        ? { outcome: "committed", revisionId: workspaceChange.revisionId }
-        : { outcome: "unchanged", revisionId: context.currentRevisionId ?? null };
-    entries.push({
-      entryId: `${key}/workspace`,
-      kind: workspaceChange !== undefined ? "workspace_committed" : "workspace_unchanged",
-      body: inlineContextBody(workspaceBody),
-    });
-  }
-  const terminalBody = {
-    status,
-    ...(code === undefined
-      ? {}
-      : { code, userFacingMessage: terminalFailureMessage(status, code) }),
-  };
-  entries.push({
-    entryId: `${key}/terminal`,
-    kind: "run_terminal",
-    body: inlineContextBody(terminalBody),
-  });
-  return { schemaVersion: 1, idempotencyKey: key, entries };
-}
-
-function inlineContextBody(value: Readonly<Record<string, unknown>>) {
-  return {
-    storage: "inline" as const,
-    value,
-    sha256: digestCanonical(value),
-    size: Buffer.byteLength(JSON.stringify(value), "utf8"),
-  };
-}
-
-function agentEvent(context: ExecutionContext, payload: RuntimeAgentEvent): RuntimeEventV1 {
-  return agentEventAt(context.nextEventSequence, payload);
-}
-
-function agentEventAt(sequence: number, payload: RuntimeAgentEvent): RuntimeEventV1 {
-  const event: RuntimeEventV1 = {
-    schemaVersion: 1,
-    kind: "agent_event",
-    sequence,
-    payload: sanitizeAgentEvent(payload),
-  };
-  assertProtocolSize(event);
-  return event;
-}
-
-function sanitizeAgentEvent(event: RuntimeAgentEvent): RuntimeAgentEvent {
-  if (event.type !== "error") return event;
-  if (event.code === "CONTEXT_TOO_LARGE") return { ...event, message: "上下文超出模型窗口" };
-  const messages: Readonly<Record<typeof event.code, string>> = {
-    ABORTED: "模型调用已中止",
-    PROVIDER: "模型 Provider 调用失败",
-    PROTOCOL: "模型协议响应无效",
-  };
-  return { ...event, message: messages[event.code] };
-}
-
-function cleanupOutbox(
-  context: ExecutionContext,
-  sandbox: SandboxSessionRef,
-  state: "pending" | "started" | "completed",
-  disposition?: "pause" | "close",
-): RuntimeOutboxV1 {
-  const base = {
-    schemaVersion: 1,
-    kind: "sandbox_cleanup",
-    idempotencyKey: cleanupIntentKey(context, sandbox),
-    armed: true,
-    payload: {
-      registryId: sandbox.registryId,
-      providerKey: sandbox.providerKey,
-      providerSandboxId: sandbox.providerSandboxId,
-    },
-  } as const;
-  if (state === "pending") return { ...base, state };
-  if (disposition === undefined) throw new Error("started 后必须一次性决定 cleanup disposition");
-  return { ...base, state, payload: { ...base.payload, disposition } };
-}
-
-function recoveryCleanupOutbox(
-  context: ExecutionContext,
-  sandbox: SandboxSessionRef | undefined,
-): readonly RuntimeOutboxV1[] {
-  // 普通 Sandbox 已有 pending intent；恢复终止与释放双栅栏必须在同一事务把它推进到
-  // started/close，Scheduler 才能立即领取。Thread Sandbox 由独立 lifecycle 状态机收敛。
-  return sandbox !== undefined && context.threadSandboxLease === undefined
-    ? [cleanupOutbox(context, sandbox, "started", "close")]
-    : [];
-}
-
-function terminalSandboxCommand(lease: ThreadSandboxLeaseRefV1) {
-  return {
-    schemaVersion: 1 as const,
-    sessionId: lease.sessionId,
-    generation: lease.generation,
-    leaseId: lease.leaseId,
-    leaseToken: lease.leaseToken,
-  };
-}
-
-function cleanupIntentKey(context: ExecutionContext, sandbox: SandboxSessionRef): string {
-  return `${context.attemptId}/sandbox/${sandbox.registryId}/cleanup`;
-}
-
-function cleanupUnknownOutbox(
-  context: ExecutionContext,
-  event: NonNullable<
-    Extract<
-      RuntimeOutboxV1,
-      { kind: "sandbox_cleanup"; state: "unknown" }
-    >["payload"]["uncertainEvent"]
-  >,
-  sandbox?: SandboxSessionRef,
-  disposition: "pause" | "close" = "close",
-): RuntimeOutboxV1 {
-  if (sandbox === undefined) {
-    return {
-      schemaVersion: 1,
-      kind: "sandbox_lifecycle_unknown",
-      idempotencyKey: `${context.attemptId}/sandbox/unknown/${event.requestId}`,
-      state: "unknown",
-      payload: {
-        requestId: event.requestId,
-        ...(event.sandboxId === undefined ? {} : { sandboxId: event.sandboxId }),
-        actualTtlSeconds: event.actualTtlSeconds,
-        stage: event.stage,
-        uncertainEvent: event,
-        retryCode: "SANDBOX_UNKNOWN",
-      },
-    };
-  }
-  return {
-    schemaVersion: 1,
-    kind: "sandbox_cleanup",
-    idempotencyKey: cleanupIntentKey(context, sandbox),
-    state: "unknown",
-    armed: true,
-    payload: {
-      registryId: sandbox.registryId,
-      providerKey: sandbox.providerKey,
-      providerSandboxId: sandbox.providerSandboxId,
-      disposition,
-      uncertainEvent: event,
-      retryCode: "SANDBOX_UNKNOWN",
-    },
-  };
-}
-
-function rawAlertOutbox(attemptId: string, code: StableWorkerErrorCode): RuntimeOutboxV1 {
-  return {
-    schemaVersion: 1,
-    kind: "runtime_alert",
-    idempotencyKey: `${attemptId}/alert/${code}`,
-    state: "pending",
-    payload: { code, attemptId },
-  };
-}
-
-function alertOutbox(context: ExecutionContext, code: StableWorkerErrorCode): RuntimeOutboxV1 {
-  return rawAlertOutbox(context.attemptId, code);
-}
-
-function validateWorkspaceCandidate(
-  context: ExecutionContext,
-  candidate: WorkspaceRevisionCandidate | undefined,
-): ValidatedWorkspaceChange | undefined {
-  if (candidate === undefined) return undefined;
-  if (
-    candidate.tenantId !== context.scope.tenantId ||
-    candidate.threadId !== context.scope.threadId ||
-    candidate.workspaceId !== context.scope.workspaceId ||
-    candidate.rootRunId !== context.scope.rootRunId ||
-    candidate.parentRevisionId !== context.currentRevisionId
-  ) {
-    throw new Error("WORKSPACE_CONFLICT");
-  }
-  return candidate;
-}
-
-/**
- * Run 的公开错误码必须保持稳定，不能把驱动、对象键或路径写入事件；开发进程日志只记录
- * 固定分类，供区分 Workspace head、Sandbox 数据面和依赖结果未知。
- */
-function reportWorkspaceMaterializeFailure(error: unknown): void {
-  const category =
-    error instanceof WorkspaceMaterializationStageError
-      ? workspaceMaterializationCategory(error)
-      : error instanceof WorkspaceApplicationError
-        ? workspaceApplicationCategory(error)
-        : error instanceof WorkspaceDependencyError
-          ? workspaceDependencyCategory(error)
-          : "unclassified";
-  console.warn(`WORKSPACE_MATERIALIZE_FAILED category=${category}`);
-}
-
-/** Workspace candidate 发布与物化同样只记录固定分类，避免异常正文越过 Worker 边界。 */
-function reportWorkspaceVerifyFailure(error: unknown): void {
-  const category =
-    error instanceof WorkspaceApplicationError
-      ? workspaceApplicationCategory(error)
-      : error instanceof WorkspaceDependencyError
-        ? workspaceDependencyCategory(error)
-        : "unclassified";
-  console.warn(`WORKSPACE_VERIFY_FAILED category=${category}`);
-}
-
-function workspaceMaterializationCategory(error: WorkspaceMaterializationStageError): string {
-  const stage = new Set([
-    "load_current_manifest",
-    "open_workspace",
-    "baseline_snapshot",
-    "baseline_list",
-    "baseline_release",
-    "materializer",
-  ]).has(error.stage)
-    ? error.stage
-    : undefined;
-  if (stage === undefined) return "unclassified";
-  const detail = new Set([
-    "invalid_operation_key",
-    "invalid_scope",
-    "invalid_sandbox_session",
-    "invalid_manifest",
-    "invalid_revision",
-    "other_application",
-    "dependency",
-    "unclassified",
-  ]).has(error.detail ?? "")
-    ? error.detail
-    : undefined;
-  return `stage_${stage}${detail === undefined ? "" : `_${detail}`}`;
-}
-
-function workspaceApplicationCategory(error: WorkspaceApplicationError): string {
-  const code = new Map([
-    ["INVALID_INPUT", "invalid_input"],
-    ["OPERATION_CONFLICT", "operation_conflict"],
-    ["OPERATION_IN_PROGRESS", "operation_in_progress"],
-    ["ACCESS_DENIED", "access_denied"],
-    ["INTEGRITY_MISMATCH", "integrity_mismatch"],
-    ["LIMIT_EXCEEDED", "limit_exceeded"],
-    ["CANCELLED", "cancelled"],
-    ["UNSAFE_SANDBOX_ENTRY", "unsafe_sandbox_entry"],
-    ["DEPENDENCY_FAILED", "dependency_failed"],
-    ["RESULT_UNKNOWN", "result_unknown"],
-  ]).get(error.code);
-  if (code === undefined) return "unclassified";
-  return `application_${code}${
-    error.diagnostic === "candidate_stream_pending" ? "_candidate_stream_pending" : ""
-  }`;
-}
-
-function workspaceDependencyCategory(error: WorkspaceDependencyError): string {
-  switch (error.result) {
-    case "known":
-      return "dependency_known";
-    case "unknown":
-      return "dependency_unknown";
-    default:
-      return "unclassified";
-  }
-}
-
-function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): void {
-  if (event.type === "message.completed") {
-    context.modelStopReason = event.stopReason;
-    context.modelCompleted = event.stopReason === "stop";
-  }
-  if (event.type === "error") {
-    context.agentFailure = event.code === "ABORTED" ? "CANCELLED" : event.code;
-  }
-  if (event.type === "compaction.forbidden") context.agentFailure = "PROTOCOL";
-}
-
-type FinalizationTransition = Readonly<{
-  phase?: "commentary" | "final_answer";
-  event?: Extract<
-    RuntimeAgentEvent,
-    { type: "finalization.started" | "finalization.cancelled" | "final_answer.committed" }
-  >;
-  next?: { readonly callId: string };
-}>;
-
-function classifyFinalizationTurn(
-  context: ExecutionContext,
-  event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
-): FinalizationTransition {
-  const toolCalls = event.assistant.content.filter(
-    (item): item is Extract<typeof item, { type: "toolCall" }> => item.type === "toolCall",
-  );
-  const marker =
-    toolCalls.length === 1 &&
-    toolCalls[0]?.name === "collapse_process_for_final_answer" &&
-    Object.keys(toolCalls[0].arguments).length === 0 &&
-    event.toolResults.length === 1 &&
-    event.toolResults[0]?.toolCallId === toolCalls[0].id &&
-    event.toolResults[0].toolName === "collapse_process_for_final_answer" &&
-    !event.toolResults[0].isError
-      ? toolCalls[0]
-      : undefined;
-  if (marker !== undefined) {
-    return {
-      phase: "commentary",
-      event: { type: "finalization.started", callId: marker.id },
-      next: { callId: marker.id },
-    };
-  }
-
-  const active = context.finalization;
-  if (active === undefined) return {};
-  if (toolCalls.length > 0 || event.assistant.stopReason === "toolUse") {
-    return {
-      phase: "commentary",
-      event: { type: "finalization.cancelled", callId: active.callId, reason: "tool_use" },
-    };
-  }
-  const text = event.assistant.content
-    .flatMap((item) => (item.type === "text" ? [item.text] : []))
-    .join("\n");
-  if (text.trim().length === 0) {
-    return event.assistant.stopReason === "stop"
-      ? {
-          event: {
-            type: "finalization.cancelled",
-            callId: active.callId,
-            reason: "empty_answer",
-          },
-        }
-      : { next: active };
-  }
-  if (event.assistant.stopReason === "length") {
-    return { phase: "final_answer", next: active };
-  }
-  return {
-    phase: "final_answer",
-    event: { type: "final_answer.committed", callId: active.callId },
-  };
-}
-
-function applyFinalizationTransition(
-  context: ExecutionContext,
-  transition: FinalizationTransition,
-): void {
-  if (transition.next === undefined) delete context.finalization;
-  else context.finalization = transition.next;
-}
-
-function registerToolStarted(
-  context: ExecutionContext,
-  event: Extract<RuntimeAgentEvent, { type: "tool.started" }>,
-): ToolStartedGate {
-  const existing = context.toolStartedGates.get(event.callId);
-  if (existing !== undefined) {
-    context.adapterRejected = true;
-    context.agentFailure = "PROTOCOL";
-    closeEventAcceptance(context);
-    existing.resolve();
-    return existing;
-  }
-  let resolve: () => void = () => undefined;
-  const committed = new Promise<void>((done) => {
-    resolve = done;
-  });
-  const gate = {
-    name: event.name,
-    committed,
-    authorizationRequested: false,
-    todoWriteRequested: false,
-    resolve,
-  };
-  context.toolStartedGates.set(event.callId, gate);
-  return gate;
-}
-
-function closeEventAcceptance(context: ExecutionContext): void {
-  context.eventAcceptanceOpen = false;
-}
-
-function refreshLocalStop(
-  context: ExecutionContext,
-  cancellation: AbortSignal,
-  shutdown: AbortSignal | undefined,
-): void {
-  if (shutdown?.aborted) {
-    context.stopped = "shutdown";
-  } else if (cancellation.aborted && context.stopped !== "shutdown") {
-    context.stopped = "cancelled";
-  }
-}
-
-function isApplied(result: RuntimeMutationResult): result is AppliedMutation {
-  return result.outcome === "applied" || result.outcome === "already_applied";
-}
-
-function sameScope(left: ExecutionScope, right: ExecutionScope): boolean {
-  return (
-    left.tenantId === right.tenantId &&
-    left.threadId === right.threadId &&
-    left.runId === right.runId &&
-    left.rootRunId === right.rootRunId &&
-    left.workspaceId === right.workspaceId &&
-    left.baseRevisionId === right.baseRevisionId
-  );
-}
-
-function entitiesMatch(scope: ExecutionScope, run: Run, workspace: Workspace): boolean {
-  return (
-    run.id === scope.runId &&
-    run.tenantId === scope.tenantId &&
-    run.threadId === scope.threadId &&
-    workspace.id === scope.workspaceId &&
-    workspace.tenantId === scope.tenantId &&
-    workspace.threadId === scope.threadId
-  );
-}
-
-function snapshotMatches(
-  scope: ExecutionScope,
-  fence: ExecutionFence,
-  run: Run,
-  workspace: Workspace,
-  attempt: ExecutionAttemptSnapshot,
-): boolean {
-  return (
-    sameScope(scope, fence.scope) &&
-    entitiesMatch(scope, run, workspace) &&
-    run.status === "running" &&
-    attempt.status === "claimed" &&
-    attempt.stage === "claimed" &&
-    attempt.version === 0 &&
-    fence.workspaceLease.rootRunId === scope.rootRunId &&
-    workspace.writerLease?.rootRunId === scope.rootRunId &&
-    workspace.writerLease.epoch === fence.workspaceLease.epoch &&
-    workspace.writerLease.expiresAt === fence.workspaceLease.expiresAt &&
-    workspace.currentRevisionId === attempt.currentRevisionId
-  );
-}
-
-function inspectionMatches(
-  context: ExecutionContext,
-  inspected: Extract<
-    Awaited<ReturnType<ExecutionPersistencePort["inspectAndRenew"]>>,
-    { outcome: "active" }
-  >,
-): boolean {
-  return (
-    sameScope(context.scope, inspected.fence.scope) &&
-    entitiesMatch(context.scope, inspected.run, inspected.workspace) &&
-    inspected.run.status === "running" &&
-    inspected.fence.runClaim.token === context.fence.runClaim.token &&
-    inspected.fence.runClaim.epoch === context.fence.runClaim.epoch &&
-    inspected.fence.workspaceLease.rootRunId === context.scope.rootRunId &&
-    inspected.fence.workspaceLease.epoch === context.fence.workspaceLease.epoch &&
-    Date.parse(inspected.fence.runClaim.expiresAt) > Date.parse(context.fence.runClaim.expiresAt) &&
-    Date.parse(inspected.fence.workspaceLease.expiresAt) >
-      Date.parse(context.fence.workspaceLease.expiresAt) &&
-    inspected.workspace.writerLease?.rootRunId === context.scope.rootRunId &&
-    inspected.workspace.writerLease.epoch === inspected.fence.workspaceLease.epoch &&
-    inspected.workspace.writerLease.expiresAt === inspected.fence.workspaceLease.expiresAt &&
-    inspected.workspace.currentRevisionId === context.currentRevisionId
-  );
-}
-
-function acceptInspection(
-  context: ExecutionContext,
-  inspected: Extract<
-    Awaited<ReturnType<ExecutionPersistencePort["inspectAndRenew"]>>,
-    { outcome: "active" }
-  >,
-): void {
-  context.fence = inspected.fence;
-  context.databaseNow = inspected.databaseNow;
-  context.run = inspected.run;
-  context.workspace = inspected.workspace;
-}
-
-function appliedSnapshotMatches(
-  context: ExecutionContext,
-  result: AppliedMutation,
-  command: Omit<
-    RuntimeMutation,
-    | "schemaVersion"
-    | "commandDigest"
-    | "fence"
-    | "expectedAttemptVersion"
-    | "expectedProjectionVersion"
-  >,
-): boolean {
-  const expectedStage = command.nextStage ?? context.actualCommittedStage;
-  const expectedStatus = command.nextAttemptStatus ?? context.actualAttemptStatus;
-  const expectedRevision = command.workspaceChange?.revisionId ?? context.currentRevisionId;
-  return (
-    sameScope(context.scope, result.scope) &&
-    entitiesMatch(context.scope, result.run, result.workspace) &&
-    result.attempt.attemptId === context.attemptId &&
-    result.attempt.version === result.attemptVersion &&
-    result.attempt.nextEventSequence === result.nextEventSequence &&
-    result.nextEventSequence === context.nextEventSequence + command.events.length &&
-    result.attempt.stage === expectedStage &&
-    result.attempt.status === expectedStatus &&
-    result.attempt.projectionVersion ===
-      (command.rolloutProjection === undefined
-        ? context.projectionVersion
-        : context.projectionVersion + 1) &&
-    result.attempt.currentRevisionId === expectedRevision &&
-    (command.nextRunStatus === undefined || result.run.status === command.nextRunStatus) &&
-    result.workspace.currentRevisionId === result.attempt.currentRevisionId
-  );
-}
-
-function receiptMatches(
-  context: ExecutionContext,
-  result: AppliedMutation,
-  command: RuntimeMutation,
-): boolean {
-  const receipt = result.receipt;
-  const outboxMatches =
-    receipt.outbox.length === command.outbox.length &&
-    receipt.outbox.every((item, index) => {
-      const expected = command.outbox[index];
-      if (
-        expected === undefined ||
-        item.kind !== expected.kind ||
-        item.idempotencyKey !== expected.idempotencyKey ||
-        item.state !== expected.state
-      ) {
-        return false;
-      }
-      if (expected.kind !== "sandbox_cleanup") {
-        return item.payloadDigest === outboxPayloadDigest(expected);
-      }
-      if (item.kind !== "sandbox_cleanup") return false;
-      const previous = context.cleanupFacts.get(expected.idempotencyKey);
-      const expectedArmedAt = previous?.armedAt ?? result.databaseNow;
-      const expectedDisposition =
-        "disposition" in expected.payload ? expected.payload.disposition : undefined;
-      return (
-        item.armed === true &&
-        item.armedAt === expectedArmedAt &&
-        item.identity.registryId === expected.payload.registryId &&
-        item.identity.providerSandboxId === expected.payload.providerSandboxId &&
-        item.identityDigest === sandboxCleanupIdentityDigest(expected) &&
-        item.identityDigest === (previous?.identityDigest ?? item.identityDigest) &&
-        (previous?.disposition === undefined || item.disposition === previous.disposition) &&
-        item.disposition === expectedDisposition &&
-        item.payloadDigest === outboxPayloadDigest(expected, expectedArmedAt)
-      );
-    });
-  const projectionMatches =
-    command.rolloutProjection === undefined
-      ? receipt.projection === undefined
-      : receipt.projection?.schemaVersion === 1 &&
-        receipt.projection.previousVersion === context.projectionVersion &&
-        receipt.projection.version === context.projectionVersion + 1 &&
-        receipt.projection.digest === rolloutProjectionDigest(command.rolloutProjection);
-  const workspaceMatches =
-    command.workspaceChange === undefined
-      ? receipt.workspace === undefined
-      : receipt.workspace?.changeDigest === workspaceChangeDigest(command.workspaceChange) &&
-        receipt.workspace.previousHead === context.currentRevisionId &&
-        receipt.workspace.currentHead === command.workspaceChange.revisionId;
-  const expectedContextEntries =
-    command.threadSteer === undefined ? command.threadContextAppend?.entries.length : 1;
-  const threadContextMatches =
-    expectedContextEntries === undefined
-      ? receipt.threadContext === undefined
-      : receipt.threadContext?.schemaVersion === 1 &&
-        receipt.threadContext.entryCount === expectedContextEntries &&
-        Number.isSafeInteger(receipt.threadContext.firstSequence) &&
-        receipt.threadContext.firstSequence > 0 &&
-        receipt.threadContext.lastSequence ===
-          receipt.threadContext.firstSequence + expectedContextEntries - 1;
-  const threadSteerMatches =
-    command.threadSteer === undefined
-      ? receipt.threadSteer === undefined
-      : receipt.threadSteer?.receiptId === command.threadSteer.receiptId &&
-        receipt.threadSteer.targetTurnId === command.threadSteer.targetTurnId &&
-        receipt.threadSteer.bodyDigest === command.threadSteer.bodyDigest &&
-        receipt.threadSteer.appliedContextSequence === receipt.threadContext?.firstSequence;
-  const effectInvocationMatches =
-    command.effectInvocation === undefined
-      ? receipt.effectInvocation === undefined
-      : receipt.effectInvocation?.callId === command.effectInvocation.callId &&
-        receipt.effectInvocation.toolName === command.effectInvocation.toolName;
-  const threadSandboxMatches =
-    command.threadSandboxTerminal === undefined
-      ? receipt.threadSandbox === undefined
-      : receipt.threadSandbox?.schemaVersion === 1 &&
-        receipt.threadSandbox.sessionId === command.threadSandboxTerminal.sessionId &&
-        receipt.threadSandbox.generation === command.threadSandboxTerminal.generation &&
-        (receipt.threadSandbox.outcome === "effect_pending"
-          ? (receipt.threadSandbox.effectKind === "pause" ||
-              receipt.threadSandbox.effectKind === "terminate") &&
-            receipt.threadSandbox.effectId.trim().length > 0
-          : receipt.threadSandbox.nextRunId.trim().length > 0);
-  return (
-    receipt.schemaVersion === 1 &&
-    receipt.idempotencyKey === command.idempotencyKey &&
-    receipt.commandDigest === command.commandDigest &&
-    receipt.previousAttemptVersion === context.attemptVersion &&
-    receipt.attemptVersion === context.attemptVersion + 1 &&
-    result.attemptVersion === context.attemptVersion + 1 &&
-    result.attemptVersion === receipt.attemptVersion &&
-    receipt.eventSequenceStart === context.nextEventSequence &&
-    receipt.eventSequenceEnd === context.nextEventSequence + command.events.length &&
-    result.nextEventSequence === receipt.eventSequenceEnd &&
-    outboxMatches &&
-    effectInvocationMatches &&
-    projectionMatches &&
-    workspaceMatches &&
-    threadContextMatches &&
-    threadSteerMatches &&
-    threadSandboxMatches
-  );
-}
-
-function acceptOutboxReceipts(
-  context: ExecutionContext,
-  receipts: readonly RuntimeOutboxReceiptV1[],
-): void {
-  for (const receipt of receipts) {
-    if (receipt.kind !== "sandbox_cleanup") continue;
-    context.cleanupFacts.set(receipt.idempotencyKey, {
-      armedAt: receipt.armedAt,
-      identityDigest: receipt.identityDigest,
-      ...(receipt.disposition === undefined ? {} : { disposition: receipt.disposition }),
-    });
-  }
-}
-
-function permitMatches(
-  context: ExecutionContext,
-  permit: ExternalEffectPermit,
-  effect: ExternalEffectPermit["effect"],
-  call: ExternalEffectCall,
-): boolean {
-  return (
-    permit.effect === effect &&
-    permit.callId === call.callId &&
-    permit.toolName === call.toolName &&
-    permit.argsDigest === call.argsDigest &&
-    sameScope(permit.scope, context.scope) &&
-    permit.runClaimToken === context.fence.runClaim.token &&
-    permit.runClaimEpoch === context.fence.runClaim.epoch &&
-    permit.workspaceRootRunId === context.fence.workspaceLease.rootRunId &&
-    permit.workspaceLeaseEpoch === context.fence.workspaceLease.epoch &&
-    permit.attemptVersion === context.attemptVersion &&
-    Date.parse(permit.issuedAt) < Date.parse(permit.expiresAt) &&
-    Date.parse(permit.expiresAt) > Date.parse(context.databaseNow)
-  );
 }
 
 function assertScope(scope: ExecutionScope): void {

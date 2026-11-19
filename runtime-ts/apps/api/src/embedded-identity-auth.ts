@@ -6,7 +6,8 @@ import {
   type IdentityConfiguration,
 } from "@hoox/identity";
 import type { AccountSessionDto } from "@hoox/protocol";
-import type { IdentityConfigurationRepository, Pool } from "@hoox/persistence";
+import type { IdentityConfigurationRepository } from "@hoox/persistence/admin";
+import type { Pool } from "@hoox/persistence/postgres";
 import type { LocalAccountAuthService } from "./local-account-auth.js";
 import { ApiFailure } from "./service.js";
 

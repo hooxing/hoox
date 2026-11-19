@@ -4,9 +4,9 @@ import type { ToolObservationResult } from "@hoox/context-policy";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { projectToolPresentation, type RuntimeAgentEvent } from "./events.js";
-import { PtcToolCallError, projectToolFailure, type ToolFailure } from "./tool-failure.js";
+import { PtcToolCallError, projectToolFailure, type ToolFailure } from "@hoox/tool-router";
 import { runPtcProgram } from "./ptc-runtime.js";
-import { createSchemaInvalidArgumentsBridge } from "./tools.js";
+import { createSchemaInvalidArgumentsBridge } from "@hoox/tool-router";
 
 export type ToolCallingMode = "native" | "ptc";
 export type PtcToolEvent = Extract<

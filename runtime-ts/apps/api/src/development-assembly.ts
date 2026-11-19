@@ -1,14 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@hoox/domain";
 import {
-  BlobSkillContentStore,
-  createApiPersistenceRuntime,
-  PgInstallationRepository,
   createS3BlobStore,
   DurableResourceBlobWriter,
-  DurableResourceUploadBlobAdapter,
   RUNTIME_BLOB_OBJECT_PREFIX,
-} from "@hoox/persistence";
+} from "@hoox/persistence/blob";
+import { createApiPersistenceRuntime, PgInstallationRepository } from "@hoox/persistence/postgres";
+import { BlobSkillContentStore, DurableResourceUploadBlobAdapter } from "@hoox/persistence/thread";
 import type { ServiceAssemblyFactory } from "@hoox/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,

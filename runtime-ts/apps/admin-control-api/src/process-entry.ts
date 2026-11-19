@@ -1,16 +1,16 @@
 import {
-  normalizeDevelopmentLoopbackHost,
-  parseProductionApiTransport,
   parseProductionJwtSigningKeys,
-  type ProductionApiTransport,
   type ProductionJwtVerificationKey,
-} from "@hoox/api";
+} from "@hoox/identity/auth";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
   EnvironmentConfigurationError,
   integerEnvironmentField,
+  normalizeDevelopmentLoopbackHost,
+  parseProductionApiTransport,
   parseProductionPostgresTransport,
+  type ProductionApiTransport,
   parseStrictEnvironment,
   readRequiredEnvironmentValue,
   type ProcessSignalSource,

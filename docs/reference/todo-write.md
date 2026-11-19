@@ -40,7 +40,7 @@ Pi Adapter 校验参数并把命令交给 Worker。Worker 生成单调版本的 
 | 层 | 主要文件 |
 | --- | --- |
 | Domain | `runtime-ts/packages/domain/src/todo.ts` |
-| Pi Adapter | `runtime-ts/packages/pi-adapter/src/todo-write-tool.ts` |
+| Tool Router | `runtime-ts/packages/tool-router/src/todo-write-tool.ts` |
 | Prompt | `runtime-ts/packages/prompt-builder/src/index.ts` |
 | Worker | `runtime-ts/apps/agent-worker/src/run-worker.ts` |
 | API | `runtime-ts/apps/api/src/app.ts` |

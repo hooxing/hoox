@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import type { RunDto, RunEventStreamQuery } from "@hoox/protocol";
-import type { RunExperienceReadPort } from "@hoox/persistence";
+import type { RunExperienceReadPort } from "@hoox/persistence/postgres";
 
 type EventRead = Extract<
   Awaited<ReturnType<RunExperienceReadPort["listEvents"]>>,

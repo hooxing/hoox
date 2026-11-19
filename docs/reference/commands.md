@@ -14,6 +14,7 @@
 | `corepack pnpm lint` | 执行 Biome lint |
 | `corepack pnpm typecheck` | 构建并执行根与各包类型检查 |
 | `corepack pnpm toolchain:check` | 校验 Node.js、pnpm、CI 与 Dockerfile 工具链版本契约 |
+| `corepack pnpm deps:check` | 校验 Workspace 依赖声明完整且符合[依赖规则](../architecture/repository-map.md#依赖规则) |
 
 ## 测试与工程 Gate
 

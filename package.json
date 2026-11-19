@@ -30,6 +30,7 @@
     "admin:pi-catalog:generate": "node scripts/generate-admin-pi-model-catalog.mjs",
     "admin:pi-catalog:check": "node scripts/generate-admin-pi-model-catalog.mjs --check",
     "toolchain:check": "node scripts/validate-toolchain-versions.mjs",
+    "deps:check": "node scripts/validate-workspace-dependencies.mjs",
     "clean": "corepack pnpm --recursive --if-present clean",
     "config:check": "node scripts/validate-env-example.mjs && docker compose --env-file .env.example -f docker-compose.dev.yml config --quiet",
     "config:check:production": "node scripts/validate-production-env-example.mjs",
@@ -67,7 +68,7 @@
     "test:process-runtime:clean": "node scripts/remove-workspace-dist.mjs && corepack pnpm test:process-runtime",
     "typecheck": "corepack pnpm build && tsc -p tsconfig.json && corepack pnpm --recursive --sort --if-present typecheck",
     "typecheck:built": "tsc -p tsconfig.json && corepack pnpm --recursive --sort --if-present typecheck:built && corepack pnpm --filter @cubesandbox/sdk typecheck",
-    "check": "corepack pnpm toolchain:check && corepack pnpm admin:pi-catalog:check && corepack pnpm format:check && corepack pnpm lint && corepack pnpm build && corepack pnpm typecheck:built && corepack pnpm test:built && corepack pnpm config:check",
+    "check": "corepack pnpm toolchain:check && corepack pnpm deps:check && corepack pnpm admin:pi-catalog:check && corepack pnpm format:check && corepack pnpm lint && corepack pnpm build && corepack pnpm typecheck:built && corepack pnpm test:built && corepack pnpm config:check",
     "dev:trajectory": "corepack pnpm --filter @hoox/trajectory build && corepack pnpm --filter @hoox/trajectory-web build && node --env-file-if-exists=.env runtime-ts/apps/trajectory-web/dist/bin.js",
     "security:audit:production": "corepack pnpm audit --prod --audit-level=moderate"
   },

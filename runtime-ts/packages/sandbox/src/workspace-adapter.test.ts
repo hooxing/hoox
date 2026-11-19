@@ -339,7 +339,10 @@ describe("CubeSandbox Workspace 适配器契约", () => {
     "Linux 真 helper 以 openat2 拒绝祖先 symlink，并在可挂载时拒绝跨文件系统",
     async () => {
       const fake = fakeWorkspaceSandbox({});
-      await open(fake);
+      // 打开不再发远端命令；用一次快照取得适配器实际下发的 helper 脚本。
+      const adapter = await open(fake);
+      await adapter.captureSnapshot({ operationKey: "helper-script", scope: SCOPE });
+      expect(fake.lastScript).not.toBe("");
       const root = mkdtempSync(join(tmpdir(), "cube-workspace-helper-"));
       const outside = mkdtempSync(join(tmpdir(), "cube-workspace-outside-"));
       try {

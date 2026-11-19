@@ -815,6 +815,8 @@ export interface WorkspaceRevisionVerifierPort {
     readonly sandbox: SandboxSessionRef;
     readonly operationKey: string;
     readonly signal?: AbortSignal;
+    /** 只用于诊断子阶段耗时；不得影响物化或发布结果。 */
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
   }): Promise<void>;
   /** 模型 settled 后发布 Sandbox snapshot，返回尚未提交的 manifest-aware revision 候选。 */
   verify(input: {
@@ -824,6 +826,8 @@ export interface WorkspaceRevisionVerifierPort {
     readonly sandbox: SandboxSessionRef;
     readonly operationKey: string;
     readonly signal?: AbortSignal;
+    /** 只用于诊断子阶段耗时；不得影响物化或发布结果。 */
+    readonly phaseTiming?: ExecutionPhaseTimingObserver;
   }): Promise<WorkspaceRevisionCandidate | undefined>;
 }
 

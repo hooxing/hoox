@@ -755,6 +755,7 @@ export class RunWorker {
                   // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
                   operationKey: `${context.attemptId}:workspace:materialize`,
                   signal: executionAbort.signal,
+                  ...(preparationTiming === undefined ? {} : { phaseTiming: preparationTiming }),
                 }),
               );
             }
@@ -1226,6 +1227,7 @@ export class RunWorker {
                 sandbox: verifiedSandbox,
                 operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
                 signal: executionAbort.signal,
+                ...(context.phaseTiming === undefined ? {} : { phaseTiming: context.phaseTiming }),
               }),
             );
           } catch (error) {

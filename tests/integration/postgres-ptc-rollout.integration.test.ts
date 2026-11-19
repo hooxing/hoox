@@ -513,8 +513,39 @@ describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
       ],
     });
     if (journal.outcome !== "loaded") throw new Error("测试需要可核对的 journal");
-    expect(journal.dispatches[0]?.result?.blob.incarnationId).toBeTruthy();
-    expect(journal.dispatches[0]?.result?.blob.physicalObjectKey).toBeTruthy();
+    expect(journal.dispatches[0]?.result?.blob?.incarnationId).toBeTruthy();
+    expect(journal.dispatches[0]?.result?.blob?.physicalObjectKey).toBeTruthy();
+  });
+
+  it("未截断回执以 schemaVersion 3 内联写入 journal，不引用 Blob 且可同键重放", async () => {
+    const toolCallId = "inner_inline";
+    const inline = {
+      context,
+      toolCallId,
+      parentToolCallId,
+      idempotencyKey: `result.${toolCallId}`,
+      isTruncated: false,
+      body: {
+        schemaVersion: 3,
+        toolName: "read",
+        receipt: JSON.parse(controlled) as Record<string, unknown>,
+        truncation: { isTruncated: false, modelVisibleBytes: traceSize },
+        observation: controlled,
+      },
+    };
+    expect(await repository.appendPtcToolCall(start(toolCallId))).toMatchObject({
+      outcome: "created",
+    });
+    await expect(
+      repository.appendPtcToolResult({ ...inline, isTruncated: true }),
+    ).rejects.toThrow();
+    expect(await repository.appendPtcToolResult(inline)).toMatchObject({ outcome: "created" });
+    expect(await repository.appendPtcToolResult(inline)).toMatchObject({ outcome: "replayed" });
+    const journal = await repository.listPtcDispatchesByParent({ context, parentToolCallId });
+    if (journal.outcome !== "loaded") throw new Error("测试需要可核对的 journal");
+    const dispatch = journal.dispatches.find((item) => item.toolCallId === toolCallId);
+    expect(dispatch?.result?.body).toEqual(inline.body);
+    expect(dispatch?.result).not.toHaveProperty("blob");
   });
 
   it("并发同 ID 同正文只开始一次、结果一次；不同正文或幂等键冲突", async () => {

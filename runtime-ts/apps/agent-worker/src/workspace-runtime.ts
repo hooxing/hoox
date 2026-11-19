@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { sha256Digest, workspaceRevisionId } from "@hoox/domain";
+import {
+  type ExecutionPhaseTimingObserver,
+  type ExecutionTimingPhase,
+  measureExecutionPhase,
+  sha256Digest,
+  workspaceRevisionId,
+} from "@hoox/domain";
 import { workspaceCandidateOperationDigest } from "@hoox/persistence/run-execution";
 import type { WorkspaceRuntimePort } from "@hoox/run-contracts";
 import {
@@ -79,28 +85,83 @@ export class WorkspaceMaterializationStageError extends Error {
 export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
   constructor(private readonly options: WorkerWorkspaceRuntimeOptions) {}
 
+  private timedPorts(timing: ExecutionPhaseTimingObserver | undefined) {
+    return {
+      journal: timedMethods(this.options.journal, timing, "workspace_journal", [
+        "lookupCompleted",
+        "begin",
+        "complete",
+        "failKnown",
+        "recordUnknown",
+      ]),
+      stableBlobs: timedMethods(this.options.stableBlobs, timing, "workspace_stable_read", [
+        "authorize",
+        "head",
+      ]),
+      candidateBlobs: timedMethods(
+        this.options.candidateBlobs,
+        timing,
+        "workspace_candidate_upload",
+        ["putCandidate", "headCandidate"],
+      ),
+      candidates: timedMethods(this.options.candidates, timing, "workspace_candidate_persist", [
+        "begin",
+        "prepare",
+        "release",
+      ]),
+    };
+  }
+
+  private async openTimedSandbox(
+    input: Parameters<WorkspaceRuntimePort["verify"]>[0],
+    scope: WorkspaceTrustedScope,
+    timing: ExecutionPhaseTimingObserver | undefined,
+  ): Promise<SandboxWorkspacePort> {
+    const sandbox = await measureExecutionPhase(timing, "workspace_open", () =>
+      this.options.openSandboxWorkspace({
+        scope,
+        executionScope: input.scope,
+        session: input.sandbox,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      }),
+    );
+    // 物化删除/建目录也是远端命令，与文件写入合并计入 workspace_file_write。
+    return timedMethods(
+      timedMethods(sandbox, timing, "workspace_snapshot", ["captureSnapshot"]),
+      timing,
+      "workspace_file_write",
+      [
+        "inspectRegularFile",
+        "removeFile",
+        "removeDirectory",
+        "removeUnexpectedDirectory",
+        "ensureDirectory",
+        "writeFileAtomically",
+      ],
+    );
+  }
+
   async materialize(input: Parameters<WorkspaceRuntimePort["materialize"]>[0]): Promise<void> {
     const scope = trustedScope(input.scope);
+    const timing = input.phaseTiming;
+    const ports = this.timedPorts(timing);
     let current: WorkspaceManifest | undefined;
     try {
-      current = await this.options.revisions.loadCurrentManifest({
-        scope,
-        ...(input.expectedCurrentRevisionId === undefined
-          ? {}
-          : { expectedRevisionId: input.expectedCurrentRevisionId }),
-      });
+      current = await measureExecutionPhase(timing, "workspace_head_load", () =>
+        this.options.revisions.loadCurrentManifest({
+          scope,
+          ...(input.expectedCurrentRevisionId === undefined
+            ? {}
+            : { expectedRevisionId: input.expectedCurrentRevisionId }),
+        }),
+      );
     } catch {
       throw new WorkspaceMaterializationStageError("load_current_manifest");
     }
     const target = current ?? emptyManifest(scope, this.options.policy);
     let sandbox: SandboxWorkspacePort;
     try {
-      sandbox = await this.options.openSandboxWorkspace({
-        scope,
-        executionScope: input.scope,
-        session: input.sandbox,
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      });
+      sandbox = await this.openTimedSandbox(input, scope, timing);
     } catch {
       throw new WorkspaceMaterializationStageError("open_workspace");
     }
@@ -114,8 +175,8 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
     });
     try {
       await new WorkspaceMaterializer({
-        journal: this.options.journal,
-        stableBlobs: this.options.stableBlobs,
+        journal: ports.journal,
+        stableBlobs: ports.stableBlobs,
         sandbox,
         policy: this.options.policy,
       }).materialize({
@@ -141,18 +202,17 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
     if (input.attemptId === undefined) throw new Error("WORKSPACE_ATTEMPT_ID_REQUIRED");
     const attemptId = input.attemptId;
     const scope = trustedScope(input.scope);
-    const base = await this.options.revisions.loadCurrentManifest({
-      scope,
-      ...(input.expectedCurrentRevisionId === undefined
-        ? {}
-        : { expectedRevisionId: input.expectedCurrentRevisionId }),
-    });
-    const sandbox = await this.options.openSandboxWorkspace({
-      scope,
-      executionScope: input.scope,
-      session: input.sandbox,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
+    const timing = input.phaseTiming;
+    const ports = this.timedPorts(timing);
+    const base = await measureExecutionPhase(timing, "workspace_head_load", () =>
+      this.options.revisions.loadCurrentManifest({
+        scope,
+        ...(input.expectedCurrentRevisionId === undefined
+          ? {}
+          : { expectedRevisionId: input.expectedCurrentRevisionId }),
+      }),
+    );
+    const sandbox = await this.openTimedSandbox(input, scope, timing);
     const revisionId = workspaceRevisionId(
       `revision-${createHash("sha256")
         .update(`${scope.tenantId}\0${scope.workspaceId}\0${attemptId}\0${input.operationKey}`)
@@ -173,12 +233,12 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
       ...unsigned,
       operationDigest: workspaceCandidateOperationDigest(unsigned),
     });
-    await this.options.candidates.begin(identity);
+    await ports.candidates.begin(identity);
     try {
       const change = await new WorkspacePublisher({
-        journal: this.options.journal,
+        journal: ports.journal,
         sandbox,
-        blobs: this.options.candidateBlobs,
+        blobs: ports.candidateBlobs,
         policy: this.options.policy,
       }).publish({
         operationKey: input.operationKey,
@@ -190,10 +250,10 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
       if (sameWorkspaceContent(base, change.candidateManifest)) {
         // 内容与当前 head 完全一致时不形成新 Revision：候选以 superseded 释放，Run 按
         // workspace_unchanged 收口。未变更文件不会上传 Blob，因此释放不涉及新增引用。
-        await this.options.candidates.release({ identity, reason: "superseded" });
+        await ports.candidates.release({ identity, reason: "superseded" });
         return undefined;
       }
-      await this.options.candidates.prepare({ identity, manifest: change.candidateManifest });
+      await ports.candidates.prepare({ identity, manifest: change.candidateManifest });
       return Object.freeze({
         tenantId: input.scope.tenantId,
         threadId: input.scope.threadId,
@@ -219,12 +279,33 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
           : new WorkspaceApplicationError("RESULT_UNKNOWN", "Workspace candidate 等待结果对账");
       }
       // release 的 COMMIT 若未知，候选仍由 Attempt 过期恢复收敛；绝不能据异常猜测引用已释放。
-      await this.options.candidates
-        .release({ identity, reason: "publish_failed" })
-        .catch(() => undefined);
+      await ports.candidates.release({ identity, reason: "publish_failed" }).catch(() => undefined);
       throw error;
     }
   }
+}
+
+/**
+ * 把端口方法包装成子阶段计时。只计时返回 Promise 的方法；流式方法（async iterable）原样转发，
+ * 其耗时计入消费它的那个方法。没有 observer 时直接返回原对象。
+ */
+function timedMethods<T extends object>(
+  target: T,
+  observer: ExecutionPhaseTimingObserver | undefined,
+  phase: ExecutionTimingPhase,
+  methods: readonly (keyof T & string)[],
+): T {
+  if (observer === undefined) return target;
+  const timed = new Set<string | symbol>(methods);
+  return new Proxy(target, {
+    get(object, property) {
+      const value: unknown = Reflect.get(object, property, object);
+      if (typeof value !== "function") return value;
+      if (!timed.has(property)) return value.bind(object);
+      return (...args: unknown[]) =>
+        measureExecutionPhase(observer, phase, async () => value.apply(object, args));
+    },
+  });
 }
 
 /** 只将核心固定文案映射为枚举；绝不复制错误正文到上层日志。 */

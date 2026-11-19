@@ -34,15 +34,19 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("@hoox/persistence", () => ({
-  BlobSkillContentStore: class {},
-  PgInstallationRepository: class {},
-  createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
+vi.mock("@hoox/persistence/blob", () => ({
   createS3BlobStore: mocks.createS3BlobStore,
   DurableResourceBlobWriter: class {},
-  DurableResourceUploadBlobAdapter: class {},
   probeS3BlobStore: mocks.probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX: "agent-worker",
+}));
+vi.mock("@hoox/persistence/postgres", () => ({
+  PgInstallationRepository: class {},
+  createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
+}));
+vi.mock("@hoox/persistence/thread", () => ({
+  BlobSkillContentStore: class {},
+  DurableResourceUploadBlobAdapter: class {},
 }));
 
 vi.mock("./app.js", () => ({ createApiApp: mocks.createApiApp }));

@@ -7,11 +7,8 @@ import {
   threadId,
   type WorkspaceRevisionId,
 } from "@hoox/domain";
-import {
-  type StableBlobRef,
-  TransactionCommitUnknownError,
-  withTenantTransaction,
-} from "@hoox/persistence";
+import type { StableBlobRef } from "@hoox/persistence/blob";
+import { TransactionCommitUnknownError, withTenantTransaction } from "@hoox/persistence/postgres";
 import type { ExecutionScope } from "@hoox/run-contracts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type {

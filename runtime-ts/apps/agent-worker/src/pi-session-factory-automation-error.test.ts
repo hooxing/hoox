@@ -1,4 +1,4 @@
-import { AutomationUpdateArgumentError } from "@hoox/pi-adapter";
+import { AutomationUpdateArgumentError } from "@hoox/tool-router";
 import { describe, expect, it } from "vitest";
 import { projectAutomationUpdateError } from "./pi-session-factory.js";
 

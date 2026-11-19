@@ -1,16 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { isoTimestamp, runId, threadId, workspaceId } from "@hoox/domain";
 import {
-  BlobSkillContentStore,
   type CreateS3BlobStoreConfig,
-  createApiPersistenceRuntime,
-  PgInstallationRepository,
   createS3BlobStore,
   DurableResourceBlobWriter,
-  DurableResourceUploadBlobAdapter,
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
-} from "@hoox/persistence";
+} from "@hoox/persistence/blob";
+import { createApiPersistenceRuntime, PgInstallationRepository } from "@hoox/persistence/postgres";
+import { BlobSkillContentStore, DurableResourceUploadBlobAdapter } from "@hoox/persistence/thread";
 import { type ServiceAssemblyFactory, startServiceProcess } from "@hoox/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,
@@ -26,8 +24,8 @@ import { createEmbeddedIdentityAuthService } from "./embedded-identity-auth.js";
 import { createLocalAccountAuthService } from "./local-account-auth.js";
 import type { AuthContextResolver } from "./ports.js";
 import type { ApiProcessConfiguration } from "./process-entry.js";
-import { createProductionJwtAuthResolver } from "./production-auth.js";
-import { loadProductionTlsCredentials, productionTrustProxy } from "./production-transport.js";
+import { createProductionJwtAuthResolver } from "@hoox/identity/auth";
+import { loadProductionTlsCredentials, productionTrustProxy } from "@hoox/process-runtime";
 
 const cursorTtlMilliseconds = 15 * 60_000;
 const cursorMaximumTtlMilliseconds = 60 * 60_000;

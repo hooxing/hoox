@@ -10,7 +10,7 @@ import type {
   PgClaimedWorkerTenantAssignment,
   PgRunDispatchOutbox,
   PgWorkerTenantAssignments,
-} from "@hoox/persistence";
+} from "@hoox/persistence/run-execution";
 import type {
   CancellationPort,
   ClockPort,

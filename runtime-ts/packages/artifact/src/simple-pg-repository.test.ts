@@ -1,5 +1,5 @@
 import { sha256Digest } from "@hoox/domain";
-import { TransactionCommitUnknownError, type Pool } from "@hoox/persistence";
+import { TransactionCommitUnknownError, type Pool } from "@hoox/persistence/postgres";
 import { describe, expect, it } from "vitest";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 import {

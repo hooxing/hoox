@@ -1,5 +1,5 @@
 import { resourceId, resourceVersionId, tenantId } from "@hoox/domain";
-import type { BlobStore } from "@hoox/persistence";
+import type { BlobStore } from "@hoox/persistence/blob";
 import type { ResourceFilesystemCatalog, ResourceFilesystemFile } from "@hoox/resource";
 import { describe, expect, it, vi } from "vitest";
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";

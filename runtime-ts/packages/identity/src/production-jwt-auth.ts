@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { userId, type UserId } from "@hoox/domain";
-import type { AuthContextResolver, AuthPrincipal } from "./ports.js";
+import type { AuthContextResolver, AuthPrincipal } from "./auth-context.js";
 
 const keyIdPattern = /^[A-Za-z0-9_-]{3,64}$/u;
 const base64UrlPattern = /^[A-Za-z0-9_-]+$/u;

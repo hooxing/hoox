@@ -85,9 +85,6 @@ importers:
       '@hoox/admin-control':
         specifier: workspace:*
         version: link:../../packages/admin-control
-      '@hoox/api':
-        specifier: workspace:*
-        version: link:../api
       '@hoox/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -278,12 +275,12 @@ importers:
 
   runtime-ts/apps/skill-admin-api:
     dependencies:
-      '@hoox/api':
-        specifier: workspace:*
-        version: link:../api
       '@hoox/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@hoox/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -416,6 +413,9 @@ importers:
 
   runtime-ts/packages/identity:
     dependencies:
+      '@hoox/domain':
+        specifier: workspace:*
+        version: link:../domain
       better-auth:
         specifier: 1.7.7
         version: 1.7.7(pg@8.22.0)
@@ -489,9 +489,6 @@ importers:
       '@earendil-works/pi-ai':
         specifier: 0.82.1
         version: 0.82.1(ws@8.21.1)(zod@4.6.6)
-      '@hoox/automation':
-        specifier: workspace:*
-        version: link:../automation
       '@hoox/context-policy':
         specifier: workspace:*
         version: link:../context-policy
@@ -504,9 +501,12 @@ importers:
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../protocol
-      '@hoox/sandbox':
+      '@hoox/run-contracts':
         specifier: workspace:*
-        version: link:../sandbox
+        version: link:../run-contracts
+      '@hoox/tool-router':
+        specifier: workspace:*
+        version: link:../tool-router
       '@hoox/vendor-deepseek-v4-tokenizer':
         specifier: workspace:*
         version: link:../../vendor/deepseek-v4-tokenizer
@@ -519,6 +519,10 @@ importers:
       typebox:
         specifier: 1.1.38
         version: 1.1.38
+    devDependencies:
+      '@hoox/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
 
   runtime-ts/packages/process-runtime: {}
 
@@ -553,12 +557,6 @@ importers:
       '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
-      '@hoox/pi-adapter':
-        specifier: workspace:*
-        version: link:../pi-adapter
-      '@hoox/sandbox':
-        specifier: workspace:*
-        version: link:../sandbox
       '@hoox/skill':
         specifier: workspace:*
         version: link:../skill
@@ -574,6 +572,9 @@ importers:
       '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
+      '@hoox/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
       '@hoox/workspace':
         specifier: workspace:*
         version: link:../workspace
@@ -591,18 +592,27 @@ importers:
 
   runtime-ts/packages/tool-router:
     dependencies:
+      '@earendil-works/pi-agent-core':
+        specifier: 0.82.1
+        version: 0.82.1(ws@8.21.1)(zod@4.6.6)
       '@hoox/artifact':
         specifier: workspace:*
         version: link:../artifact
+      '@hoox/automation':
+        specifier: workspace:*
+        version: link:../automation
+      '@hoox/context-policy':
+        specifier: workspace:*
+        version: link:../context-policy
       '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
-      '@hoox/pi-adapter':
-        specifier: workspace:*
-        version: link:../pi-adapter
       '@hoox/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
+      '@hoox/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@hoox/workspace':
         specifier: workspace:*
         version: link:../workspace

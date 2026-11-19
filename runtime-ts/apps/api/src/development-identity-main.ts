@@ -1,4 +1,4 @@
-import { createApiPersistenceRuntime } from "@hoox/persistence";
+import { createApiPersistenceRuntime } from "@hoox/persistence/postgres";
 import { loadDevelopmentEnvironment } from "@hoox/process-runtime";
 import {
   parseDevelopmentIdentityEnvironment,

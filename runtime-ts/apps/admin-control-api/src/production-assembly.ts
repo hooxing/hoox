@@ -7,27 +7,23 @@ import {
   type ModelProviderConfiguration,
   type ProviderProbePort,
 } from "@hoox/admin-control";
-import {
-  type AuthContextResolver,
-  createProductionJwtAuthResolver,
-  loadProductionTlsCredentials,
-  productionTrustProxy,
-} from "@hoox/api";
 import { userId } from "@hoox/domain";
+import { type AuthContextResolver, createProductionJwtAuthResolver } from "@hoox/identity/auth";
 import {
-  createPostgresPool,
   ModelProviderCredentialCipher,
   PgAdminControlRepository,
   PgIdentityConfigurationRepository,
   PgSandboxControlRepository,
   PgSkillPublicationAuthorization,
   PgSkillPublicationRepository,
-  probePostgres,
   probeS3StableSkillPublisher,
   S3StableSkillPublisher,
-} from "@hoox/persistence";
+} from "@hoox/persistence/admin";
+import { createPostgresPool, probePostgres } from "@hoox/persistence/postgres";
 import {
+  loadProductionTlsCredentials,
   type ProcessSignalSource,
+  productionTrustProxy,
   type ServiceAssemblyFactory,
   startServiceProcess,
 } from "@hoox/process-runtime";

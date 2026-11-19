@@ -1,4 +1,4 @@
-import type { AuthContextResolver } from "@hoox/api";
+import type { AuthContextResolver } from "@hoox/identity/auth";
 import { userId } from "@hoox/domain";
 
 export function createAdminSessionAuthResolver(

@@ -6,7 +6,5 @@ export * from "./development-boundary.js";
 export * from "./development-identity.js";
 export * from "./local-account-auth.js";
 export * from "./ports.js";
-export * from "./production-auth.js";
-export * from "./production-transport.js";
 export * from "./process-entry.js";
 export { ApiFailure, ApiService } from "./service.js";

@@ -1,4 +1,4 @@
-import type { CleanupClaim } from "@hoox/persistence";
+import type { CleanupClaim } from "@hoox/persistence/maintenance";
 import {
   type SandboxGateway,
   type SandboxProviderRegistry,

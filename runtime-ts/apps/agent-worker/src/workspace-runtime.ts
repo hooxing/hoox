@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { sha256Digest, workspaceRevisionId } from "@hoox/domain";
-import { workspaceCandidateOperationDigest } from "@hoox/persistence";
+import { workspaceCandidateOperationDigest } from "@hoox/persistence/run-execution";
 import type { WorkspaceRuntimePort } from "@hoox/run-contracts";
 import {
   createWorkspaceManifest,

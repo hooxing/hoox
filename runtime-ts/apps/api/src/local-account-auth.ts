@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { tenantId, userId } from "@hoox/domain";
-import type { LocalAccountRepository } from "@hoox/persistence";
+import type { LocalAccountRepository } from "@hoox/persistence/thread";
 import type {
   AccountProfileDto,
   AccountSessionDto,

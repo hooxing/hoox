@@ -3,11 +3,13 @@ import type { RolloutCompatibilityIdentity } from "@hoox/domain";
 import {
   type BlobStore,
   createDurableTraceBlobPersistence,
+  type TraceBlobCommitRepository,
+} from "@hoox/persistence/blob";
+import {
   PgToolObservationRolloutAdapter,
   type PgRuntimeRolloutRepository,
-  type TraceBlobCommitRepository,
   type TrustedRolloutContext,
-} from "@hoox/persistence";
+} from "@hoox/persistence/run-execution";
 import { type ControlledRolloutProjection, projectLoadedRuntimeRecovery } from "@hoox/pi-adapter";
 import { createDurableObservationRecorderFactory } from "./pi-session-factory.js";
 import type { AgentSessionFactoryPort } from "./ports.js";

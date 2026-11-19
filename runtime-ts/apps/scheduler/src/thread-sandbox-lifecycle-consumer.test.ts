@@ -1,7 +1,7 @@
 import type {
   ThreadSandboxLifecycleClaim,
   ThreadSandboxLifecycleResolution,
-} from "@hoox/persistence";
+} from "@hoox/persistence/maintenance";
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { describe, expect, it, vi } from "vitest";
 import {

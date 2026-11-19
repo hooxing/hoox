@@ -1,9 +1,8 @@
 import { types } from "node:util";
 
-export type ToolFailure = {
-  readonly code: string;
-  readonly message: string;
-};
+import type { ToolFailure } from "@hoox/run-contracts/runtime-agent-event";
+
+export type { ToolFailure } from "@hoox/run-contracts/runtime-agent-event";
 
 const MAX_ENCODED_ERROR_LENGTH = 16 * 1_024;
 const UNKNOWN_FAILURE: ToolFailure = Object.freeze({

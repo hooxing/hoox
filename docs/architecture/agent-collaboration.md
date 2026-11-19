@@ -30,7 +30,7 @@ Runtime 对可创建的子 Agent 总数和同时运行数量设置上限。Agent
 ## 事实归属
 
 - Agent 协作领域状态位于 `runtime-ts/packages/domain/src/agent-*.ts`。
-- Root 协作工具位于 `runtime-ts/packages/pi-adapter/src/agent-control-tools.ts`。
+- Root 协作工具位于 `runtime-ts/packages/tool-router/src/agent-control-tools.ts`。
 - 执行与恢复位于 `runtime-ts/apps/agent-worker/src/agent-supervisor.ts`。
 - 持久化命令、Turn、mailbox 和对话位于 `runtime-ts/packages/persistence`。
 

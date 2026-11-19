@@ -21,11 +21,8 @@ import {
 } from "@hoox/domain";
 import {
   assessSafePiSessionContext,
-  AutomationUpdateArgumentError,
-  automationToolMutation,
   bindTrustedPiModelContextCapability,
   ContextBudgetAdmissionError,
-  type AutomationUpdateToolArguments,
   type ControlledRolloutProjection,
   createSafePiSession,
   deriveSafePiSessionCompatibility,
@@ -36,6 +33,11 @@ import {
   type TrustedPiModelContextCapability,
   type ToolCallingMode,
 } from "@hoox/pi-adapter";
+import {
+  AutomationUpdateArgumentError,
+  automationToolMutation,
+  type AutomationUpdateToolArguments,
+} from "@hoox/tool-router";
 import {
   assertRunSkillSnapshot,
   digestRunSkillSnapshot,

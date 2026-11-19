@@ -6,7 +6,7 @@ import {
   tenantId,
   userId,
 } from "@hoox/domain";
-import type { TenantBundle, TenantRepository, TenantScope } from "@hoox/persistence";
+import type { TenantBundle, TenantRepository, TenantScope } from "@hoox/persistence/postgres";
 import { describe, expect, it, vi } from "vitest";
 import {
   parseDevelopmentIdentityEnvironment,

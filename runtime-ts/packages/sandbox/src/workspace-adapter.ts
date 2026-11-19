@@ -7,11 +7,7 @@ import type {
   SandboxWorkspacePort as WorkspacePort,
   WorkspaceTrustedScope,
 } from "@hoox/workspace";
-import {
-  SANDBOX_WORKSPACE_ROOT,
-  WorkspaceDependencyError,
-  workspaceRelativePath,
-} from "@hoox/workspace";
+import { WorkspaceDependencyError, workspaceRelativePath } from "@hoox/workspace";
 import { mapSandboxError, SandboxRuntimeError, settledOperation } from "./errors.js";
 
 const FILE_TYPE_FILE = "FILE_TYPE_FILE";
@@ -115,6 +111,7 @@ export class SandboxWorkspacePort implements WorkspacePort {
   private readonly options: SandboxWorkspaceAdapterOptions;
   private readonly snapshotsByOperation = new Map<string, SnapshotOperation>();
   private readonly snapshotsByToken = new Map<string, CapturedSnapshot>();
+  private secureFilesystemProbe: Promise<void> | undefined;
 
   private constructor(
     private readonly capability: TrustedSandboxSessionCapability,
@@ -141,9 +138,10 @@ export class SandboxWorkspacePort implements WorkspacePort {
         input.errorMapper ?? mapSandboxError,
         validateDependencyPrefix(input.dependencyPrefix ?? "CUBE"),
       );
+      // 打开时只校验可信 binding，不做远端往返。只读操作每次都以 O_DIRECTORY|O_NOFOLLOW 打开
+      // 根目录并逐级 dirfd 相对访问，根缺失或类型漂移都会失败关闭；openat2 探测推迟到首次写入前，
+      // 保证写入路径仍在任何副作用前以已知错误拒绝不受支持的模板。
       await adapter.currentSession();
-      await adapter.probeSecureFilesystem();
-      await adapter.requireDirectory(SANDBOX_WORKSPACE_ROOT);
       return adapter;
     };
   }
@@ -359,6 +357,7 @@ export class SandboxWorkspacePort implements WorkspacePort {
     readonly signal?: AbortSignal;
   }): Promise<void> {
     await this.assertCall(input.sandbox, "known");
+    await this.ensureSecureFilesystem();
     const relative = this.safeRelative(input.relativePath);
     const body = await collectBody(input.body, this.options, input.signal);
     const suffix = createHash("sha256")
@@ -512,11 +511,6 @@ export class SandboxWorkspacePort implements WorkspacePort {
     return parsed;
   }
 
-  private async requireDirectory(_path: string, signal?: AbortSignal): Promise<void> {
-    const entry = await this.secureStat("", signal);
-    if (entryKind(entry) !== "directory") throw known("DIRECTORY_TYPE_DRIFT");
-  }
-
   private async secureStat(
     relativePath: string,
     signal?: AbortSignal,
@@ -533,6 +527,18 @@ export class SandboxWorkspacePort implements WorkspacePort {
     const parsed: unknown = JSON.parse(output.stdout);
     if (!plainRecord(parsed)) throw known("FILESYSTEM_PROTOCOL");
     return parsed;
+  }
+
+  /** 每个适配器只探测一次；失败不缓存，下一次写入前重试。 */
+  private ensureSecureFilesystem(): Promise<void> {
+    if (this.secureFilesystemProbe === undefined) {
+      const probe = this.probeSecureFilesystem();
+      this.secureFilesystemProbe = probe;
+      probe.catch(() => {
+        if (this.secureFilesystemProbe === probe) this.secureFilesystemProbe = undefined;
+      });
+    }
+    return this.secureFilesystemProbe;
   }
 
   private async probeSecureFilesystem(): Promise<void> {
@@ -682,6 +688,7 @@ export class SandboxWorkspacePort implements WorkspacePort {
     signal: AbortSignal | undefined,
     knownExitCodes: ReadonlySet<number>,
   ): Promise<void> {
+    await this.ensureSecureFilesystem();
     let raw: unknown;
     try {
       raw = await settledOperation(

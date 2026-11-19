@@ -1,6 +1,7 @@
 export interface WorkspaceDependencyRules {
   readonly allowedAppDependencies: Readonly<Record<string, readonly string[]>>;
   readonly forbiddenDependencies: Readonly<Record<string, readonly string[]>>;
+  readonly compatibilityRootEntries?: readonly string[];
 }
 
 export interface WorkspaceDependencyInputs {

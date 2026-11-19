@@ -9,7 +9,7 @@ import {
   type Sha256Digest,
   sha256Digest,
 } from "@hoox/domain";
-import type { PersistResourceBlobResult } from "@hoox/persistence";
+import type { PersistResourceBlobResult } from "@hoox/persistence/blob";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 
 export interface SimpleDeliveredFileSnapshot {

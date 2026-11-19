@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { resourceId, resourceVersionId, tenantId } from "@hoox/domain";
-import type { BlobStore } from "@hoox/persistence";
+import type { BlobStore } from "@hoox/persistence/blob";
 import {
   createResourceFilesystemCapabilityCodec,
   type HistoryFilesystemCatalog,

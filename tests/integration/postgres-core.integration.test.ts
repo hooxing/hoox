@@ -31,7 +31,11 @@ import {
   workspaceId,
   workspaceRevisionId,
 } from "@hoox/domain";
-import type { CoreRepositories, TenantScope, WorkspaceWriteScope } from "@hoox/persistence";
+import type {
+  CoreRepositories,
+  TenantScope,
+  WorkspaceWriteScope,
+} from "@hoox/persistence/postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";

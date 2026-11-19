@@ -1,4 +1,4 @@
-import type { BlobStore, StableBlobRef } from "@hoox/persistence";
+import type { BlobStore, StableBlobRef } from "@hoox/persistence/blob";
 import type { ResourceFilesystemCatalog } from "@hoox/resource";
 import type { PromptImageLoaderPort } from "./pi-session-factory.js";
 

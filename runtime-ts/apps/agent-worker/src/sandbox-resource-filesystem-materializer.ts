@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { TenantId } from "@hoox/domain";
-import type { BlobStore, StableBlobRef } from "@hoox/persistence";
+import type { BlobStore, StableBlobRef } from "@hoox/persistence/blob";
 import type {
   HistoryFilesystemCatalog,
   ResourceFilesystemCatalog,

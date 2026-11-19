@@ -1,5 +1,5 @@
 import type { IsoTimestamp, Run, TenantId, Thread, UserId, Workspace } from "@hoox/domain";
-import type { ThreadListCursor } from "@hoox/persistence";
+import type { ThreadListCursor } from "@hoox/persistence/postgres";
 export type {
   ArchiveThreadCommandPort,
   EnqueueOutboxPort,
@@ -7,7 +7,7 @@ export type {
   IdempotentCreateResult,
   RenamePersonalThreadCommandPort,
   ThreadCreationPort,
-} from "@hoox/persistence";
+} from "@hoox/persistence/postgres";
 
 // 认证端口由 @hoox/identity 拥有，供 API 与后台进程共同装配。
 export type { AuthContextResolver, AuthPrincipal } from "@hoox/identity/auth";

@@ -57,6 +57,21 @@
 - 基线 down 删除基线创建的全部表、视图与函数，不按数据内容阻止回退；新增迁移的 down 若可能丢失不可恢复事实，应自行失败关闭。
 - `pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作。
 
+## 包入口
+
+`@hoox/persistence` 按职责提供子入口，每个模块只归属一个子入口：
+
+| 子入口 | 内容 |
+| --- | --- |
+| `postgres` | 连接池、租户事务、通用错误、请求侧端口与 API 运行时装配 |
+| `blob` | Blob 存储契约、S3 适配、提交协议与生命周期收敛 |
+| `admin` | 模型与 Sandbox 配置、身份配置、凭据加密与 Skill 发布 |
+| `thread` | 面向用户请求的 Thread、账户、团队、个性化、资源与技能读写 |
+| `run-execution` | Worker 执行事实：调度领取、执行状态、Rollout、恢复、协作、定时任务与 Workspace 提交 |
+| `maintenance` | Scheduler 的 Sandbox 清理与 Thread Sandbox 生命周期消费 |
+
+根入口只是聚合全部子入口的兼容层。其他包的生产源码必须从子入口导入，使进程只加载与自身职责相关的 Repository 和 SDK；`pnpm deps:check` 拒绝生产源码导入根入口，测试不受此限制。新增模块时在 `src/entrypoints/` 中选择唯一归属；一个进程需要多个领域时分别导入对应子入口，不为单个进程新建聚合入口。
+
 ## 新增数据库事实检查清单
 
 1. 新表启用并 FORCE RLS，策略与复合外键包含 `tenant_id`。

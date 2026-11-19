@@ -23,25 +23,22 @@ import {
   type Workspace,
   workspaceId,
 } from "@hoox/domain";
+import { type BlobStore, BlobStoreError, sha256Hex } from "@hoox/persistence/blob";
 import {
   type ArchiveThreadCommandPort,
-  type BlobStore,
-  BlobStoreError,
   type CoreRepositories,
-  type ModelWireTraceBody,
-  type ModelWireTraceReadPort,
   PersistenceError,
   type RenamePersonalThreadCommandPort,
   type RunReadSnapshot,
   type RunExperienceReadPort,
-  sha256Hex,
   type TenantBundle,
   type TenantScope,
   type ThreadListPage,
   type ThreadInputReceiptView,
   type ThreadInputRoutingPort,
   type Versioned,
-} from "@hoox/persistence";
+} from "@hoox/persistence/postgres";
+import type { ModelWireTraceBody, ModelWireTraceReadPort } from "@hoox/persistence/thread";
 import { HistoryFileLibraryService, type HistoryFileLibraryFile } from "@hoox/resource";
 import type { FastifyInstance } from "fastify";
 import { SkillCenterService, type SkillCenterPort, type SkillInstallation } from "@hoox/skill";

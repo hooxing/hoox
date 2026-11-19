@@ -8,7 +8,7 @@ import type {
   UserId,
   WorkspaceRevisionId,
 } from "@hoox/domain";
-import type { StableBlobRef } from "@hoox/persistence";
+import type { StableBlobRef } from "@hoox/persistence/blob";
 import type { ExecutionScope } from "@hoox/run-contracts";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 

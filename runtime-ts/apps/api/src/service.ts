@@ -16,7 +16,7 @@ import type {
   TenantBundle,
   TenantScope,
   ThreadListCursor,
-} from "@hoox/persistence";
+} from "@hoox/persistence/postgres";
 import type {
   CreateThreadInputRequest,
   RunDto,
@@ -30,7 +30,7 @@ import {
   validFileSelection,
   type FileReference,
 } from "@hoox/protocol/file-references";
-import type { RunExperienceReadPort } from "@hoox/persistence";
+import type { RunExperienceReadPort } from "@hoox/persistence/postgres";
 import { toRunDto, toThreadDto } from "@hoox/protocol-mapper";
 import {
   appendAttachmentsToLatestUserPrompt,

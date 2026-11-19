@@ -106,8 +106,8 @@
 
 以下位置承担较多跨领域职责，修改前应先阅读测试和相关架构文档：
 
-- `@hoox/persistence`：数据库、Outbox、Blob 生命周期和多个领域 Repository 的集中实现。
-- `@hoox/agent-worker`：模型、工具、上下文、Sandbox、Artifact 和恢复语义的装配中心。
+- `@hoox/persistence`：数据库、Outbox、Blob 生命周期和多个领域 Repository 的集中实现；已按职责拆分[子入口](persistence-and-database.md#包入口)，但仍是同一个包。
+- `@hoox/agent-worker`：模型、工具、上下文、Sandbox、Artifact 和恢复语义的装配中心。`RunWorker.execute` 的执行状态机仍在 `run-worker.ts`；事件构造、Outbox、持久事实回读比对、Workspace 失败分类、执行状态迁移与资源探测分别位于同目录的 `run-worker-*.ts`。
 - `@hoox/run-contracts`：连接 Worker 编排与多个执行端口；它不依赖实现包，但仍依赖 `context-policy`、`skill`、`workspace` 等领域包，不是零依赖类型包。
 - `@hoox/admin-control-api` 对控制面和 Skill 路由的统一装配：新增复用前应确认是否应下沉到共享包，并保持两套数据库权限边界。
 

@@ -4,8 +4,34 @@
   "private": true,
   "type": "module",
   "exports": {
-    "types": "./src/index.ts",
-    "default": "./dist/index.js"
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./postgres": {
+      "types": "./src/entrypoints/postgres.ts",
+      "default": "./dist/entrypoints/postgres.js"
+    },
+    "./blob": {
+      "types": "./src/entrypoints/blob.ts",
+      "default": "./dist/entrypoints/blob.js"
+    },
+    "./admin": {
+      "types": "./src/entrypoints/admin.ts",
+      "default": "./dist/entrypoints/admin.js"
+    },
+    "./thread": {
+      "types": "./src/entrypoints/thread.ts",
+      "default": "./dist/entrypoints/thread.js"
+    },
+    "./run-execution": {
+      "types": "./src/entrypoints/run-execution.ts",
+      "default": "./dist/entrypoints/run-execution.js"
+    },
+    "./maintenance": {
+      "types": "./src/entrypoints/maintenance.ts",
+      "default": "./dist/entrypoints/maintenance.js"
+    }
   },
   "types": "./src/index.ts",
   "scripts": {

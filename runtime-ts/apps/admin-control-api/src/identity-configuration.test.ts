@@ -2,7 +2,7 @@ import { emptyIdentityConfiguration } from "@hoox/identity";
 import type {
   IdentityConfigurationRepository,
   PersistedIdentityConfiguration,
-} from "@hoox/persistence";
+} from "@hoox/persistence/admin";
 import { describe, expect, it, vi } from "vitest";
 import { createIdentityAdminService } from "./identity-configuration.js";
 

@@ -41,6 +41,11 @@ export const workspaceDependencyRules = Object.freeze({
     "@hoox/persistence": Object.freeze(["@hoox/pi-adapter", "@hoox/sandbox", "@hoox/tool-router"]),
     "@hoox/sandbox": Object.freeze(["@hoox/pi-adapter", "@hoox/tool-router", "@hoox/persistence"]),
   }),
+  /**
+   * 只为兼容保留的聚合根入口：其他包的生产源码必须从按职责划分的子入口导入，
+   * 避免进程加载与自身职责无关的 Repository 与 SDK。测试源码不受限。
+   */
+  compatibilityRootEntries: Object.freeze(["@hoox/persistence"]),
 });
 
 function isTestSource(relativePath) {
@@ -167,6 +172,11 @@ export function validateWorkspaceDependencies(input, rules = workspaceDependency
       for (const specifier of file.specifiers) {
         const name = packageNameOf(specifier);
         if (name === undefined || name === workspace.name) continue;
+        if (!testSource && (rules.compatibilityRootEntries ?? []).includes(specifier)) {
+          issues.push(
+            `${workspace.directory}/${file.path} 必须从 ${specifier} 的职责子入口导入，不得使用聚合根入口`,
+          );
+        }
         if (runtimeNames.has(name)) continue;
         // 纯类型包（如 mdast）只发布在 @types 下，类型擦除后不进入运行时闭包。
         const typesName = `@types/${name.startsWith("@") ? name.slice(1).replace("/", "__") : name}`;

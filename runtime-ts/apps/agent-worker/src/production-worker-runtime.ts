@@ -708,6 +708,8 @@ export class SandboxSessionRegistryRouter
 {
   private readonly registries: ReadonlyMap<SandboxProviderKey, ProviderSandboxSessionRegistry>;
   private readonly workspaceOwners = new WeakMap<object, ProviderSandboxSessionRegistry>();
+  /** capability 对应的 Run 已持有 Handle；网关据此复用连接而不是重新 connect。 */
+  private readonly workspaceHandles = new WeakMap<object, SandboxSessionRef["sandbox"]>();
   private readonly sessionOwners = new WeakMap<object, ProviderSandboxSessionRegistry>();
 
   constructor(
@@ -858,6 +860,7 @@ export class SandboxSessionRegistryRouter
       this.sessionOwners.get(input.session) ?? this.require(input.session.providerKey);
     const capability = registry.workspaceCapability(input);
     this.workspaceOwners.set(capability, registry);
+    this.workspaceHandles.set(capability, input.session.sandbox);
     return capability;
   }
 
@@ -868,7 +871,12 @@ export class SandboxSessionRegistryRouter
   ): Promise<SandboxWorkspacePort> {
     const registry = this.workspaceOwners.get(capability);
     if (registry === undefined) throw new Error("未授予 Sandbox Workspace capability");
-    return registry.gateway.connectWorkspace(capability, options, control);
+    return registry.gateway.connectWorkspace(
+      capability,
+      options,
+      control,
+      this.workspaceHandles.get(capability),
+    );
   }
 }
 

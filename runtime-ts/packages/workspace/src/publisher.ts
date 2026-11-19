@@ -40,12 +40,14 @@ import {
 import {
   createWorkspaceManifest,
   parseWorkspaceManifest,
+  type WorkspaceContentIdentity,
   type WorkspaceManifest,
   type WorkspaceManifestPolicy,
 } from "./manifest.js";
 import { workspaceRelativePath } from "./path.js";
 
 const OPERATION_DIGEST_VERSION = "workspace-operation-v2";
+const CANDIDATE_UPLOAD_CONCURRENCY = 4;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
 export interface WorkspacePublisherOptions {
@@ -109,6 +111,11 @@ export class WorkspacePublisher {
         const entries = await this.collectEntries(identity, snapshot, input.signal);
         const manifestEntries: unknown[] = [];
         const baseByPath = new Map(base?.entries.map((entry) => [entry.path, entry]) ?? []);
+        const uploads: {
+          readonly index: number;
+          readonly relativePath: string;
+          readonly content: WorkspaceContentIdentity;
+        }[] = [];
         let totalBytes = 0;
 
         for (const entry of entries) {
@@ -148,67 +155,30 @@ export class WorkspacePublisher {
             manifestEntries.push(previous);
             continue;
           }
-
-          phase = "upload_candidate";
-          stopPoint(input.signal);
-          const verified = verifyingStream({
-            source: parseExternalStream(
-              this.options.sandbox.readRegularFile(
-                snapshot,
-                relativePath,
-                signalControl(input.signal),
-              ),
-              "Sandbox 快照文件流",
-            ),
-            policy: this.policy,
-            ...(input.signal === undefined ? {} : { signal: input.signal }),
-            expected: content,
-          });
-          const blob = parseCandidateBlob(
-            await this.callDependency(identity, phase, () =>
-              this.options.blobs.putCandidate({
-                scope,
-                purpose: "workspace",
-                operationKey: candidateOperationKey(identity, relativePath, content),
-                relativePath,
-                expectedContent: content,
-                ...(input.candidate === undefined ? {} : { candidate: input.candidate }),
-                body: verified.body,
-                ...(input.signal === undefined ? {} : { signal: input.signal }),
-              }),
-            ),
-          );
-          if (verified.status() === "pending") {
-            throw new WorkspaceApplicationError(
-              "DEPENDENCY_FAILED",
-              "候选 Blob 端口未消费完整文件流",
-              "candidate_stream_pending",
-            );
-          }
-          await verified.result;
-          if (!sameCandidateContent(blob, content)) {
-            throw new WorkspaceApplicationError(
-              "INTEGRITY_MISMATCH",
-              "上传结果与快照内容身份不一致",
-            );
-          }
-
-          createWorkspaceManifest(
-            { tenantId: scope.tenantId, entries: [manifestEntry(relativePath, blob)] },
-            this.manifestPolicy,
-          );
-          stopPoint(input.signal);
-          phase = "verify_candidate";
-          const head = parseCandidateHeadResult(
-            await this.callDependency(identity, phase, () =>
-              this.options.blobs.headCandidate({ scope, blob }),
-            ),
-          );
-          if (head.status !== "exists" || !sameCandidate(head.blob, blob)) {
-            throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "候选 Blob HEAD 校验失败");
-          }
-          manifestEntries.push(manifestEntry(relativePath, blob));
+          uploads.push({ index: manifestEntries.length, relativePath, content });
+          manifestEntries.push(undefined);
         }
+
+        phase = "upload_candidate";
+        // 不同内容的候选并发上传以摊薄每个文件约一次往返的协议开销；内容相同的文件共享同一
+        // content-addressed lifecycle，同组内保持串行，避免并发创建同一 lifecycle。
+        const groups = new Map<string, (typeof uploads)[number][]>();
+        for (const upload of uploads) {
+          const key = `${upload.content.sha256}:${upload.content.size}`;
+          groups.set(key, [...(groups.get(key) ?? []), upload]);
+        }
+        await runBounded([...groups.values()], CANDIDATE_UPLOAD_CONCURRENCY, async (group) => {
+          for (const upload of group) {
+            manifestEntries[upload.index] = await this.uploadCandidate(
+              identity,
+              scope,
+              snapshot,
+              upload.relativePath,
+              upload.content,
+              input,
+            );
+          }
+        });
 
         stopPoint(input.signal);
         phase = "build_candidate";
@@ -375,6 +345,66 @@ export class WorkspacePublisher {
         now: this.now,
       });
     }
+  }
+
+  private async uploadCandidate(
+    identity: WorkspaceOperationIdentity,
+    scope: WorkspaceTrustedScope,
+    snapshot: SandboxWorkspaceSnapshot,
+    relativePath: string,
+    content: WorkspaceContentIdentity,
+    input: PublishWorkspaceInput,
+  ): Promise<unknown> {
+    stopPoint(input.signal);
+    const verified = verifyingStream({
+      source: parseExternalStream(
+        this.options.sandbox.readRegularFile(snapshot, relativePath, signalControl(input.signal)),
+        "Sandbox 快照文件流",
+      ),
+      policy: this.policy,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+      expected: content,
+    });
+    const blob = parseCandidateBlob(
+      await this.callDependency(identity, "upload_candidate", () =>
+        this.options.blobs.putCandidate({
+          scope,
+          purpose: "workspace",
+          operationKey: candidateOperationKey(identity, relativePath, content),
+          relativePath,
+          expectedContent: content,
+          ...(input.candidate === undefined ? {} : { candidate: input.candidate }),
+          body: verified.body,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        }),
+      ),
+    );
+    if (verified.status() === "pending") {
+      throw new WorkspaceApplicationError(
+        "DEPENDENCY_FAILED",
+        "候选 Blob 端口未消费完整文件流",
+        "candidate_stream_pending",
+      );
+    }
+    await verified.result;
+    if (!sameCandidateContent(blob, content)) {
+      throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "上传结果与快照内容身份不一致");
+    }
+
+    createWorkspaceManifest(
+      { tenantId: scope.tenantId, entries: [manifestEntry(relativePath, blob)] },
+      this.manifestPolicy,
+    );
+    stopPoint(input.signal);
+    const head = parseCandidateHeadResult(
+      await this.callDependency(identity, "verify_candidate", () =>
+        this.options.blobs.headCandidate({ scope, blob }),
+      ),
+    );
+    if (head.status !== "exists" || !sameCandidate(head.blob, blob)) {
+      throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "候选 Blob HEAD 校验失败");
+    }
+    return manifestEntry(relativePath, blob);
   }
 
   private async callDependency<T>(
@@ -722,4 +752,30 @@ function parseCandidateHeadResult(value: unknown): ParsedCandidateHeadResult {
   }
   exactKeys(input, ["status", "blob"], "Workspace candidate HEAD 结果");
   return Object.freeze({ status: "exists", blob: parseCandidateBlob(input.blob) });
+}
+
+/**
+ * 以有界并发执行任务。首个失败后不再启动新任务，但会等待已启动的任务结束再抛出首个错误，
+ * 避免调用方返回后仍有上传在后台改写候选事实。
+ */
+async function runBounded<T>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  let failure: { readonly error: unknown } | undefined;
+  const worker = async () => {
+    while (failure === undefined && next < items.length) {
+      const item = items[next] as T;
+      next += 1;
+      try {
+        await task(item);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure !== undefined) throw failure.error;
 }

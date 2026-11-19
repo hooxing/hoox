@@ -100,6 +100,60 @@ function oneFileHead() {
 }
 
 describe("ManifestWorkspaceRuntime candidate 恢复边界", () => {
+  it("同一 Session 的 materialize 与 verify 复用已打开的 Workspace，换 Session 才重新打开", async () => {
+    const open = vi.fn(async () => emptySandbox());
+    const runtime = new ManifestWorkspaceRuntime({
+      journal: {
+        lookupCompleted: async () => ({ status: "not_found" }),
+        begin: async () => ({ status: "started" }),
+        complete: async () => undefined,
+        failKnown: async () => undefined,
+        recordUnknown: async () => undefined,
+      },
+      revisions: { loadCurrentManifest: async () => undefined },
+      stableBlobs: {
+        authorize: async () => ({ status: "denied" }),
+        head: async () => ({ status: "not_found" }),
+        read: async function* () {},
+      },
+      candidateBlobs: {
+        putCandidate: async () => {
+          throw new Error("空 Workspace 不应上传 candidate");
+        },
+        headCandidate: async () => ({ status: "not_found" }),
+      },
+      candidates: {
+        begin: async () => undefined,
+        prepare: async () => undefined,
+        release: async () => undefined,
+      },
+      openSandboxWorkspace: open,
+      policy,
+    });
+
+    await runtime.materialize({
+      scope,
+      attemptId: "attempt-workspace-reuse" as never,
+      sandbox: session,
+      operationKey: "workspace-reuse-materialize",
+    });
+    await runtime.verify({
+      scope,
+      attemptId: "attempt-workspace-reuse" as never,
+      sandbox: session,
+      operationKey: "workspace-reuse-publish",
+    });
+    expect(open).toHaveBeenCalledOnce();
+
+    await runtime.verify({
+      scope,
+      attemptId: "attempt-workspace-reuse-2" as never,
+      sandbox: { ...session },
+      operationKey: "workspace-reuse-publish-2",
+    });
+    expect(open).toHaveBeenCalledTimes(2);
+  });
+
   it("内容与当前 head 相同时不形成 Revision，并以 superseded 释放候选", async () => {
     const phases: string[] = [];
     const prepare = vi.fn(async () => undefined);

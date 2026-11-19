@@ -1,5 +1,10 @@
 import { SandboxRuntimeError } from "./errors.js";
-import type { OperationControl, SandboxGateway, SandboxProviderKey } from "./types.js";
+import type {
+  OperationControl,
+  SandboxGateway,
+  SandboxHandle,
+  SandboxProviderKey,
+} from "./types.js";
 import type {
   SandboxWorkspaceAdapterOptions,
   SandboxWorkspacePort,
@@ -12,6 +17,8 @@ export interface RuntimeSandboxGateway extends SandboxGateway {
     capability: TrustedSandboxSessionCapability,
     options: SandboxWorkspaceAdapterOptions,
     control?: OperationControl,
+    /** Run 已持有的同一 Sandbox Handle；网关只复用自己创建的 Handle，否则照常 connect。 */
+    reuse?: SandboxHandle,
   ): Promise<SandboxWorkspacePort>;
 }
 

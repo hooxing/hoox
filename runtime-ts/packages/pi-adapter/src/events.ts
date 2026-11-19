@@ -1,5 +1,9 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
-import { projectToolFailure, type ToolFailure } from "./tool-failure.js";
+import type { RuntimeAgentEvent, ToolPresentation } from "@hoox/run-contracts/runtime-agent-event";
+import { projectToolFailure } from "./tool-failure.js";
+
+// 事件协议定义位于 run-contracts；重导出以保持 @hoox/pi-adapter 的既有公开面。
+export type { RuntimeAgentEvent, ToolPresentation } from "@hoox/run-contracts/runtime-agent-event";
 
 /** settled 由 Runtime 在底层完成及事务回滚后补发，不把 agent_end 当作空闲屏障。 */
 export type PiAgentEvent =
@@ -12,103 +16,6 @@ export type PiAgentEvent =
         { type: "tool.started" | "tool.updated" | "tool.completed" }
       >;
     };
-import type { TodoSnapshot } from "@hoox/domain";
-
-export type ToolPresentation = {
-  readonly action:
-    | "search"
-    | "read"
-    | "create"
-    | "write"
-    | "edit"
-    | "deliver"
-    | "command"
-    | "other";
-  readonly title?: string;
-};
-
-export type RuntimeAgentEvent =
-  | { type: "agent.started" }
-  | { type: "agent.settled" }
-  | { type: "thinking.started" }
-  | { type: "thinking.delta"; delta: string }
-  | { type: "thinking.completed" }
-  | { type: "message.delta"; delta: string }
-  | { type: "message.completed"; stopReason: "stop" | "length" | "toolUse" }
-  | {
-      type: "tool.started";
-      callId: string;
-      name: string;
-      presentation?: ToolPresentation;
-      parentCallId?: string;
-    }
-  | { type: "tool.updated"; callId: string; name: string }
-  | {
-      type: "tool.completed";
-      callId: string;
-      name: string;
-      isError: boolean;
-      failure?: ToolFailure;
-    }
-  | { type: "finalization.started"; callId: string }
-  | {
-      type: "finalization.cancelled";
-      callId: string;
-      reason: "tool_use" | "empty_answer";
-    }
-  | { type: "final_answer.committed"; callId: string }
-  | { type: "todo.updated"; snapshot: TodoSnapshot }
-  | {
-      /** 只在完整 turn_end 后发布；RunWorker 将其写入 Thread Context，不写入 UI run_events。 */
-      type: "turn.completed";
-      assistant: {
-        readonly content: readonly (
-          | { readonly type: "text"; readonly text: string }
-          | {
-              readonly type: "toolCall";
-              readonly id: string;
-              readonly name: string;
-              readonly arguments: Readonly<Record<string, unknown>>;
-              readonly thoughtSignature?: string;
-            }
-          | {
-              readonly type: "thinking";
-              readonly thinking: string;
-              readonly thinkingSignature?: string;
-              readonly redacted?: boolean;
-            }
-        )[];
-        readonly api: string;
-        readonly provider: string;
-        readonly model: string;
-        readonly stopReason: "stop" | "length" | "toolUse";
-        readonly timestamp: number;
-      };
-      toolResults: readonly {
-        readonly toolCallId: string;
-        readonly toolName: string;
-        readonly text: string;
-        readonly isError: boolean;
-        readonly timestamp: number;
-      }[];
-    }
-  | { type: "queue.updated"; steering: readonly string[]; followUp: readonly string[] }
-  | {
-      /** Runtime 在模型无法安全继续时生成的用户可见兜底；不伪装成模型原话。 */
-      type: "runtime.notice";
-      level: "error";
-      code: string;
-      message: string;
-      source: "terminal_fallback";
-    }
-  | { type: "compaction.forbidden"; source: "pi" }
-  | {
-      type: "error";
-      code: "CONTEXT_TOO_LARGE";
-      message: "上下文超出模型窗口";
-      action: "rebuild_context";
-    }
-  | { type: "error"; code: "ABORTED" | "PROVIDER" | "PROTOCOL"; message: string };
 
 /** Pi 事件属于可替换内核协议；此处转换后，上层不需要依赖 Pi 的事件结构。 */
 export function mapPiEvent(event: PiAgentEvent): RuntimeAgentEvent | undefined {

@@ -11,6 +11,22 @@
     "./mutation-protocol": {
       "types": "./src/mutation-protocol.ts",
       "default": "./dist/mutation-protocol.js"
+    },
+    "./rollout-projection": {
+      "types": "./src/rollout-projection.ts",
+      "default": "./dist/rollout-projection.js"
+    },
+    "./runtime-agent-event": {
+      "types": "./src/runtime-agent-event.ts",
+      "default": "./dist/runtime-agent-event.js"
+    },
+    "./sandbox-port": {
+      "types": "./src/sandbox-port.ts",
+      "default": "./dist/sandbox-port.js"
+    },
+    "./thread-history": {
+      "types": "./src/thread-history.ts",
+      "default": "./dist/thread-history.js"
     }
   },
   "types": "./src/index.ts",
@@ -22,8 +38,6 @@
   "dependencies": {
     "@hoox/context-policy": "workspace:*",
     "@hoox/domain": "workspace:*",
-    "@hoox/pi-adapter": "workspace:*",
-    "@hoox/sandbox": "workspace:*",
     "@hoox/skill": "workspace:*",
     "@hoox/workspace": "workspace:*"
   }

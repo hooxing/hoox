@@ -26,7 +26,7 @@ import {
   type RuntimePromptInput,
   type ToolCapabilityManifest,
 } from "@hoox/prompt-builder";
-import type { SandboxHandle } from "@hoox/sandbox";
+import type { SandboxHandle } from "@hoox/run-contracts/sandbox-port";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import type {
@@ -49,12 +49,12 @@ import {
   type AgentControlPiToolExecutorPort,
   createAgentControlPiTools,
   type DelegablePiToolName,
-} from "./agent-control-tools.js";
+} from "@hoox/tool-router";
 import {
   createAutomationUpdatePiTool,
   type AutomationUpdatePiToolExecutorPort,
-} from "./automation-update-tool.js";
-import { createCollapseProcessForFinalAnswerPiTool } from "./collapse-process-for-final-answer-tool.js";
+} from "@hoox/tool-router";
+import { createCollapseProcessForFinalAnswerPiTool } from "@hoox/tool-router";
 import {
   normalizeOfficialDeepSeekV4FlashPayload,
   defaultModelThinkingLevel,
@@ -63,26 +63,23 @@ import {
   isTrustedModelTokenizerCapability,
   type TrustedModelTokenizerCapability,
 } from "./deepseek-v4-tokenizer.js";
-import {
-  createDeliverFilePiTool,
-  type DeliverFilePiToolExecutorPort,
-} from "./deliver-file-tool.js";
+import { createDeliverFilePiTool, type DeliverFilePiToolExecutorPort } from "@hoox/tool-router";
 import { subscribeBufferedRuntimeEvents } from "./event-buffer.js";
 import { mapPiEvent, type PiAgentEvent, type RuntimeAgentEvent } from "./events.js";
 import { createPtcTool, type PtcToolEvent, type ToolCallingMode } from "./ptc-tools.js";
-import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
+import { createSkillPiTool, type SkillPiToolExecutorPort } from "@hoox/tool-router";
 import {
   assertThreadActiveHistory,
   providerVisibleThreadHistoryMessages,
   type ThreadActiveHistoryV1,
 } from "./thread-history.js";
-import { publicToolParameters, runtimeToolParameters } from "./tool-parameter-schemas.js";
-import { createTodoWritePiTool, type TodoWritePiToolExecutorPort } from "./todo-write-tool.js";
+import { publicToolParameters, runtimeToolParameters } from "@hoox/tool-router";
+import { createTodoWritePiTool, type TodoWritePiToolExecutorPort } from "@hoox/tool-router";
 import {
   createObservedSandboxTools,
   type SandboxToolEffectAuthorizer,
   type SandboxToolHandleProvider,
-} from "./tools.js";
+} from "@hoox/tool-router";
 
 export interface PiContextBudgetDiagnostics {
   readonly outcome: ContextBudgetDecision["outcome"];

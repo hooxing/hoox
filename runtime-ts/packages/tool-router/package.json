@@ -4,15 +4,23 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.82.1",
     "@hoox/artifact": "workspace:*",
+    "@hoox/automation": "workspace:*",
+    "@hoox/context-policy": "workspace:*",
     "@hoox/domain": "workspace:*",
-    "@hoox/pi-adapter": "workspace:*",
     "@hoox/run-contracts": "workspace:*",
+    "@hoox/sandbox": "workspace:*",
     "@hoox/workspace": "workspace:*",
     "typebox": "1.1.38"
   },
-  "exports": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./src/index.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",

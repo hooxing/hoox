@@ -27,7 +27,7 @@ import {
   type PiSessionController,
 } from "./pi-session.js";
 import { type ThreadActiveHistoryV1, threadActiveHistoryDigest } from "./thread-history.js";
-import { SANDBOX_TOOL_NAMES } from "./tools.js";
+import { SANDBOX_TOOL_NAMES } from "@hoox/tool-router";
 
 const disposers: Array<() => void> = [];
 afterEach(() => {

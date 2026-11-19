@@ -20,6 +20,9 @@ export default defineConfig({
       "@hoox/pi-adapter": fileURLToPath(
         new URL("./runtime-ts/packages/pi-adapter/src/index.ts", import.meta.url),
       ),
+      "@hoox/tool-router": fileURLToPath(
+        new URL("./runtime-ts/packages/tool-router/src/index.ts", import.meta.url),
+      ),
       "@hoox/context-policy": fileURLToPath(
         new URL("./runtime-ts/packages/context-policy/src/index.ts", import.meta.url),
       ),

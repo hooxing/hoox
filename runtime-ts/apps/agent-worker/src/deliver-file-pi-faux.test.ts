@@ -24,7 +24,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { DeliverFileToolRouterFactory } from "./deliver-file.js";
+import { DeliverFileToolRouterFactory } from "@hoox/tool-router";
 
 const scope = Object.freeze({
   tenantId: tenantId("tenant_faux_deliver"),

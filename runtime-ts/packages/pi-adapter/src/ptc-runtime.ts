@@ -6,7 +6,7 @@ import {
   type QuickJSHandle,
   type QuickJSRuntime,
 } from "quickjs-emscripten";
-import { readPtcToolCallError } from "./tool-failure.js";
+import { readPtcToolCallError } from "@hoox/tool-router";
 
 export interface PtcProgramInput {
   code: string;

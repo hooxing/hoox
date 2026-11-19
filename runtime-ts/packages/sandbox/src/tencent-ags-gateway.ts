@@ -1,7 +1,8 @@
 import type { SandboxInfo } from "e2b";
 import { E2BSandboxGateway, type E2BGatewayOptions, type E2BSdkFacade } from "./e2b-gateway.js";
+import { reusableE2BSdk } from "./e2b-handle-sdk.js";
 import { SandboxRuntimeError } from "./errors.js";
-import type { OperationControl, SandboxCreateInput } from "./types.js";
+import type { OperationControl, SandboxCreateInput, SandboxHandle } from "./types.js";
 import type {
   SandboxWorkspaceAdapterOptions,
   TrustedSandboxSessionCapability,
@@ -54,6 +55,7 @@ export class TencentAgsSandboxGateway extends E2BSandboxGateway {
     capability: TrustedSandboxSessionCapability,
     options: SandboxWorkspaceAdapterOptions,
     control: OperationControl = {},
+    reuse?: SandboxHandle,
   ) {
     const remaining = this.operationBudget(control);
     const binding = await resolveTrustedSandboxWorkspaceBinding(
@@ -61,6 +63,10 @@ export class TencentAgsSandboxGateway extends E2BSandboxGateway {
       remaining().timeoutMs,
       control.signal,
     );
+    // 复用 Run 已连接且已确认 running 的 Handle 时不会触发自动恢复，无需重复状态校验。
+    if (reusableE2BSdk(reuse, binding.sessionId) !== undefined) {
+      return super.connectWorkspace(capability, options, remaining(), reuse);
+    }
     await this.assertConnectable(binding.sessionId, remaining());
     const workspace = await super.connectWorkspace(capability, options, remaining());
     await this.assertRunning(binding.sessionId, remaining());

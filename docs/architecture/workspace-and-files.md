@@ -20,6 +20,15 @@ Sandbox 临时文件、长期资源和用户交付物不能混用身份。历史
 - 应用核心不获得宿主工作目录读写能力，大文件处理有单次内存和总量上限。
 - Workspace 默认忽略 `node_modules` 等依赖目录，避免把可重建内容写入 Revision。
 
+## 快照时机与采集
+
+Workspace Revision 是 Sandbox 暂停或回收后仍能恢复文件的唯一副本，只在 Sandbox 即将离开当前 Run 时生成：
+
+- 用过 Sandbox 的 Run 在模型收口后、Run 终态前快照 `/workspace`。Thread Sandbox 复用开启且队列中已有未取消的 follow-up 时跳过快照：终态事务把仍在运行的 Sandbox 直接交接给下一个 Run，文件随 Sandbox 延续，由最终暂停或关闭前的那个 Run 一并快照。waiting 收口、非 Thread 复用的 Sandbox 和 follow-up 查询失败时一律照常快照。
+- 快照内容与当前 head 的清单 digest 相同时不形成新 Revision，候选以 `superseded` 释放，Run 以 `workspace_unchanged` 收口。因此 `workspace_unchanged` 与 `run_workspace_results.outcome='unchanged'` 只表示“本 Run 未提交新 Revision”，不保证 Sandbox 中的文件没有变化。
+- 交接时 Session 的 `materialized_revision_id` 仍指向当前 head，Sandbox 可能包含该基线之后尚未快照的改动。复用与 head 校验不受影响；但这些改动在快照前只存在于 Sandbox 中：后续 Run 失败或进入恢复导致 Sandbox 被关闭，或者 follow-up 在查询之后被取消使 Sandbox 带着未快照改动暂停并在复用前过期，这些改动都会丢失。失败或取消的 Run 本身不提交 Revision，这一点不变。
+- 采集只发一次 Sandbox 命令：受控 helper 以 dirfd 相对原语遍历 `/workspace`，在同一命令内读出全部普通文件内容并返回 base64，读前读后 fingerprint 不一致即失败关闭。Worker 在进程内保存这份不可变快照（总量受 Workspace 字节配额约束），后续 hash、比对与上传都读取内存副本，不再逐文件回到 Sandbox。只有相对 head 新增或变更的文件才上传为候选 Blob；未变更文件复用 head 的精确 incarnation。
+
 ## 候选与原子交接
 
 Sandbox 快照产生的新文件先形成 Attempt 级 candidate：

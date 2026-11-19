@@ -3031,6 +3031,17 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         },
       });
     }
+    const followUps = new PgThreadSandboxSessionLifecycle(
+      runtime,
+      fakeThreadSandboxProvider(new FakeSandboxGateway()),
+      { pausedRetentionSeconds: 600, transitionWaitMs: 1_000 },
+    );
+    const followUpScope = (id: string) =>
+      ({ tenantId: f.tenantScope.tenantId, threadId: f.thread.id, runId: id }) as ExecutionScope;
+    // 快照推迟提示只看未取消的 queued follow-up，不把当前 active Run 自身算入。
+    await expect(followUps.hasQueuedFollowUp({ scope: followUpScope(firstRun.id) })).resolves.toBe(
+      true,
+    );
     for (const run of [secondRun, firstRun]) {
       const current = await repositories.runs.get(f.tenantScope, run.id);
       if (current === undefined) throw new Error("待取消 Run 缺失");
@@ -3082,6 +3093,9 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       { queued_run_id: thirdRun.id, state: "consumed" },
     ]);
     expect(cancelled.head).toEqual({ active_run_id: thirdRun.id });
+    await expect(followUps.hasQueuedFollowUp({ scope: followUpScope(thirdRun.id) })).resolves.toBe(
+      false,
+    );
     expect(cancelled.inputs.map((item) => item.run_id).sort()).toEqual(
       [firstRun.id, thirdRun.id].sort(),
     );

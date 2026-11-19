@@ -144,6 +144,8 @@ export async function applyThreadSandboxTerminal(
         input.handoffLeaseMs,
       ],
     );
+    // 交接时 Worker 可能推迟了 Workspace 快照：materialized_revision_id 是 Sandbox 的基线 head，
+    // Sandbox 内可能还有该基线之后未快照的改动，由最终暂停前的 Run 一并提交。
     const session = await client.query(
       `UPDATE thread_sandbox_sessions
           SET materialized_revision_id=$4,materialization_attested=true,updated_at=$5
@@ -244,6 +246,22 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       600_000,
       "transitionWaitMs",
     );
+  }
+
+  async hasQueuedFollowUp(input: { readonly scope: ExecutionScope }): Promise<boolean> {
+    // 与 activateNextThreadRun 的选择条件一致：queued 且 Run 未被取消才会在终态被激活。
+    return withTenantTransaction(this.pool, { tenantId: input.scope.tenantId }, async (client) => {
+      const result = await client.query<{ readonly queued: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM thread_follow_up_queue queue
+             JOIN runs run ON run.tenant_id=queue.tenant_id AND run.id=queue.run_id
+            WHERE queue.tenant_id=$1 AND queue.thread_id=$2 AND queue.state='queued'
+              AND queue.run_id<>$3 AND run.status<>'cancelled'
+         ) AS queued`,
+        [input.scope.tenantId, input.scope.threadId, input.scope.runId],
+      );
+      return result.rows[0]?.queued === true;
+    });
   }
 
   async acquire(

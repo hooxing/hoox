@@ -1210,7 +1210,7 @@ export class RunWorker {
         });
         if (!isApplied(modelSettled)) return await this.handleMutationFailure(modelSettled);
 
-        if (sandbox !== undefined) {
+        if (sandbox !== undefined && !(await this.shouldDeferWorkspaceSnapshot(context, turn))) {
           const preVerify = await this.stopPoint(context, cancellation);
           if (preVerify) return await this.finishStopped(context, preVerify, sandbox);
           const verifiedSandbox = sandbox;
@@ -2051,6 +2051,30 @@ export class RunWorker {
     await this.dependencies.threadSandboxes
       ?.completeTerminalEffect({ scope: context.scope, session: sandbox, receipt })
       .catch(() => "unknown");
+  }
+
+  /**
+   * Workspace 快照只在 Sandbox 即将暂停或回收前生成一次。成功收口且队列中已有 follow-up 时，
+   * 终态事务会把仍在运行的 Thread Sandbox 交接给下一个 Run，文件随 Sandbox 延续，本次不生成
+   * Revision，由最终暂停前的那个 Run 一并快照。
+   *
+   * 这是性能取舍而非正确性前提：查询后 follow-up 若被取消，终态会暂停一个含未快照改动的
+   * Sandbox（与失败 Run 保留 Sandbox 相同）；后续若 Sandbox 在复用前过期或被异常回收，这些
+   * 改动会丢失。查询失败、waiting 收口与非 Thread 复用的 Sandbox 一律照常快照。
+   */
+  private async shouldDeferWorkspaceSnapshot(
+    context: ExecutionContext,
+    turn: { readonly kind: string },
+  ): Promise<boolean> {
+    const lifecycle = this.dependencies.threadSandboxes;
+    if (
+      turn.kind === "waiting" ||
+      context.threadSandboxLease === undefined ||
+      lifecycle?.hasQueuedFollowUp === undefined
+    ) {
+      return false;
+    }
+    return lifecycle.hasQueuedFollowUp({ scope: context.scope }).catch(() => false);
   }
 
   private async prepareThreadSandboxTerminal(

@@ -642,6 +642,56 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
   });
 
+  it("Thread Sandbox 将暂停时生成一次 Workspace 快照", async () => {
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(h.threadSandboxes.queuedFollowUpChecks).toBe(1);
+    expect(h.revisions.verifyCount).toBe(1);
+    expect(
+      h.persistence.mutationCommands.some((mutation) =>
+        mutation.idempotencyKey.endsWith("/stage/workspace-verified"),
+      ),
+    ).toBe(true);
+  });
+
+  it("已有排队 follow-up 时推迟快照，Sandbox 连同文件交接给下一个 Run", async () => {
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+    h.threadSandboxes.queuedFollowUp = true;
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(h.revisions.verifyCount).toBe(0);
+    expect(
+      h.persistence.mutationCommands.some((mutation) =>
+        mutation.idempotencyKey.endsWith("/stage/workspace-verified"),
+      ),
+    ).toBe(false);
+    const terminal = h.persistence.mutationCommands.find((mutation) =>
+      mutation.idempotencyKey.endsWith("/final/succeeded"),
+    );
+    expect(terminal?.workspaceChange).toBeUndefined();
+    expect(terminal?.threadSandboxTerminal).toMatchObject({
+      sessionId: h.threadSandboxes.lease.sessionId,
+    });
+  });
+
+  it("follow-up 查询失败时照常快照，不因性能提示丢失 Workspace", async () => {
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+    h.threadSandboxes.queuedFollowUp = "unavailable";
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(h.revisions.verifyCount).toBe(1);
+  });
+
   it("主模型命中输出上限后只续跑一次，并以独立 model_continue 许可完成任务", async () => {
     const lengthEvents: readonly RuntimeAgentEvent[] = [
       { type: "agent.started" },

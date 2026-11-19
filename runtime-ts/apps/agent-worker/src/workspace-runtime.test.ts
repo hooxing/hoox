@@ -101,6 +101,7 @@ function oneFileHead() {
 
 describe("ManifestWorkspaceRuntime candidate 恢复边界", () => {
   it("内容与当前 head 相同时不形成 Revision，并以 superseded 释放候选", async () => {
+    const phases: string[] = [];
     const prepare = vi.fn(async () => undefined);
     const release = vi.fn(async () => undefined);
     const runtime = new ManifestWorkspaceRuntime({
@@ -134,8 +135,19 @@ describe("ManifestWorkspaceRuntime candidate 恢复边界", () => {
         attemptId: "attempt-workspace-unchanged" as never,
         sandbox: session,
         operationKey: "workspace-unchanged-operation",
+        phaseTiming: { record: (span) => phases.push(span.phase) },
       }),
     ).resolves.toBeUndefined();
+    // 子阶段只用于诊断：按实际调用记录，不改变 verify 结果。
+    expect(new Set(phases)).toEqual(
+      new Set([
+        "workspace_head_load",
+        "workspace_open",
+        "workspace_snapshot",
+        "workspace_journal",
+        "workspace_candidate_persist",
+      ]),
+    );
     expect(prepare).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledWith(expect.objectContaining({ reason: "superseded" }));
   });

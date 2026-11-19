@@ -378,6 +378,7 @@ export class RunSandboxPreparation<Result> {
             // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
             operationKey: `${context.attemptId}:workspace:materialize`,
             signal: this.input.signal,
+            ...(timing === undefined ? {} : { phaseTiming: timing }),
           }),
         );
       }

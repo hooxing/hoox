@@ -121,6 +121,44 @@ describe("腾讯云 AGS 兼容边界", () => {
     expect(connect).not.toHaveBeenCalled();
   });
 
+  it("Workspace 复用 Run 已持有的 Handle，不重复 connect 与状态查询；伪造 Handle 照常 connect", async () => {
+    const sandbox = workspaceSandbox();
+    const connect = vi.fn(async () => sandbox);
+    const getInfo = vi.fn(async () => info("running"));
+    const gateway = new TencentAgsSandboxGateway(
+      options,
+      fakeFacade({ create: async () => sandbox, connect, getInfo }),
+    );
+    const handle = await gateway.create({ templateId: "hoox" });
+    connect.mockClear();
+    getInfo.mockClear();
+
+    await expect(
+      gateway.connectWorkspace(workspaceCapability(), workspaceOptions, {}, handle),
+    ).resolves.toBeDefined();
+    expect(connect).not.toHaveBeenCalled();
+    expect(getInfo).not.toHaveBeenCalled();
+
+    const forged = { ...handle, id: handle.id } as typeof handle;
+    await expect(
+      gateway.connectWorkspace(workspaceCapability(), workspaceOptions, {}, forged),
+    ).resolves.toBeDefined();
+    expect(connect).toHaveBeenCalledOnce();
+  });
+
+  it("Handle 与可信 binding 的 Sandbox ID 不一致时不复用", async () => {
+    const sandbox = workspaceSandbox();
+    const connect = vi.fn(async () => sandbox);
+    const gateway = new TencentAgsSandboxGateway(
+      options,
+      fakeFacade({ create: async () => workspaceSandbox("other-sandbox"), connect }),
+    );
+    const other = await gateway.create({ templateId: "hoox" });
+    connect.mockClear();
+    await gateway.connectWorkspace(workspaceCapability(), workspaceOptions, {}, other);
+    expect(connect).toHaveBeenCalledOnce();
+  });
+
   it("连接返回但实例仍 paused 时不交付可用句柄", async () => {
     const gateway = new TencentAgsSandboxGateway(
       options,
@@ -227,5 +265,48 @@ function info(
     cpuCount: 2,
     memoryMB: 512,
     envdVersion: "v1",
+  };
+}
+
+const workspaceOptions = {
+  maxEntries: 16,
+  maxFileBytes: 1024,
+  maxTotalBytes: 4096,
+  maxPathUtf8Bytes: 256,
+  maxCommandOutputBytes: 4096,
+  readChunkBytes: 4,
+  maxSnapshots: 4,
+  operationTimeoutMs: 1000,
+};
+
+function workspaceCapability(sessionId = "e2b-sandbox") {
+  return {
+    current: async () => ({
+      sessionId,
+      generation: 1,
+      scope: { tenantId: "tenant-test", threadId: "thread-test", workspaceId: "workspace-test" },
+    }),
+  };
+}
+
+/** 能通过 Workspace 适配器打开时 probe 与根目录 stat 的最小 Sandbox。 */
+function workspaceSandbox(sandboxId = "e2b-sandbox"): E2BSdkSandbox {
+  const base = fakeSandbox(sandboxId);
+  return {
+    ...base,
+    commands: {
+      run: async (_command, commandOptions) => {
+        const operation = commandOptions?.envs?.CUBE_WS_OP;
+        if (operation === "probe") return { stdout: "OK\n", stderr: "", exitCode: 0 };
+        if (operation === "stat") {
+          return {
+            stdout: JSON.stringify({ type: "FILE_TYPE_DIRECTORY" }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "", stderr: "", exitCode: 1 };
+      },
+    },
   };
 }

@@ -219,6 +219,7 @@ export class CubeSandboxGateway implements SandboxGateway {
     capability: TrustedSandboxSessionCapability,
     options: CubeWorkspaceAdapterOptions,
     control: OperationControl = {},
+    reuse?: SandboxHandle,
   ): Promise<SandboxWorkspacePort> {
     const effectiveControl = this.control(control);
     const binding = await resolveTrustedSandboxWorkspaceBinding(
@@ -226,14 +227,19 @@ export class CubeSandboxGateway implements SandboxGateway {
       effectiveControl.timeoutMs,
       effectiveControl.signal,
     );
-    const sandbox = await settledOperation(
-      "连接 Workspace Sandbox",
-      () =>
-        this.sdk.connect(binding.sessionId, {
-          config: this.config(effectiveControl.timeoutMs),
-        }),
-      effectiveControl,
-    );
+    const reused = reuse === undefined ? undefined : cubeHandleSdk.get(reuse);
+    // 与 E2B 相同：只复用本模块创建、且 ID 与可信 binding 一致的 Handle 连接。
+    const sandbox =
+      reused !== undefined && reused.sandboxId === binding.sessionId
+        ? reused
+        : await settledOperation(
+            "连接 Workspace Sandbox",
+            () =>
+              this.sdk.connect(binding.sessionId, {
+                config: this.config(effectiveControl.timeoutMs),
+              }),
+            effectiveControl,
+          );
     return SandboxWorkspacePort.open({
       capability,
       binding,
@@ -343,11 +349,15 @@ function validateVolumeMounts(input: SandboxCreateInput["volumeMounts"]): void {
   }
 }
 
+const cubeHandleSdk = new WeakMap<object, CubeSdkSandbox>();
+
 class CubeSandboxHandle implements SandboxHandle {
   constructor(
     private readonly sandbox: CubeSdkSandbox,
     private readonly defaultTimeoutMs: number,
-  ) {}
+  ) {
+    cubeHandleSdk.set(this, sandbox);
+  }
 
   get id(): string {
     return this.sandbox.sandboxId;

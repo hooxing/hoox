@@ -83,6 +83,16 @@ export class WorkspaceMaterializationStageError extends Error {
  * snapshot 发布为待 RuntimeMutation 原子提交的候选。它从不向 Worker 暴露 BlobStore 或 object key。
  */
 export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
+  /**
+   * 同一 Session 对象（一次 acquire 的结果）在 materialize 与 verify 之间复用已打开的适配器，
+   * 安全探测只做一次。适配器每次调用仍重验可信 binding 的 session/generation/scope，失效时
+   * 失败关闭；打开失败不缓存。键是对象身份，Run 结束后随 Session 一起回收。
+   */
+  private readonly openedWorkspaces = new WeakMap<
+    object,
+    { readonly scopeKey: string; readonly opened: Promise<SandboxWorkspacePort> }
+  >();
+
   constructor(private readonly options: WorkerWorkspaceRuntimeOptions) {}
 
   private timedPorts(timing: ExecutionPhaseTimingObserver | undefined) {
@@ -117,14 +127,29 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
     scope: WorkspaceTrustedScope,
     timing: ExecutionPhaseTimingObserver | undefined,
   ): Promise<SandboxWorkspacePort> {
-    const sandbox = await measureExecutionPhase(timing, "workspace_open", () =>
-      this.options.openSandboxWorkspace({
-        scope,
-        executionScope: input.scope,
-        session: input.sandbox,
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      }),
-    );
+    const scopeKey = executionScopeKey(input.scope);
+    const cached = this.openedWorkspaces.get(input.sandbox);
+    let opened: Promise<SandboxWorkspacePort>;
+    if (cached !== undefined && cached.scopeKey === scopeKey) {
+      opened = cached.opened;
+    } else {
+      opened = measureExecutionPhase(timing, "workspace_open", () =>
+        this.options.openSandboxWorkspace({
+          scope,
+          executionScope: input.scope,
+          session: input.sandbox,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        }),
+      );
+      const entry = { scopeKey, opened };
+      this.openedWorkspaces.set(input.sandbox, entry);
+      opened.catch(() => {
+        if (this.openedWorkspaces.get(input.sandbox) === entry) {
+          this.openedWorkspaces.delete(input.sandbox);
+        }
+      });
+    }
+    const sandbox = await opened;
     // 物化删除/建目录也是远端命令，与文件写入合并计入 workspace_file_write。
     return timedMethods(
       timedMethods(sandbox, timing, "workspace_snapshot", ["captureSnapshot"]),
@@ -379,6 +404,12 @@ async function assertEmptyWorkspaceBaseline(input: {
     });
   }
   if (failure !== undefined) throw failure;
+}
+
+function executionScopeKey(scope: Parameters<WorkspaceRuntimePort["verify"]>[0]["scope"]): string {
+  return [scope.tenantId, scope.threadId, scope.runId, scope.rootRunId, scope.workspaceId].join(
+    "\0",
+  );
 }
 
 function trustedScope(

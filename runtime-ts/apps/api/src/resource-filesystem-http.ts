@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { resourceId, resourceVersionId, type TenantId } from "@hoox/domain";
-import type { BlobStore, StableBlobRef } from "@hoox/persistence";
+import type { BlobStore, StableBlobRef } from "@hoox/persistence/blob";
 import {
   HISTORY_FILESYSTEM_ROOT_SEGMENT,
   RESOURCE_FILESYSTEM_ROOT,

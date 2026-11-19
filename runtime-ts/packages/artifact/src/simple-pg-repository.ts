@@ -1,5 +1,5 @@
 import { artifactId, resourceVersionId, sha256Digest } from "@hoox/domain";
-import { TransactionCommitUnknownError, withTenantTransaction } from "@hoox/persistence";
+import { TransactionCommitUnknownError, withTenantTransaction } from "@hoox/persistence/postgres";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 import type {

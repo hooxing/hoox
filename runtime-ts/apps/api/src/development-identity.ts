@@ -7,7 +7,7 @@ import {
   tenantId,
   userId,
 } from "@hoox/domain";
-import type { TenantBundle, TenantRepository } from "@hoox/persistence";
+import type { TenantBundle, TenantRepository } from "@hoox/persistence/postgres";
 import {
   booleanEnvironmentField,
   EnvironmentConfigurationError,

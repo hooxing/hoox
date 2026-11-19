@@ -2,7 +2,7 @@ import type {
   EnqueueOutboxPort,
   ThreadCreationPort,
   ThreadInputRoutingPort,
-} from "@hoox/persistence";
+} from "@hoox/persistence/postgres";
 
 const createCapabilityBrand: unique symbol = Symbol("ApiCreateCapability");
 const issuedCapabilities = new WeakSet<object>();

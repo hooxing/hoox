@@ -1,6 +1,9 @@
 import { SandboxRuntimeError } from "@hoox/sandbox";
 import type { ExecutionPhaseTiming } from "@hoox/domain";
-import type { PgClaimedRunDispatch, PgClaimedWorkerTenantAssignment } from "@hoox/persistence";
+import type {
+  PgClaimedRunDispatch,
+  PgClaimedWorkerTenantAssignment,
+} from "@hoox/persistence/run-execution";
 import type { ExecutionScope, SandboxSessionRef } from "@hoox/run-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {

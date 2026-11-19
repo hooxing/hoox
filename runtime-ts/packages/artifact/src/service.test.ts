@@ -10,7 +10,7 @@ import {
   workspaceId,
   workspaceRevisionId,
 } from "@hoox/domain";
-import type { BlobStore, StableBlobRef } from "@hoox/persistence";
+import type { BlobStore, StableBlobRef } from "@hoox/persistence/blob";
 import type { ExecutionScope } from "@hoox/run-contracts";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";

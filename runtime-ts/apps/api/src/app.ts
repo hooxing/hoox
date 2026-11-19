@@ -11,12 +11,9 @@ import {
   threadId,
   userId,
 } from "@hoox/domain";
+import type { BlobStore } from "@hoox/persistence/blob";
 import type {
-  BlobStore,
   CoreRepositories,
-  ModelWireTraceBody,
-  ModelWireTraceCursor,
-  ModelWireTraceReadPort,
   PersonalizationSettingsPort,
   RunExperienceArtifact,
   RunExperienceReadPort,
@@ -24,8 +21,14 @@ import type {
   ThreadContinuityReadPort,
   TeamCollaborationPort,
   ThreadForkPort,
-} from "@hoox/persistence";
-import { assertBlobRef, BlobStoreError, PersistenceError, sha256Hex } from "@hoox/persistence";
+} from "@hoox/persistence/postgres";
+import type {
+  ModelWireTraceBody,
+  ModelWireTraceCursor,
+  ModelWireTraceReadPort,
+} from "@hoox/persistence/thread";
+import { assertBlobRef, BlobStoreError, sha256Hex } from "@hoox/persistence/blob";
+import { PersistenceError } from "@hoox/persistence/postgres";
 import {
   AccountProfileSuccessEnvelopeSchema,
   CreateScheduledTaskRequestSchema,

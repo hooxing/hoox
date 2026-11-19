@@ -9,15 +9,19 @@ const mocks = vi.hoisted(() => ({
   loopStarted: vi.fn(),
 }));
 
-vi.mock("@hoox/persistence", () => ({
-  createPostgresPool: mocks.createPostgresPool,
-  probePostgres: mocks.probePostgres,
-  PgSandboxCleanupConsumerStore: class {},
+vi.mock("@hoox/persistence/admin", () => ({
   PgSandboxConfigurationResolver: class {
     activeProfiles() {
       return Promise.resolve(undefined);
     }
   },
+}));
+vi.mock("@hoox/persistence/maintenance", () => ({
+  PgSandboxCleanupConsumerStore: class {},
+}));
+vi.mock("@hoox/persistence/postgres", () => ({
+  createPostgresPool: mocks.createPostgresPool,
+  probePostgres: mocks.probePostgres,
 }));
 
 vi.mock("@hoox/sandbox", () => ({

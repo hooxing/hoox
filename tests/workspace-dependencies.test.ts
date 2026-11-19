@@ -116,6 +116,23 @@ describe("Workspace 依赖契约", () => {
     ).toEqual(["@hoox/pi-adapter 不得依赖 @hoox/sandbox"]);
   });
 
+  it("生产源码不得使用 persistence 聚合根入口", () => {
+    const issues = validateWorkspaceDependencies({
+      rootManifest,
+      workspaces: [
+        workspace("@hoox/persistence", "package", {}),
+        workspace("@hoox/scheduler", "app", { "@hoox/persistence": "workspace:*" }, [
+          { path: "src/a.ts", specifiers: ["@hoox/persistence"] },
+          { path: "src/b.ts", specifiers: ["@hoox/persistence/postgres"] },
+          { path: "src/a.test.ts", specifiers: ["@hoox/persistence"] },
+        ]),
+      ],
+    });
+    expect(issues).toEqual([
+      "runtime-ts/apps/scheduler/src/a.ts 必须从 @hoox/persistence 的职责子入口导入，不得使用聚合根入口",
+    ]);
+  });
+
   it("拒绝契约层反向依赖实现与应用间依赖", () => {
     const issues = validateWorkspaceDependencies({
       rootManifest,

@@ -1,4 +1,4 @@
-import type { PgSandboxConfigurationResolver } from "@hoox/persistence";
+import type { PgSandboxConfigurationResolver } from "@hoox/persistence/admin";
 import {
   createConfiguredSandboxGateway,
   type SandboxProviderKey,

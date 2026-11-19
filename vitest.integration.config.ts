@@ -13,6 +13,30 @@ export default defineConfig({
       "@hoox/domain": fileURLToPath(
         new URL("./runtime-ts/packages/domain/src/index.ts", import.meta.url),
       ),
+      "@hoox/persistence/admin": fileURLToPath(
+        new URL("./runtime-ts/packages/persistence/src/entrypoints/admin.ts", import.meta.url),
+      ),
+      "@hoox/persistence/blob": fileURLToPath(
+        new URL("./runtime-ts/packages/persistence/src/entrypoints/blob.ts", import.meta.url),
+      ),
+      "@hoox/persistence/maintenance": fileURLToPath(
+        new URL(
+          "./runtime-ts/packages/persistence/src/entrypoints/maintenance.ts",
+          import.meta.url,
+        ),
+      ),
+      "@hoox/persistence/postgres": fileURLToPath(
+        new URL("./runtime-ts/packages/persistence/src/entrypoints/postgres.ts", import.meta.url),
+      ),
+      "@hoox/persistence/run-execution": fileURLToPath(
+        new URL(
+          "./runtime-ts/packages/persistence/src/entrypoints/run-execution.ts",
+          import.meta.url,
+        ),
+      ),
+      "@hoox/persistence/thread": fileURLToPath(
+        new URL("./runtime-ts/packages/persistence/src/entrypoints/thread.ts", import.meta.url),
+      ),
       "@hoox/persistence": fileURLToPath(
         new URL("./runtime-ts/packages/persistence/src/index.ts", import.meta.url),
       ),

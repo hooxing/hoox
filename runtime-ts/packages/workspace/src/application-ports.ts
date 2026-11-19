@@ -33,7 +33,7 @@ export interface WorkspaceCandidateHandoffPort {
   }): Promise<void>;
   release(input: {
     readonly identity: WorkspaceCandidateIdentity;
-    readonly reason: "publish_failed" | "manual_recovery";
+    readonly reason: "publish_failed" | "manual_recovery" | "superseded";
   }): Promise<void>;
 }
 

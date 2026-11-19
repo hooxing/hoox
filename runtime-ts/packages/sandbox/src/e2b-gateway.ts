@@ -10,6 +10,7 @@ import {
   FileType,
 } from "e2b";
 import { mapE2BError } from "./e2b-errors.js";
+import { registerE2BHandleSdk, reusableE2BSdk } from "./e2b-handle-sdk.js";
 import { SandboxRuntimeError, settledOperation } from "./errors.js";
 import type { UncertainLifecycleEvent } from "./lifecycle.js";
 import type {
@@ -278,6 +279,7 @@ export class E2BSandboxGateway implements SandboxGateway {
     capability: TrustedSandboxSessionCapability,
     options: SandboxWorkspaceAdapterOptions,
     control: OperationControl = {},
+    reuse?: SandboxHandle,
   ): Promise<SandboxWorkspacePort> {
     const effective = this.control(control);
     const binding = await resolveTrustedSandboxWorkspaceBinding(
@@ -285,15 +287,17 @@ export class E2BSandboxGateway implements SandboxGateway {
       effective.timeoutMs,
       effective.signal,
     );
-    const sandbox = await this.call(
-      "连接 E2B Workspace Sandbox",
-      () =>
-        this.sdk.connect(binding.sessionId, {
-          ...this.connection(effective.timeoutMs, effective.signal),
-          timeoutMs: this.connectTtlSeconds * 1_000,
-        }),
-      effective,
-    );
+    const sandbox =
+      reusableE2BSdk(reuse, binding.sessionId) ??
+      (await this.call(
+        "连接 E2B Workspace Sandbox",
+        () =>
+          this.sdk.connect(binding.sessionId, {
+            ...this.connection(effective.timeoutMs, effective.signal),
+            timeoutMs: this.connectTtlSeconds * 1_000,
+          }),
+        effective,
+      ));
     return SandboxWorkspacePort.open({
       capability,
       binding,
@@ -423,7 +427,9 @@ class E2BSandboxHandle implements SandboxHandle {
     private readonly sandbox: E2BSdkSandbox,
     private readonly defaultTimeoutMs: number,
     private readonly preserveMemoryOnPause: boolean,
-  ) {}
+  ) {
+    registerE2BHandleSdk(this, sandbox);
+  }
 
   get id(): string {
     return this.sandbox.sandboxId;

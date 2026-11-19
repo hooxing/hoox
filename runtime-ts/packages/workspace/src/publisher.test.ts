@@ -217,7 +217,33 @@ class Blobs implements WorkspaceCandidateBlobWritePort {
   candidateOverride: WorkspaceCandidateBlob | undefined;
   headOverride: Awaited<ReturnType<WorkspaceCandidateBlobWritePort["headCandidate"]>> | undefined;
 
+  /** 开启后每次上传先让出事件循环，用于观察并发度。 */
+  trackConcurrency = false;
+  inFlight = 0;
+  maxInFlight = 0;
+  readonly inFlightBySha = new Map<string, number>();
+  maxSameContentInFlight = 0;
+
   async putCandidate(input: Parameters<WorkspaceCandidateBlobWritePort["putCandidate"]>[0]) {
+    if (!this.trackConcurrency) return this.putCandidateOnce(input);
+    const sha = input.expectedContent.sha256;
+    this.inFlight += 1;
+    this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    const same = (this.inFlightBySha.get(sha) ?? 0) + 1;
+    this.inFlightBySha.set(sha, same);
+    this.maxSameContentInFlight = Math.max(this.maxSameContentInFlight, same);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return await this.putCandidateOnce(input);
+    } finally {
+      this.inFlight -= 1;
+      this.inFlightBySha.set(sha, (this.inFlightBySha.get(sha) ?? 1) - 1);
+    }
+  }
+
+  private async putCandidateOnce(
+    input: Parameters<WorkspaceCandidateBlobWritePort["putCandidate"]>[0],
+  ) {
     if (this.putError !== undefined) throw this.putError;
     this.tenantSideEffects += 1;
     const chunks: Uint8Array[] = [];
@@ -425,6 +451,44 @@ describe("Workspace publisher 可靠边界", () => {
     expect(state.sandbox.reads).toBe(2);
     expect(Object.keys(change)).not.toContain("revisionId");
     expect(state.sandbox.releaseCalls).toBe(1);
+  });
+
+  it("不同内容的候选有界并发上传，相同内容串行，清单仍按路径完整", async () => {
+    const state = setup();
+    state.blobs.trackConcurrency = true;
+    state.sandbox.addFile("a", "alpha");
+    state.sandbox.addFile("b", "bravo");
+    state.sandbox.addFile("c", "charlie");
+    state.sandbox.addFile("d", "alpha");
+    state.sandbox.addFile("e", "echo");
+    const change = await state.publisher.publish(request("publish-parallel"));
+    expect(state.blobs.maxInFlight).toBeGreaterThan(1);
+    expect(state.blobs.maxInFlight).toBeLessThanOrEqual(4);
+    expect(state.blobs.maxSameContentInFlight).toBe(1);
+    expect(change.candidateManifest.entries.map((entry) => entry.path)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+    ]);
+  });
+
+  it("并发上传中途失败时等待已启动的上传结束后才抛出", async () => {
+    const state = setup();
+    state.blobs.trackConcurrency = true;
+    state.sandbox.addFile("a", "alpha");
+    state.sandbox.addFile("b", "bravo");
+    state.sandbox.addFile("c", "charlie");
+    let calls = 0;
+    state.blobs.afterPut = () => {
+      calls += 1;
+      if (calls === 1) throw new WorkspaceDependencyError("known", "PUT_UNAVAILABLE");
+    };
+    await expect(state.publisher.publish(request("publish-parallel-fail"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+    expect(state.blobs.inFlight).toBe(0);
   });
 
   it("capture 或后续读取失败也在 finally 释放 operation 快照", async () => {

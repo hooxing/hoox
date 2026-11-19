@@ -49,7 +49,12 @@ export interface ToolObservationRolloutPort {
     readonly parentToolCallId?: string;
     readonly body: Readonly<Record<string, unknown>>;
     readonly isTruncated: boolean;
-    readonly blob: { readonly referenceId: string; readonly sha256: string; readonly size: number };
+    /** 只有截断的观察需要 stable trace Blob 保存完整回执；未截断时回执已完整内联在 body。 */
+    readonly blob?: {
+      readonly referenceId: string;
+      readonly sha256: string;
+      readonly size: number;
+    };
   }): Promise<{
     readonly outcome: "created" | "replayed" | "conflict" | "unavailable" | "unknown";
   }>;
@@ -192,8 +197,9 @@ export function assertControlledToolObservation(input: {
 }
 
 /**
- * 把“保存完整事实”和“投影给模型”拆成不能倒置的两个阶段。即使输出很小也先保存，
- * 因而重启后可以从 Rollout 的 stable trace Blob 重建同一观察结果。
+ * 把“保存完整事实”和“投影给模型”拆成不能倒置的两个阶段。固定受控回执未截断时，
+ * 完整回执已逐字内联在 Rollout body（schemaVersion 3），恢复直接从 body 重建；只有
+ * 截断观察才先提交 stable trace Blob 保存完整回执（schemaVersion 2）。
  */
 export class ToolObservationPipeline {
   readonly #maxModelObservationBytes: number;
@@ -224,6 +230,44 @@ export class ToolObservationPipeline {
     if (controlledReceipt === undefined) return { outcome: "conflict" };
     const receipt = parseControlledToolReceipt(controlledReceipt);
     if (receipt.toolName !== input.toolName) return { outcome: "conflict" };
+    // 回执由 Runtime 按 toolName+outcome 固定编码，未截断时 body 已包含全部事实；
+    // 再为同样的几十字节走一遍 Blob 提交协议（约 15 次往返）没有任何恢复价值。
+    const buildInlineBody = (rendered: {
+      readonly observation: string;
+      readonly isTruncated: boolean;
+    }) =>
+      Object.freeze({
+        schemaVersion: 3,
+        toolName: input.toolName,
+        receipt,
+        truncation: Object.freeze({
+          isTruncated: rendered.isTruncated,
+          modelVisibleBytes: Buffer.byteLength(rendered.observation, "utf8"),
+        }),
+        observation: rendered.observation,
+      });
+    const inline = fitObservationToBothBudgets(
+      controlledReceipt,
+      this.#maxModelObservationBytes,
+      this.#maxRolloutBodyBytes,
+      buildInlineBody,
+    );
+    if (!inline.isTruncated) {
+      const appended = await this.rollout.appendToolResult({
+        binding: input.binding,
+        idempotencyKey: `${input.idempotencyKey}.rollout`,
+        toolCallId: input.toolCallId,
+        ...(input.parentToolCallId === undefined
+          ? {}
+          : { parentToolCallId: input.parentToolCallId }),
+        body: buildInlineBody(inline),
+        isTruncated: false,
+      });
+      if (appended.outcome !== "created" && appended.outcome !== "replayed") {
+        return { outcome: appended.outcome as "conflict" | "unavailable" | "unknown" };
+      }
+      return { outcome: appended.outcome === "created" ? "recorded" : "replayed", ...inline };
+    }
     const bytes = Buffer.from(controlledReceipt, "utf8");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const persisted = await this.traces.persistTrace({

@@ -56,7 +56,7 @@ try {
 
 外层 `run_code` 继续形成 Rollout 的 `tool_call → tool_result` 对。每个内部调用在真实 `tool.started` 后、任何授权和副作用前持久化自己的开始事实，且逐次使用原工具授权、Sandbox 准备和受控回执，不共享外层许可。
 
-内部事实写入独立 `runtime_ptc_dispatches` journal，完整绑定 Tenant、Thread、Run、Attempt、agentThread、执行双栅栏及未闭合父调用。结果引用同租户 stable/trace Blob，保存固定受控回执，不保存程序源代码或完整工具业务输出。相同幂等键同正文允许 replay，不同正文冲突；未知写入使用同键收敛重试。
+内部事实写入独立 `runtime_ptc_dispatches` journal，完整绑定 Tenant、Thread、Run、Attempt、agentThread、执行双栅栏及未闭合父调用。结果只保存固定受控回执，不保存程序源代码或完整工具业务输出：未截断的回执以 schemaVersion 3 完整内联在 journal 中，不引用 Blob；只有截断观察才以 schemaVersion 2 引用同租户 stable/trace Blob 保存完整回执。数据库 CHECK 分别约束两种形状。相同幂等键同正文允许 replay，不同正文冲突；未知写入使用同键收敛重试。
 
 内部 journal 不注入模型历史，也不改变 Thread Context 的工具配对语义。外层调用未闭合时，恢复仍返回 `requires_tool_reconciliation`，不得自动重跑程序。维护者可通过仓储 `listPtcDispatchesByParent` 读取该父调用的审计证据；该只读核对不授权重试已执行的副作用。
 

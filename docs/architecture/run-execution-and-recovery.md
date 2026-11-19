@@ -59,6 +59,8 @@ claimed/running/finalizing → recovery_required → abandoned | failed
 
 Tool Observation 写入结果未知时，用同一个冻结命令和幂等键带退避重放，禁止在重试中改写正文或身份。
 
+Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回执。未截断时，回执以 schemaVersion 3 完整内联在 Rollout 或 PTC journal 中，不引用 Blob，恢复时直接从 body 重建并校验。只有观察被截断时，才先提交 stable/trace Blob 保存完整回执，再写 schemaVersion 2 的结果。这样常见路径只需一次 Rollout 事务，不必为几十字节的确定性回执走完整的 Blob 提交协议。
+
 ## 外部副作用许可
 
 模型请求、Sandbox 操作和 Artifact 发布等外部副作用必须先持久化意图，再签发并消费一次性许可，随后立即触达外部系统：

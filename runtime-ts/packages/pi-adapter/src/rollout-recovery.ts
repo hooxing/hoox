@@ -181,29 +181,41 @@ function recoverToolObservation(
   entry: RuntimeRolloutEntry,
   predecessorToolName: string,
 ): Extract<ControlledRolloutProjection["items"][number], { kind: "tool_receipt" }> {
+  // schemaVersion 3 把未截断的固定回执完整内联且不引用 Blob；schemaVersion 2 引用
+  // stable trace Blob，截断观察只能使用后者。两种形状都从固定 schema 重建回执。
+  const blob = entry.blob;
   if (
     !validCallId(entry.toolCallId) ||
-    entry.blob === undefined ||
     (!entry.isTruncated && entry.isTruncated !== false) ||
     !isRecord(entry.body) ||
-    entry.body.schemaVersion !== 2 ||
-    !hasExactKeys(entry.body, [
-      "observation",
-      "receipt",
-      "receiptBytes",
-      "receiptSha256",
-      "schemaVersion",
-      "toolName",
-      "traceBlob",
-      "truncation",
-    ]) ||
+    (blob === undefined
+      ? entry.isTruncated ||
+        entry.body.schemaVersion !== 3 ||
+        !hasExactKeys(entry.body, [
+          "observation",
+          "receipt",
+          "schemaVersion",
+          "toolName",
+          "truncation",
+        ])
+      : entry.body.schemaVersion !== 2 ||
+        !hasExactKeys(entry.body, [
+          "observation",
+          "receipt",
+          "receiptBytes",
+          "receiptSha256",
+          "schemaVersion",
+          "toolName",
+          "traceBlob",
+          "truncation",
+        ]) ||
+        !isRecord(entry.body.traceBlob) ||
+        !hasExactKeys(entry.body.traceBlob, ["referenceId"]) ||
+        entry.body.traceBlob.referenceId !== blob.referenceId ||
+        entry.body.receiptSha256 !== blob.sha256 ||
+        entry.body.receiptBytes !== blob.size) ||
     entry.body.toolName !== predecessorToolName ||
     typeof entry.body.observation !== "string" ||
-    !isRecord(entry.body.traceBlob) ||
-    !hasExactKeys(entry.body.traceBlob, ["referenceId"]) ||
-    entry.body.traceBlob.referenceId !== entry.blob.referenceId ||
-    entry.body.receiptSha256 !== entry.blob.sha256 ||
-    entry.body.receiptBytes !== entry.blob.size ||
     !isRecord(entry.body.receipt) ||
     !hasExactKeys(entry.body.receipt, [
       "message",
@@ -238,7 +250,8 @@ function recoverToolObservation(
     receipt = parseControlledToolReceipt(receiptText);
     const receiptBytes = Buffer.byteLength(receiptText, "utf8");
     const receiptSha256 = createHash("sha256").update(receiptText, "utf8").digest("hex");
-    if (receiptBytes !== entry.blob.size || receiptSha256 !== entry.blob.sha256) malformed();
+    if (blob !== undefined && (receiptBytes !== blob.size || receiptSha256 !== blob.sha256))
+      malformed();
     assertControlledToolObservation({
       receipt,
       observation: entry.body.observation,

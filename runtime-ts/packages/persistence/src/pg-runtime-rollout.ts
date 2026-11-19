@@ -90,7 +90,8 @@ export interface AppendPtcToolResultInput {
   readonly parentToolCallId: string;
   readonly body: Readonly<Record<string, unknown>>;
   readonly isTruncated: boolean;
-  readonly blob: NonNullable<RolloutEntryDraft["blob"]>;
+  /** schemaVersion 2（截断观察）必填；schemaVersion 3 内联回执不得提供。 */
+  readonly blob?: NonNullable<RolloutEntryDraft["blob"]>;
 }
 
 export interface RuntimePtcDispatch {
@@ -105,7 +106,8 @@ export interface RuntimePtcDispatch {
     readonly body: Readonly<Record<string, unknown>>;
     readonly isTruncated: boolean;
     readonly completedAt: string;
-    readonly blob: NonNullable<RolloutEntryDraft["blob"]> & {
+    /** 只有 schemaVersion 2（截断观察）的回执引用 stable trace Blob；内联回执没有 Blob。 */
+    readonly blob?: NonNullable<RolloutEntryDraft["blob"]> & {
       readonly kind: "stable";
       readonly purpose: "trace";
       readonly incarnationId: string;
@@ -371,7 +373,7 @@ function samePtcScope(row: PtcDispatchRow, context: TrustedRolloutContext): bool
 
 function assertPtcReceipt(
   body: Readonly<Record<string, unknown>>,
-  blob: NonNullable<RolloutEntryDraft["blob"]>,
+  blob: RolloutEntryDraft["blob"],
   isTruncated: boolean,
 ): { readonly toolName: string } {
   assertJsonRecord(body.receipt, "PTC 固定受控回执");
@@ -383,7 +385,17 @@ function assertPtcReceipt(
     throw new TypeError("PTC 结果不是固定受控回执");
   }
   const encoded = encodeControlledToolReceipt(receipt.toolName, receipt.outcome);
-  if (
+  if (blob === undefined) {
+    // schemaVersion 3：未截断的固定回执完整内联，不引用 Blob；截断观察必须保留完整 Blob。
+    if (
+      body.schemaVersion !== 3 ||
+      isTruncated ||
+      body.toolName !== receipt.toolName ||
+      digestCanonical(receipt) !== digestCanonical(JSON.parse(encoded))
+    ) {
+      throw new TypeError("PTC 内联回执不是未截断的固定受控回执");
+    }
+  } else if (
     body.schemaVersion !== 2 ||
     body.toolName !== receipt.toolName ||
     digestCanonical(receipt) !== digestCanonical(JSON.parse(encoded)) ||
@@ -395,16 +407,20 @@ function assertPtcReceipt(
   ) {
     throw new TypeError("PTC 回执与 stable trace 身份不匹配");
   }
-  const allowedKeys = new Set([
-    "schemaVersion",
-    "toolName",
-    "receiptSha256",
-    "receiptBytes",
-    "receipt",
-    "traceBlob",
-    "truncation",
-    "observation",
-  ]);
+  const allowedKeys = new Set(
+    blob === undefined
+      ? ["schemaVersion", "toolName", "receipt", "truncation", "observation"]
+      : [
+          "schemaVersion",
+          "toolName",
+          "receiptSha256",
+          "receiptBytes",
+          "receipt",
+          "traceBlob",
+          "truncation",
+          "observation",
+        ],
+  );
   assertJsonRecord(body.truncation, "PTC 回执截断元数据");
   const truncation = body.truncation;
   if (
@@ -437,29 +453,34 @@ function mapPtcDispatch(
 ): RuntimePtcDispatch {
   let result: RuntimePtcDispatch["result"];
   if (row.result_body !== null) {
+    if (row.is_truncated === null || row.completed_at === null)
+      throw new Error("PTC journal 回执缺少完成事实");
+    const inline = row.blob_reference_id === null;
     if (
-      row.is_truncated === null ||
-      row.completed_at === null ||
-      row.blob_reference_id === null ||
-      row.blob_sha256 === null ||
-      row.blob_size === null ||
-      row.incarnation_id === null ||
-      row.physical_object_key === null
+      !inline &&
+      (row.blob_sha256 === null ||
+        row.blob_size === null ||
+        row.incarnation_id === null ||
+        row.physical_object_key === null)
     )
       throw new Error("PTC journal 回执缺少 stable trace 身份");
     result = Object.freeze({
       body: Object.freeze(row.result_body),
       isTruncated: row.is_truncated,
       completedAt: row.completed_at.toISOString(),
-      blob: Object.freeze({
-        referenceId: row.blob_reference_id,
-        sha256: sha256Digest(row.blob_sha256),
-        size: Number(row.blob_size),
-        kind: "stable",
-        purpose: "trace",
-        incarnationId: row.incarnation_id,
-        physicalObjectKey: row.physical_object_key,
-      }),
+      ...(inline
+        ? {}
+        : {
+            blob: Object.freeze({
+              referenceId: row.blob_reference_id as string,
+              sha256: sha256Digest(row.blob_sha256 as string),
+              size: Number(row.blob_size),
+              kind: "stable" as const,
+              purpose: "trace" as const,
+              incarnationId: row.incarnation_id as string,
+              physicalObjectKey: row.physical_object_key as string,
+            }),
+          }),
     });
   }
   return Object.freeze({
@@ -903,10 +924,9 @@ export class PgRuntimeRolloutRepository {
       toolCallId: input.toolCallId,
       body: input.body,
       isTruncated: input.isTruncated,
-      blob: input.blob,
+      ...(input.blob === undefined ? {} : { blob: input.blob }),
     });
     const blob = draft.blob;
-    if (blob === undefined) throw new TypeError("PTC 回执必须引用 stable trace Blob");
     const receipt = assertPtcReceipt(draft.body, blob, input.isTruncated);
     const commandDigest = digestCanonical({
       schemaVersion: 1,
@@ -914,7 +934,7 @@ export class PgRuntimeRolloutRepository {
       parentToolCallId: input.parentToolCallId,
       body: draft.body,
       isTruncated: draft.isTruncated,
-      blob,
+      ...(blob === undefined ? {} : { blob }),
     });
     try {
       return await withTenantTransaction(
@@ -954,11 +974,14 @@ export class PgRuntimeRolloutRepository {
             [...scopeParams(input.context), input.idempotencyKey],
           );
           if (key.rowCount !== 0) return { outcome: "conflict" };
-          // FK 在提交时重新约束 stable/trace 引用，不能只信任上传端口返回的身份。
+          // FK 在提交时重新约束 stable/trace 引用，不能只信任上传端口返回的身份；
+          // 内联回执的 Blob 列整体为 NULL，由数据库 CHECK 约束 schemaVersion 3 的固定形状。
           await client.query(
             `UPDATE runtime_ptc_dispatches SET result_idempotency_key=$7,result_digest=$8,
-              result_body=$9::jsonb,is_truncated=$10,blob_reference_id=$11,blob_state='stable',
-              blob_purpose='trace',blob_sha256=$12,blob_size=$13,completed_at=clock_timestamp()
+              result_body=$9::jsonb,is_truncated=$10,blob_reference_id=$11::text,
+              blob_state=CASE WHEN $11::text IS NULL THEN NULL ELSE 'stable' END,
+              blob_purpose=CASE WHEN $11::text IS NULL THEN NULL ELSE 'trace' END,
+              blob_sha256=$12,blob_size=$13,completed_at=clock_timestamp()
              WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 AND attempt_id=$4 AND agent_thread_id=$5
                AND tool_call_id=$6 AND result_digest IS NULL`,
             [
@@ -968,9 +991,9 @@ export class PgRuntimeRolloutRepository {
               commandDigest,
               JSON.stringify(draft.body),
               draft.isTruncated,
-              blob.referenceId,
-              blob.sha256,
-              blob.size,
+              blob?.referenceId ?? null,
+              blob?.sha256 ?? null,
+              blob?.size ?? null,
             ],
           );
           return { outcome: "created", value: undefined };

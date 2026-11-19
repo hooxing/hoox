@@ -1,4 +1,4 @@
-import type { AuthContextResolver } from "@hoox/api";
+import type { AuthContextResolver } from "@hoox/identity/auth";
 import { userId } from "@hoox/domain";
 import { describe, expect, it, vi } from "vitest";
 import { type AdminControlApiDependencies, createAdminControlApiApp } from "./app.js";

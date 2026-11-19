@@ -8,7 +8,7 @@ import {
   type ModelProviderConfiguration,
   type SandboxControlServicePort,
 } from "@hoox/admin-control";
-import type { AuthContextResolver } from "@hoox/api";
+import type { AuthContextResolver } from "@hoox/identity/auth";
 import {
   AdminControlOverviewSuccessEnvelopeSchema,
   ControlAuditListSuccessEnvelopeSchema,

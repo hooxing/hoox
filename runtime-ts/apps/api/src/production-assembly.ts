@@ -26,8 +26,8 @@ import { createEmbeddedIdentityAuthService } from "./embedded-identity-auth.js";
 import { createLocalAccountAuthService } from "./local-account-auth.js";
 import type { AuthContextResolver } from "./ports.js";
 import type { ApiProcessConfiguration } from "./process-entry.js";
-import { createProductionJwtAuthResolver } from "./production-auth.js";
-import { loadProductionTlsCredentials, productionTrustProxy } from "./production-transport.js";
+import { createProductionJwtAuthResolver } from "@hoox/identity/auth";
+import { loadProductionTlsCredentials, productionTrustProxy } from "@hoox/process-runtime";
 
 const cursorTtlMilliseconds = 15 * 60_000;
 const cursorMaximumTtlMilliseconds = 60 * 60_000;

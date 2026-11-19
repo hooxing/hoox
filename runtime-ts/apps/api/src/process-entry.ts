@@ -27,12 +27,9 @@ import {
 import {
   parseProductionJwtSigningKeys,
   type ProductionJwtVerificationKey,
-} from "./production-auth.js";
+} from "@hoox/identity/auth";
 import { startProductionApiProcess } from "./production-assembly.js";
-import {
-  parseProductionApiTransport,
-  type ProductionApiTransport,
-} from "./production-transport.js";
+import { parseProductionApiTransport, type ProductionApiTransport } from "@hoox/process-runtime";
 
 const optionalEnvironments = [] as const;
 const developmentAndTestEnvironments = ["development", "test"] as const;

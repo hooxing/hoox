@@ -1,6 +1,6 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type { RuntimeAgentEvent, ToolPresentation } from "@hoox/run-contracts/runtime-agent-event";
-import { projectToolFailure } from "./tool-failure.js";
+import { projectToolFailure } from "@hoox/tool-router";
 
 // 事件协议定义位于 run-contracts；重导出以保持 @hoox/pi-adapter 的既有公开面。
 export type { RuntimeAgentEvent, ToolPresentation } from "@hoox/run-contracts/runtime-agent-event";

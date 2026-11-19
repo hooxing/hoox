@@ -13,7 +13,10 @@ import {
   type ResourceVersionId,
   type Sha256Digest,
 } from "@hoox/domain";
-import { type DeliverFileToolArguments, DeliverFileToolArgumentsSchema } from "@hoox/pi-adapter";
+import {
+  type DeliverFileToolArguments,
+  DeliverFileToolArgumentsSchema,
+} from "./deliver-file-tool.js";
 import type { ExecutionScope, ExternalEffectCall, SandboxSessionRef } from "@hoox/run-contracts";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import { workspaceRelativePath } from "@hoox/workspace";

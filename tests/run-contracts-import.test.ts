@@ -41,7 +41,7 @@ describe("Run 契约的历史入口", () => {
     ).toThrow("Thread Active History 顺序无效");
   });
 
-  it("独立进程导入公开契约不会加载 Pi 会话、模型或 Provider SDK", () => {
+  it("独立进程导入公开契约不会加载 Pi 适配器、Sandbox Provider 或模型 SDK", () => {
     // 仅为 Workspace 启用 types 条件并运行当前源码，避免旧 dist 和第三方声明文件干扰。
     const output = execFileSync(
       process.execPath,
@@ -68,6 +68,9 @@ describe("Run 契约的历史入口", () => {
               if (
                 specifier.startsWith("@earendil-works/") ||
                 specifier.startsWith("@huggingface/") ||
+                specifier.startsWith("@cubesandbox/") ||
+                specifier === "e2b" ||
+                path.includes("/sandbox/src/") ||
                 (path.includes("/pi-adapter/src/") && !path.endsWith("/thread-history.ts"))
               ) {
                 throw new Error("禁止加载模型运行时: " + specifier);
@@ -78,6 +81,9 @@ describe("Run 契约的历史入口", () => {
           });
 
           const contracts = await import("@hoox/run-contracts");
+          // run-contracts 自身不得触达 pi-adapter；兼容入口只在显式导入时加载。
+          assert(![...loaded].some(path => path.includes("/pi-adapter/")));
+          assert([...loaded].some(path => path.endsWith("/run-contracts/src/thread-history.ts")));
           const history = await import("@hoox/pi-adapter/thread-history");
           assert.equal(contracts.assertThreadActiveHistory, history.assertThreadActiveHistory);
           assert.equal(contracts.threadActiveHistoryDigest, history.threadActiveHistoryDigest);
@@ -86,6 +92,7 @@ describe("Run 契约的历史入口", () => {
 
           // 负对照必须实际被拦截，证明隔离进程中的模块守卫确实生效。
           await assert.rejects(import("@hoox/pi-adapter"), /禁止加载模型运行时/u);
+          await assert.rejects(import("@hoox/sandbox"), /禁止加载模型运行时/u);
           await assert.rejects(import("@earendil-works/pi-ai"), /禁止加载模型运行时/u);
           process.stdout.write("ok");
         `,

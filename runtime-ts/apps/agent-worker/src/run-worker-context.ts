@@ -12,6 +12,7 @@ import type { DurableOperationLane } from "./durable-operation-lane.js";
 import type {
   ExecutionAttemptStatus,
   ExecutionFence,
+  ExecutionPersistencePort,
   ExecutionScope,
   ExecutionStage,
   RuntimeMutationResult,
@@ -68,3 +69,39 @@ export type AppliedMutation = Extract<
   RuntimeMutationResult,
   { outcome: "applied" | "already_applied" }
 >;
+
+export type ClaimedExecution = Extract<
+  Awaited<ReturnType<ExecutionPersistencePort["claim"]>>,
+  { readonly outcome: "claimed" }
+>;
+
+/** 由已通过作用域校验的 claim 快照建立本次执行的初始可变上下文。 */
+export function createExecutionContext(
+  scope: ExecutionScope,
+  claim: ClaimedExecution,
+  durableLane: DurableOperationLane,
+): ExecutionContext {
+  return {
+    scope,
+    fence: claim.fence,
+    attemptVersion: claim.snapshot.attempt.version,
+    nextEventSequence: claim.snapshot.attempt.nextEventSequence,
+    databaseNow: claim.databaseNow,
+    attemptId: claim.snapshot.attempt.attemptId,
+    run: claim.snapshot.run,
+    workspace: claim.snapshot.workspace,
+    ...(claim.snapshot.attempt.currentRevisionId === undefined
+      ? {}
+      : { currentRevisionId: claim.snapshot.attempt.currentRevisionId }),
+    actualCommittedStage: claim.snapshot.attempt.stage,
+    actualAttemptStatus: claim.snapshot.attempt.status,
+    projectionVersion: claim.snapshot.attempt.projectionVersion,
+    durableLane,
+    toolStartedGates: new Map(),
+    cleanupFacts: new Map(),
+    modelCompleted: false,
+    eventAcceptanceOpen: true,
+    adapterRejected: false,
+    contextTurnOrdinal: 0,
+  };
+}

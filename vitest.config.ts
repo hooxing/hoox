@@ -23,6 +23,18 @@ export default defineConfig({
       "@hoox/context-policy": fileURLToPath(
         new URL("./runtime-ts/packages/context-policy/src/index.ts", import.meta.url),
       ),
+      "@hoox/run-contracts/rollout-projection": fileURLToPath(
+        new URL("./runtime-ts/packages/run-contracts/src/rollout-projection.ts", import.meta.url),
+      ),
+      "@hoox/run-contracts/runtime-agent-event": fileURLToPath(
+        new URL("./runtime-ts/packages/run-contracts/src/runtime-agent-event.ts", import.meta.url),
+      ),
+      "@hoox/run-contracts/sandbox-port": fileURLToPath(
+        new URL("./runtime-ts/packages/run-contracts/src/sandbox-port.ts", import.meta.url),
+      ),
+      "@hoox/run-contracts/thread-history": fileURLToPath(
+        new URL("./runtime-ts/packages/run-contracts/src/thread-history.ts", import.meta.url),
+      ),
       "@hoox/run-contracts/mutation-protocol": fileURLToPath(
         new URL("./runtime-ts/packages/run-contracts/src/mutation-protocol.ts", import.meta.url),
       ),

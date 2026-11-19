@@ -17,11 +17,12 @@ import type {
   WorkspaceId,
   WorkspaceRevisionId,
 } from "@hoox/domain";
-import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@hoox/pi-adapter";
-import type { ThreadActiveHistoryV1 } from "@hoox/pi-adapter/thread-history";
-import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "@hoox/sandbox";
 import type { RunSkillSnapshot } from "@hoox/skill";
 import type { WorkspaceManifest } from "@hoox/workspace";
+import type { ControlledRolloutProjection } from "./rollout-projection.js";
+import type { RuntimeAgentEvent } from "./runtime-agent-event.js";
+import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "./sandbox-port.js";
+import type { ThreadActiveHistoryV1 } from "./thread-history.js";
 
 export interface ExecutionScope {
   readonly tenantId: TenantId;

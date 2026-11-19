@@ -27,6 +27,7 @@
     "@hoox/domain": "workspace:*",
     "@hoox/prompt-builder": "workspace:*",
     "@hoox/protocol": "workspace:*",
+    "@hoox/run-contracts": "workspace:*",
     "@hoox/sandbox": "workspace:*",
     "@hoox/vendor-deepseek-v4-tokenizer": "workspace:*",
     "@huggingface/tokenizers": "0.1.3",

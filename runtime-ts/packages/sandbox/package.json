@@ -20,9 +20,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@hoox/domain": "workspace:*",
-    "@hoox/workspace": "workspace:*",
     "@cubesandbox/sdk": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/run-contracts": "workspace:*",
+    "@hoox/workspace": "workspace:*",
     "e2b": "2.39.0"
   }
 }

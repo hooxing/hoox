@@ -913,6 +913,7 @@ export class RunWorker {
           // 历史修正轮次已移除，`:0` 只为保持 Workspace journal 操作键稳定。
           operationKey: `${context.attemptId}:workspace:publish:0`,
           signal: run.executionAbort.signal,
+          ...(context.phaseTiming === undefined ? {} : { phaseTiming: context.phaseTiming }),
         }),
       );
     } catch (error) {

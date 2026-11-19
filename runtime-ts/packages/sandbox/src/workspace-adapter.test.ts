@@ -270,7 +270,34 @@ describe("CubeSandbox Workspace 适配器契约", () => {
       result: "known",
       dependencyCode: "PATH_LIMIT_EXCEEDED",
     });
-    expect(fake.operations).toEqual(["probe", "stat"]);
+    expect(fake.operations).toEqual([]);
+  });
+
+  it("打开适配器不发远端命令；只读快照不探测，首次写入前只探测一次", async () => {
+    const fake = fakeWorkspaceSandbox({ "a.txt": "hello" });
+    const adapter = await open(fake);
+    expect(fake.operations).toEqual([]);
+    await adapter.captureSnapshot({ operationKey: "read-only", scope: SCOPE });
+    expect(fake.operations).toEqual(["snapshot"]);
+    await adapter.ensureDirectory(IDENTITY, "dir");
+    await adapter.removeFile(IDENTITY, "a.txt");
+    expect(fake.operations).toEqual(["snapshot", "probe", "ensure_directory", "remove_file"]);
+  });
+
+  it("模板不支持 openat2 时写入在任何副作用前以已知错误拒绝", async () => {
+    const fake = fakeWorkspaceSandbox({});
+    fake.probeExitCode = 1;
+    const adapter = await open(fake);
+    await expect(
+      adapter.writeFileAtomically({
+        sandbox: IDENTITY,
+        relativePath: "a.txt",
+        operationKey: "write-unsupported",
+        body: bytes("hello"),
+      }),
+    ).rejects.toMatchObject({ result: "known", dependencyCode: "OPENAT2_UNAVAILABLE" });
+    expect(fake.temporaryFiles.size).toBe(0);
+    expect(fake.operations).toEqual(["probe"]);
   });
 
   it("capability 不响应 Abort 时仍受硬超时约束", async () => {
@@ -435,6 +462,7 @@ function fakeWorkspaceSandbox(initial: Record<string, string>) {
     temporaryFiles,
     beforeScan: undefined as (() => Promise<void>) | undefined,
     snapshotExitCode: 0,
+    probeExitCode: 0,
     finalizeExitCode: 0,
     forceEmptyMutationAck: false,
     lastScript: "",
@@ -447,6 +475,11 @@ function fakeWorkspaceSandbox(initial: Record<string, string>) {
         const env = commandOptions?.envs ?? {};
         const operation = env.CUBE_WS_OP ?? "";
         operations.push(operation);
+        if (operation === "probe") {
+          return state.probeExitCode === 0
+            ? { stdout: "OK\n", stderr: "", exitCode: 0 }
+            : { stdout: "", stderr: "", exitCode: state.probeExitCode };
+        }
         if (operation === "snapshot") {
           await state.beforeScan?.();
           const excludedDirectories = new Set(

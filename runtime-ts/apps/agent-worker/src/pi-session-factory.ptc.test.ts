@@ -24,7 +24,6 @@ import {
 } from "./pi-session-factory.js";
 import { RunWorker } from "./run-worker.js";
 import {
-  FakeArtifactPublication,
   FakeCancellationPort,
   FakeClock,
   FakeExecutionPersistence,
@@ -209,7 +208,6 @@ async function fixture(
       orphanSandboxes: sandboxes,
       sessions,
       cancellation,
-      artifacts: new FakeArtifactPublication(),
       clock: new FakeClock(),
       metrics: new FakeRecoveryMetrics(),
     },

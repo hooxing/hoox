@@ -43,7 +43,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
 import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
 import {
-  FakeArtifactPublication,
   FakeCancellationPort,
   FakeClock,
   FakeRecoveryMetrics,
@@ -4013,7 +4012,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           orphanSandboxes: registeredSandboxes,
           sessions,
           cancellation: new FakeCancellationPort(),
-          artifacts: new FakeArtifactPublication(),
           clock: new FakeClock(),
           metrics: new FakeRecoveryMetrics(),
         },

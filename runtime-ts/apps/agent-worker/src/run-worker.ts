@@ -19,7 +19,6 @@ import type {
   AgentControlPersistencePort,
   AgentUserInput,
   AgentSessionFactoryPort,
-  ArtifactPublicationPort,
   CancellationPort,
   ClaimedExecutionSnapshot,
   ClockPort,
@@ -107,10 +106,6 @@ export interface RunWorkerOptions {
   readonly heartbeatMs?: number;
   readonly runTimeoutMs?: number;
   readonly externalEffectPermitMs?: number;
-  /** TODO(codex-alignment): 旧调用方兼容字段，简化交付协议稳定后删除。 */
-  readonly maxArtifactCorrectionRounds?: number;
-  /** TODO(codex-alignment): 旧调用方兼容字段，简化交付协议稳定后删除。 */
-  readonly artifactCorrectionPromptBudgetBytes?: number;
   readonly threadContextWriteEnabled?: boolean;
   readonly threadInputRoutingV2Enabled?: boolean;
   readonly threadSandboxSessionReuseEnabled?: boolean;
@@ -161,8 +156,6 @@ interface WorkerDependencies {
   readonly cancellation: CancellationPort;
   /** 进程停机只中止当前执行，不代表用户取消 Run。 */
   readonly shutdownSignal?: AbortSignal;
-  /** TODO(codex-alignment): 旧装配 ABI；新 Run 完成流程不再读取该门。 */
-  readonly artifacts: ArtifactPublicationPort;
   readonly clock: ClockPort;
   readonly metrics: RecoveryMetricsPort;
   readonly threadContextBodies?: ThreadContextBodyPersistencePort;

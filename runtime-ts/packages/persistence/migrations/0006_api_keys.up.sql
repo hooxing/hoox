@@ -40,14 +40,19 @@ BEGIN
   END IF;
 
   -- Runtime 只能将集成身份的 active Membership 转为 revoked；已 revoked 行不再可更新。
+  -- PostgreSQL 对 SELECT ... FOR SHARE/UPDATE 同样施加 UPDATE 策略的 USING，因此 USING
+  -- 只限定 active 行：人类成员的授权加锁与 lock_marker 自更新必须继续命中。状态迁移约束
+  -- 放在 WITH CHECK：新行要么仍为 active，要么是集成身份的 revoked。列级 ACL 只开放
+  -- status 与 lock_marker，user_id 不可改，因此人类成员不能被吊销；revoked 行不满足 USING，
+  -- Runtime 既不能重新激活它，也不能再锁定或更新它。
   EXECUTE format(
     'CREATE POLICY api_key_integration_membership_revoke ON memberships AS RESTRICTIVE FOR UPDATE TO %I
        USING (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')
-         AND status = ''active''
-         AND EXISTS (SELECT 1 FROM app_users WHERE app_users.id = memberships.user_id AND app_users.kind = ''integration''))
+         AND status = ''active'')
        WITH CHECK (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')
-         AND status = ''revoked''
-         AND EXISTS (SELECT 1 FROM app_users WHERE app_users.id = memberships.user_id AND app_users.kind = ''integration''))',
+         AND (status = ''active''
+           OR (status = ''revoked''
+             AND EXISTS (SELECT 1 FROM app_users WHERE app_users.id = memberships.user_id AND app_users.kind = ''integration''))))',
     runtime_role
   );
   -- revoked_at IS NULL 排除已吊销行；列级 ACL 再限制可更新列。

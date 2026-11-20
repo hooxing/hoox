@@ -201,8 +201,13 @@ describe("API Key Runtime ACL 存在性门控", () => {
     expect(migration).toMatch(
       /CREATE POLICY api_key_integration_membership_revoke ON memberships AS RESTRICTIVE FOR UPDATE TO %I/u,
     );
+    // USING 不得引用集成身份：FOR SHARE/UPDATE 会施加 UPDATE 策略的 USING，
+    // 人类成员的授权加锁必须继续命中；集成身份约束只出现在 WITH CHECK 中。
     expect(migration).toMatch(
-      /status = ''active''[\s\S]*kind = ''integration''[\s\S]*status = ''revoked''/u,
+      /USING \(tenant_id = [^\n]*\n\s*AND status = ''active''\)\s*WITH CHECK/u,
+    );
+    expect(migration).toMatch(
+      /WITH CHECK[\s\S]*status = ''revoked''[\s\S]*kind = ''integration''/u,
     );
     expect(migration).toMatch(
       /CREATE POLICY api_key_revocation_guard ON api_keys AS RESTRICTIVE FOR UPDATE TO %I/u,

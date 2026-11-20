@@ -1,6 +1,6 @@
 # 可定制 Agent 平台规范
 
-- 状态：草案
+- 状态：已确认（2026-11-19 维护者确认第 12 节决定）
 - 创建日期：2026-11-19
 - 适用范围：`runtime-ts/packages/domain`、`persistence`、`protocol`、`run-contracts`、`prompt-builder`、`pi-adapter`、`tool-router`、`skill`、`identity`、`admin-control`、`trajectory`，以及 `runtime-ts/apps/api`、`agent-worker`、`scheduler`、`admin-control-api`、`admin-web`、`web`
 - 目标读者：参与把 Hoox 演进为“可定制云端 Agent 平台”的开发者、维护者和协作智能体
@@ -84,7 +84,7 @@ AgentRevision 发布后不可原地修改。修改即创建新的草稿 Revision
 
 ### 4.4 所有权与可用范围
 
-首个版本中，AgentDefinition 归平台所有，由具有 Agent 管理角色的管理员创建和发布，模式与 Skill 中心一致。每个 AgentDefinition 声明可用范围：全部 Tenant，或指定的个人/团队 Tenant。Tenant 自己拥有和发布 Agent 不在首个版本范围内（见[第 12 节](#12-待决问题)）。
+AgentDefinition 只归平台所有，由具有 Agent 管理角色的管理员创建和发布，模式与 Skill 中心一致。每个 AgentDefinition 声明可用范围：全部 Tenant，或指定的个人/团队 Tenant。个人和团队（包括团队 Owner/Admin）只有使用权，**不能创建、编辑或发布 AgentDefinition**；这是产品边界，不是首版暂缓的功能。
 
 安装初始化和迁移必须创建一个内置的**默认 Agent**，其指令、工具和模型设置与当前行为等价。已有 Thread 绑定到默认 Agent。默认 Agent 可以编辑，但不能删除。
 
@@ -163,7 +163,13 @@ AgentRevision 发布后不可原地修改。修改即创建新的草稿 Revision
 
 ### 8.2 终端用户映射
 
-业务方的终端用户不一定是 Hoox 账号。公开 API 允许 API Key 携带业务方的终端用户 ID，由 Hoox 映射到内部 User 并按需创建。目标是让不同终端用户的 Thread、Workspace、记忆默认相互隔离。具体映射模型是待决问题，见[第 12 节](#12-待决问题)。
+业务方的终端用户不一定是 Hoox 账号。映射模型如下：
+
+- 每个接入的业务方应用在 Hoox 中有一个集成身份，持有 API Key。
+- 请求携带业务方的终端用户 ID；Hoox 在该集成身份的命名空间内把它映射为一个内部 User，首次出现时创建，并为其创建个人空间。同一集成身份下同一终端用户 ID 的映射幂等。
+- 不同终端用户的 Thread、Workspace、记忆默认相互隔离，由现有 Membership 与 RLS 保证。
+- 业务方的组织可以映射为团队空间，终端用户按业务方声明加入，团队内共享遵循现有[团队协作](../architecture/team-collaboration.md)边界。
+- 终端用户映射出的内部 User 不能登录 Hoox 工作台，除非业务方另行绑定登录身份。
 
 ### 8.3 公开 API
 
@@ -214,17 +220,19 @@ AgentRevision 发布后不可原地修改。修改即创建新的草稿 Revision
 - 文档按开发者旅程组织：快速开始（构建你的第一个 Agent）→ 概念（AgentDefinition、工具、Skill、Thread、Run、Artifact）→ 指南（编写指令、接入 MCP/HTTP 工具、发布 Skill、测试与评测、观测、通过 API 嵌入产品）→ 参考（公开 API、Agent 配置格式）。现有架构文档继续面向贡献者。
 - 只把已经实现并验证的能力写成现在时；尚未实现的能力只能出现在路线图中，并标明阶段。“生产就绪”的表述限制继续遵守[首次公开发布检查清单](../maintainers/open-source-release-checklist.md#对外表述)。
 
-## 12. 待决问题
+## 12. 已确认的决定
 
-以下问题在对应工作包开工前必须由维护者确定，并把结论写回本文：
+以下决定已由维护者确认，实施时不得偏离；需要改变时先修订本文：
 
-| 问题 | 建议 | 影响的工作包 |
+| 问题 | 决定 | 影响的工作包 |
 | --- | --- | --- |
-| AgentDefinition 归平台还是归 Tenant | 首版归平台，Tenant 只获得使用范围；之后再评估 Tenant 自建 | A1、A4 |
-| 终端用户映射模型 | 每个“业务方应用”对应一个 Tenant 下的集成身份，终端用户 ID 映射为内部 User，默认每人一个个人空间；业务方的组织映射为团队空间 | C3 |
-| Thread 是否锁定 Revision | 不锁定，每个 Run 使用当时已发布的 Revision | A3 |
+| AgentDefinition 归属 | 只归平台，由管理员创建和发布；个人和团队只有使用权，永远不能创建或发布 Agent（见 4.4） | A1、A4 |
+| 终端用户映射模型 | 集成身份持有 API Key，终端用户 ID 映射为内部 User 并各有个人空间；业务方组织可映射为团队空间（见 8.2） | C3 |
+| Thread 是否锁定 Revision | 不锁定，每个 Run 使用当时已发布的 Revision（见 4.5） | A3 |
 | Agent 配置文件格式 | YAML，顶层 `schemaVersion: 1`，凭据只写引用 | E1 |
 | 成本单价来源 | 模型配置中增加可选的输入、输出、缓存单价 | D3 |
+
+新的待决问题出现时，在本节下增加“待决问题”表格，并在对应工作包开工前确定。
 
 ## 13. 验收门槛
 

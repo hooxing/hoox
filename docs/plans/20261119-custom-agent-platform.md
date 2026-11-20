@@ -1,6 +1,6 @@
 # 可定制 Agent 平台实施计划
 
-- 状态：草案
+- 状态：进行中
 - 创建日期：2026-11-19
 - 适用范围：见[可定制 Agent 平台规范](../specs/custom-agent-platform.md)，并包含开源首发与对外表述相关的仓库、文档和 Landing 工作
 - 目标读者：领取工作包的开发者与协作智能体、负责排期和合并的维护者
@@ -10,7 +10,7 @@
 
 本文只规定**做什么、按什么顺序、哪些可以并行、谁拥有哪些文件**。各能力必须满足的行为和约束以[规范](../specs/custom-agent-platform.md)为准；本文与规范冲突时以规范为准，并先修订本文。
 
-维护者确认[规范第 12 节](../specs/custom-agent-platform.md#12-待决问题)中与第一波相关的问题后，本文状态改为“进行中”。工作包的完成情况在第 6 节的表格中维护。全部里程碑完成、当前说明已更新后，本文标为“已完成”并删除。
+[规范第 12 节](../specs/custom-agent-platform.md#12-已确认的决定)的决定已于 2026-11-19 确认，本文进入“进行中”。工作包的完成情况在第 6 节的表格中维护。全部里程碑完成、当前说明已更新后，本文标为“已完成”并删除。
 
 ## 2. 目标结果
 
@@ -24,7 +24,7 @@
 ## 3. 不做事项
 
 - 不做多组织 SaaS 计费与自助开通；部署形态仍是“一家机构自托管一套 Hoox，在其中建多个 Agent”。
-- 首版不允许 Tenant 自己创建和发布 AgentDefinition。
+- 不允许个人或团队创建、编辑、发布 AgentDefinition；他们只有使用权。
 - 不在 Agent Worker 宿主拉起 stdio MCP Server。
 - 不做跨供应商的模型或 Sandbox 自动故障转移。
 - 不为未发布的能力写对外宣传文案。
@@ -59,7 +59,7 @@
 | --- | --- | --- | --- | --- |
 | C1 | API Key：创建、作用域、到期、轮换、吊销、哈希存储、使用审计；API 认证中间件 | `identity`、`persistence`、`api` 认证层、`web` 中的 Key 管理页 | 无，可在第一波开工 | 明文只显示一次；吊销立即生效；RLS 不被绕过 |
 | C2 | 公开 API v1：稳定化 Agent、Thread、Run、文件、事件、Artifact、取消接口；从 `protocol` 生成 OpenAPI；区分公开与内部接口 | `protocol`、`api`、新的 `docs/reference/public-api.md` | C1、A5 | 契约测试；OpenAPI 生成结果入库并有一致性检查 |
-| C3 | 终端用户映射：业务方终端用户 ID 映射到内部 User 与空间 | `identity`、`persistence`、`api` | C1；需要先确定规范第 12 节的映射模型 | 不同终端用户互相不可见；重复映射幂等 |
+| C3 | 终端用户映射：业务方终端用户 ID 映射到内部 User 与空间 | `identity`、`persistence`、`api` | C1 | 不同终端用户互相不可见；重复映射幂等 |
 | C4 | 客户端工具：AgentRevision 声明、`requires_action` 事件、结果提交接口、超时回执 | `run-contracts`、`agent-worker`、`api`、`tool-router` | A3、C2 | 重复提交幂等、超时、Run 取消时的行为测试 |
 | C5 | Webhook：注册、事件订阅、Outbox 投递、签名、退避重试、自动停用 | `persistence`、`scheduler`（或独立投递进程）、`api`、`web` 管理页 | C1；事件类型与 C4 的 `requires_action` 对齐 | 至少一次投递、签名校验、停用测试 |
 | C6 | TypeScript SDK：类型、SSE 续连、客户端工具回传辅助、示例项目 | 新包，例如 `runtime-ts/packages/sdk` | C2；客户端工具部分依赖 C4 | 针对本地 API 的集成测试 |
@@ -182,7 +182,7 @@ WP 合并后，负责人在本表或对应轨道的表格中把状态更新为�
 3. 遇到规范没有覆盖、且影响架构边界的选择时，先在规范中补充结论（单独 PR 或同一 PR 的独立提交），不得只在代码中留下结论。
 4. 遵守仓库根 [`AGENTS.md`](../../AGENTS.md)：中文文档、注释与提交信息；行为改动必须带测试；system prompt 与工具 Schema 不注入请求级数据；不绕过 `tool-router`。
 5. 实现完成时，把稳定约束写入 `docs/architecture` 中对应的现状文档，把接口写入 `docs/reference`。不得让读者通过本计划拼装现状。
-6. 规范第 12 节中与本 WP 相关的待决问题未确定时，不得开工，应先向维护者提出。
+6. 遇到规范第 12 节之外、会影响本 WP 的新待决问题时，先向维护者提出并写入规范，确定后再继续。
 
 ## 8. 失败语义与回滚
 

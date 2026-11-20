@@ -36,6 +36,7 @@ export function registerArtifactRoutes(
             200: ArtifactListSuccessEnvelopeSchema,
             400: ErrorEnvelopeSchema,
             401: ErrorEnvelopeSchema,
+            403: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             500: ErrorEnvelopeSchema,
             503: ErrorEnvelopeSchema,
@@ -43,7 +44,7 @@ export function registerArtifactRoutes(
         },
       },
       async (request) => {
-        const auth = await authenticate(request);
+        const auth = await authenticate(request, "runs:read");
         const run = await service.getRun(auth, request.params.threadId, request.params.runId);
         const read = await dependencies.experience?.listArtifacts({
           scope: auth.scope,
@@ -74,7 +75,7 @@ export function registerArtifactRoutes(
       "/v1/threads/:threadId/runs/:runId/artifacts/:artifactId/content",
       { schema: { params: RunArtifactPathSchema } },
       async (request, reply) => {
-        const auth = await authenticate(request);
+        const auth = await authenticate(request, "runs:read");
         await service.getRun(auth, request.params.threadId, request.params.runId);
         const lookup = {
           scope: auth.scope,
@@ -122,6 +123,7 @@ export function registerArtifactRoutes(
         200: ArtifactDeliverySuccessEnvelopeSchema,
         400: ErrorEnvelopeSchema,
         401: ErrorEnvelopeSchema,
+        403: ErrorEnvelopeSchema,
         404: ErrorEnvelopeSchema,
         422: ErrorEnvelopeSchema,
         500: ErrorEnvelopeSchema,
@@ -139,7 +141,7 @@ export function registerArtifactRoutes(
           void reply.header("cache-control", "no-store");
           void reply.header("pragma", "no-cache");
           void reply.header("x-content-type-options", "nosniff");
-          const auth = await authenticate(request);
+          const auth = await authenticate(request, "runs:read");
           const run = await service.getRun(auth, request.params.threadId, request.params.runId);
           const artifact = await dependencies.experience?.getArtifact({
             scope: auth.scope,

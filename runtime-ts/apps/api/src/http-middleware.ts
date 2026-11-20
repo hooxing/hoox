@@ -76,6 +76,7 @@ export function registerHttpMiddleware(app: FastifyInstance): void {
 const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
   bad_request: 400,
   unauthorized: 401,
+  forbidden: 403,
   not_found: 404,
   conflict: 409,
   invalid_state: 422,

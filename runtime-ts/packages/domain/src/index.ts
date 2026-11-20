@@ -12,3 +12,5 @@ export * from "./sandbox.js";
 export * from "./todo.js";
 export * from "./workspace-commit-port.js";
 export * from "./api-key.js";
+export * from "./external-tool.js";
+export * from "./agent-definition.js";

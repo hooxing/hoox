@@ -109,6 +109,20 @@ Attempt 下拉框支持切换单次 Attempt，默认组合各 Run 的最新 Atte
 
 “模型流生成”为 assistant `message_start` 到 `message_end` 的累计时间；“模型等待”为各轮 `turn_start` 到首个 assistant `message_start` 的已采集等待，包含请求准备及首响应等待，不是精确 HTTP TTFT。完全缺少等待边界时显示空值。轨迹跨度来自内部事件的单调时钟范围，不能当作服务端完整 Run 总耗时。只有旧版 Runtime 镜像时才使用文件 mtime 做近似定位。
 
+## 与后台运行记录的关系
+
+管理 Web 的“运行记录”页是面向平台管理员的产品入口，内部轨迹查看器是面向维护者的诊断工具，两者共用 `@hoox/trajectory` 的事件投影，但数据来源和授权不同：
+
+| | 后台运行记录 | 内部轨迹查看器 |
+| --- | --- | --- |
+| 数据来源 | PostgreSQL `runs`、`execution_attempts`、`run_events` 与模型用量账本，经 Admin Control 受限视图读取 | 本地 `model-wire-traces` 镜像目录 |
+| 可用环境 | 所有部署 | development 与受控 Demo |
+| 默认内容 | 结构与指标，不含正文 | 思考、回复、工具生命周期与 request 原文 |
+| 正文 | 需要 `run_content.read`（当前仅 `admin`），每次打开写入审计 | 由回环绑定或 Demo 管理员会话网关保护，不写访问审计 |
+| 模型报文 | 不提供 | 提供 request 原文、阶段计时与 Session log 下载 |
+
+排查某个 Run 时先在运行记录页定位 Tenant、Attempt、失败工具与错误码；需要逐字节 request、内部阶段计时或 Session log 时再使用内部轨迹查看器。运行记录页不读取本地镜像，也不依赖 `MODEL_WIRE_TRACE_ENABLED`。权限与审计边界见[后台控制面与运行配置](../architecture/admin-control-plane.md#run-浏览器与正文访问)。
+
 ## 安全约束
 
 - 查看器只允许绑定本机回环地址。除 `deploy/demo` 明确实现的同源管理员会话网关外，不得代理或转发到远程网络。

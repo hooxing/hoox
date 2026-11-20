@@ -98,3 +98,8 @@ Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回
 - 新的外部调用必须定义 UNKNOWN 语义和对账入口，不能用普通重试猜测远端结果。
 - 新的重试必须证明重放的是同一冻结命令，并给出耗尽后的 `recovery_required` 行为。
 - 修改 Attempt 状态机或恢复入口时，同步验证 `tests/integration/postgres-run-worker.integration.test.ts` 等真实 PostgreSQL 黑盒。
+
+
+## 外部工具结果未知
+
+外部工具请求写出后发生超时、断连或进程中断时，结果属于 UNKNOWN，Attempt 进入恢复且普通 Worker 再投递不得重放。只有独立显式对账入口核对持久化的工具版本、canonical 参数摘要与原幂等键完全一致后，才可授权声明幂等工具复用同一幂等键重试；Transport 自身不得重放。外部工具版本与凭据读取必须受 Run 快照限定，接入 Agent 快照前 Worker 不获得相应数据库读取授权。

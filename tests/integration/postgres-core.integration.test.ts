@@ -562,9 +562,11 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       "SELECT id,current_revision_id FROM agent_definitions WHERE id='agent_default'",
     );
     expect(defaultAgent.rowCount).toBe(1);
-    const thread = await runtimePool.query(
-      "SELECT agent_definition_id FROM threads WHERE tenant_id=$1 AND id=$2",
-      [manager.tenant.id, manager.thread.id],
+    const thread = await withTenantTransaction(runtimePool, manager.scope, (client) =>
+      client.query("SELECT agent_definition_id FROM threads WHERE tenant_id=$1 AND id=$2", [
+        manager.tenant.id,
+        manager.thread.id,
+      ]),
     );
     expect(thread.rows[0]?.agent_definition_id).toBe("agent_default");
     await expect(

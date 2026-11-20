@@ -211,6 +211,7 @@ describe("Skill Runtime", () => {
   it("Run 快照摘要由目录与显式参数确定，篡改后拒绝进入 Session", () => {
     const items = [
       {
+        source: "tenant" as const,
         invocationName: "review",
         canonicalKey: "code-review",
         skillVersion: "1.2.3",
@@ -227,7 +228,27 @@ describe("Skill Runtime", () => {
       explicitInvocation,
     };
 
+    const legacyItems = items.map(({ source: _, ...item }) => item);
+    const legacyDigest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          schemaVersion: 1,
+          items: legacyItems,
+          explicit: {
+            invocationName: explicitInvocation.invocationName,
+            argsDigest: createHash("sha256").update(explicitInvocation.args).digest("hex"),
+          },
+        }),
+      )
+      .digest("hex");
+    expect(snapshot.digest).toBe(legacyDigest);
     expect(() => assertRunSkillSnapshot(snapshot)).not.toThrow();
+    expect(() =>
+      assertRunSkillSnapshot({
+        ...snapshot,
+        items: items.map((item) => ({ ...item, source: "agent" })),
+      }),
+    ).toThrow(/摘要不匹配/u);
     expect(() =>
       assertRunSkillSnapshot({
         ...snapshot,

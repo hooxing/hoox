@@ -5,10 +5,7 @@ import {
   type ModelProviderModelConfiguration,
 } from "@hoox/admin-control";
 import {
-  ArtifactCompletionGateAdapter,
-  ArtifactDeliveryService,
   createArtifactExecutionAuthorizationAuthority,
-  PgArtifactDeliveryRepository,
   PgSimpleDeliveredFileRepository,
   SimpleArtifactDeliveryService,
 } from "@hoox/artifact";
@@ -1024,17 +1021,6 @@ async function assembleWorkerRuntime(
       threadContinuityMetrics,
     );
     const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
-    const artifactRepository = new PgArtifactDeliveryRepository(
-      pool,
-      artifactAuthorization.verifier,
-    );
-    const artifactService = new ArtifactDeliveryService(artifactRepository, blobs, {
-      runtimeMode,
-      defaultDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
-      maxDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
-      ...(runtimeMode === "development" ? { allowInsecureHttpDownload: true } : {}),
-      executionAuthorizationVerifier: artifactAuthorization.verifier,
-    });
     const resourceVolume =
       configuration.sandbox.apiUrl === undefined
         ? undefined
@@ -1402,7 +1388,6 @@ async function assembleWorkerRuntime(
           configuration.worker.pollIntervalMs,
         ),
         shutdownSignal: shutdown.signal,
-        artifacts: new ArtifactCompletionGateAdapter(artifactService),
         clock: new SystemWorkerClock(),
         metrics: new PgRecoveryMetrics(pool),
         continuityMetrics: threadContinuityMetrics,

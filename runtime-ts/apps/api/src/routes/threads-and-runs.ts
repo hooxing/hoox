@@ -80,7 +80,12 @@ export function registerThreadAndRunRoutes(
         const auth = await authenticate(request, "threads:create");
         return success(
           request,
-          await service.createThread(auth, request.body.title, requireIdempotencyKey(request)),
+          await service.createThread(
+            auth,
+            request.body.title,
+            requireIdempotencyKey(request),
+            request.body.agentDefinitionId,
+          ),
         );
       },
     );

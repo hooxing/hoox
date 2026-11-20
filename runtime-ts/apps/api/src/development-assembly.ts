@@ -183,6 +183,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             ? {}
             : { demoAdminUserId: configuration.demoAdminUserId }),
           repositories: persistence.repositories,
+          agentDefinitions: persistence.agentDefinitions,
           apiKeys: persistence.apiKeys,
           personalizations: persistence.personalizations,
           scheduledTasks: persistence.scheduledTasks,

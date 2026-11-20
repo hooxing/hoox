@@ -1234,6 +1234,14 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(
       (await repository.listAvailable(manager.tenant.id)).map((item) => item.definition.id),
     ).toContain("agent_scope_test");
+    const visibleSelection = await repository.readVisibleCurrent(
+      manager.tenant.id,
+      "agent_scope_test",
+    );
+    expect(visibleSelection?.revision?.content.displayName).toBe("测试助手第二版");
+    expect(
+      await repository.readVisibleCurrent(other.tenant.id, "agent_scope_test"),
+    ).toBeUndefined();
     expect(
       (await repository.listAvailable(other.tenant.id)).map((item) => item.definition.id),
     ).not.toContain("agent_scope_test");
@@ -1272,6 +1280,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         expectedGeneration: 3,
       }),
     ).resolves.toMatchObject({ status: "disabled", generation: 4 });
+    expect(
+      await repository.readVisibleCurrent(manager.tenant.id, "agent_scope_test"),
+    ).toBeUndefined();
     await expect(
       repository.revoke({
         actorUserId: manager.user.id,
@@ -1323,6 +1334,34 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(
       await repository.readCurrentPublished(manager.tenant.id, "agent_revoke_test"),
     ).toBeUndefined();
+    const revisionless = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_visible_without_revision",
+      availability: { mode: "selected_tenants", tenantIds: [manager.tenant.id] },
+      content,
+      revisionId: "agent_visible_without_revision_v1",
+      idempotencyKey: "agent-revisionless-create",
+      expectedGeneration: 0,
+    });
+    await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: revisionless.definition.id,
+      revisionId: revisionless.revision.id,
+      idempotencyKey: "agent-revisionless-publish",
+      expectedGeneration: 0,
+    });
+    const clearedRevision = await withTenantTransaction(adminControlPool, manager.scope, (client) =>
+      client.query("UPDATE agent_definitions SET current_revision_id=NULL WHERE id=$1", [
+        revisionless.definition.id,
+      ]),
+    );
+    expect(clearedRevision.rowCount).toBe(1);
+    const visibleWithoutRevision = await repository.readVisibleCurrent(
+      manager.tenant.id,
+      revisionless.definition.id,
+    );
+    expect(visibleWithoutRevision?.definition.id).toBe(revisionless.definition.id);
+    expect(visibleWithoutRevision?.revision).toBeUndefined();
   });
 
   it("RunAgentSnapshot 固定创建时的 Revision，发布、停用与重启恢复不改写，撤销阻断安全点和许可", async () => {

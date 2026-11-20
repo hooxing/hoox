@@ -951,10 +951,52 @@ describe("Agent 工作台恢复接入", () => {
     });
     await settleEffects();
 
-    expect(apiClient.createThread).toHaveBeenCalledWith("生成一份周报");
+    expect(apiClient.createThread).toHaveBeenCalledWith("生成一份周报", "agent_default");
     expect(apiClient.createThread).toHaveBeenCalledTimes(1);
     expect(apiClient.createRun).toHaveBeenCalledWith(createdThread.id, "生成一份周报");
     expect(container.querySelector("h1")?.textContent).toBe(createdThread.title);
+  });
+
+  it("新建任务可选 Agent，欢迎问题填入后按所选 Agent 创建 Thread", async () => {
+    const createdThread = thread("thread_sales");
+    const createdRun = run("run_sales", createdThread.id);
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => []),
+      listAvailableAgents: vi.fn(async () => [
+        {
+          id: "agent_default",
+          displayName: "默认助手",
+          description: "默认",
+          suggestedQuestions: [],
+        },
+        {
+          id: "agent_sales",
+          displayName: "销售助手",
+          description: "销售",
+          welcomeMessage: "想整理哪类线索？",
+          suggestedQuestions: ["整理本周线索"],
+        },
+      ]),
+      createThread: vi.fn(async () => createdThread),
+      createRun: vi.fn(async () => createdRun),
+      getRun: vi.fn(async () => createdRun),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+    const selector = container.querySelector<HTMLSelectElement>('select[aria-label="选择 Agent"]');
+    if (selector === null) throw new Error("Agent 选择器未显示");
+    act(() => {
+      selector.value = "agent_sales";
+      selector.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const suggestion = container.querySelector(".suggested-question");
+    if (!(suggestion instanceof HTMLButtonElement)) throw new Error("建议问题未显示");
+    act(() => suggestion.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const form = container.querySelector("form");
+    if (form === null) throw new Error("任务输入区未显示");
+    act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await settleEffects();
+    expect(apiClient.createThread).toHaveBeenCalledWith("整理本周线索", "agent_sales");
   });
 
   it("上传图片发送后保留在用户消息中并加载 inline 预览", async () => {

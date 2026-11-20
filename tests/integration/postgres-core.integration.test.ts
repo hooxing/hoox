@@ -1716,6 +1716,21 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(migrationContract.count);
   });
 
+  it("外部工具原始名称迁移仅允许 MCP 版本绑定远程工具名", async () => {
+    const result = await migratorPool.query<{ column_name: string; constraint_definition: string }>(
+      `SELECT column_state.column_name, pg_get_constraintdef(constraint_row.oid) AS constraint_definition
+         FROM information_schema.columns column_state
+         JOIN pg_constraint constraint_row ON constraint_row.conrelid = format('%I.%I',$1::text,'external_tool_versions')::regclass
+        WHERE column_state.table_schema=$1 AND column_state.table_name='external_tool_versions'
+          AND column_state.column_name='remote_tool_name'
+          AND constraint_row.conname='external_tool_versions_remote_name_source_check'`,
+      [schema],
+    );
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]?.constraint_definition).toContain("remote_tool_name IS NOT NULL");
+    expect(result.rows[0]?.constraint_definition).toContain("remote_tool_name IS NULL");
+  });
+
   it("外部工具密文仅允许 Admin Control 写入，Runtime 零权限", async () => {
     const rows = await migratorPool.query<{
       readonly table_name: string;

@@ -9,6 +9,7 @@ export interface ExternalToolVersion {
   readonly source: ExternalToolSource;
   readonly endpoint: string;
   readonly modelToolName: string;
+  readonly remoteToolName?: string | null;
   readonly description: string;
   readonly inputSchema: ExternalToolJsonSchema;
   readonly inputSchemaDigest: string;
@@ -204,6 +205,16 @@ export function validateExternalToolVersion(input: ExternalToolVersion): Externa
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.credentialRef))
   )
     throw new TypeError("EXTERNAL_TOOL_CREDENTIAL_REF_INVALID");
+  if (input.source === "mcp") {
+    if (
+      typeof input.remoteToolName !== "string" ||
+      input.remoteToolName.length === 0 ||
+      Buffer.byteLength(input.remoteToolName) > 512
+    )
+      throw new TypeError("EXTERNAL_TOOL_REMOTE_NAME_REQUIRED");
+  } else if (input.remoteToolName != null) {
+    throw new TypeError("EXTERNAL_TOOL_REMOTE_NAME_SOURCE_MISMATCH");
+  }
   if (typeof input.description !== "string")
     throw new TypeError("EXTERNAL_TOOL_DESCRIPTION_INVALID");
   if (!SAFE_TOOL_NAME.test(input.modelToolName) || !CONTEXT_TOOL_NAME.test(input.modelToolName))

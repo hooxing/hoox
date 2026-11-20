@@ -1,7 +1,7 @@
 {
   "name": "hoox",
   "version": "0.0.0",
-  "description": "可靠、可恢复、可审计的多租户 Agent Runtime",
+  "description": "开源、可自托管的云端 Agent 平台。写好指令、接上你的工具、上架 Skill，就是你自己的专属 Agent。",
   "private": true,
   "license": "Apache-2.0",
   "repository": {

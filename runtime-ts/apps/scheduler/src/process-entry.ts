@@ -8,7 +8,8 @@ import {
   PgSandboxCleanupConsumerStore,
   PgThreadSandboxLifecycleConsumerStore,
 } from "@hoox/persistence/maintenance";
-import { createPostgresPool, probePostgres } from "@hoox/persistence/postgres";
+import { createPostgresPool, probePostgres, WebhookSecretCipher } from "@hoox/persistence/postgres";
+import { WebhookDispatcher } from "./webhook-dispatcher.js";
 import { PgThreadContinuityMetrics, PgThreadTitleGenerationStore } from "@hoox/persistence/thread";
 import {
   assertProductionInheritedEnvironment,
@@ -61,6 +62,22 @@ const schedulerEnvironmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
+  WEBHOOK_SECRET_ENCRYPTION_KEY: stringEnvironmentField({
+    secret: true,
+    maxLength: 8192,
+    requiredIn: ["production"],
+  }),
+  WEBHOOK_DISPATCHER_DATABASE_URL: urlEnvironmentField({
+    secret: true,
+    protocols: ["postgres:", "postgresql:"],
+    allowCredentials: true,
+    maxLength: 8192,
+    requiredIn: ["production"],
+  }),
+  DATABASE_WEBHOOK_DISPATCHER_ROLE: stringEnvironmentField({
+    maxLength: 63,
+    requiredIn: ["production"],
+  }),
   MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
     secret: true,
     maxLength: 8192,
@@ -139,6 +156,12 @@ export const schedulerProcessEnvironmentKeys = Object.freeze(
 );
 
 export interface SchedulerProcessConfiguration {
+  readonly webhookDispatch?: Readonly<{
+    databaseUrl: string;
+    databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
+    role: string;
+    secretKey: string;
+  }>;
   readonly credentialEncryptionKey?: string;
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
@@ -218,6 +241,27 @@ export function parseSchedulerProcessEnvironment(
     parsed.runtimeEnvironment === "production"
       ? parseProductionPostgresTransport(configuredDatabaseUrl)
       : undefined;
+  const webhookUrl = parsed.values.WEBHOOK_DISPATCHER_DATABASE_URL;
+  const webhookRole = parsed.values.DATABASE_WEBHOOK_DISPATCHER_ROLE;
+  const webhookKey = parsed.values.WEBHOOK_SECRET_ENCRYPTION_KEY;
+  if (
+    [webhookUrl, webhookRole, webhookKey].some((value) => value !== undefined) &&
+    [webhookUrl, webhookRole, webhookKey].some((value) => value === undefined)
+  )
+    throw new TypeError("Webhook Dispatcher 数据库角色、连接与加密根必须同时配置");
+  if (webhookUrl !== undefined && webhookRole !== undefined) {
+    const parsedWebhookUrl = new URL(webhookUrl);
+    if (decodeURIComponent(parsedWebhookUrl.username) !== webhookRole)
+      throw new TypeError("Webhook Dispatcher 连接用户名必须与数据库角色一致");
+  }
+  if (webhookKey !== undefined && Buffer.byteLength(webhookKey, "utf8") < 32)
+    throw new TypeError("WEBHOOK_SECRET_ENCRYPTION_KEY 至少需要 32 字节");
+  const webhookDatabase =
+    webhookUrl === undefined
+      ? undefined
+      : parsed.runtimeEnvironment === "production"
+        ? parseProductionPostgresTransport(webhookUrl)
+        : undefined;
   const configuredTenantId = readRequiredEnvironmentValue(parsed, "SCHEDULER_TENANT_ID");
   // Scheduler 仅接受领域 Tenant ID；避免把任意数据库文本带入 RLS 上下文。
   tenantId(configuredTenantId);
@@ -319,6 +363,16 @@ export function parseSchedulerProcessEnvironment(
   }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
+    ...(webhookUrl === undefined || webhookRole === undefined || webhookKey === undefined
+      ? {}
+      : {
+          webhookDispatch: Object.freeze({
+            databaseUrl: webhookDatabase?.connectionString ?? webhookUrl,
+            ...(webhookDatabase === undefined ? {} : { databaseSsl: webhookDatabase.ssl }),
+            role: webhookRole,
+            secretKey: webhookKey,
+          }),
+        }),
     ...(parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY === undefined
       ? {}
       : { credentialEncryptionKey: parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY }),
@@ -380,7 +434,38 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "hoox-scheduler-cleanup",
     });
+    const webhookPool =
+      configuration.webhookDispatch === undefined
+        ? undefined
+        : createPostgresPool({
+            connectionString: configuration.webhookDispatch.databaseUrl,
+            ...(configuration.webhookDispatch.databaseSsl === undefined
+              ? {}
+              : { ssl: configuration.webhookDispatch.databaseSsl }),
+            schema: configuration.databaseSchema,
+            expectedRuntimeRole: configuration.webhookDispatch.role,
+            applicationName: "hoox-scheduler-webhook-dispatcher",
+          });
+    let webhookTimer: ReturnType<typeof setInterval> | undefined;
+    let webhookInFlight: Promise<unknown> | undefined;
     try {
+      if (webhookPool !== undefined && configuration.webhookDispatch !== undefined) {
+        await probePostgres(webhookPool, configuration.webhookDispatch.role);
+        const dispatcher = new WebhookDispatcher(
+          webhookPool,
+          new WebhookSecretCipher(configuration.webhookDispatch.secretKey),
+          configuration.cleanup.workerId,
+        );
+        webhookTimer = setInterval(() => {
+          if (webhookInFlight !== undefined) return;
+          webhookInFlight = dispatcher
+            .runOne()
+            .catch(() => undefined)
+            .finally(() => {
+              webhookInFlight = undefined;
+            });
+        }, 500);
+      }
       // 角色身份和 RLS 绕过属性必须在 cleanup loop 产生任何远端副作用前证明安全。
       await probePostgres(pool, configuration.databaseRuntimeRole);
       const gateways: RuntimeSandboxGateway[] = [];
@@ -508,6 +593,8 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       threadSandboxLoop.start();
       const assembly = Object.freeze({
         stopAccepting: async () => {
+          if (webhookTimer !== undefined) clearInterval(webhookTimer);
+          await webhookInFlight;
           await Promise.all([
             loop.close(),
             threadSandboxLoop.close(),
@@ -515,18 +602,39 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
           ]);
         },
         // loop 必须先停止并等待在途远端调用，再关闭连接池。
-        resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
+        resources: Object.freeze([
+          Object.freeze({ name: "postgres", close: () => pool.end() }),
+          ...(webhookPool === undefined
+            ? []
+            : [
+                Object.freeze({
+                  name: "webhook-dispatcher-postgres",
+                  close: () => webhookPool.end(),
+                }),
+              ]),
+        ]),
         readiness: Object.freeze([
           Object.freeze({
             name: "postgres",
             probe: () => probePostgres(pool, configuration.databaseRuntimeRole),
           }),
+          ...(webhookPool === undefined
+            ? []
+            : [
+                Object.freeze({
+                  name: "webhook-dispatcher-postgres",
+                  probe: () => probePostgres(webhookPool, configuration.webhookDispatch?.role),
+                }),
+              ]),
           Object.freeze({ name: "sandbox-providers", probe: () => managed.probe() }),
         ]),
       });
       return assembly;
     } catch (error) {
+      if (webhookTimer !== undefined) clearInterval(webhookTimer);
+      await webhookInFlight;
       await pool.end().catch(() => undefined);
+      await webhookPool?.end().catch(() => undefined);
       throw error;
     }
   },

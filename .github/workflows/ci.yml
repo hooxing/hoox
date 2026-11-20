@@ -140,6 +140,7 @@ jobs:
           DATABASE_WORKER_COORDINATOR_ROLE: m4_ci_worker_coordinator
           DATABASE_TEAM_COORDINATOR_ROLE: m4_ci_team_coordinator
           DATABASE_ADMIN_CONTROL_ROLE: m4_ci_admin_control
+          DATABASE_WEBHOOK_DISPATCHER_ROLE: m4_ci_webhook_dispatcher
           DATABASE_SCHEMA: m4_ci_runtime_schema
           M4_DATABASE_RUNTIME_PASSWORD: ci-runtime-placeholder-password
           M4_DATABASE_MIGRATOR_PASSWORD: ci-migrator-placeholder-password
@@ -147,6 +148,7 @@ jobs:
           M4_DATABASE_WORKER_COORDINATOR_PASSWORD: ci-worker-coordinator-placeholder-password
           M4_DATABASE_TEAM_COORDINATOR_PASSWORD: ci-team-coordinator-placeholder-password
           M4_DATABASE_ADMIN_CONTROL_PASSWORD: ci-admin-control-placeholder-password
+          M4_DATABASE_WEBHOOK_DISPATCHER_PASSWORD: ci-webhook-dispatcher-placeholder-password
         # 管理凭据只用于一次性测试夹具的角色和 Schema 准备、清理；迁移与业务查询均使用受限角色。
         run: pnpm --filter @hoox/persistence prepare:ci:m4
 
@@ -182,7 +184,7 @@ jobs:
           DATABASE_RUNTIME_ROLE: m4_ci_runtime
           DATABASE_MIGRATOR_ROLE: m4_ci_migrator
         # postgres-core 体量大，只运行 Agent 平台新增的用例；必须在 M4 删除受限角色之前执行。
-        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "默认 Agent|AgentDefinition|RunAgentSnapshot|外部工具密文|API Key|集成 Membership|Key 无法认证|down 的 DDL 与 ACL 收敛失败|down 只有显式 test 授权"
+        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "Webhook Dispatcher|默认 Agent|AgentDefinition|RunAgentSnapshot|外部工具密文|API Key|集成 Membership|Key 无法认证|down 的 DDL 与 ACL 收敛失败|down 只有显式 test 授权"
 
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:
@@ -198,6 +200,8 @@ jobs:
           DATABASE_WORKER_COORDINATOR_ROLE: m4_ci_worker_coordinator
           DATABASE_TEAM_COORDINATOR_ROLE: m4_ci_team_coordinator
           DATABASE_ADMIN_CONTROL_ROLE: m4_ci_admin_control
+          DATABASE_WEBHOOK_DISPATCHER_ROLE: m4_ci_webhook_dispatcher
+          WEBHOOK_DISPATCHER_DATABASE_URL: postgresql://m4_ci_webhook_dispatcher:ci-webhook-dispatcher-placeholder-password@127.0.0.1:5432/agent_runtime_ci
           DATABASE_SCHEMA: m4_ci_runtime_schema
         # M4 独立清理运行时依赖的 dist，以此回归验证黑盒不依赖其他 Job 或缓存遗留。
         run: pnpm test:integration:m4:clean

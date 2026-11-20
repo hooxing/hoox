@@ -4,6 +4,7 @@ import type { BlobStore } from "@hoox/persistence/blob";
 import type {
   CoreRepositories,
   PgApiKeyRepository,
+  PgWebhookRepository,
   PersonalizationSettingsPort,
   RunExperienceReadPort,
   TeamCollaborationPort,
@@ -21,6 +22,7 @@ import type {
   ResourceUploadPort,
 } from "@hoox/resource";
 import type { SkillCenterService, SkillContentStore, SkillFilesystemCatalog } from "@hoox/skill";
+import type { WebhookSecretCipher } from "@hoox/persistence/postgres";
 import type { ApiCreateCapability } from "./capabilities.js";
 import type { EmbeddedIdentityAuthService } from "./embedded-identity-auth.js";
 import type { LocalAccountAuthService } from "./local-account-auth.js";
@@ -37,6 +39,8 @@ import type {
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
   readonly apiKeys?: PgApiKeyRepository;
+  readonly webhooks?: PgWebhookRepository;
+  readonly webhookCipher?: WebhookSecretCipher;
   readonly localAccounts?: LocalAccountAuthService;
   readonly localAccountPasswordRoutes?: boolean;
   readonly embeddedIdentity?: EmbeddedIdentityAuthService;

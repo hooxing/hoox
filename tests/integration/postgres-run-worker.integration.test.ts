@@ -143,6 +143,9 @@ const teamCoordinatorRole = preprovisionedDatabase
 const adminControlRole = preprovisionedDatabase
   ? (process.env.DATABASE_ADMIN_CONTROL_ROLE ?? "")
   : `it_rw_control_${suffix}`;
+const webhookDispatcherRole = preprovisionedDatabase
+  ? (process.env.DATABASE_WEBHOOK_DISPATCHER_ROLE ?? "")
+  : `it_rw_webhook_${suffix}`;
 const runtimePassword = randomBytes(24).toString("hex");
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherPassword = randomBytes(24).toString("hex");
@@ -510,8 +513,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${adminControlRole}" LOGIN PASSWORD '${adminControlPassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${webhookDispatcherRole}" LOGIN PASSWORD '${adminControlPassword}'
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}"
-         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}";
+         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
       );
     }
@@ -529,6 +534,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         !workerCoordinatorRole.startsWith("m4_ci_") ||
         !teamCoordinatorRole.startsWith("m4_ci_") ||
         !adminControlRole.startsWith("m4_ci_") ||
+        !webhookDispatcherRole.startsWith("m4_ci_") ||
         !safePgIdentifier.test(schema) ||
         !safePgIdentifier.test(runtimeRole) ||
         !safePgIdentifier.test(migratorRole) ||
@@ -536,6 +542,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         !safePgIdentifier.test(workerCoordinatorRole) ||
         !safePgIdentifier.test(teamCoordinatorRole) ||
         !safePgIdentifier.test(adminControlRole) ||
+        !safePgIdentifier.test(webhookDispatcherRole) ||
         migratorUrl.username !== migratorRole ||
         runtimeUrl.username !== runtimeRole ||
         workerCoordinatorUrl.username !== workerCoordinatorRole ||
@@ -570,6 +577,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       workerCoordinatorRole,
       teamCoordinatorRole,
       adminControlRole,
+      webhookDispatcherRole,
       schema,
     });
     const dispatchAcl = await admin.query<{ readonly allowed: boolean; readonly version: number }>(
@@ -609,13 +617,14 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ?.query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
        REVOKE CONNECT ON DATABASE "${databaseName}"
-         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}"`,
+         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}"`,
       )
       .catch(() => undefined);
     await admin?.query(
       `DROP ROLE IF EXISTS "${runtimeRole}";
        DROP ROLE IF EXISTS "${workerCoordinatorRole}";
        DROP ROLE IF EXISTS "${teamCoordinatorRole}";
+       DROP ROLE IF EXISTS "${webhookDispatcherRole}";
        DROP ROLE IF EXISTS "${adminControlRole}";
        DROP ROLE IF EXISTS "${skillPublisherRole}";
        DROP ROLE IF EXISTS "${migratorRole}"`,
@@ -705,6 +714,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         workerCoordinatorRole,
         teamCoordinatorRole,
         adminControlRole,
+        webhookDispatcherRole,
         schema: isolatedSchema,
       });
       const identity = await control.query<{

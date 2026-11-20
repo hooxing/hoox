@@ -25,6 +25,7 @@ function validExample(): string {
         key === "DATABASE_URL" ||
         key === "DATABASE_WORKER_COORDINATOR_URL" ||
         key === "DATABASE_TEAM_COORDINATOR_URL" ||
+        key === "WEBHOOK_DISPATCHER_DATABASE_URL" ||
         key === "DATABASE_BOOTSTRAP_URL" ||
         key === "MIGRATION_DATABASE_URL" ||
         key === "SKILL_PUBLISHER_DATABASE_URL" ||
@@ -49,6 +50,7 @@ function validExample(): string {
         key.endsWith("TOKEN") ||
         key.endsWith("TEMPLATE_ID") ||
         key === "MODEL_CREDENTIAL_ENCRYPTION_KEY" ||
+        key === "WEBHOOK_SECRET_ENCRYPTION_KEY" ||
         key === "RESOURCEFS_PROXY_TLS_KEY_PATH" ||
         key === "RESOURCEFS_PROXY_TLS_CERT_PATH" ||
         key === "MINIO_ROOT_USER" ||

@@ -1,3 +1,4 @@
+import { enqueueWebhookEvent, type WebhookEventType } from "./pg-webhooks.js";
 import { randomUUID } from "node:crypto";
 import {
   isoTimestamp,
@@ -2437,6 +2438,27 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         ],
       );
       if (updated.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
+      const eventType: WebhookEventType =
+        command.nextRunStatus === "waiting"
+          ? "run.waiting"
+          : command.nextRunStatus === "succeeded"
+            ? "run.succeeded"
+            : command.nextRunStatus === "failed"
+              ? "run.failed"
+              : "run.cancelled";
+      const eventId = `evt_${randomUUID()}`;
+      await enqueueWebhookEvent({
+        client,
+        tenantId: command.fence.scope.tenantId,
+        eventId,
+        eventType,
+        payload: {
+          id: eventId,
+          type: eventType,
+          createdAt: databaseNow,
+          data: { runId: command.fence.scope.runId, status: command.nextRunStatus },
+        },
+      });
     }
 
     const succeededWithMemory =
@@ -3141,6 +3163,19 @@ async function settleWorkspaceArtifactIntents(
        VALUES($1,$2,'published',$3)`,
       [input.tenantId, intent.artifact_id, input.databaseNow],
     );
+    const eventId = `evt_${randomUUID()}`;
+    await enqueueWebhookEvent({
+      client,
+      tenantId: input.tenantId,
+      eventId,
+      eventType: "artifact.published",
+      payload: {
+        id: eventId,
+        type: "artifact.published",
+        createdAt: input.databaseNow,
+        data: { artifactId: intent.artifact_id, runId: input.runId, name: intent.name },
+      },
+    });
     if (
       shouldIndexArtifactInHistory({
         historyFilesystemEnabled: input.historyFilesystemEnabled,

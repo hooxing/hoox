@@ -37,7 +37,7 @@ import type {
   TenantScope,
   WorkspaceWriteScope,
 } from "@hoox/persistence/postgres";
-import { assertRunSkillSnapshot } from "@hoox/skill";
+import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AdminControlApiDependencies } from "../../runtime-ts/apps/admin-control-api/src/app.js";
 import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";

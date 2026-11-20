@@ -18,7 +18,11 @@ import {
   ensureHistoryDirectory,
   refreshHistoryDirectorySummary,
 } from "./pg-personal-history.js";
-import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
+import {
+  createRunConfigurationSnapshots,
+  RunAgentUnavailableError,
+} from "./pg-run-agent-snapshot.js";
+import { SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
 import {
   enqueueThreadTitleGeneration,
   isThreadTitleGenerationEnabled,
@@ -284,10 +288,11 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
                 throw new TypeError("steer 决策缺少 active Run/Turn");
               }
               if (input.mode === "auto" || input.fallbackToFollowUp) {
-                // fallback Run 尚未插入 runs，但其不可变身份与 Skill 快照在用户提交时已经固定；
-                // terminal 转队列时只消费该候选，不能反查届时的安装集合。
-                await createRunSkillSnapshot(client, {
+                // fallback Run 尚未插入 runs，但其不可变身份与 Agent、Skill 快照在用户提交时已经固定；
+                // terminal 转队列时只消费该候选，不能反查届时的发布版本或安装集合。
+                await createRunConfigurationSnapshots(client, {
                   tenantId: input.scope.tenantId,
+                  threadId: input.thread.id,
                   runId: input.fallbackRun.id,
                   userId: input.scope.userId,
                 });
@@ -427,6 +432,8 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
         },
       );
     } catch (error) {
+      if (error instanceof RunAgentUnavailableError)
+        return { outcome: "agent_revision_unavailable" };
       if (error instanceof SkillSnapshotUnavailableError) {
         return { outcome: "skill_not_available" };
       }
@@ -507,8 +514,9 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
                  created_at AS run_created_at,updated_at AS run_updated_at`,
       [input.scope.tenantId, input.fallbackRun.id, input.thread.id],
     );
-    await createRunSkillSnapshot(client, {
+    await createRunConfigurationSnapshots(client, {
       tenantId: input.scope.tenantId,
+      threadId: input.thread.id,
       runId: input.fallbackRun.id,
       userId: input.scope.userId,
       ...(input.skillInvocation === undefined ? {} : { explicitInvocation: input.skillInvocation }),

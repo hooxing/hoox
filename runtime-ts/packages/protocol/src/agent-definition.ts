@@ -16,7 +16,12 @@ const AgentAvailabilitySchema = Type.Union([
 const AgentModelReferenceSchema = Type.Union([
   Type.Object({ mode: Type.Literal("platform_default") }, strict),
   Type.Object(
-    { mode: Type.Literal("pinned"), providerRevisionId: IdSchema, modelId: boundedText(200) },
+    {
+      mode: Type.Literal("pinned"),
+      providerKey: IdSchema,
+      providerRevision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+      modelId: boundedText(200),
+    },
     strict,
   ),
 ]);
@@ -69,7 +74,10 @@ export const AgentRevisionContentSchema = Type.Object(
     includeTenantSkills: Type.Boolean(),
     sandboxTemplateId: Type.Optional(IdSchema),
     sandboxIdleAction: Type.Union([Type.Literal("pause"), Type.Literal("kill")]),
-    longTermMemoryEnabled: Type.Boolean(),
+    memory: Type.Union([
+      Type.Object({ mode: Type.Literal("platform_default") }, strict),
+      Type.Object({ mode: Type.Literal("configured"), longTermEnabled: Type.Boolean() }, strict),
+    ]),
   },
   { ...strict, $id: "v1.AgentRevisionContent" },
 );

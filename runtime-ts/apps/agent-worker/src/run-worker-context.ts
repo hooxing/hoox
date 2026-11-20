@@ -38,7 +38,15 @@ export interface ExecutionContext {
   readonly toolStartedGates: Map<string, ToolStartedGate>;
   readonly cleanupFacts: Map<string, CleanupReceiptFacts>;
   todo?: TodoSnapshot;
-  stopped?: "cancelled" | "shutdown" | "timeout" | "fence_lost" | "unavailable" | "scope_mismatch";
+  readonly sandboxIdleAction: "pause" | "kill";
+  stopped?:
+    | "agent_revision_revoked"
+    | "cancelled"
+    | "shutdown"
+    | "timeout"
+    | "fence_lost"
+    | "unavailable"
+    | "scope_mismatch";
   agentFailure?: StableWorkerErrorCode;
   modelCompleted: boolean;
   modelStopReason?: "stop" | "length" | "toolUse";
@@ -83,6 +91,10 @@ export function createExecutionContext(
 ): ExecutionContext {
   return {
     scope,
+    sandboxIdleAction:
+      typeof claim.snapshot.agent === "string"
+        ? "kill"
+        : claim.snapshot.agent.content.sandboxIdleAction,
     fence: claim.fence,
     attemptVersion: claim.snapshot.attempt.version,
     nextEventSequence: claim.snapshot.attempt.nextEventSequence,

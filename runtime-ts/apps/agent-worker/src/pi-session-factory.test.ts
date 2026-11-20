@@ -40,6 +40,7 @@ import type {
   ModelUsageMetricsPort,
   SandboxSessionRef,
 } from "./ports.js";
+import { fakeAgentSnapshot } from "./testing/agent-snapshot.js";
 import { RunWorker } from "./run-worker.js";
 import {
   FakeCancellationPort,
@@ -117,6 +118,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       prepareRuntimeCompaction,
     );
     const session = await sessions.create({
+      agentSnapshot: fakeAgentSnapshot(),
       scope,
       attemptId: claimed.snapshot.attempt.attemptId,
       fence: claimed.fence,
@@ -146,7 +148,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
 
   it("同一安全点的多条 durable steer 进入下一次 Provider request body", async () => {
     const persistence = new FakeExecutionPersistence();
-    const scope = persistence.addSeed(fakeSeed("pi-batched-durable-steer"));
+    const agentSnapshot = fakeAgentSnapshot({
+      operatorInstructions: "固定 Agent 指令：只分析工作区。",
+    });
+    const scope = persistence.addSeed({
+      ...fakeSeed("pi-batched-durable-steer"),
+      agent: agentSnapshot,
+    });
     persistence.pendingThreadSteers.push(
       {
         scope,
@@ -163,6 +171,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         bodyDigest: sha256Digest("2".repeat(64)),
       },
     );
+    const systemPrompts: Array<string | undefined> = [];
     let continuationMessages: readonly unknown[] = [];
     const faux = fauxProvider({
       api: `faux-worker-batched-steer-${Date.now()}`,
@@ -170,9 +179,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       tokensPerSecond: 10_000,
     });
     faux.setResponses([
-      fauxAssistantMessage("第一步完成"),
+      (context) => {
+        systemPrompts.push(context.systemPrompt);
+        return fauxAssistantMessage("第一步完成");
+      },
       (context) => {
         continuationMessages = context.messages;
+        systemPrompts.push(context.systemPrompt);
         return fauxAssistantMessage("已采用两条补充输入");
       },
     ]);
@@ -210,6 +223,9 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
 
     await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
     expect(faux.state.callCount).toBe(2);
+    expect(systemPrompts[0]).toContain(agentSnapshot.content.operatorInstructions);
+    expect(systemPrompts[1]).toBe(systemPrompts[0]);
+    expect(systemPrompts[0]).not.toContain(agentSnapshot.revisionDigest);
     expect(continuationMessages.slice(-2)).toMatchObject([
       { role: "user", content: [{ type: "text", text: "不要修改后端" }] },
       { role: "user", content: [{ type: "text", text: "保留现有字体" }] },
@@ -388,6 +404,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     });
     const authorizedToolCalls: ExternalEffectCall[] = [];
     const session = await sessions.create({
+      agentSnapshot: fakeAgentSnapshot(),
       scope,
       attemptId: claimed.snapshot.attempt.attemptId,
       fence: claimed.fence,

@@ -36,6 +36,7 @@ import type {
 } from "./ports.js";
 import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 import type { RunStartupTimingDiagnosticsPort } from "./run-startup-diagnostics.js";
+import { fakeAgentSnapshot } from "./testing/agent-snapshot.js";
 import { RunWorker, type RunWorkerOptions } from "./run-worker.js";
 import {
   BlockingAgentSession,
@@ -238,8 +239,8 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
     expect(snapshot?.spans.map((span) => span.phase)).toEqual([
       "run_claim",
-      "memory_retrieve",
       "pre_session_stop_point",
+      "memory_retrieve",
       "agent_session_create",
       "post_session_stop_point",
       "model_checkpoint",
@@ -365,6 +366,8 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(execution).resolves.toEqual({ outcome: "succeeded" });
     expect(h.factory.agentIdentities[0]).toBeUndefined();
     expect(h.factory.agentIdentities[1]).toMatchObject({ agentKind: "subagent" });
+    expect(h.factory.agentSnapshots).toHaveLength(2);
+    expect(h.factory.agentSnapshots[1]).toBe(h.factory.agentSnapshots[0]);
     expect(h.factory.preparedSandboxes).toHaveLength(2);
     expect(h.factory.preparedSandboxes[0]).toBe(h.factory.preparedSandboxes[1]);
     expect(h.sandboxes.acquireCount).toBe(1);
@@ -612,6 +615,124 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
           record.event.payload.type === "message.delta",
       ),
     ).toBe(true);
+  });
+
+  it("紧急撤销在安全点令 Run 失败，不启动 Session 或 Sandbox", async () => {
+    const h = harness([], fakeSeed("agent-revoked"));
+    h.persistence.agentRevisionRevoked = true;
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
+    expect(h.factory.createCount).toBe(0);
+    expect(h.persistence.record(h.scope).events).toContainEqual(
+      expect.objectContaining({
+        kind: "attempt_state_changed",
+        payload: expect.objectContaining({ code: "AGENT_REVISION_REVOKED" }),
+      }),
+    );
+  });
+
+  it("模型在途时由续租发现撤销，先失败关闭再交给 Sandbox 清理消费者", async () => {
+    const session = new BlockingAgentSession();
+    const h = sandboxHarness([session], fakeSeed("agent-revoked-during-model"));
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => session.prompts.length === 1);
+    h.persistence.agentRevisionRevoked = true;
+    await h.clock.tickHeartbeat();
+    await expect(execution).resolves.toEqual({ outcome: "failed" });
+    expect(session.abortCount).toBe(1);
+    expect(h.sandboxes.settleCount).toBe(0);
+    expect(h.persistence.record(h.scope).outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "started" }),
+    );
+  });
+
+  it.each(["AGENT_SNAPSHOT_INVALID", "AGENT_REVISION_REVOKED"] as const)(
+    "领取读取到 %s 时失败关闭",
+    async (agent) => {
+      const h = harness([], { ...fakeSeed("agent-blocked"), agent });
+      await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
+      expect(h.factory.createCount).toBe(0);
+      expect(h.persistence.record(h.scope).events).toContainEqual(
+        expect.objectContaining({
+          kind: "attempt_state_changed",
+          payload: expect.objectContaining({ code: agent }),
+        }),
+      );
+    },
+  );
+
+  it("快照要求未接入的固定 Provider 时不回退到平台模型", async () => {
+    const h = harness([], {
+      ...fakeSeed("agent-model-unavailable"),
+      agent: fakeAgentSnapshot({
+        model: {
+          mode: "pinned",
+          providerKey: "model-provider-test",
+          providerRevision: 3,
+          modelId: "model-test",
+        },
+      }),
+    });
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
+    expect(h.factory.createCount).toBe(0);
+    expect(h.persistence.record(h.scope).events).toContainEqual(
+      expect.objectContaining({
+        kind: "attempt_state_changed",
+        payload: expect.objectContaining({ code: "AGENT_CONFIGURATION_UNSUPPORTED" }),
+      }),
+    );
+  });
+
+  it("快照关闭长期记忆时不读平台记忆", async () => {
+    const seed = {
+      ...fakeSeed("agent-memory-disabled"),
+      agent: fakeAgentSnapshot({ memory: { mode: "configured", longTermEnabled: false } }),
+    };
+    const memoryRetriever = { retrieve: vi.fn(async () => []) };
+    const h = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      seed,
+      {},
+      undefined,
+      false,
+      memoryRetriever,
+    );
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(memoryRetriever.retrieve).not.toHaveBeenCalled();
+  });
+
+  it("默认记忆模式跟随平台并允许平台检索", async () => {
+    const memoryRetriever = { retrieve: vi.fn(async () => []) };
+    const h = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      {
+        ...fakeSeed("agent-memory-platform-default"),
+        agent: fakeAgentSnapshot({ memory: { mode: "platform_default" } }),
+      },
+      {},
+      undefined,
+      false,
+      memoryRetriever,
+    );
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(memoryRetriever.retrieve).toHaveBeenCalledTimes(1);
+  });
+
+  it("Agent 的 kill 策略不允许成功 Run 暂停或交接 Thread Sandbox", async () => {
+    const h = sandboxHarness(
+      [new ScriptedAgentSession(successfulEvents)],
+      {
+        ...fakeSeed("agent-sandbox-kill"),
+        agent: fakeAgentSnapshot({ sandboxIdleAction: "kill" }),
+      },
+      { threadSandboxSessionReuseEnabled: true },
+    );
+    h.persistence.threadSandboxHandoffRunId = runId("agent-kill-follow-up");
+    h.threadSandboxes.queuedFollowUp = true;
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(h.revisions.verifyCount).toBe(1);
+    expect(h.threadSandboxes.terminalReceipts).toEqual([
+      expect.objectContaining({ effectKind: "terminate" }),
+    ]);
   });
 
   it("阶段 5 成功终态先提交 pause intent，再执行 lifecycle effect，且不走 success-close", async () => {

@@ -30,26 +30,38 @@ export const AgentRevisionContentSchema = Type.Object(
     operatorInstructions: boundedText(32768),
     replyLanguage: boundedText(100),
     model: AgentModelReferenceSchema,
-    builtinTools: Type.Array(boundedText(100), { maxItems: 64, uniqueItems: true }),
-    externalTools: Type.Array(
-      Type.Object(
-        { kind: Type.Union([Type.Literal("mcp"), Type.Literal("http")]), versionId: IdSchema },
-        strict,
-      ),
-      { maxItems: 64 },
-    ),
-    clientTools: Type.Array(
+    tools: Type.Union([
+      Type.Object({ mode: Type.Literal("platform_default") }, strict),
       Type.Object(
         {
-          name: boundedText(100),
-          description: boundedText(1000),
-          inputSchema: Type.Record(Type.String(), Type.Unknown()),
+          mode: Type.Literal("configured"),
+          builtinTools: Type.Array(boundedText(100), { maxItems: 64, uniqueItems: true }),
+          externalTools: Type.Array(
+            Type.Object(
+              {
+                kind: Type.Union([Type.Literal("mcp"), Type.Literal("http")]),
+                versionId: IdSchema,
+              },
+              strict,
+            ),
+            { maxItems: 64 },
+          ),
+          clientTools: Type.Array(
+            Type.Object(
+              {
+                name: boundedText(100),
+                description: boundedText(1000),
+                inputSchema: Type.Record(Type.String(), Type.Unknown()),
+              },
+              strict,
+            ),
+            { maxItems: 64 },
+          ),
+          toolCallingMode: Type.Union([Type.Literal("native"), Type.Literal("ptc")]),
         },
         strict,
       ),
-      { maxItems: 64 },
-    ),
-    toolCallingMode: Type.Union([Type.Literal("native"), Type.Literal("ptc")]),
+    ]),
     skillVersions: Type.Array(
       Type.Object({ skillId: IdSchema, version: boundedText(64) }, strict),
       { maxItems: 64 },

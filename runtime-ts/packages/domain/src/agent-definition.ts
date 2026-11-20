@@ -24,14 +24,22 @@ export interface AgentRevisionContent {
         readonly providerRevisionId: string;
         readonly modelId: string;
       };
-  readonly builtinTools: readonly string[];
-  readonly externalTools: readonly { readonly kind: "mcp" | "http"; readonly versionId: string }[];
-  readonly clientTools: readonly {
-    readonly name: string;
-    readonly description: string;
-    readonly inputSchema: Readonly<Record<string, unknown>>;
-  }[];
-  readonly toolCallingMode: "native" | "ptc";
+  readonly tools:
+    | { readonly mode: "platform_default" }
+    | {
+        readonly mode: "configured";
+        readonly builtinTools: readonly string[];
+        readonly externalTools: readonly {
+          readonly kind: "mcp" | "http";
+          readonly versionId: string;
+        }[];
+        readonly clientTools: readonly {
+          readonly name: string;
+          readonly description: string;
+          readonly inputSchema: Readonly<Record<string, unknown>>;
+        }[];
+        readonly toolCallingMode: "native" | "ptc";
+      };
   readonly skillVersions: readonly { readonly skillId: string; readonly version: string }[];
   readonly includeTenantSkills: boolean;
   readonly sandboxTemplateId?: string;
@@ -93,10 +101,7 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
       "operatorInstructions",
       "replyLanguage",
       "model",
-      "builtinTools",
-      "externalTools",
-      "clientTools",
-      "toolCallingMode",
+      "tools",
       "skillVersions",
       "includeTenantSkills",
       "sandboxTemplateId",
@@ -115,10 +120,24 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
     value.model.mode === "platform_default" ? ["mode"] : ["mode", "providerRevisionId", "modelId"],
     "AgentRevision model",
   );
-  for (const item of value.externalTools)
-    exactKeys(item, ["kind", "versionId"], "AgentRevision external tool");
-  for (const item of value.clientTools)
-    exactKeys(item, ["name", "description", "inputSchema"], "AgentRevision client tool");
+  domainInvariant(
+    value.tools.mode === "platform_default" || value.tools.mode === "configured",
+    "INVALID_ARGUMENT",
+    "Agent 工具模式无效",
+  );
+  exactKeys(
+    value.tools,
+    value.tools.mode === "platform_default"
+      ? ["mode"]
+      : ["mode", "builtinTools", "externalTools", "clientTools", "toolCallingMode"],
+    "AgentRevision tools",
+  );
+  if (value.tools.mode === "configured") {
+    for (const item of value.tools.externalTools)
+      exactKeys(item, ["kind", "versionId"], "AgentRevision external tool");
+    for (const item of value.tools.clientTools)
+      exactKeys(item, ["name", "description", "inputSchema"], "AgentRevision client tool");
+  }
   for (const item of value.skillVersions)
     exactKeys(item, ["skillId", "version"], "AgentRevision Skill");
   nonempty(value.displayName, "displayName", 200);
@@ -131,7 +150,8 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
     "Operator 指令不得包含模板变量",
   );
   domainInvariant(
-    value.suggestedQuestions.length <= 12 && value.builtinTools.length <= 64,
+    value.suggestedQuestions.length <= 12 &&
+      (value.tools.mode === "platform_default" || value.tools.builtinTools.length <= 64),
     "INVALID_ARGUMENT",
     "Agent 能力数量超出限制",
   );
@@ -139,9 +159,10 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
     value.suggestedQuestions.every(
       (item) => item.trim().length > 0 && new TextEncoder().encode(item).byteLength <= 500,
     ) &&
-      value.builtinTools.every((item) => /^[a-z][a-z0-9_]{0,99}$/u.test(item)) &&
-      value.externalTools.length <= 64 &&
-      value.clientTools.length <= 64 &&
+      (value.tools.mode === "platform_default" ||
+        (value.tools.builtinTools.every((item) => /^[a-z][a-z0-9_]{0,99}$/u.test(item)) &&
+          value.tools.externalTools.length <= 64 &&
+          value.tools.clientTools.length <= 64)) &&
       value.skillVersions.length <= 64,
     "INVALID_ARGUMENT",
     "Agent Revision 子项格式或数量无效",
@@ -160,9 +181,19 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
   return Object.freeze({
     ...value,
     suggestedQuestions: Object.freeze([...value.suggestedQuestions]),
-    builtinTools: Object.freeze([...value.builtinTools]),
-    externalTools: Object.freeze(value.externalTools.map((item) => Object.freeze({ ...item }))),
-    clientTools: Object.freeze(value.clientTools.map((item) => Object.freeze({ ...item }))),
+    tools:
+      value.tools.mode === "platform_default"
+        ? Object.freeze({ mode: "platform_default" })
+        : Object.freeze({
+            ...value.tools,
+            builtinTools: Object.freeze([...value.tools.builtinTools]),
+            externalTools: Object.freeze(
+              value.tools.externalTools.map((item) => Object.freeze({ ...item })),
+            ),
+            clientTools: Object.freeze(
+              value.tools.clientTools.map((item) => Object.freeze({ ...item })),
+            ),
+          }),
     skillVersions: Object.freeze(value.skillVersions.map((item) => Object.freeze({ ...item }))),
   });
 }

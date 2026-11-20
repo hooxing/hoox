@@ -1367,6 +1367,14 @@ async function activeTablePolicy(
   if (!(await hasEmbeddedIdentityState(client, schema))) {
     for (const table of embeddedIdentityTables) policy.delete(table);
   }
+  if (!(await hasExternalToolState(client, schema))) {
+    for (const table of [
+      "external_tool_versions",
+      "external_tool_credentials",
+      "external_tool_revocations",
+    ])
+      policy.delete(table);
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -1420,6 +1428,14 @@ async function activeColumnUpdatePolicy(
   }
   if (await hasEmbeddedIdentityState(client, schema)) {
     policy.set("user_accounts", new Set(["better_auth_user_id", "display_name", "updated_at"]));
+  }
+  if (!(await hasExternalToolState(client, schema))) {
+    for (const table of [
+      "external_tool_versions",
+      "external_tool_credentials",
+      "external_tool_revocations",
+    ])
+      policy.delete(table);
   }
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
@@ -2300,6 +2316,7 @@ async function assertAdminControlBoundary(
     enabled && (await hasAdminUserOperationsState(client, context.schema));
   const runExplorerEnabled = enabled && (await hasAdminRunExplorerState(client, context.schema));
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
+  const externalToolsEnabled = enabled && (await hasExternalToolState(client, context.schema));
   const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
     enabled
@@ -2312,12 +2329,14 @@ async function assertAdminControlBoundary(
           ["admin_control_commands", new Set(["SELECT", "INSERT"])],
           ["admin_control_audits", new Set(["SELECT", "INSERT"])],
           ["admin_control_generation", new Set(["SELECT"])],
-          ["external_tool_versions", new Set(["SELECT", "INSERT"])],
-          ["external_tool_credentials", new Set(["INSERT"])],
-          ["external_tool_revocations", new Set(["SELECT", "INSERT"])],
         ]
       : [],
   );
+  if (externalToolsEnabled) {
+    allowed.set("external_tool_versions", new Set(["SELECT", "INSERT"]));
+    allowed.set("external_tool_credentials", new Set(["INSERT"]));
+    allowed.set("external_tool_revocations", new Set(["SELECT", "INSERT"]));
+  }
   const agentDefinitionsEnabled =
     enabled && (await hasAgentDefinitionState(client, context.schema));
   if (agentDefinitionsEnabled) {
@@ -2989,6 +3008,9 @@ const adminControlPolicyBindings = Object.freeze([
   ["admin_control_active_configs", "runtime_control_active_read_policy", "runtime"],
   ["admin_control_generation", "runtime_control_generation_read_policy", "runtime"],
   ["run_runtime_config_snapshots", "run_runtime_config_snapshots_runtime_policy", "runtime"],
+] as const);
+
+const externalToolPolicyBindings = Object.freeze([
   ["external_tool_versions", "external_tool_versions_migrator_policy", "migrator"],
   ["external_tool_credentials", "external_tool_credentials_migrator_policy", "migrator"],
   ["external_tool_revocations", "external_tool_revocations_migrator_policy", "migrator"],
@@ -3165,6 +3187,14 @@ async function rebindRoleScopedPolicies(
           `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
         );
       }
+    }
+  }
+  if (await hasExternalToolState(client, context.schema)) {
+    for (const [table, policy, target] of externalToolPolicyBindings) {
+      const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+      );
     }
   }
 }

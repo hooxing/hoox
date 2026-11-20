@@ -27,6 +27,7 @@ export function registerHttpMiddleware(app: FastifyInstance): void {
 
   app.setErrorHandler((error, request, reply) => {
     let kind: ApiFailureKind;
+    let envelope: ErrorEnvelope | undefined;
     const errorShape =
       typeof error === "object" && error !== null
         ? (error as { readonly validation?: unknown; readonly code?: unknown })
@@ -55,6 +56,9 @@ export function registerHttpMiddleware(app: FastifyInstance): void {
       kind = error.kind;
     } else if (error instanceof PersistenceError) {
       kind = persistenceFailure(error);
+      if (error.code === "AGENT_REVISION_UNAVAILABLE") {
+        envelope = createErrorEnvelope(requestId(request), { kind: "agent_revision_unavailable" });
+      }
     } else if (error instanceof BlobStoreError) {
       // 对象已经通过业务授权后，签名、完整性或 provider 失败都是依赖异常，不能泄漏内部对象状态。
       kind = "dependency_unavailable";
@@ -66,7 +70,9 @@ export function registerHttpMiddleware(app: FastifyInstance): void {
       { requestId: requestId(request), route: request.routeOptions.url, failure: kind },
       "HTTP 请求失败",
     );
-    void reply.status(statusByFailure[kind]).send(errorEnvelope(requestId(request), kind));
+    void reply
+      .status(statusByFailure[kind])
+      .send(envelope ?? errorEnvelope(requestId(request), kind));
   });
   app.setNotFoundHandler((request, reply) => {
     void reply.status(404).send(errorEnvelope(requestId(request), "not_found"));
@@ -76,6 +82,7 @@ export function registerHttpMiddleware(app: FastifyInstance): void {
 const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
   bad_request: 400,
   unauthorized: 401,
+  forbidden: 403,
   not_found: 404,
   conflict: 409,
   invalid_state: 422,
@@ -86,6 +93,7 @@ const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
 
 function persistenceFailure(error: PersistenceError): ApiFailureKind {
   switch (error.code) {
+    case "AGENT_REVISION_UNAVAILABLE":
     case "CONFLICT":
       return "conflict";
     case "UNAVAILABLE":

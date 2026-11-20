@@ -153,7 +153,7 @@ docker compose --project-name hoox-demo \
 - Nginx 候选配置失败时恢复上一站点配置；Admin Control Token 文件继续留在 root-only 路径并由后续成功发布覆盖。旧版 htpasswd 可能为回滚到仍使用 HTTP Basic 的上一 release 而暂时保留，但现行配置不会引用它。
 - 数据库迁移只向前执行，脚本绝不自动运行 down；若新迁移与旧镜像不兼容，必须停服并按该迁移说明和备份方案处理。
 - PostgreSQL、MinIO 和轨迹数据卷都不随应用回滚或旧 release 目录清理删除。轨迹卷固定为 `hoox-demo-trajectory-data-20260903`；未来只能通过显式数据 epoch 切换执行受控轮换，自动发布不得删除。
-- 需要一次性舍弃 Demo 测试数据时，只能在 Compose 中把 PostgreSQL 与 MinIO 命名卷成对切换到同一个新数据 epoch。2026-11 迁移基线压缩后，数据卷已切换到 `20261118` epoch：新卷由初始化脚本重建角色与 Schema，再执行基线迁移；旧 `20260826` 卷保留给回滚到压缩前镜像，确认不再需要后由运维人员手工删除。
+- 需要一次性舍弃 Demo 测试数据时，只能在 Compose 中把 PostgreSQL 与 MinIO 命名卷成对切换到同一个新数据 epoch。2026-11 迁移基线压缩后，数据卷切换到 `20261118` epoch：新卷由初始化脚本重建角色与 Schema，再执行基线迁移；旧 `20260826` 卷保留给回滚到压缩前镜像。2026-11-20 因修复迁移回退依赖顺序（down 文件变化导致 checksum 变化），切换到 `20261120` epoch；旧 `20261118` 卷保留给回滚，确认后由运维人员手工删除。
   旧卷必须保留到候选 release 完成全部验收，以便失败时由上一 release 重新挂载；新版本稳定并处理外部 Sandbox 残留后，
   才可按确切卷名清理旧卷。发布脚本在候选和回滚时都必须显式强制重建 PostgreSQL 与 MinIO，不能依赖 Compose 自动
   识别顶层卷名变化；自动发布不得无条件执行 `down --volumes`。

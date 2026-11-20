@@ -25,7 +25,6 @@ import {
   ContextBudgetAdmissionError,
   type ControlledRolloutProjection,
   createSafePiSession,
-  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
   deriveSafePiSessionCompatibility,
   ModelContinuationRejectedError,
   type PiSessionController,
@@ -54,6 +53,7 @@ import {
 } from "@hoox/trajectory";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { Models } from "@earendil-works/pi-ai";
+import type { WorkerTelemetry } from "./telemetry/runtime.js";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
 import { digestCanonical } from "./mutation-protocol.js";
 import type {
@@ -228,6 +228,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly modelUsageMetrics?: ModelUsageMetricsPort,
     private readonly toolCallingMode: ToolCallingMode = "native",
     private readonly enabledTools?: readonly RuntimeToolName[],
+    private readonly telemetry?: WorkerTelemetry,
   ) {
     this.enabledTools = normalizeRuntimeToolSelection(enabledTools);
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
@@ -269,6 +270,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       this.modelUsageMetrics,
       input.toolCallingMode ?? this.toolCallingMode,
       input.enabledTools ?? this.enabledTools,
+      this.telemetry,
     );
   }
 
@@ -750,10 +752,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 { toolCallId: call.toolCallId, toolName: call.toolName },
               );
               if (result.outcome !== "recorded" && result.outcome !== "replayed") {
+                this.telemetry?.markToolUnknown(input.attemptId, runtimeCallId(call.toolCallId));
                 requireObservationRecovery(result.outcome);
               }
               return result;
             } catch (error) {
+              this.telemetry?.markToolUnknown(input.attemptId, runtimeCallId(call.toolCallId));
               requireObservationRecovery();
               throw error;
             } finally {
@@ -765,9 +769,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           },
         };
       },
-      // Run 尚未固定 Agent 快照，所有 Run（含子 Agent 与恢复）都显式使用默认 Agent 指令，
-      // 保证同一 Run 重建得到字节一致的 system 前缀。
-      operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
+      operatorInstructions: input.agentSnapshot.content.operatorInstructions,
+      agentRevisionDigest: input.agentSnapshot.revisionDigest,
       availableSkills: skillSnapshot.items.map((item) => ({
         name: item.invocationName,
         description: item.description,
@@ -1039,6 +1042,27 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const drainModelUsage = async () => {
       while (modelUsageWrites.size > 0) await Promise.all([...modelUsageWrites]);
     };
+    const telemetry = this.telemetry;
+    const unsubscribeToolContent =
+      telemetry?.contentEnabled === true
+        ? controller.subscribeInternal((event) => {
+            if (event.type === "tool_execution_start") {
+              telemetry.captureToolBody(
+                input.attemptId,
+                runtimeCallId(event.toolCallId),
+                "args",
+                event.args,
+              );
+            } else if (event.type === "tool_execution_end") {
+              telemetry.captureToolBody(
+                input.attemptId,
+                runtimeCallId(event.toolCallId),
+                "result",
+                event.result,
+              );
+            }
+          })
+        : undefined;
     const unsubscribeTrajectory =
       trajectoryRecorder === undefined
         ? undefined
@@ -1160,6 +1184,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         }),
       dispose: () => {
         unsubscribeModelUsage?.();
+        unsubscribeToolContent?.();
         unsubscribeTrajectory?.();
         unsubscribeToolGate();
         startedToolCalls.clear();

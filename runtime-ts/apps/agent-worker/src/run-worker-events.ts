@@ -40,6 +40,9 @@ export function terminalFailureMessage(
     return "任务已取消；未完成或未提交的工作不视为成功。";
   }
   const messages: Readonly<Record<StableWorkerErrorCode, string>> = {
+    AGENT_REVISION_REVOKED: "此任务使用的 Agent 版本已被撤销，任务已停止。",
+    AGENT_SNAPSHOT_INVALID: "无法验证此任务固定的 Agent 版本，任务已停止。",
+    AGENT_CONFIGURATION_UNSUPPORTED: "此 Agent 版本要求当前 Worker 不支持的配置，任务未执行。",
     CANCELLED: "任务已取消；未完成或未提交的工作不视为成功。",
     CONTEXT_TOO_LARGE: "上下文仍然超出模型窗口，本次任务未能完成。",
     TIMEOUT: "任务运行超时，本次任务未能完成。",

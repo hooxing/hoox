@@ -1,4 +1,3 @@
-import { McpResponseFailure } from "./mcp-errors.js";
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -13,6 +12,7 @@ import {
 } from "@hoox/domain";
 import {
   ExternalToolTransportError,
+  type ExternalToolCallContext,
   type ValidatedExternalTarget,
   type ExternalToolReconciliationPort,
   type ExternalToolTransport,
@@ -267,6 +267,9 @@ export interface ExternalToolExecutionPorts {
     readonly argsDigest: Sha256Digest;
   }) => Promise<void>;
   readonly transport: ExternalToolTransport;
+  readonly getCallContext: (callId: string) => ExternalToolCallContext;
+  /** HTTP 工具版本绑定的方法；返回 undefined 或未提供时 HTTP Transport 在发包前拒绝。 */
+  readonly httpMethodForVersion?: (toolVersionId: string) => "GET" | "POST" | undefined;
   readonly reconciliation?: ExternalToolReconciliationPort;
   readonly recordReceipt: (input: {
     readonly callId: string;
@@ -338,36 +341,51 @@ export function createExternalToolAgentTool(
           await ports.persistStarted({ callId, toolName: tool.modelToolName });
           await ports.authorizeAndConsume({ callId, toolName: tool.modelToolName, argsDigest });
         }
-        const target = await validateExternalHttpsTarget(tool.endpoint, {
-          ...(ports.allowPrivateAddresses === undefined
-            ? {}
-            : { allowPrivate: ports.allowPrivateAddresses }),
-          ...(ports.resolveAddresses === undefined ? {} : { resolve: ports.resolveAddresses }),
-        });
+        // 总超时从 DNS 预检开始计算，Transport 共用同一绝对截止时间。
+        const deadlineAt = Date.now() + tool.timeoutMs;
+        const target = await withDeadline(
+          validateExternalHttpsTarget(tool.endpoint, {
+            ...(ports.allowPrivateAddresses === undefined
+              ? {}
+              : { allowPrivate: ports.allowPrivateAddresses }),
+            ...(ports.resolveAddresses === undefined ? {} : { resolve: ports.resolveAddresses }),
+          }),
+          deadlineAt,
+        );
+        const method =
+          tool.source === "http" ? ports.httpMethodForVersion?.(tool.toolVersionId) : undefined;
         wrote = true;
         const response = await ports.transport.invoke({
           tool,
           target,
           arguments: args,
+          callContext: ports.getCallContext(callId),
+          ...(method === undefined ? {} : { method }),
           ...(credential === undefined ? {} : { credential }),
           idempotencyKey: callId,
           timeoutMs: tool.timeoutMs,
+          deadlineAt,
           maxResponseBytes: tool.maxResponseBytes,
           redirect: "error",
           ...(signal === undefined ? {} : { signal }),
         });
         if (response.body.byteLength > tool.maxResponseBytes)
           throw new Error("EXTERNAL_TOOL_RESPONSE_LIMIT");
+        // 模型只看到正文投影：凭据与签名、时间戳等认证材料在解析后逐值剔除。
+        const secrets = [credential, ...(response.authMaterial ?? [])].filter(
+          (value): value is string => typeof value === "string" && value.length > 0,
+        );
         const raw = new TextDecoder().decode(response.body);
         let visible = raw;
-        if (/json/i.test(response.contentType)) {
+        if (response.body.byteLength === 0) visible = "外部工具调用已成功，未返回内容。";
+        else if (/json/i.test(response.contentType)) {
           try {
-            visible = JSON.stringify(redactJson(JSON.parse(raw), credential));
+            visible = JSON.stringify(redactJson(JSON.parse(raw), secrets));
           } catch {
             throw new Error("EXTERNAL_TOOL_RESPONSE_INVALID");
           }
         }
-        if (credential) visible = visible.split(credential).join("[凭据已隐藏]");
+        visible = redactText(visible, secrets);
         const cap = Math.max(1, Math.min(8192, ports.maxModelVisibleBytes ?? 8192));
         const bytes = new TextEncoder().encode(visible);
         if (bytes.byteLength > cap) visible = decodeUtf8Prefix(bytes, cap);
@@ -378,10 +396,15 @@ export function createExternalToolAgentTool(
         };
       } catch (error) {
         if (
-          (error instanceof ExternalToolTransportError && error.phase === "preflight") ||
-          error instanceof McpResponseFailure
-        )
-          wrote = false;
+          error instanceof ExternalToolTransportError &&
+          (error.disposition === "not_sent" || error.disposition === "responded_failure")
+        ) {
+          await ports.recordReceipt({ callId, receipt: receipt("failed") });
+          return {
+            content: [{ type: "text", text: "外部工具调用未完成。" }],
+            details: { error: error.safeCode },
+          };
+        }
         if (wrote) {
           recoveryRequired = true;
           try {
@@ -393,35 +416,51 @@ export function createExternalToolAgentTool(
         }
         await ports.recordReceipt({ callId, receipt: receipt("failed") });
         return {
-          content: [
-            {
-              type: "text",
-              text:
-                error instanceof McpResponseFailure ? error.safeMessage : "外部工具调用未完成。",
-            },
-          ],
-          details: {
-            error: error instanceof McpResponseFailure ? error.safeCode : "EXTERNAL_TOOL_FAILED",
-          },
+          content: [{ type: "text", text: "外部工具调用未完成。" }],
+          details: { error: "EXTERNAL_TOOL_FAILED" },
         };
       }
     },
   };
 }
 
-function redactJson(value: unknown, credential?: string): unknown {
-  if (!credential) return value;
-  if (typeof value === "string") return value.split(credential).join("[凭据已隐藏]");
-  if (Array.isArray(value)) return value.map((item) => redactJson(item, credential));
+function redactText(value: string, secrets: readonly string[]): string {
+  return secrets.reduce((text, secret) => text.split(secret).join("[凭据已隐藏]"), value);
+}
+
+function redactJson(value: unknown, secrets: readonly string[]): unknown {
+  if (secrets.length === 0) return value;
+  if (typeof value === "string") return redactText(value, secrets);
+  // 时间戳等认证材料可能以 JSON 数字回显，按完整数值匹配剔除。
+  if (typeof value === "number" && secrets.includes(String(value))) return "[凭据已隐藏]";
+  if (Array.isArray(value)) return value.map((item) => redactJson(item, secrets));
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
-        key.split(credential).join("[凭据已隐藏]"),
-        redactJson(item, credential),
+        redactText(key, secrets),
+        redactJson(item, secrets),
       ]),
     );
   }
   return value;
+}
+
+/** DNS 预检超过整次调用截止时间时以未写出失败结束；底层解析无法取消，但不再等待其结果。 */
+async function withDeadline<T>(promise: Promise<T>, deadlineAt: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new ExternalToolTransportError("not_sent", "EXTERNAL_TOOL_UNAVAILABLE")),
+          Math.max(0, deadlineAt - Date.now()),
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function validateExternalToolArguments(

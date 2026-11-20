@@ -52,6 +52,18 @@ function productionEnvironment(): Record<string, string> {
 }
 
 describe("Agent Worker 进程入口", () => {
+  it("私有出站目标默认关闭且只能通过显式布尔配置放行", () => {
+    const env = productionEnvironment();
+    expect(parseWorkerProcessEnvironment(env).externalToolsAllowPrivateAddresses).toBe(false);
+    expect(
+      parseWorkerProcessEnvironment({ ...env, EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES: "true" })
+        .externalToolsAllowPrivateAddresses,
+    ).toBe(true);
+    expect(() =>
+      parseWorkerProcessEnvironment({ ...env, EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES: "yes" }),
+    ).toThrow();
+  });
+
   it("无沙箱和模型供应商时仍能解析基础部署，显式启用的沙箱仍校验完整性", () => {
     const env = productionEnvironment();
     for (const key of Object.keys(env)) {

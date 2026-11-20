@@ -11,6 +11,7 @@
 
 ## Tenant 隔离
 
+- 外部工具版本、撤销事实与凭据由 Admin Control 写入，版本和凭据密文发布后不可修改；Runtime ACL 对这些表为零。凭据管理投影只返回是否配置。接入 Agent 快照前不得向 Worker 开放版本或凭据读取。
 - 业务表全部启用并 FORCE RLS，策略基于事务内的 `app.tenant_id`、`app.user_id` 等可信设置。应用授权与 RLS 同时生效，不能只依赖其中一层。
 - 认证只证明 User 身份；Runtime 必须在事务内从 Membership 重建 TenantScope。客户端头部或模型参数不能构造 scope。
 - 跨表引用使用包含 `tenant_id` 的复合外键，阻止跨租户身份拼接。公开错误不泄漏跨 Tenant 实体是否存在。
@@ -26,7 +27,7 @@
 | Runtime | API、Worker、Scheduler | 表与列白名单 ACL，无 routine 权限；对 Membership 只有 SELECT、INSERT 与恒定 `lock_marker` 列更新 |
 | Worker Coordinator | Worker 的 Tenant 发现 | 只能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表 |
 | Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Worker 不持有 |
-| Admin Control | 统一 Admin API 控制面 | 控制面配置、审计与统计投影 |
+| Admin Control | 统一 Admin API 控制面 | 控制面配置、外部工具版本发布与撤销、审计及统计投影；工具凭据仅 INSERT，管理投影不读取密文 |
 | Skill Publisher | 统一 Admin API Skill 路由 | Skill 发布状态机与对应对象存储权限 |
 
 角色属于整个 PostgreSQL 集群；同一集群的开发、预览和生产数据库使用不同角色集合。迁移在任何 DDL 前校验全部角色、Schema owner、`search_path` 与跨数据库依赖，并在同一事务中完成 Schema 迁移、迁移记录、策略重绑定和最小 ACL 重建。readiness 探测的是实际连接身份，而不是配置文件中的声明。

@@ -3,7 +3,6 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SiteRoot } from "./site-root.js";
-vi.mock("./landing-page.js", () => ({ LandingPage: () => <p>公开首页</p> }));
 vi.mock("./main.js", () => ({ App: () => <p>工作台</p> }));
 let root: Root;
 let container: HTMLDivElement;
@@ -21,20 +20,21 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   fetcher.mockReset();
 });
-describe("安装状态与公开入口", () => {
-  it("API 故障时公开首页仍可访问", async () => {
-    fetcher.mockRejectedValue(new Error("offline"));
-    await act(async () => root.render(<SiteRoot surface="landing" />));
-    expect(container.textContent).toBe("公开首页");
+describe("工作台的安装状态", () => {
+  it("等待安装状态时不加载工作台", async () => {
+    fetcher.mockImplementation(() => new Promise(() => {}));
+    await act(async () => root.render(<SiteRoot />));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("正在检查 Hoox 安装状态…");
+    expect(fetcher).toHaveBeenCalledWith("/api/v1/installation", { cache: "no-store" });
   });
   it("API 故障时工作台展示连接失败", async () => {
     fetcher.mockRejectedValue(new Error("offline"));
-    await act(async () => root.render(<SiteRoot surface="workspace" />));
+    await act(async () => root.render(<SiteRoot />));
     expect(container.textContent).toContain("无法连接 Hoox 服务");
   });
   it("已初始化后加载工作台", async () => {
     fetcher.mockResolvedValue(Response.json({ data: { initialized: true } }));
-    await act(async () => root.render(<SiteRoot surface="workspace" />));
+    await act(async () => root.render(<SiteRoot />));
     expect(container.textContent).toBe("工作台");
   });
 });

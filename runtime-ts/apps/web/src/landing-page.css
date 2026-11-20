@@ -54,7 +54,8 @@ html[data-surface="landing"] {
   border: 0;
 }
 .landing-page a:focus-visible,
-.landing-page button:focus-visible {
+.landing-page button:focus-visible,
+.landing-nav-menu summary:focus-visible {
   outline: 3px solid hsl(154, 57%, 37%);
   outline-offset: 4px;
 }
@@ -79,7 +80,8 @@ html[data-surface="landing"] {
   display: block;
   object-fit: contain;
 }
-.landing-nav nav {
+.landing-nav nav,
+.landing-nav-sections {
   display: flex;
   gap: 24px;
   align-items: center;
@@ -89,6 +91,29 @@ html[data-surface="landing"] {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.landing-nav-menu {
+  display: none;
+  position: relative;
+}
+.landing-nav-menu summary {
+  cursor: pointer;
+  padding: 12px 8px;
+  font-weight: 600;
+}
+.landing-nav-menu > div {
+  position: absolute;
+  z-index: 2;
+  inset-inline-end: 0;
+  min-width: 144px;
+  padding: 8px;
+  border: 1px solid var(--landing-border);
+  border-radius: 8px;
+  background: var(--landing-white);
+  box-shadow: 0 8px 24px hsl(150 14% 15% / 12%);
+}
+.landing-nav-menu a {
+  padding: 10px 12px;
 }
 .landing-nav nav a:hover {
   color: var(--landing-green);
@@ -1682,7 +1707,7 @@ html[data-surface="landing"] {
   margin-top: 32px;
 }
 .landing-community-links a,
-.landing-footer div > a {
+.landing-footer nav > a {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -1691,15 +1716,17 @@ html[data-surface="landing"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 24px;
   border-top: 1px solid var(--landing-border);
   padding-block: 32px;
   color: var(--landing-muted);
   font-size: 12px;
 }
-.landing-footer > div {
+.landing-footer > nav {
   display: flex;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 12px 16px;
 }
 .landing-page [data-motion="playing"] .landing-section-heading {
   animation: landing-section-arrive 800ms var(--landing-ease) both;
@@ -1949,9 +1976,11 @@ html[data-surface="landing"] {
     gap: 16px;
     font-size: 12px;
   }
-  .landing-nav nav > a[href="#team"],
-  .landing-nav nav > .landing-nav-github {
+  .landing-nav-sections {
     display: none;
+  }
+  .landing-nav-menu {
+    display: block;
   }
   .landing-hero {
     grid-template-columns: minmax(0, 1fr);
@@ -2079,8 +2108,8 @@ html[data-surface="landing"] {
     width: 104px;
     height: 32px;
   }
-  .landing-nav nav > a[href^="#"] {
-    display: none;
+  .landing-nav nav {
+    gap: 8px;
   }
   .landing-nav-app {
     padding: 8px 12px;
@@ -2497,9 +2526,8 @@ html[data-surface="landing"] {
     width: 88px;
     height: 32px;
   }
-  .landing-footer > div {
-    gap: 12px;
-    font-size: 10px;
+  .landing-footer > nav {
+    flex-basis: 100%;
   }
 }
 @keyframes landing-snapshot-transfer-mobile {

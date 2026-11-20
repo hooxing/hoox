@@ -40,7 +40,6 @@ import {
 } from "../../runtime-ts/apps/agent-worker/src/production-worker-runtime.js";
 import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
 import {
-  FakeArtifactPublication,
   FakeCancellationPort,
   FakeRecoveryMetrics,
   FakeRevisionVerifier,
@@ -832,7 +831,6 @@ describe("PostgreSQL stable blob 生命周期", () => {
         orphanSandboxes: sandboxes,
         sessions,
         cancellation: new FakeCancellationPort(),
-        artifacts: new FakeArtifactPublication(),
         clock: new SystemWorkerClock(),
         metrics: new FakeRecoveryMetrics(),
       },

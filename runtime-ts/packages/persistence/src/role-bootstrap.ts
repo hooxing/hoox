@@ -182,6 +182,7 @@ const adminControlTables = new Set([
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
+  ["api_keys", new Set(["SELECT", "INSERT"])],
   ["user_accounts", new Set(["SELECT", "INSERT"])],
   ["user_sessions", new Set(["SELECT", "INSERT", "DELETE"])],
   ["tenants", new Set(["SELECT", "INSERT"])],
@@ -323,6 +324,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 ]);
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
+  ["api_keys", new Set(["last_used_at", "revoked_at"])],
   [
     "runtime_ptc_dispatches",
     new Set([
@@ -1157,6 +1159,14 @@ const managedSandboxRuntimeTables = [
   "sandbox_control_head",
 ] as const;
 
+async function hasApiKeyState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.api_keys',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasManagedSandboxState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.sandbox_control_head',$1::text)) IS NOT NULL AS present",
@@ -1170,6 +1180,7 @@ async function activeTablePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
+  if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
   if (await hasManagedSandboxState(client, schema)) {
     for (const table of managedSandboxControlTables) policy.set(table, new Set());
     for (const table of managedSandboxRuntimeTables) policy.set(table, new Set(["SELECT"]));
@@ -1318,6 +1329,7 @@ async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
   if (await hasInstallationState(client, schema)) {
     policy.set("installation_state", new Set(["administrator_user_id", "initialized_at"]));
   }
@@ -1327,6 +1339,8 @@ async function activeColumnUpdatePolicy(
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
   if (await hasMembershipLockMarker(client)) membershipUpdateColumns.add("lock_marker");
+  // 仅 API Key 吊销需撤销专属集成身份；其他 Membership 授权列仍由 Team Coordinator 管理。
+  if (await hasApiKeyState(client, schema)) membershipUpdateColumns.add("status");
   policy.set("memberships", membershipUpdateColumns);
   if (!(await hasPersonalizationSettingsState(client, schema))) {
     for (const table of personalizationSettingsTables) policy.delete(table);
@@ -3152,6 +3166,13 @@ export async function bootstrapRuntimeAccessOnClient(
   await client.query(
     `GRANT SELECT, INSERT ON TABLE ${schema}.app_users, ${schema}.tenants, ${schema}.memberships TO ${role}`,
   );
+  if (await hasApiKeyState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.api_keys TO ${role};
+       GRANT UPDATE(last_used_at, revoked_at) ON TABLE ${schema}.api_keys TO ${role};
+       GRANT UPDATE(status) ON TABLE ${schema}.memberships TO ${role}`,
+    );
+  }
   if (await hasMembershipLockMarker(client)) {
     await client.query(`GRANT UPDATE(lock_marker) ON TABLE ${schema}.memberships TO ${role}`);
   }

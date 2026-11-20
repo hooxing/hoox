@@ -12,7 +12,7 @@
 ## Tenant 隔离
 
 - 业务表全部启用并 FORCE RLS，策略基于事务内的 `app.tenant_id`、`app.user_id` 等可信设置。应用授权与 RLS 同时生效，不能只依赖其中一层。
-- 认证只证明 User 身份；Runtime 必须在事务内从 Membership 重建 TenantScope。客户端头部或模型参数不能构造 scope。
+- 认证只证明 User 身份；Runtime 必须在事务内从 Membership 重建 TenantScope。客户端头部或模型参数不能构造 scope。API Key 在尚未知 Tenant 时只可经 RLS 按当前事务 `app.api_key_hash` 精确读取匹配记录；凭据成功后业务访问仍必须使用集成 User 的 Tenant Membership。
 - 跨表引用使用包含 `tenant_id` 的复合外键，阻止跨租户身份拼接。公开错误不泄漏跨 Tenant 实体是否存在。
 - 后台统计只通过 Migrator 拥有的受限视图跨 Tenant 聚合；底表保留 FORCE RLS，专属读取策略只面向 Migrator 并要求有效平台操作者。
 
@@ -23,7 +23,7 @@
 | 角色 | 使用者 | 边界 |
 | --- | --- | --- |
 | Migrator | 迁移命令 | 拥有 Schema 和受限视图；不被常驻进程使用 |
-| Runtime | API、Worker、Scheduler | 表与列白名单 ACL，无 routine 权限；对 Membership 只有 SELECT、INSERT 与恒定 `lock_marker` 列更新 |
+| Runtime | API、Worker、Scheduler | 表与列白名单 ACL，无 routine 权限；API Key 认证仅按哈希命中受 RLS 限制的凭据行，最近使用/吊销字段与集成 Membership 状态只有列级更新权限 |
 | Worker Coordinator | Worker 的 Tenant 发现 | 只能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表 |
 | Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Worker 不持有 |
 | Admin Control | 统一 Admin API 控制面 | 控制面配置、审计与统计投影 |

@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "@hoox/prompt-builder";
 import {
   CubeSandboxGateway,
   cubeConfigFromEnv,
@@ -90,6 +91,7 @@ try {
   const model = faux.getModel();
   controller = await createSafePiSession({
     model,
+    operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
     modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
     modelRuntime,
     sandbox,

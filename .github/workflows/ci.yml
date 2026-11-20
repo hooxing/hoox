@@ -162,6 +162,18 @@ jobs:
           pnpm build:m4-runtime-dependencies
           pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "PostgreSQL Runtime 模型与模式快照"
 
+      - name: 验证 Agent 平台新增 PostgreSQL 集成测试
+        env:
+          DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+        # 每个套件用管理连接自建并清理带随机后缀的隔离 Schema 与受限角色，不使用也不删除 m4_ci_* 角色。
+        # 新增套件时在 suites 数组中追加一行。
+        run: |
+          pnpm --filter "@hoox/persistence..." build
+          suites=(
+            tests/integration/postgres-admin-run-explorer.integration.test.ts
+          )
+          pnpm exec vitest run --config vitest.integration.config.ts "${suites[@]}"
+
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:
           RUN_PG_RUN_WORKER_INTEGRATION: "true"

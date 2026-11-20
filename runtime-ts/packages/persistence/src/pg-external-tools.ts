@@ -23,10 +23,13 @@ async function withAdminUser<T>(
 
 /** 控制面仅写凭据并只投影 configured；不存在返回密文或明文的管理查询。 */
 export class PgExternalToolRegistry {
-  constructor(
-    private readonly pool: Pool,
-    private readonly cipher: ExternalToolCredentialCipher,
-  ) {}
+  private readonly pool: Pool;
+  private readonly cipher: ExternalToolCredentialCipher;
+
+  constructor(pool: Pool, cipher: ExternalToolCredentialCipher) {
+    this.pool = pool;
+    this.cipher = cipher;
+  }
 
   async publish(input: {
     readonly actorUserId: string;

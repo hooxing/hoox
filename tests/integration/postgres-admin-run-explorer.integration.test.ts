@@ -126,9 +126,10 @@ async function seed(): Promise<void> {
     for (const [kind, sequence, payload] of events) {
       await client.query(
         `INSERT INTO run_events(tenant_id,attempt_id,sequence,schema_version,kind,payload,occurred_at)
-         VALUES('tenant_a','run_a2_attempt',$1,1,$2,$3::jsonb,
-           '2026-11-19T01:00:02Z'::timestamptz + ($1::int * interval '1 second'))`,
-        [sequence, kind, JSON.stringify(payload)],
+         VALUES('tenant_a','run_a2_attempt',$1::bigint,1,$2::text,$3::jsonb,
+           '2026-11-19T01:00:02Z'::timestamptz + make_interval(secs => $4::integer))`,
+        // 序号与时间偏移分开传参：同一参数出现在不同类型位置会让 PostgreSQL 推断失败。
+        [Number(sequence), kind, JSON.stringify(payload), Number(sequence)],
       );
     }
     for (const [metric, value, unit] of [

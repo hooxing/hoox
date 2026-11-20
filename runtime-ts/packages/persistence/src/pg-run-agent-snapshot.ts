@@ -55,6 +55,7 @@ export async function createRunConfigurationSnapshots(
   }
   await createRunSkillSnapshot(client, {
     ...input,
+    agentSkillVersions: snapshot.content.skillVersions,
     includeTenantSkills: snapshot.content.includeTenantSkills,
   });
 }

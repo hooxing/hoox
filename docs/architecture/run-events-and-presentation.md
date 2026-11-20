@@ -29,6 +29,7 @@
 - 模型网络请求诊断默认关闭，只有显式开启后才拦截与配置 Provider 匹配的 `chat/completions` 请求，保存最终请求正文；不保存 HTTP header、原始响应正文或 Sandbox/S3 等其他请求。诊断正文进入 trace Blob 生命周期，受保留期与 GC 约束。
 - 内部轨迹记录（`@hoox/trajectory`）由 Worker 在 Session 内收集 Runtime 与 Pi 事件，供 development/Demo 的内部轨迹查看器读取；它不是公开产品 API。
 - 模型用量（未缓存输入、输出、缓存读取 Token 与生成时长）原子写入租户隔离的低基数指标账本，后台只读取跨 Tenant 聚合视图，不保存 Provider 身份或模型正文。
+- Worker 的 [OpenTelemetry 导出](../maintainers/diagnostics.md#导出到-opentelemetry)只旁听 Provider 流与通过持久化验证的 Run/工具事件。同一 Tool Call 的重复读回不生成新 Span；没有已确认的结束事实不猜测结果。导出默认不含正文，不复制持久账本，也不作为界面投影、恢复或计费依据。
 - 诊断数据可能包含用户内容，必须按敏感数据处理；配置错误、日志和测试失败不得输出秘密值。
 
 ## 修改检查清单

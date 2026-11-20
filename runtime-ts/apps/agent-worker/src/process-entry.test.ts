@@ -52,6 +52,42 @@ function productionEnvironment(): Record<string, string> {
 }
 
 describe("Agent Worker 进程入口", () => {
+  it("Worker OTLP 配置独立启用，凭据配置错误只输出变量名", () => {
+    const env = productionEnvironment();
+    expect(parseWorkerProcessEnvironment(env).telemetry).toBeUndefined();
+    const enabled = {
+      ...env,
+      OTEL_EXPORT_ENABLED: "true",
+      OTEL_EXPORT_ENDPOINT: "https://collector.example.invalid/otlp/",
+      OTEL_EXPORT_HEADERS: '{"Authorization":"Bearer replace-me"}',
+      OTEL_EXPORT_SAMPLE_RATE: "0.25",
+    };
+    expect(
+      parseWorkerProcessEnvironment(selectWorkerProcessEnvironment(enabled)).telemetry,
+    ).toEqual({
+      endpoint: "https://collector.example.invalid/otlp",
+      headers: { authorization: "Bearer replace-me" },
+      sampleRate: 0.25,
+      contentEnabled: false,
+    });
+    for (const [key, value] of [
+      ["OTEL_EXPORT_ENDPOINT", "https://collector.example.invalid/?key=secret-placeholder"],
+      ["OTEL_EXPORT_HEADERS", '{"Authorization":"secret-placeholder\\n"}'],
+      ["OTEL_EXPORT_SAMPLE_RATE", "1.1"],
+    ] as const) {
+      expect(() => parseWorkerProcessEnvironment({ ...enabled, [key]: value })).toThrow(
+        new RegExp(`^环境配置无效：INVALID:${key}$`, "u"),
+      );
+    }
+    expect(() => parseWorkerProcessEnvironment({ ...enabled, OTEL_EXPORT_ENDPOINT: "" })).toThrow(
+      "MISSING:OTEL_EXPORT_ENDPOINT",
+    );
+    expect(
+      parseWorkerProcessEnvironment({ ...enabled, OTEL_EXPORT_CONTENT_ENABLED: "true" }).telemetry
+        ?.contentEnabled,
+    ).toBe(true);
+  });
+
   it("私有出站目标默认关闭且只能通过显式布尔配置放行", () => {
     const env = productionEnvironment();
     expect(parseWorkerProcessEnvironment(env).externalToolsAllowPrivateAddresses).toBe(false);

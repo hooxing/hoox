@@ -1280,7 +1280,7 @@ async function assembleWorkerRuntime(
       new PgRunCompactionSettingsRepository(pool),
       configuration.threadContext.compaction,
       configuration.model.maxOutputTokens,
-      async (snapshot, compactionSettings) => {
+      async (snapshot, compactionSettings, tools) => {
         if (snapshot?.model === undefined && configuration.model.apiKey === "")
           throw new Error("MODEL_CONFIGURATION_REQUIRED");
         const configuredProvider = snapshot?.model?.configuration;
@@ -1314,10 +1314,7 @@ async function assembleWorkerRuntime(
           threadContinuityMetrics,
         );
         return deploymentSessions.withModel({
-          toolCallingMode: snapshot?.runtimeSettings?.configuration.toolCallingMode ?? "native",
-          ...(snapshot?.runtimeSettings?.configuration.enabledTools === undefined
-            ? {}
-            : { enabledTools: snapshot.runtimeSettings.configuration.enabledTools }),
+          ...tools,
           model: dynamicModel.model,
           modelRuntime: dynamicModel.modelRuntime,
           modelContext: dynamicModelContext,

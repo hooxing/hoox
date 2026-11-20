@@ -77,6 +77,7 @@ export async function applyThreadSandboxTerminal(
     readonly command: ThreadSandboxTerminalCommandV1;
     readonly currentRevisionId?: string;
     readonly nextRunId?: string;
+    readonly forceClose?: boolean;
     readonly databaseNow: string;
     readonly handoffLeaseMs: number;
   },
@@ -126,7 +127,7 @@ export async function applyThreadSandboxTerminal(
     ],
   );
   if (released.rowCount !== 1) throw new Error("Thread Sandbox terminal lease release CAS 冲突");
-  if (input.nextRunId !== undefined) {
+  if (input.nextRunId !== undefined && input.forceClose !== true) {
     const nextEpoch = Number(row.lease_epoch) + 1;
     await client.query(
       `INSERT INTO thread_sandbox_leases(
@@ -173,7 +174,8 @@ export async function applyThreadSandboxTerminal(
     input.scope.tenantId,
     input.command.sessionId,
   );
-  const effectKind = policy?.idleAction === "kill" ? "terminate" : "pause";
+  const effectKind =
+    input.forceClose === true || policy?.idleAction === "kill" ? "terminate" : "pause";
   const operationId = `${input.attemptId}/sandbox/${input.command.sessionId}/terminal-${effectKind}`;
   await client.query(
     `INSERT INTO sandbox_lifecycle_effects(

@@ -1,6 +1,7 @@
 import {
   AGENT_OPERATOR_INSTRUCTIONS_MAX_BYTES,
   type AdminSetAgentAvailability,
+  type AgentPinnedModelReferenceDto,
   type AgentRevisionContentDto,
   RUNTIME_TOOL_CATALOG,
 } from "@hoox/protocol";
@@ -85,7 +86,7 @@ const initialContent: AgentRevisionContentDto = {
   skillVersions: [],
   includeTenantSkills: true,
   sandboxIdleAction: "pause",
-  longTermMemoryEnabled: false,
+  memory: { mode: "platform_default" },
 };
 
 function skills(value: string): AgentRevisionContentDto["skillVersions"] {
@@ -111,15 +112,21 @@ function skills(value: string): AgentRevisionContentDto["skillVersions"] {
   return versions;
 }
 
+function pinnedModelKey(model: AgentPinnedModelReferenceDto): string {
+  return JSON.stringify([model.providerKey, model.providerRevision, model.modelId]);
+}
+
 export function AgentDefinitionEditor({
   initial,
   builtinToolLimit,
+  pinnedModelOptions,
   saving,
   onSave,
   onCancel,
 }: {
   readonly initial?: AgentRevisionContentDto;
   readonly builtinToolLimit: readonly string[];
+  readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
   readonly saving: boolean;
   readonly onSave: (
     content: AgentRevisionContentDto,
@@ -144,7 +151,13 @@ export function AgentDefinitionEditor({
       : /\$\{[^}]+\}|\{\{[^}]+\}\}/u.test(content.operatorInstructions)
         ? "Operator 指令不得包含模板变量。"
         : undefined;
-  const pinnedModel = initial?.model.mode === "pinned" ? initial.model : undefined;
+  const pinnedModels = new Map(pinnedModelOptions.map((model) => [pinnedModelKey(model), model]));
+  const selectedModelKey =
+    content.model.mode === "pinned" ? pinnedModelKey(content.model) : "platform_default";
+  const unavailableModel =
+    content.model.mode === "pinned" && !pinnedModels.has(selectedModelKey)
+      ? content.model
+      : undefined;
   const configured = content.tools.mode === "configured" ? content.tools : undefined;
   const unavailableTools =
     configured?.builtinTools.filter((tool) => !builtinToolLimit.includes(tool)) ?? [];
@@ -162,6 +175,7 @@ export function AgentDefinitionEditor({
     setError(undefined);
     try {
       if (instructionError) throw new Error(instructionError);
+      if (unavailableModel) throw new Error("当前固定模型不可用，请重新选择。");
       const suggestedQuestions = lines(questions);
       if (
         suggestedQuestions.length > 12 ||
@@ -258,25 +272,30 @@ export function AgentDefinitionEditor({
           <label className="agent-field">
             <span>模型</span>
             <select
-              value={content.model.mode}
-              onChange={(event) => {
-                if (event.target.value === "platform_default") {
-                  change("model", { mode: "platform_default" });
-                } else if (pinnedModel) {
-                  change("model", pinnedModel);
-                }
-              }}
+              value={selectedModelKey}
+              onChange={(event) =>
+                change(
+                  "model",
+                  pinnedModels.get(event.target.value) ?? { mode: "platform_default" },
+                )
+              }
             >
               <option value="platform_default">跟随平台默认</option>
-              {pinnedModel && (
-                <option value="pinned">
-                  {pinnedModel.modelId} · {pinnedModel.providerRevisionId}
+              {unavailableModel && (
+                <option value={selectedModelKey} disabled>
+                  {unavailableModel.modelId} · {unavailableModel.providerKey} · 版本{" "}
+                  {unavailableModel.providerRevision}（不可用）
                 </option>
               )}
+              {Array.from(pinnedModels, ([key, model]) => (
+                <option key={key} value={key}>
+                  {model.modelId} · {model.providerKey} · 版本 {model.providerRevision}
+                </option>
+              ))}
             </select>
           </label>
           <Typography.Text type="secondary">
-            这里可以跟随平台默认模型；已有的固定模型引用会保留。
+            可跟随平台默认，或固定到已保存的模型版本。固定后不随平台默认模型切换。
           </Typography.Text>
         </div>
       </Card>
@@ -394,13 +413,29 @@ export function AgentDefinitionEditor({
               <option value="kill">销毁</option>
             </select>
           </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={content.longTermMemoryEnabled}
-              onChange={(event) => change("longTermMemoryEnabled", event.target.checked)}
-            />{" "}
-            启用长期记忆（受平台设置约束）
+          <label className="agent-field">
+            <span>长期记忆</span>
+            <select
+              value={
+                content.memory.mode === "platform_default"
+                  ? "platform_default"
+                  : content.memory.longTermEnabled
+                    ? "enabled"
+                    : "disabled"
+              }
+              onChange={(event) =>
+                change(
+                  "memory",
+                  event.target.value === "platform_default"
+                    ? { mode: "platform_default" }
+                    : { mode: "configured", longTermEnabled: event.target.value === "enabled" },
+                )
+              }
+            >
+              <option value="platform_default">跟随平台设置</option>
+              <option value="enabled">启用（受平台设置约束）</option>
+              <option value="disabled">关闭</option>
+            </select>
           </label>
         </div>
       </Card>

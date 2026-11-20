@@ -15,6 +15,7 @@ import {
   type Membership,
   membershipId,
   prepareWorkspaceRevision,
+  rehydrateThread,
   type Run,
   releaseWorkspaceLease,
   renewWorkspaceLease,
@@ -38,9 +39,21 @@ import type {
 } from "@hoox/persistence/postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AdminControlApiDependencies } from "../../runtime-ts/apps/admin-control-api/src/app.js";
+import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
-import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "../../runtime-ts/packages/prompt-builder/src/index.js";
+import {
+  buildRuntimeSystemPrompt,
+  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
+} from "../../runtime-ts/packages/prompt-builder/src/index.js";
+import { runtimeMutationDigest } from "@hoox/run-contracts/mutation-protocol";
+import type { RuntimeMutation } from "@hoox/run-contracts";
+import { PgRunDispatchCreation } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
+import {
+  PgExecutionPersistence,
+  PgRunExecutionSetup,
+} from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
+import { readRunAgentSnapshot } from "../../runtime-ts/packages/persistence/src/pg-run-agent-snapshot.js";
 import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import {
   loadMigrations,
@@ -68,6 +81,7 @@ import {
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
+import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
 import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
@@ -176,7 +190,10 @@ function canonical(value: unknown): string {
 
 async function readDefaultAgentRevision() {
   const repository = new PgAgentDefinitionRepository(runtimePool);
-  return repository.readRevisionById(tenantId("tenant_seed_contract"), "agent_default_revision_1");
+  return repository.readRevisionById(
+    tenantId("tenant_seed_contract"),
+    "agent_default_revision_platform_memory",
+  );
 }
 
 function timestamp(second: number): ReturnType<typeof isoTimestamp> {
@@ -469,6 +486,245 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   it("默认 Agent Revision 的工具配置跟随平台运行设置", async () => {
     const revision = await readDefaultAgentRevision();
     expect(revision?.content.tools).toEqual({ mode: "platform_default" });
+    expect(revision?.content.memory).toEqual({ mode: "platform_default" });
+    const seed = await administrativePool.query<{ readonly content: Record<string, unknown> }>(
+      `SELECT content FROM "${schema}".agent_revisions WHERE id='agent_default_revision_1'`,
+    );
+    expect(seed.rows[0]?.content).toMatchObject({ longTermMemoryEnabled: false });
+    expect(seed.rows[0]?.content).not.toHaveProperty("memory");
+  });
+
+  function pinnedModelFixture() {
+    const cipher = new ModelProviderCredentialCipher(
+      "integration-pinned-model-root-at-least-32-bytes",
+    );
+    const config = new PgAdminControlRepository(adminControlPool, cipher);
+    const service = new AdminControlService(
+      config,
+      config,
+      { async probeModel() {}, async probeMemory() {} },
+      [],
+    );
+    const providerKey = "agent-pinned-model";
+    const configurations = {
+      providerKey,
+      displayName: "Agent 固定模型测试供应商",
+      protocol: "openai-compatible",
+      baseUrl: "https://pinned.example.invalid/v1",
+      defaultModelId: "model-default",
+      models: [
+        {
+          id: "model-default",
+          name: "默认",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 65536,
+          maxTokens: 4096,
+        },
+        {
+          id: "model-selected",
+          name: "固定",
+          enabled: true,
+          reasoning: false,
+          input: ["text", "image"],
+          contextWindow: 32768,
+          maxTokens: 2048,
+        },
+        {
+          id: "model-disabled",
+          name: "停用",
+          enabled: false,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 32768,
+          maxTokens: 1024,
+        },
+      ],
+    } as const;
+    const context = (actorUserId: string, idempotencyKey: string) => ({
+      actorUserId,
+      idempotencyKey,
+      requestDigest: createHash("sha256").update(idempotencyKey).digest("hex"),
+    });
+    return { cipher, config, service, providerKey, configurations, context };
+  }
+
+  it("RunAgentSnapshot 只读解析精确的固定模型，不采用 active、默认条目或部署凭据", async () => {
+    const manager = await createFixture("pinned_runtime_model");
+    const other = await createFixture("pinned_other_tenant");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [manager.user.id],
+    );
+    const { cipher, config, service, providerKey, configurations, context } = pinnedModelFixture();
+    const key = "placeholder-agent-pinned-api-key";
+    const provider = await service.createModelDraft(
+      context(manager.user.id, "pinned-model-runtime-draft"),
+      {
+        ...configurations,
+        apiKey: key,
+      },
+    );
+    const active = await service.saveModelConfiguration(
+      context(manager.user.id, "pinned-model-runtime-active"),
+      {
+        ...configurations,
+        expectedGeneration: await config.generation(manager.user.id),
+        apiKey: "placeholder-distinct-active-model-key",
+      },
+    );
+    try {
+      const defaults = await readDefaultAgentRevision();
+      if (!defaults) throw new Error("默认 Agent Revision 不可见");
+      const reference = {
+        mode: "pinned",
+        providerKey,
+        providerRevision: provider.revision,
+        modelId: "model-selected",
+      } as const;
+      const agents = new PgAgentDefinitionRepository(adminControlPool);
+      const draft = await agents.createDraft({
+        actorUserId: manager.user.id,
+        id: "agent_pinned_runtime_model",
+        revisionId: "agent_pinned_runtime_revision",
+        expectedGeneration: 0,
+        idempotencyKey: "pinned-runtime-agent-draft",
+        availability: { mode: "all_tenants" },
+        content: { ...defaults.content, model: reference },
+      });
+      await agents.publish({
+        actorUserId: manager.user.id,
+        definitionId: draft.definition.id,
+        revisionId: draft.revision.id,
+        expectedGeneration: 0,
+        idempotencyKey: "pinned-runtime-agent-publish",
+      });
+      const thread = rehydrateThread(
+        {
+          ...manager.thread,
+          id: "thread_agent_pinned_runtime",
+          agentDefinitionId: draft.definition.id,
+        },
+        manager.tenant,
+        manager.user,
+        manager.membership,
+      );
+      expect(await repositories.threads.create(manager.scope, thread)).toMatchObject({
+        outcome: "created",
+      });
+      const workspace = createWorkspace({
+        id: workspaceId("workspace_agent_pinned_runtime"),
+        thread,
+        now: timestamp(4),
+      });
+      expect(await repositories.workspaces.create(manager.scope, workspace)).toEqual({
+        outcome: "created",
+      });
+      const run = createRun({ id: runId("run_agent_pinned_runtime"), thread, now: timestamp(5) });
+      expect(
+        await new PgRunDispatchCreation(runtimePool).createQueuedRun({
+          scope: manager.scope,
+          thread,
+          run,
+          inputText: "执行",
+          idempotency: {
+            key: "pinned-runtime-create-run",
+            requestHash: sha256Digest("0".repeat(64)),
+          },
+        }),
+      ).toMatchObject({ outcome: "created" });
+      const scope = { tenantId: manager.tenant.id, runId: run.id };
+      const runtime = new PgRuntimeControlConfigurationRepository(
+        runtimePool,
+        cipher,
+        "placeholder-deployment-key",
+      );
+      const readVisible = (tenantId: string, runId?: string) =>
+        withTenantTransaction(runtimePool, { tenantId }, async (client) => {
+          if (runId)
+            await client.query("SELECT set_config('app.pinned_model_run_id',$1,true)", [runId]);
+          return (
+            await client.query(
+              "SELECT 1 FROM admin_control_config_revisions WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2",
+              [providerKey, provider.revision],
+            )
+          ).rowCount;
+        });
+      expect(await readVisible(scope.tenantId)).toBe(0);
+      expect(await readVisible(other.tenant.id, run.id)).toBe(0);
+      expect(await readVisible(scope.tenantId, run.id)).toBe(1);
+      const resolved = await runtime.resolvePinnedModelConfiguration(scope, reference);
+      expect(resolved.model).toMatchObject({
+        revision: provider.revision,
+        configuration: {
+          providerKey,
+          defaultModelId: reference.modelId,
+          models: expect.arrayContaining([
+            expect.objectContaining({ id: reference.modelId, maxTokens: 2048 }),
+          ]),
+        },
+      });
+      expect(resolved.apiKey === key).toBe(true);
+      const countSnapshots = async () =>
+        Number(
+          (
+            await migratorPool.query<{ count: string }>(
+              "SELECT count(*) AS count FROM run_runtime_config_snapshots WHERE tenant_id=$1 AND run_id=$2",
+              [scope.tenantId, scope.runId],
+            )
+          ).rows[0]?.count,
+        );
+      expect(await countSnapshots()).toBe(0);
+      await expect(
+        runtime.resolvePinnedModelConfiguration(scope, {
+          ...reference,
+          providerRevision: active.revision,
+        }),
+      ).rejects.toThrow("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+      await expect(
+        runtime.resolvePinnedModelConfiguration(scope, { ...reference, modelId: "model-default" }),
+      ).rejects.toThrow("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+      await expect(
+        runtime.resolvePinnedModelConfiguration({ ...scope, tenantId: other.tenant.id }, reference),
+      ).rejects.toThrow("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+      const wrongCipher = new ModelProviderCredentialCipher(
+        "integration-wrong-pinned-root-at-least-32-bytes",
+      );
+      await expect(
+        new PgRuntimeControlConfigurationRepository(
+          runtimePool,
+          wrongCipher,
+          "placeholder-deployment-key",
+        ).resolvePinnedModelConfiguration(scope, reference),
+      ).rejects.toThrow("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+      expect((await runtime.resolveActiveModelConfiguration())?.configuration.defaultModelId).toBe(
+        "model-default",
+      );
+      expect((await runtime.resolveForRun(scope))?.model).toEqual(resolved.model);
+      expect(await countSnapshots()).toBe(1);
+      await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
+        manager.user.id,
+      ]);
+      expect(
+        (
+          await new PgRuntimeControlConfigurationRepository(runtimePool, cipher).resolveForRun(
+            scope,
+          )
+        )?.model,
+      ).toEqual(resolved.model);
+      await migratorPool.query(
+        "DELETE FROM admin_control_config_revisions WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2",
+        [providerKey, provider.revision],
+      );
+      await expect(runtime.resolveForRun(scope)).rejects.toThrow(
+        "PINNED_MODEL_CONFIGURATION_UNAVAILABLE",
+      );
+    } finally {
+      await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
+        manager.user.id,
+      ]);
+    }
   });
 
   it("后台 Agent 管理拒绝草稿越权并原子更新可用范围", async () => {
@@ -519,7 +775,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       skillVersions: [],
       includeTenantSkills: true,
       sandboxIdleAction: "pause",
-      longTermMemoryEnabled: false,
+      memory: { mode: "platform_default" },
     };
     const write = (
       url: string,
@@ -549,6 +805,32 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
       expect(oversized.statusCode).toBe(400);
       expect(oversized.json().error.message).toContain("operatorInstructions");
+      const { service, configurations, context, providerKey } = pinnedModelFixture();
+      const provider = await service.createModelDraft(
+        context(operator.user.id, "pinned-model-admin-draft"),
+        {
+          ...configurations,
+          apiKey: "placeholder-admin-pinned-api-key",
+        },
+      );
+      const pinned = {
+        mode: "pinned",
+        providerKey,
+        providerRevision: provider.revision,
+        modelId: "model-selected",
+      };
+      for (const model of [
+        { ...pinned, providerRevision: provider.revision + 100 },
+        { ...pinned, modelId: "model-disabled" },
+        { ...pinned, modelId: "model-missing" },
+      ]) {
+        const invalid = await write(route, "agent-invalid-pinned-model", {
+          ...draft,
+          content: { ...content, model },
+        });
+        expect(invalid.statusCode).toBe(400);
+        expect(invalid.json().error.message).toContain("已保存、已启用");
+      }
       const invalidTool = await write(route, "agent-admin-create", {
         ...draft,
         content: {
@@ -587,7 +869,13 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(runtimeDraft.rows).toEqual([]);
       const managerList = await read(route);
       expect(managerList.statusCode).toBe(200);
-      expect(managerList.json().data).toMatchObject({ canManage: true });
+      expect(managerList.json().data).toMatchObject({
+        canManage: true,
+        pinnedModelOptions: expect.arrayContaining([pinned]),
+      });
+      expect(managerList.body).not.toContain("placeholder-admin-pinned-api-key");
+      expect(managerList.body).not.toContain("ciphertext");
+      expect((await read(route, "Bearer viewer")).json().data.pinnedModelOptions).toEqual([]);
       const listItem = managerList
         .json()
         .data.items.find((item: { definition: { id: string } }) => item.definition.id === id);
@@ -602,10 +890,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       const saved = await write(revisions, "agent-admin-save", {
         expectedGeneration: 0,
         revisionId: second,
-        content: { ...content, displayName: "草稿第二版" },
+        content: { ...content, displayName: "草稿第二版", model: pinned },
       });
       expect(saved.statusCode).toBe(201);
-      expect(saved.json().data).toMatchObject({ id: second, revision: 2, status: "draft" });
+      expect(saved.json().data).toMatchObject({
+        id: second,
+        revision: 2,
+        status: "draft",
+        content: { model: pinned },
+      });
       expect(
         (
           await write(`${revisions}/${first}/publish`, "agent-admin-publish", {
@@ -631,6 +924,13 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         "草稿第二版",
       );
       expect((await read(`${route}/agent_default/revisions/${first}`)).statusCode).toBe(404);
+      const seed = await read(`${route}/agent_default/revisions/agent_default_revision_1`);
+      expect(seed.statusCode).toBe(200);
+      expect(seed.json().data.content.memory).toEqual({
+        mode: "configured",
+        longTermEnabled: false,
+      });
+      expect(seed.json().data.content).not.toHaveProperty("longTermMemoryEnabled");
 
       const scope = (expectedGeneration: number, tenantIds: string[]) => ({
         expectedGeneration,
@@ -872,7 +1172,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       skillVersions: [],
       includeTenantSkills: true,
       sandboxIdleAction: "pause" as const,
-      longTermMemoryEnabled: false,
+      memory: { mode: "configured" as const, longTermEnabled: false },
     };
     await expect(
       repository.createDraft({
@@ -1023,6 +1323,349 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(
       await repository.readCurrentPublished(manager.tenant.id, "agent_revoke_test"),
     ).toBeUndefined();
+  });
+
+  it("RunAgentSnapshot 固定创建时的 Revision，发布、停用与重启恢复不改写，撤销阻断安全点和许可", async () => {
+    const manager = await createFixture("run_agent_snapshot");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [manager.user.id],
+    );
+    const repository = new PgAgentDefinitionRepository(adminControlPool);
+    const defaults = await readDefaultAgentRevision();
+    if (defaults === undefined) throw new Error("默认 Agent Revision 不可见");
+    const draft = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_run_snapshot",
+      availability: { mode: "selected_tenants", tenantIds: [manager.tenant.id] },
+      content: {
+        ...defaults.content,
+        operatorInstructions: "固定指令一",
+        includeTenantSkills: false,
+      },
+      revisionId: "agent_run_snapshot_v1",
+      idempotencyKey: "run-agent-snapshot-draft",
+      expectedGeneration: 0,
+    });
+    const revision = draft.revision;
+    const firstPublish = await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: revision.id,
+      idempotencyKey: "run-agent-snapshot-publish",
+      expectedGeneration: draft.definition.generation,
+    });
+    const thread = rehydrateThread(
+      {
+        ...manager.thread,
+        id: "thread_run_agent_snapshot_bound",
+        agentDefinitionId: draft.definition.id,
+      },
+      manager.tenant,
+      manager.user,
+      manager.membership,
+    );
+    expect(await repositories.threads.create(manager.scope, thread)).toMatchObject({
+      outcome: "created",
+    });
+    const workspace = createWorkspace({
+      id: workspaceId("workspace_run_agent_snapshot_bound"),
+      thread,
+      now: timestamp(4),
+    });
+    expect(await repositories.workspaces.create(manager.scope, workspace)).toEqual({
+      outcome: "created",
+    });
+    const creation = new PgRunDispatchCreation(runtimePool);
+    const enqueue = (
+      id: string,
+      skillInvocation?: { readonly invocationName: string; readonly args: string },
+    ) =>
+      creation.createQueuedRun({
+        scope: manager.scope,
+        thread,
+        run: createRun({ id: runId(id), thread, now: timestamp(5) }),
+        inputText: "执行",
+        ...(skillInvocation === undefined ? {} : { skillInvocation }),
+        idempotency: { key: id, requestHash: sha256Digest("0".repeat(64)) },
+      });
+    const rejectedRunId = "run_agent_snapshot_skill_rejected";
+    await expect(
+      enqueue(rejectedRunId, { invocationName: "not-installed", args: "" }),
+    ).resolves.toEqual({ outcome: "skill_not_available" });
+    const rejectedRun = await withTenantTransaction(runtimePool, manager.scope, (client) =>
+      client.query(
+        `SELECT 1 FROM runs WHERE id=$1
+         UNION ALL SELECT 1 FROM run_agent_snapshots WHERE run_id=$1
+         UNION ALL SELECT 1 FROM run_skill_snapshots WHERE run_id=$1`,
+        [rejectedRunId],
+      ),
+    );
+    expect(rejectedRun.rowCount).toBe(0);
+    const first = await enqueue("run_agent_snapshot_v1");
+    if (first.outcome !== "created") throw new Error(`Run 创建失败：${first.outcome}`);
+    const scope = {
+      tenantId: manager.scope.tenantId,
+      threadId: thread.id,
+      workspaceId: workspace.id,
+      runId: first.entity.id,
+      rootRunId: first.entity.id,
+    };
+    const snap = await withTenantTransaction(runtimePool, manager.scope, (client) =>
+      readRunAgentSnapshot(client, scope),
+    );
+    expect(snap).toEqual({
+      definitionId: draft.definition.id,
+      revisionId: revision.id,
+      revisionDigest: revision.digest,
+      content: revision.content,
+    });
+    expect(await enqueue(first.entity.id)).toMatchObject({ outcome: "replayed" });
+    const stranger = await createFixture("run_agent_snapshot_other");
+    await expect(
+      withTenantTransaction(runtimePool, stranger.scope, (client) =>
+        readRunAgentSnapshot(client, scope),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      withTenantTransaction(runtimePool, manager.scope, (client) =>
+        client.query("UPDATE run_agent_snapshots SET content='{}'::jsonb WHERE run_id=$1", [
+          scope.runId,
+        ]),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      withTenantTransaction(runtimePool, manager.scope, (client) =>
+        client.query("DELETE FROM run_agent_snapshots WHERE run_id=$1", [scope.runId]),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    expect(
+      await withTenantTransaction(runtimePool, manager.scope, (client) =>
+        client.query("SELECT 1 FROM run_skill_snapshots WHERE tenant_id=$1 AND run_id=$2", [
+          scope.tenantId,
+          scope.runId,
+        ]),
+      ),
+    ).toMatchObject({ rowCount: 1 });
+
+    const second = await repository.createDraftRevision({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: "agent_run_snapshot_v2",
+      content: { ...revision.content, operatorInstructions: "固定指令二" },
+      idempotencyKey: "run-agent-snapshot-draft-v2",
+      expectedGeneration: firstPublish.generation,
+    });
+    const secondPublish = await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: second.id,
+      idempotencyKey: "run-agent-snapshot-publish-v2",
+      expectedGeneration: firstPublish.generation + 1,
+    });
+    const secondRun = await enqueue("run_agent_snapshot_v2");
+    expect(secondRun.outcome).toBe("created");
+    expect(
+      await withTenantTransaction(runtimePool, manager.scope, (client) =>
+        readRunAgentSnapshot(client, { ...scope, runId: "run_agent_snapshot_v2" }),
+      ),
+    ).toMatchObject({ revisionId: second.id });
+    const disabled = await repository.deactivate({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      idempotencyKey: "run-agent-snapshot-disable",
+      expectedGeneration: secondPublish.generation,
+    });
+    await expect(enqueue("run_agent_snapshot_denied")).resolves.toEqual({
+      outcome: "agent_revision_unavailable",
+    });
+    await expect(
+      repositories.runs.get(manager.scope, runId("run_agent_snapshot_denied")),
+    ).resolves.toBeUndefined();
+
+    await expect(enqueue(first.entity.id)).resolves.toMatchObject({ outcome: "replayed" });
+
+    const worker = new PgExecutionPersistence(runtimePool);
+    const claim = await worker.claim({
+      scope,
+      workerId: "snapshot-worker-first",
+      leaseDurationMs: 30_000,
+    });
+    if (claim.outcome !== "claimed") throw new Error(`领取失败：${claim.outcome}`);
+    expect(claim.snapshot.agent).toEqual(snap);
+    const mutate = (
+      claimFence: typeof claim.fence,
+      input: Omit<
+        RuntimeMutation,
+        "schemaVersion" | "commandDigest" | "fence" | "events" | "outbox"
+      >,
+    ) => {
+      const unsigned = {
+        schemaVersion: 1 as const,
+        fence: claimFence,
+        events: [],
+        outbox: [],
+        ...input,
+      };
+      return worker.mutate({ ...unsigned, commandDigest: runtimeMutationDigest(unsigned) });
+    };
+    await expect(
+      mutate(claim.fence, {
+        idempotencyKey: "agent-snapshot-running",
+        expectedAttemptVersion: 0,
+        nextAttemptStatus: "running",
+        nextStage: "model_execution_started",
+      }),
+    ).resolves.toMatchObject({ outcome: "applied" });
+    await expect(
+      mutate(claim.fence, {
+        idempotencyKey: "agent-snapshot-waiting",
+        expectedAttemptVersion: 1,
+        nextAttemptStatus: "waiting",
+        nextStage: "finished",
+        nextRunStatus: "waiting",
+        releaseFences: true,
+      }),
+    ).resolves.toMatchObject({ outcome: "applied" });
+    const waiting = await repositories.runs.get(manager.scope, scope.runId);
+    if (waiting === undefined) throw new Error("等待中的 Run 不可见");
+    await expect(
+      new PgRunExecutionSetup(runtimePool).setAnswer({
+        scope,
+        answer: "恢复执行",
+        expectedRunVersion: Number(waiting.version),
+      }),
+    ).resolves.toBe("updated");
+    const restarted = new PgExecutionPersistence(runtimePool);
+    const resumed = await restarted.claim({
+      scope,
+      workerId: "snapshot-worker-restarted",
+      leaseDurationMs: 30_000,
+    });
+    if (resumed.outcome !== "claimed") throw new Error(`恢复领取失败：${resumed.outcome}`);
+    expect(resumed.snapshot.agent).toEqual(snap);
+    expect(resumed.snapshot.attempt.attemptId).not.toBe(claim.snapshot.attempt.attemptId);
+    await expect(
+      mutate(resumed.fence, {
+        idempotencyKey: "agent-snapshot-resumed-running",
+        expectedAttemptVersion: 0,
+        nextAttemptStatus: "running",
+        nextStage: "model_execution_started",
+      }),
+    ).resolves.toMatchObject({ outcome: "applied" });
+    const permit = await restarted.issueExternalEffectPermit({
+      fence: resumed.fence,
+      expectedAttemptVersion: 1,
+      effect: "model_start",
+      call: {
+        callId: "model-before-revocation",
+        toolName: "pi_model",
+        argsDigest: sha256Digest("0".repeat(64)),
+      },
+      permitDurationMs: 15_000,
+    });
+    if (permit.outcome !== "authorized") throw new Error(`签发许可失败：${permit.outcome}`);
+
+    await repository.revoke({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: revision.id,
+      idempotencyKey: "run-agent-snapshot-revoke",
+      reason: "撤销旧 Revision",
+      expectedGeneration: disabled.generation,
+    });
+    const inspected = await restarted.inspectAndRenew({
+      fence: resumed.fence,
+      leaseDurationMs: 30_000,
+    });
+    if (inspected.outcome !== "active") throw new Error(`安全点失败：${inspected.outcome}`);
+    expect(inspected.agentRevisionRevoked).toBe(true);
+    await expect(
+      restarted.consumeExternalEffectPermit({
+        fence: inspected.fence,
+        expectedAttemptVersion: 1,
+        permit: permit.permit,
+      }),
+    ).resolves.toEqual({ outcome: "agent_revision_revoked" });
+    await expect(
+      restarted.issueExternalEffectPermit({
+        fence: inspected.fence,
+        expectedAttemptVersion: resumed.snapshot.attempt.version,
+        effect: "model_start",
+        call: {
+          callId: "revoked-call",
+          toolName: "pi_model",
+          argsDigest: sha256Digest("0".repeat(64)),
+        },
+        permitDurationMs: 3_000,
+      }),
+    ).resolves.toEqual({ outcome: "agent_revision_revoked" });
+  });
+
+  it("RunAgentSnapshot 默认 Agent 保留 Prompt Golden 字节，损坏和缺失快照不回退", async () => {
+    const f = await createFixture("agent_snapshot_golden");
+    const scope = { tenantId: f.scope.tenantId, threadId: f.thread.id, runId: f.run.id };
+    const snapshot = await withTenantTransaction(runtimePool, f.scope, (client) =>
+      readRunAgentSnapshot(client, scope),
+    );
+    if (snapshot === undefined) throw new Error("默认 Agent 快照不可见");
+    const prompt = (operatorInstructions: string) =>
+      buildRuntimeSystemPrompt({
+        schemaVersion: 1,
+        operatorInstructions,
+        capabilities: [],
+        availableSkills: [],
+        untrusted: { tenant: [], skill: [], user: [] },
+      });
+    expect(prompt(snapshot.content.operatorInstructions)).toEqual(
+      prompt(DEFAULT_AGENT_OPERATOR_INSTRUCTIONS),
+    );
+    const fixtures = await Promise.all(
+      ["corrupt", "missing"].map(async (kind) => {
+        const isolated = await createFixture(`agent_snapshot_${kind}`);
+        const run = createRun({
+          id: runId(`run_agent_snapshot_${kind}_queued`),
+          thread: isolated.thread,
+          now: timestamp(5),
+        });
+        expect(
+          await new PgRunDispatchCreation(runtimePool).createQueuedRun({
+            scope: isolated.scope,
+            thread: isolated.thread,
+            run,
+            inputText: "执行",
+            idempotency: { key: run.id, requestHash: sha256Digest("0".repeat(64)) },
+          }),
+        ).toMatchObject({ outcome: "created" });
+        return { kind, run, isolated };
+      }),
+    );
+    for (const { kind, run, isolated } of fixtures) {
+      // 使用隔离 Schema 的管理连接模拟磁盘事实损坏；Runtime 本身不能改写此行。
+      const table = `"${schema}".run_agent_snapshots`;
+      await administrativePool.query(
+        kind === "corrupt"
+          ? `UPDATE ${table} SET revision_digest=repeat('0',64) WHERE run_id=$1`
+          : `DELETE FROM ${table} WHERE run_id=$1`,
+        [run.id],
+      );
+      await expect(
+        new PgExecutionPersistence(runtimePool).claim({
+          scope: {
+            tenantId: isolated.tenant.id,
+            threadId: isolated.thread.id,
+            runId: run.id,
+            rootRunId: run.id,
+            workspaceId: isolated.workspace.id,
+          },
+          workerId: "snapshot-invalid-worker",
+          leaseDurationMs: 30_000,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "claimed",
+        snapshot: { agent: "AGENT_SNAPSHOT_INVALID" },
+      });
+    }
   });
 
   it("托管沙箱配置验证权限、发布门禁、版本并发及实例绑定隔离", async () => {
@@ -2759,7 +3402,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(publicAfter.rows[0]?.count).toBe("0");
   });
 
-  it("空 routine manifest 令 Runtime 与 PUBLIC 的 EXECUTE 集合自然为空", async () => {
+  it("Runtime 的业务 Schema 不包含可执行 Routine", async () => {
     const privileges = await migratorPool.query<{
       routine_count: string;
       runtime_execute_count: string;
@@ -3091,6 +3734,196 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         ),
       ),
     ).rejects.toMatchObject({ code: "42501" });
+  });
+});
+
+function postgresSqlState(error: unknown): string | undefined {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { readonly code?: unknown; readonly cause?: unknown };
+    if (
+      typeof candidate.code === "string" &&
+      /^[0-9A-Z]{5}$/.test(candidate.code) &&
+      ![
+        "ECONNREFUSED",
+        "ENOTFOUND",
+        "EAI_AGAIN",
+        "ETIMEDOUT",
+        "EHOSTUNREACH",
+        "ENETUNREACH",
+        "ECONNRESET",
+        "ECONNABORTED",
+        "EPIPE",
+      ].includes(candidate.code)
+    ) {
+      return candidate.code;
+    }
+    current = candidate.cause;
+  }
+  return undefined;
+}
+
+function itWithSqlStateDiagnostic(title: string, test: () => Promise<void>): void {
+  it(title, async () => {
+    try {
+      await test();
+    } catch (error) {
+      const code = postgresSqlState(error);
+      if (code !== undefined) {
+        throw new Error(`PostgreSQL API Key 用例失败（SQLSTATE ${code}）`, { cause: error });
+      }
+      throw error;
+    }
+  });
+}
+
+describe("PostgreSQL API Key 隔离与集成身份", () => {
+  itWithSqlStateDiagnostic(
+    "仅持久化哈希，按 Tenant 隔离并在吊销后同步禁用集成 Membership",
+    async () => {
+      const owner = await createFixture("api_key_owner");
+      const other = await createFixture("api_key_other");
+      const repository = new PgApiKeyRepository(runtimePool);
+      const token = createApiKeyToken();
+      const key = await repository.create({
+        scope: owner.scope,
+        createdBy: owner.user.id,
+        keyHash: hashApiKey(token),
+        prefix: token.slice(0, 12),
+        name: "集成测试",
+        scopes: ["threads:read", "runs:read"],
+        now: timestamp(10),
+      });
+
+      expect((await repository.list(other.scope)).map((item) => item.id)).toEqual([]);
+      const principal = await repository.authenticateKey({ token, now: timestamp(11) });
+      expect(principal).toMatchObject({
+        tenantId: owner.scope.tenantId,
+        userId: key.integrationUserId,
+      });
+      const integration = await repositories.tenants.get({
+        tenantId: owner.scope.tenantId,
+        userId: userId(key.integrationUserId),
+      });
+      expect(integration?.membership.role).toBe("member");
+
+      const raw = await withTenantTransaction(migratorPool, owner.scope, (client) =>
+        client.query<{
+          key_hash: Buffer;
+          kind: string;
+          last_used_at: Date | null;
+        }>(
+          "SELECT k.key_hash, k.last_used_at, u.kind FROM api_keys k JOIN app_users u ON u.id = k.integration_user_id WHERE k.tenant_id = $1 AND k.id = $2",
+          [owner.scope.tenantId, key.id],
+        ),
+      );
+      expect(raw.rows[0]?.key_hash.equals(hashApiKey(token))).toBe(true);
+      expect(raw.rows[0]?.key_hash.equals(Buffer.from(token))).toBe(false);
+      expect(raw.rows[0]?.last_used_at).not.toBeNull();
+      expect(raw.rows[0]?.kind).toBe("integration");
+
+      await repository.revoke(owner.scope, key.id, timestamp(12));
+      const clearRevocation = await withTenantTransaction(runtimePool, owner.scope, (client) =>
+        client.query("UPDATE api_keys SET revoked_at = NULL WHERE tenant_id = $1 AND id = $2", [
+          owner.scope.tenantId,
+          key.id,
+        ]),
+      );
+      expect(clearRevocation.rowCount).toBe(0);
+      const restoreMembership = await withTenantTransaction(
+        runtimePool,
+        { ...owner.scope, userId: key.integrationUserId },
+        (client) =>
+          client.query(
+            "UPDATE memberships SET status = 'active' WHERE tenant_id = $1 AND user_id = $2",
+            [owner.scope.tenantId, key.integrationUserId],
+          ),
+      );
+      expect(restoreMembership.rowCount).toBe(0);
+      expect(
+        (await repository.list(owner.scope)).find((item) => item.id === key.id)?.revokedAt,
+      ).toBe(timestamp(12));
+      expect(await repository.authenticateKey({ token, now: timestamp(13) })).toBeUndefined();
+      expect(
+        await repositories.tenants.get({
+          tenantId: owner.scope.tenantId,
+          userId: userId(key.integrationUserId),
+        }),
+      ).toBeUndefined();
+    },
+  );
+
+  itWithSqlStateDiagnostic("Runtime 不能直接撤销人类成员 Membership", async () => {
+    const owner = await createFixture("api_key_human_guard");
+    const humanId = userId("user_api_key_human_guard_member");
+    await withTenantTransaction(
+      migratorPool,
+      { tenantId: owner.scope.tenantId, userId: humanId },
+      async (client) => {
+        await client.query("INSERT INTO app_users(id, created_at) VALUES ($1, $2)", [
+          humanId,
+          timestamp(10),
+        ]);
+        await client.query(
+          "INSERT INTO memberships(tenant_id, id, user_id, role, status, created_at) VALUES ($1, $2, $3, 'member', 'active', $4)",
+          [owner.scope.tenantId, "mem_api_key_human_guard", humanId, timestamp(10)],
+        );
+      },
+    );
+
+    // FOR SHARE/UPDATE 会施加 UPDATE 策略的 USING；人类成员的授权加锁与 lock_marker
+    // 自更新必须仍然命中，否则 Thread 创建、归档等主路径会退化为 not_authorized。
+    const humanScope = { tenantId: owner.scope.tenantId, userId: humanId };
+    const locked = await withTenantTransaction(runtimePool, humanScope, (client) =>
+      client.query<{ status: string }>(
+        "SELECT status FROM memberships WHERE tenant_id = $1 AND user_id = $2 FOR SHARE",
+        [owner.scope.tenantId, humanId],
+      ),
+    );
+    expect(locked.rows.map((row) => row.status)).toEqual(["active"]);
+    const markerTouch = await withTenantTransaction(runtimePool, humanScope, (client) =>
+      client.query(
+        "UPDATE memberships SET lock_marker = lock_marker WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'",
+        [owner.scope.tenantId, humanId],
+      ),
+    );
+    expect(markerTouch.rowCount).toBe(1);
+
+    await expect(
+      withTenantTransaction(runtimePool, owner.scope, (client) =>
+        client.query(
+          "UPDATE memberships SET status = 'revoked' WHERE tenant_id = $1 AND user_id = $2",
+          [owner.scope.tenantId, humanId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+
+    const unchanged = await withTenantTransaction(migratorPool, owner.scope, (client) =>
+      client.query<{ status: string }>(
+        "SELECT status FROM memberships WHERE tenant_id = $1 AND user_id = $2",
+        [owner.scope.tenantId, humanId],
+      ),
+    );
+    expect(unchanged.rows[0]?.status).toBe("active");
+  });
+
+  it("到期的 Key 无法认证", async () => {
+    const owner = await createFixture("api_key_expired");
+    const repository = new PgApiKeyRepository(runtimePool);
+    const token = createApiKeyToken();
+    await repository.create({
+      scope: owner.scope,
+      createdBy: owner.user.id,
+      keyHash: hashApiKey(token),
+      prefix: token.slice(0, 12),
+      name: "过期测试",
+      scopes: ["threads:read"],
+      now: "2000-01-01T00:00:00.000Z",
+      expiresAt: "2001-01-01T00:00:00.000Z",
+    });
+    expect(await repository.authenticateKey({ token, now: timestamp(14) })).toBeUndefined();
   });
 });
 

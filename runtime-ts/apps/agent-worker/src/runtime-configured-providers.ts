@@ -1,11 +1,17 @@
-import { normalizeRuntimeToolSelection } from "@hoox/protocol";
+import {
+  normalizeRuntimeToolSelection,
+  RUNTIME_TOOL_NAMES,
+  type RuntimeToolName,
+} from "@hoox/protocol";
 import {
   defaultModelConfiguration,
   type ModelProviderConfiguration,
+  PinnedRunModelUnavailableError,
   type RunCompactionSettings,
   type RunCompactionSettingsPort,
   type RuntimeControlConfigurationPort,
   type RuntimeControlConfigurationSnapshot,
+  type RuntimeSettingsConfiguration,
 } from "@hoox/admin-control";
 import {
   Mem0PlatformMemoryProvider,
@@ -16,7 +22,11 @@ import {
   type MemoryRetriever,
   type RetrievedMemory,
 } from "@hoox/memory";
-import type { AgentSessionFactoryPort, WorkerAgentSessionPort } from "@hoox/run-contracts";
+import type {
+  AgentSessionFactoryPort,
+  RunAgentSnapshot,
+  WorkerAgentSessionPort,
+} from "@hoox/run-contracts";
 
 export interface RuntimeModelProbeConfiguration {
   readonly baseUrl: string;
@@ -51,6 +61,30 @@ export async function resolveRuntimeModelProbeConfiguration(
 
 type SessionCreateInput = Parameters<AgentSessionFactoryPort["create"]>[0];
 
+interface RunToolPolicy {
+  readonly toolCallingMode: "native" | "ptc";
+  readonly enabledTools?: readonly RuntimeToolName[];
+}
+
+function resolveRunToolPolicy(
+  tools: RunAgentSnapshot["content"]["tools"],
+  platform?: RuntimeSettingsConfiguration,
+): RunToolPolicy {
+  const enabledTools = normalizeRuntimeToolSelection(platform?.enabledTools);
+  if (tools.mode === "platform_default") {
+    return {
+      toolCallingMode: platform?.toolCallingMode ?? "native",
+      ...(enabledTools === undefined ? {} : { enabledTools }),
+    };
+  }
+  return {
+    toolCallingMode: tools.toolCallingMode,
+    enabledTools: (enabledTools ?? RUNTIME_TOOL_NAMES).filter((name) =>
+      tools.builtinTools.includes(name),
+    ),
+  };
+}
+
 /** 已托管模型的 Run 按不可变快照恢复；部署回退模型仍由启动配置决定。 */
 export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort {
   readonly toolRejectionReceiptBarrier = "durable" as const;
@@ -64,6 +98,7 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
     private readonly build: (
       snapshot: RuntimeControlConfigurationSnapshot | undefined,
       compactionSettings: RunCompactionSettings,
+      tools: RunToolPolicy,
     ) => Promise<AgentSessionFactoryPort>,
   ) {}
 
@@ -72,6 +107,15 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       tenantId: input.scope.tenantId,
       runId: input.scope.runId,
     });
+    const reference = input.agentSnapshot.content.model;
+    if (
+      reference.mode === "pinned" &&
+      (snapshot?.model?.configuration.providerKey !== reference.providerKey ||
+        snapshot.model.revision !== reference.providerRevision ||
+        snapshot.model.configuration.defaultModelId !== reference.modelId ||
+        !snapshot.modelApiKey)
+    )
+      throw new PinnedRunModelUnavailableError();
     const modelMaxOutputTokens =
       snapshot?.model === undefined
         ? this.deploymentModelMaxOutputTokens
@@ -93,23 +137,25 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       ...savedCompactionSettings,
       maxOutputTokens: Math.min(savedCompactionSettings.maxOutputTokens, modelMaxOutputTokens),
     };
-    const selectedTools = normalizeRuntimeToolSelection(
-      snapshot?.runtimeSettings?.configuration.enabledTools,
+    const tools = resolveRunToolPolicy(
+      input.agentSnapshot.content.tools,
+      snapshot?.runtimeSettings?.configuration,
     );
-    const key = [
-      snapshot?.runtimeSettings?.configuration.toolCallingMode ?? "native",
-      selectedTools === undefined ? "default-tools" : JSON.stringify(selectedTools),
+    const key = JSON.stringify([
+      tools.toolCallingMode,
+      tools.enabledTools === undefined ? "default-tools" : JSON.stringify(tools.enabledTools),
       snapshot?.model?.configuration.providerKey ?? "deployment",
       snapshot?.model?.revision ?? 0,
+      snapshot?.model?.configuration.defaultModelId,
       compactionSettings.softLimitPercent,
       compactionSettings.targetPercent,
       compactionSettings.recentUserTokens,
       compactionSettings.maxOutputTokens,
       compactionSettings.timeoutMs,
-    ].join(":");
+    ]);
     let factory = this.factories.get(key);
     if (factory === undefined) {
-      factory = this.build(snapshot, compactionSettings);
+      factory = this.build(snapshot, compactionSettings, tools);
       this.factories.set(key, factory);
       factory.catch(() => this.factories.delete(key));
       if (this.factories.size > 16)
@@ -144,7 +190,10 @@ export class RuntimeConfiguredMemoryProvider implements MemoryRetriever, MemoryP
     });
     if (snapshot === undefined) return this.fallback;
     const memory = snapshot.memory;
-    if (memory === undefined) return snapshot.model === undefined ? this.fallback : undefined;
+    if (memory === undefined) {
+      const managedModel = snapshot.platformModelConfigured ?? snapshot.model !== undefined;
+      return managedModel ? undefined : this.fallback;
+    }
     if (!memory.configuration.enabled) return undefined;
     const apiKey =
       memory.configuration.apiSecretRef === "managed:memory-api"

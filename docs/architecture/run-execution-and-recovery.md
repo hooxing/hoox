@@ -27,9 +27,10 @@ claimed/running/finalizing → recovery_required → abandoned | failed
 
 ## 创建与投递
 
-- API 在一个 Tenant 事务内按 Membership → Thread → Workspace 锁序重验状态，原子写入 queued Run、不可变执行输入、Dispatch Outbox 和 API 幂等记录。Thread 创建同样原子写入 Thread、初始 Workspace 与幂等记录，不允许由 API 顺序组合多个 Repository。
+- API 在一个 Tenant 事务内按 Membership → Thread → Workspace 锁序重验状态，原子写入 queued Run、不可变执行输入、Dispatch Outbox、[RunAgentSnapshot](agent-definition.md)、`RunSkillSnapshot` 与 API 幂等记录。Thread 创建同样原子写入 Thread、初始 Workspace 与幂等记录，不允许由 API 顺序组合多个 Repository。
 - 请求哈希绑定 Thread 与输入；同一幂等键只接受相同请求，不同请求稳定冲突。COMMIT 响应未知时只按原 scope、幂等键与请求哈希读回，禁止再次写入。
 - 输入上限为 1,048,576 UTF-8 字节，API 与 PostgreSQL 各自执行。
+- Worker 领取时验证固定 Agent 快照，在停止检查、续租及外部副作用许可边界验证 Revision 撤销事实。撤销不是用户取消；Run 在安全停止后失败，不继续发起模型或工具调用。Agent 的长期记忆策略随同 Revision 固定；`platform_default` 在执行时服从该 Run 的平台记忆配置，显式关闭不检索也不摄取。
 - Worker 通过 Tenant assignment 发现有待处理工作的 Tenant，用短事务 `FOR UPDATE SKIP LOCKED` 领取 Outbox，并以 generation、claim token 与数据库租约作为确认栅栏。迟到确认是 no-op；Worker 仍负责 Attempt 级幂等。
 - 全局 Tenant 发现由独立 Worker Coordinator 数据库身份授权，只能读取 assignment 并更新 claim 栅栏列，不能读取业务表。团队解散会主动终止调度事实，避免撤权后的重试热循环。
 
@@ -103,3 +104,7 @@ Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回
 ## 外部工具结果未知
 
 外部工具请求写出后发生超时、断连或进程中断时，结果属于 UNKNOWN，Attempt 进入恢复且普通 Worker 再投递不得重放。只有独立显式对账入口核对持久化的工具版本、canonical 参数摘要与原幂等键完全一致后，才可授权声明幂等工具复用同一幂等键重试；Transport 自身不得重放。外部工具版本与凭据读取必须受 Run 快照限定，接入 Agent 快照前 Worker 不获得相应数据库读取授权。
+
+外部工具 Transport 将失败明确分为两类可安全结束的结果：`not_sent` 表示可证明请求未写出（例如目标预检、DNS、缺少方法绑定或 TLS 握手完成前的失败）；`responded_failure` 表示收到可归一化的失败响应。两类都写入失败回执，不进入 UNKNOWN 恢复。HTTP 3xx（拒绝跟随）与 4xx（包括 408、429）属于 `responded_failure`；HTTP 5xx、写出后超时或取消、断连、2xx 正文中途中断、超限以及无法解释的 2xx 正文仍属于 UNKNOWN 并转入恢复。合法空成功响应（204、205 或声明长度为 0 的 2xx）按成功结算。MCP 协议错误响应和工具错误映射为 `responded_failure`。Transport 不重试；未明确分类的异常一律按 UNKNOWN 处理，且每次调用只结算一次。
+
+整次外部调用共享一个从 DNS 预检开始计算的绝对截止时间；预检耗尽预算时按 `not_sent` 结束，Transport 不得在截止时间后继续等待或排空不使用的响应正文。HTTP Transport 每次调用新建连接并直接拨号到本次预检校验通过的 IP，不使用共享连接池，证书与 SNI 按原主机名校验。

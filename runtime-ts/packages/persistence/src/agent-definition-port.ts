@@ -86,6 +86,10 @@ export interface AgentDefinitionAdminRepositoryPort
   listDefinitions(actorUserId: string): Promise<{
     readonly canManage: boolean;
     readonly builtinToolLimit: readonly string[];
+    readonly pinnedModelOptions: readonly Extract<
+      AgentRevisionContent["model"],
+      { mode: "pinned" }
+    >[];
     readonly items: readonly {
       readonly definition: StoredAgentDefinition;
       readonly revision?: StoredAgentRevisionSummary;

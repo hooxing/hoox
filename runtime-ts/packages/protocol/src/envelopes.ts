@@ -6,8 +6,10 @@ export const publicErrorCodes = [
   "INVALID_REQUEST",
   "UNSUPPORTED_MEDIA_TYPE",
   "UNAUTHORIZED",
+  "FORBIDDEN",
   "NOT_FOUND",
   "CONFLICT",
+  "AGENT_REVISION_UNAVAILABLE",
   "INVALID_STATE",
   "RATE_LIMITED",
   "DEPENDENCY_UNAVAILABLE",
@@ -38,8 +40,10 @@ export type PublicFailure =
   | { readonly kind: "bad_request" }
   | { readonly kind: "unsupported_media_type" }
   | { readonly kind: "unauthorized" }
+  | { readonly kind: "forbidden" }
   | { readonly kind: "not_found" }
   | { readonly kind: "conflict" }
+  | { readonly kind: "agent_revision_unavailable" }
   | { readonly kind: "invalid_state" }
   | { readonly kind: "rate_limited" }
   | { readonly kind: "dependency_unavailable" }
@@ -57,8 +61,14 @@ const fixedErrors: Readonly<Record<PublicFailure["kind"], ErrorEnvelope["error"]
     retryable: false,
   }),
   unauthorized: Object.freeze({ code: "UNAUTHORIZED", message: "身份认证失败", retryable: false }),
+  forbidden: Object.freeze({ code: "FORBIDDEN", message: "凭据无权执行此操作", retryable: false }),
   not_found: Object.freeze({ code: "NOT_FOUND", message: "请求的资源不存在", retryable: false }),
   conflict: Object.freeze({ code: "CONFLICT", message: "资源状态已经变化", retryable: true }),
+  agent_revision_unavailable: Object.freeze({
+    code: "AGENT_REVISION_UNAVAILABLE",
+    message: "所选 Agent 当前不可用，请联系管理员或选择其他 Agent",
+    retryable: false,
+  }),
   invalid_state: Object.freeze({
     code: "INVALID_STATE",
     message: "当前状态不允许该操作",

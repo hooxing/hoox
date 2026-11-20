@@ -23,7 +23,7 @@
 
 Operator 指令的输入约束与失败语义：
 
-- `@hoox/prompt-builder` 要求调用方显式提供 Operator 指令，`@hoox/pi-adapter` 的 Session 选项同样必填，不会回退到默认值，避免漏传 Agent 配置时静默套用错误身份。Run 尚未固定 Agent 快照时，Worker 对所有 Run（含子 Agent 与恢复）传入 `DEFAULT_AGENT_OPERATOR_INSTRUCTIONS`，其内容是 Hoox 身份与“默认中文回答，用户明确要求时使用其他语言”。
+- `@hoox/prompt-builder` 要求调用方显式提供 Operator 指令，`@hoox/pi-adapter` 的 Session 选项同样必填，不会回退到默认值，避免漏传 Agent 配置时静默套用错误身份。Worker 对根 Session、子 Agent 与恢复 Session 一律传入 [RunAgentSnapshot](agent-definition.md) 的 Operator 指令。内置 Agent 的种子指令与 `DEFAULT_AGENT_OPERATOR_INSTRUCTIONS` 字节一致；Revision 摘要只参与审计与恢复比较，不进入模型输入。
 - 正文必须是非空 NFC 字符串，UTF-8 不超过 `MAX_OPERATOR_INSTRUCTIONS_BYTES`（16 KiB），不得以空白开头或结尾，除换行外不得包含控制、Bidi、零宽或非法 Unicode 字符，也不得包含任何 Runtime Prompt 结构标记（如 `PLATFORM_HARNESS`、`OPERATOR_INSTRUCTIONS`、`CAPABILITY_MANIFEST`，不区分大小写），防止伪造或提前闭合分区。任一校验失败时构造 Prompt 直接抛错，不截断、不清洗，Session 不会创建。
 - 同一 Operator 指令在相同能力配置下产生字节一致的 system；Prompt 摘要原像除完整 system 外还单独包含 Operator 指令摘要。
 
@@ -43,7 +43,7 @@ Operator 指令的输入约束与失败语义：
 ## 模型绑定
 
 - Worker 通过 `@hoox/pi-adapter` 直接装配 `pi-ai` Provider 与 `pi-agent-core` 工具循环，不使用 `pi-coding-agent` 的 Session、设置或宿主资源发现。逻辑工作目录固定为 `/workspace`。
-- 模型请求使用 Run 快照中的 Provider Revision、模型能力和凭据。Provider 请求前重新复核预算、工具能力和可信模型绑定；`MODEL_CONTINUATION_REJECTED` 与 `PROVIDER_BINDING_DRIFT` 属于 Runtime 本地协议阻断。
+- 模型请求使用 Run 快照中的 Provider Revision、模型能力和凭据。Agent 固定模型以 `providerKey + providerRevision + modelId` 精确引用已保存配置；缺失或不匹配必须失败关闭，不回退 active 或部署默认值。Provider 请求前重新复核预算、工具能力和可信模型绑定；`MODEL_CONTINUATION_REJECTED` 与 `PROVIDER_BINDING_DRIFT` 属于 Runtime 本地协议阻断。
 - 发送给 OpenAI-compatible Provider 的函数参数 Schema 顶层必须是 `object`，不使用顶层 `anyOf`；严格的联合校验由 Runtime 在调用后执行，并返回字段级错误。
 - 推理模型默认开启思考；思考内容可流式展示，但不作为可信事实或交付物。默认 Agent 的 Operator 指令要求默认使用中文回复。
 - 模型输出达到上限时由 Runtime 受控续轮，不把截断输出伪装为完整回复。

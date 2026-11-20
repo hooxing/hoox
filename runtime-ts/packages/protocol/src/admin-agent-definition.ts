@@ -2,6 +2,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import {
   AgentAvailabilitySchema,
   AgentDefinitionDtoSchema,
+  AgentPinnedModelReferenceSchema,
   AgentRevisionContentSchema,
   AgentRevisionDtoSchema,
 } from "./agent-definition.js";
@@ -50,6 +51,7 @@ export const AdminAgentDefinitionListSchema = Type.Object(
   {
     canManage: Type.Boolean(),
     builtinToolLimit: Type.Array(Type.String()),
+    pinnedModelOptions: Type.Array(AgentPinnedModelReferenceSchema),
     items: Type.Array(
       Type.Object(
         {

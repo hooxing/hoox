@@ -21,6 +21,7 @@ import type {
   StoredAgentRevision,
   StoredAgentRevisionSummary,
 } from "./agent-definition-port.js";
+import { mapSavedModelProviderConfiguration } from "./pg-admin-control.js";
 import type { Pool, PoolClient } from "./postgres.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
 
@@ -76,8 +77,19 @@ function mapDefinition(
   });
 }
 function mapRevision(row: RevisionRow, revoked: boolean): StoredAgentRevision {
-  const content = validateAgentRevisionContent(row.content);
-  if (digest(content) !== row.content_digest) throw new TypeError("AgentRevision 摘要不匹配");
+  if (digest(row.content) !== row.content_digest) throw new TypeError("AgentRevision 摘要不匹配");
+  const { longTermMemoryEnabled, ...contentWithMemory } = row.content as AgentRevisionContent & {
+    readonly longTermMemoryEnabled?: boolean;
+  };
+  // 初始种子只在读取时投影为当前协议，历史正文与摘要保持不变。
+  const content = validateAgentRevisionContent(
+    row.id === "agent_default_revision_1" && typeof longTermMemoryEnabled === "boolean"
+      ? {
+          ...contentWithMemory,
+          memory: { mode: "configured", longTermEnabled: longTermMemoryEnabled },
+        }
+      : row.content,
+  );
   return Object.freeze({
     id: row.id,
     definitionId: row.definition_id,
@@ -154,6 +166,44 @@ async function builtinToolLimit(client: PoolClient) {
   return agentBuiltinToolLimit(result.rows[0]?.configuration.enabledTools);
 }
 
+type PinnedModel = Extract<AgentRevisionContent["model"], { mode: "pinned" }>;
+
+function selectableModels(
+  objectKey: string,
+  revision: string,
+  configuration: unknown,
+): PinnedModel[] {
+  const provider = mapSavedModelProviderConfiguration(configuration);
+  const providerRevision = Number(revision);
+  if (
+    !provider.credentialConfigured ||
+    provider.providerKey !== objectKey ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(objectKey) ||
+    !Number.isSafeInteger(providerRevision) ||
+    providerRevision < 1
+  )
+    return [];
+  return provider.models.flatMap((model) =>
+    model.enabled && Buffer.byteLength(model.id, "utf8") <= 200
+      ? [{ mode: "pinned", providerKey: objectKey, providerRevision, modelId: model.id }]
+      : [],
+  );
+}
+
+async function listPinnedModelOptions(client: PoolClient): Promise<PinnedModel[]> {
+  const result = await client.query<{
+    object_key: string;
+    revision: string;
+    configuration: unknown;
+  }>(
+    `SELECT object_key,revision::text,configuration FROM admin_control_config_revisions
+      WHERE object_kind='model_provider' ORDER BY object_key,admin_control_config_revisions.revision DESC`,
+  );
+  return result.rows.flatMap((row) =>
+    selectableModels(row.object_key, row.revision, row.configuration),
+  );
+}
+
 async function validateDraft(client: PoolClient, value: AgentRevisionContent) {
   let content: AgentRevisionContent;
   try {
@@ -161,6 +211,22 @@ async function validateDraft(client: PoolClient, value: AgentRevisionContent) {
   } catch (error) {
     if (error instanceof DomainError) throw new AgentDefinitionValidationError(error.message);
     throw error;
+  }
+  if (content.model.mode === "pinned") {
+    const { providerKey, providerRevision, modelId } = content.model;
+    const result = await client.query<{ configuration: unknown }>(
+      `SELECT configuration FROM admin_control_config_revisions
+        WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2`,
+      [providerKey, providerRevision],
+    );
+    const row = result.rows[0];
+    if (
+      !row ||
+      !selectableModels(providerKey, String(providerRevision), row.configuration).some(
+        (model) => model.modelId === modelId,
+      )
+    )
+      throw new AgentDefinitionValidationError("请选择已保存、已启用且绑定托管凭据的模型");
   }
   if (content.tools.mode === "configured") {
     // 平台运行设置使用同一行的排他锁激活，避免校验通过后按过期名单提交。
@@ -317,6 +383,7 @@ export class PgAgentDefinitionRepository
       return {
         canManage,
         builtinToolLimit: canManage ? await builtinToolLimit(client) : [],
+        pinnedModelOptions: canManage ? await listPinnedModelOptions(client) : [],
         items: result.rows.map((row) => ({
           definition: mapDefinition(row, row.tenant_ids),
           ...(row.summary === null ? {} : { revision: mapRevisionSummary(row.summary) }),

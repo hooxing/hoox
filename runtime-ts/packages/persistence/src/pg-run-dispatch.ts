@@ -6,7 +6,11 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
-import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
+import {
+  createRunConfigurationSnapshots,
+  RunAgentUnavailableError,
+} from "./pg-run-agent-snapshot.js";
+import { SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
 import { scheduleWorkerTenant, wakeWorkerTenant } from "./pg-worker-tenant-assignment.js";
 import {
   enqueueThreadTitleGeneration,
@@ -138,8 +142,9 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
         );
         const runRow = run.rows[0];
         if (runRow === undefined) throw new TypeError("创建 Run 未返回数据");
-        await createRunSkillSnapshot(client, {
+        await createRunConfigurationSnapshots(client, {
           tenantId: input.scope.tenantId,
+          threadId: input.run.threadId,
           runId: input.run.id,
           userId: input.scope.userId,
           ...(input.skillInvocation === undefined
@@ -229,6 +234,8 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
       await this.options.afterCommit?.("create_run");
       return result;
     } catch (error) {
+      if (error instanceof RunAgentUnavailableError)
+        return { outcome: "agent_revision_unavailable" };
       if (error instanceof SkillSnapshotUnavailableError) {
         return { outcome: "skill_not_available" };
       }

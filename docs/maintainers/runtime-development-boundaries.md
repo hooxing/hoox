@@ -186,6 +186,8 @@ TanStack Query 协调控制面读取、去重和失效。页面按工作台、�
 受限聚合视图。development 页面新窗口打开回环轨迹查看器；受控 Demo 构建新窗口打开同源 `/trajectory/`，轨迹 API 由 Demo 管理员 Hoox Session 保护；其他 production 构建不显示该入口。
 统计与诊断边界见[运行事件与对话展示](../architecture/run-events-and-presentation.md#诊断数据)。
 
+运营分组下的“运行记录”页（`/runs`，详情 `/runs/:tenantId/:runId`）读取 `GET /v1/admin/control/runs`（筛选 `tenantId`、`status`、`createdFrom`、`createdTo`，预留 `agentDefinitionId`、`agentRevisionId`、`origin`，游标分页）与 `GET /v1/admin/control/runs/:tenantId/:runId?attemptId=`，两者只返回结构与指标。正文由管理员在详情页主动打开，调用 `GET /v1/admin/control/runs/:tenantId/:runId/content?attemptId=`；每次调用都写入正文访问审计，正文只保存在页面组件状态中。权限位、数据库视图与审计边界见[后台控制面与运行配置](../architecture/admin-control-plane.md#run-浏览器与正文访问)。
+
 使用一键开发脚本时，既有 `-IncludeSkill` 兼容开关会启动统一 Admin API 与 Admin Web；默认核心拓扑仍不启动任何
 管理服务。
 

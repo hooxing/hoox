@@ -40,7 +40,7 @@ export function registerRunEventRoutes(
       async (request, reply) => {
         const experience = dependencies.experience;
         if (experience === undefined) throw new ApiFailure("not_found");
-        const auth = await authenticate(request);
+        const auth = await authenticate(request, "runs:read");
         await service.getRun(auth, request.params.threadId, request.params.runId);
         if (eventStreamsClosing) throw new ApiFailure("dependency_unavailable");
         const controller = new AbortController();
@@ -57,7 +57,7 @@ export function registerRunEventRoutes(
                 wake,
               ) ?? (() => {}),
             read: async (after) => {
-              const currentAuth = await authenticate(request);
+              const currentAuth = await authenticate(request, "runs:read");
               const run = await service.getRun(
                 currentAuth,
                 request.params.threadId,
@@ -101,6 +101,7 @@ export function registerRunEventRoutes(
             200: RunEventPageSuccessEnvelopeSchema,
             400: ErrorEnvelopeSchema,
             401: ErrorEnvelopeSchema,
+            403: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             500: ErrorEnvelopeSchema,
             503: ErrorEnvelopeSchema,
@@ -108,7 +109,7 @@ export function registerRunEventRoutes(
         },
       },
       async (request) => {
-        const auth = await authenticate(request);
+        const auth = await authenticate(request, "runs:read");
         const run = await service.getRun(auth, request.params.threadId, request.params.runId);
         const read = await dependencies.experience?.listEvents({
           scope: auth.scope,

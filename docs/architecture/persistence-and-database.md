@@ -11,10 +11,16 @@
 
 ## Tenant 隔离
 
+- 外部工具版本、撤销事实与凭据由 Admin Control 写入，版本和凭据密文发布后不可修改；Runtime ACL 对这些表为零。凭据管理投影只返回是否配置。接入 Agent 快照前不得向 Worker 开放版本或凭据读取。
 - 业务表全部启用并 FORCE RLS，策略基于事务内的 `app.tenant_id`、`app.user_id` 等可信设置。应用授权与 RLS 同时生效，不能只依赖其中一层。
-- 认证只证明 User 身份；Runtime 必须在事务内从 Membership 重建 TenantScope。客户端头部或模型参数不能构造 scope。
+- 认证只证明 User 身份；Runtime 必须在事务内从 Membership 重建 TenantScope。客户端头部或模型参数不能构造 scope。API Key 在尚未知 Tenant 时只可经 RLS 按当前事务 `app.api_key_hash` 精确读取匹配记录；凭据成功后业务访问仍必须使用集成 User 的 Tenant Membership。
 - 跨表引用使用包含 `tenant_id` 的复合外键，阻止跨租户身份拼接。公开错误不泄漏跨 Tenant 实体是否存在。
+- 持久层映射数据库异常时，只在错误 `cause` 中附加经格式校验的 5 位 SQLSTATE；驱动消息、SQL、参数、连接信息和原始异常均不跨越错误边界。
 - 后台统计只通过 Migrator 拥有的受限视图跨 Tenant 聚合；底表保留 FORCE RLS，专属读取策略只面向 Migrator 并要求有效平台操作者。
+
+## Thread 的 Agent 绑定
+
+Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Thread 回填内置默认 Agent。绑定列只能在 INSERT 时写入：Runtime 对 `threads` 不拥有整表 `UPDATE`，仅获准更新标题、状态、版本、时间戳及标题生成元数据等现有业务列。列级 ACL 同时保护所有 SQL 写入路径，AgentDefinition 绑定不会随 Thread 更新、归档或标题生成改变。新增 Thread 前还必须通过 RLS 校验所选 Agent 已发布且对当前 Tenant 可用。
 
 ## 数据库角色
 
@@ -23,10 +29,10 @@
 | 角色 | 使用者 | 边界 |
 | --- | --- | --- |
 | Migrator | 迁移命令 | 拥有 Schema 和受限视图；不被常驻进程使用 |
-| Runtime | API、Worker、Scheduler | 表与列白名单 ACL，无 routine 权限；对 Membership 只有 SELECT、INSERT 与恒定 `lock_marker` 列更新 |
+| Runtime | API、Worker、Scheduler | 表与列白名单 ACL；业务 Schema 不含 routine。API Key 吊销只授予 Runtime 所需列级 UPDATE，并由 Runtime 专属 RESTRICTIVE RLS 策略限制集成 Membership 状态转换和 Key 吊销行；API Key 认证只按哈希命中受 RLS 限制的凭据行 |
 | Worker Coordinator | Worker 的 Tenant 发现 | 只能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表 |
 | Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Worker 不持有 |
-| Admin Control | 统一 Admin API 控制面 | 控制面配置、审计与统计投影 |
+| Admin Control | 统一 Admin API 控制面 | 控制面配置、AgentDefinition 发布与撤销、Run 浏览器受限视图及正文访问审计、外部工具版本发布与撤销、审计及统计投影；AgentDefinition 写入仅允许当前有效的 `operator` 或 `admin` 身份；工具凭据仅 INSERT，管理投影不读取密文 |
 | Skill Publisher | 统一 Admin API Skill 路由 | Skill 发布状态机与对应对象存储权限 |
 
 角色属于整个 PostgreSQL 集群；同一集群的开发、预览和生产数据库使用不同角色集合。迁移在任何 DDL 前校验全部角色、Schema owner、`search_path` 与跨数据库依赖，并在同一事务中完成 Schema 迁移、迁移记录、策略重绑定和最小 ACL 重建。readiness 探测的是实际连接身份，而不是配置文件中的声明。
@@ -52,7 +58,7 @@
 
 ## Routine 与迁移
 
-- 迁移 manifest 不允许遗留自定义函数、过程或聚合；runner 在迁移 SQL 执行后、提交前断言目标 routine 集合为空，否则整体回滚。约束优先使用内建 immutable 表达式或内联 CHECK。未来引入 routine 前必须单独审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 与调用权限。
+- 业务 Schema 不得存在自定义函数、过程或聚合，迁移 runner 在迁移前后均以严格 routine 检查失败关闭。API Key 撤销不使用数据库 routine：Runtime 的列级 UPDATE 权限受 Runtime 专属 RESTRICTIVE RLS 策略进一步约束，只能将集成 Membership 从 active 改为 revoked，不能改人类成员或恢复已吊销 Membership。由于 `SELECT ... FOR SHARE/UPDATE` 同样施加 UPDATE 策略的 USING，Membership 策略的 USING 只限定当前 Tenant 的 active 行，使人类成员的授权加锁与 `lock_marker` 自更新继续命中；集成身份与目标状态只在 WITH CHECK 中约束，因此 Runtime 也无法锁定或更新已吊销 Membership；API Key 仅允许更新未吊销行，且新状态必须仍处于当前 Tenant，因此已吊销 Key 不可恢复。Key 与 Membership 在同一事务中更新，任一更新未命中预期行则整体回滚。这些策略随 API Key 表在同一迁移中创建与回退。
 - 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。2026-11 起全部历史迁移已合并为 `0001_baseline`；基线及之后的迁移一经提交不可修改，新变化只能追加 `0002` 起的递增版本。压缩前建立的数据库会因迁移记录不一致而失败关闭，必须清空 Schema 后重建，见[开发环境准备](../development.md#迁移基线重置)。
 - 基线 down 删除基线创建的全部表、视图与函数，不按数据内容阻止回退；新增迁移的 down 若可能丢失不可恢复事实，应自行失败关闭。
 - `pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作。
@@ -78,4 +84,4 @@
 2. 更新 `role-bootstrap.ts` 中各角色的精确 ACL 白名单，并补真实 PostgreSQL 测试。
 3. 写入路径具备幂等键、摘要冲突语义和 COMMIT 未知读回。
 4. 需要远端动作时使用同事务 Outbox，并定义 UNKNOWN 收敛。
-5. 不新增 routine，不在迁移中依赖会话外的动态角色名。
+5. 不新增业务 routine；迁移后的业务 Schema 必须保持无 routine，迁移 runner 与 PostgreSQL 权限测试对此失败关闭。

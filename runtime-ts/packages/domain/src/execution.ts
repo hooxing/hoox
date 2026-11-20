@@ -20,10 +20,12 @@ import { assertActiveMembership, type Membership, type Tenant, type User } from 
 import { arrayValue, enumValue, recordValue, stringValue } from "./validation.js";
 
 export type ThreadStatus = "active" | "archived";
+export const DEFAULT_AGENT_DEFINITION_ID = "agent_default";
 interface ThreadData {
   readonly id: ThreadId;
   readonly tenantId: TenantId;
   readonly createdByUserId: UserId;
+  readonly agentDefinitionId: string;
   readonly title: string;
   readonly status: ThreadStatus;
   readonly createdAt: IsoTimestamp;
@@ -46,6 +48,7 @@ export function createThread(input: {
     id: input.id,
     tenantId: input.tenant.id,
     createdByUserId: input.user.id,
+    agentDefinitionId: DEFAULT_AGENT_DEFINITION_ID,
     title,
     status: "active",
     createdAt: input.now,
@@ -73,6 +76,10 @@ export function rehydrateThread(
     id: threadId(stringValue(raw, "id")),
     tenantId: restoredTenantId,
     createdByUserId,
+    agentDefinitionId:
+      typeof raw.agentDefinitionId === "string"
+        ? raw.agentDefinitionId
+        : DEFAULT_AGENT_DEFINITION_ID,
     title,
     status: enumValue(raw, "status", ["active", "archived"] as const),
     createdAt: isoTimestamp(stringValue(raw, "createdAt")),

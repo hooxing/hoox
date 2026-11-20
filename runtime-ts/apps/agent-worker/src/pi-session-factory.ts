@@ -25,7 +25,6 @@ import {
   ContextBudgetAdmissionError,
   type ControlledRolloutProjection,
   createSafePiSession,
-  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
   deriveSafePiSessionCompatibility,
   ModelContinuationRejectedError,
   type PiSessionController,
@@ -770,9 +769,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           },
         };
       },
-      // Run 尚未固定 Agent 快照，所有 Run（含子 Agent 与恢复）都显式使用默认 Agent 指令，
-      // 保证同一 Run 重建得到字节一致的 system 前缀。
-      operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
+      operatorInstructions: input.agentSnapshot.content.operatorInstructions,
+      agentRevisionDigest: input.agentSnapshot.revisionDigest,
       availableSkills: skillSnapshot.items.map((item) => ({
         name: item.invocationName,
         description: item.description,

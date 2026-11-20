@@ -14,3 +14,4 @@ export {
 } from "../postgres.js";
 export * from "../runtime.js";
 export * from "../pg-installation.js";
+export { PgApiKeyRepository } from "../pg-api-keys.js";

@@ -7,7 +7,9 @@ describe("持久层公开错误脱敏", () => {
     const original = Object.assign(new Error("包含 SQL 与秘密连接串"), { code: "23505" });
     const mapped = mapPersistenceError(original, "创建任务");
     expect(mapped).toMatchObject({ code: "CONFLICT", message: "创建任务发生并发冲突" });
-    expect("cause" in mapped).toBe(false);
+    expect(mapped.cause).toEqual({ code: "23505" });
+    expect(mapped).not.toHaveProperty("original");
+    expect(JSON.stringify(mapped)).not.toContain(original.message);
     expect(mapped.message).not.toContain(original.message);
   });
 
@@ -39,5 +41,28 @@ describe("持久层公开错误脱敏", () => {
     expect(mapped).toMatchObject({ code: "UNAVAILABLE", message: "预留 Blob暂时不可用" });
     expect("cause" in mapped).toBe(false);
     expect(mapped.message).not.toContain("数据库地址");
+  });
+});
+
+describe("SQLSTATE 诊断脱敏", () => {
+  it("只从原始异常链提取合法 SQLSTATE，不保留异常细节", () => {
+    const original = Object.assign(new Error("detail: private host; SQL: SELECT secret"), {
+      code: "42501",
+      detail: "private detail",
+      query: "SELECT secret",
+    });
+    const mapped = mapPersistenceError(original, "读取租户");
+    expect(mapped.cause).toEqual({ code: "42501" });
+    expect(Object.keys(mapped)).not.toContain("cause");
+    expect(JSON.stringify(mapped)).not.toMatch(/private host|private detail|SELECT secret/u);
+    expect(JSON.stringify(mapped.cause)).toBe('{"code":"42501"}');
+  });
+
+  it("忽略不是 5 位 SQLSTATE 的驱动 code", () => {
+    const mapped = mapPersistenceError(
+      Object.assign(new Error("hidden"), { code: "ECONNRESET" }),
+      "探针",
+    );
+    expect("cause" in mapped).toBe(false);
   });
 });

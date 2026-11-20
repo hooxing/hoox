@@ -3,9 +3,46 @@ import {
   EXTERNAL_TOOL_LIMITS,
   normalizeExternalToolName,
   normalizeExternalToolSchema,
+  validateExternalToolVersion,
 } from "./external-tool.js";
 
 describe("外部工具领域契约", () => {
+  it("MCP 原始工具名必填，HTTP 版本不得绑定远程 MCP 名称", () => {
+    const schema = normalizeExternalToolSchema({
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    });
+    const base = {
+      toolVersionId: "version-1",
+      endpoint: "https://tools.example/mcp",
+      modelToolName: "mcp__server__lookup",
+      description: "lookup",
+      inputSchema: schema.schema,
+      inputSchemaDigest: schema.digest,
+      timeoutMs: 5000,
+      maxResponseBytes: 4096,
+      sideEffect: "read_only" as const,
+      idempotent: false,
+      credentialRef: null,
+    };
+    expect(() => validateExternalToolVersion({ ...base, source: "mcp" })).toThrow(
+      "EXTERNAL_TOOL_REMOTE_NAME_REQUIRED",
+    );
+    expect(() =>
+      validateExternalToolVersion({
+        ...base,
+        source: "http",
+        modelToolName: "http__lookup",
+        remoteToolName: "lookup",
+      }),
+    ).toThrow("EXTERNAL_TOOL_REMOTE_NAME_SOURCE_MISMATCH");
+    expect(
+      validateExternalToolVersion({ ...base, source: "mcp", remoteToolName: "_lookup" })
+        .remoteToolName,
+    ).toBe("_lookup");
+  });
   it("规范化稳定排序属性和枚举并摘要", () => {
     const a = normalizeExternalToolSchema({
       type: "object",

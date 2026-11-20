@@ -12,3 +12,4 @@ export * from "./tool-parameter-schemas.js";
 export * from "./tools.js";
 export * from "./external-tools.js";
 export * from "./http-external-tool.js";
+export * from "./mcp-client.js";

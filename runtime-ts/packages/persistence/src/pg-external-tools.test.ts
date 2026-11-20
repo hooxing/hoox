@@ -19,6 +19,7 @@ const tool = {
   source: "mcp" as const,
   endpoint: "https://tools.example/mcp",
   modelToolName: "mcp__server__lookup",
+  remoteToolName: "_lookup",
   description: "lookup",
   inputSchema: schema.schema,
   inputSchemaDigest: schema.digest,
@@ -48,6 +49,10 @@ describe("外部工具持久化适配器", () => {
       ),
     ).toBe(false);
     expect(JSON.stringify(query.mock.calls)).not.toContain("secret-value");
+    const insert = query.mock.calls.find(([statement]) =>
+      String(statement).includes("INSERT INTO external_tool_versions"),
+    );
+    expect(insert?.[1]).toContain("_lookup");
   });
   it("撤销追加不可变事实并绑定管理身份", async () => {
     const query = vi.fn(async (..._args: unknown[]) => ({ rows: [], rowCount: 1 }));
@@ -75,6 +80,7 @@ describe("外部工具持久化适配器", () => {
                 source: "mcp",
                 endpoint: "https://tools.example/mcp",
                 model_tool_name: tool.modelToolName,
+                remote_tool_name: tool.remoteToolName,
                 description: "lookup",
                 input_schema: schema.schema,
                 input_schema_digest: schema.digest,
@@ -100,6 +106,7 @@ describe("外部工具持久化适配器", () => {
       toolVersionId: tool.toolVersionId,
     });
     expect(projection?.credentialConfigured).toBe(true);
+    expect(projection?.remoteToolName).toBe("_lookup");
     expect(JSON.stringify(projection)).not.toContain("ciphertext");
     expect(
       query.mock.calls

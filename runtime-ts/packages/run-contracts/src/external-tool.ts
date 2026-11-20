@@ -1,5 +1,15 @@
 import type { ExternalToolVersion, Sha256Digest } from "@hoox/domain";
 
+export interface ValidatedExternalTarget {
+  readonly url: URL;
+  readonly hostname: string;
+  readonly servername: string;
+  readonly hostHeader: string;
+  /** 唯一允许用于 TCP 连接的、已完成策略校验的地址。 */
+  readonly address: string;
+  readonly addresses: readonly string[];
+}
+
 export type ExternalToolCallPhase = "preflight" | "request_written" | "response_received";
 
 /** Transport 仅可标注已证明尚未写出的失败；其他异常一律按结果未知处理。 */
@@ -17,6 +27,7 @@ export class ExternalToolTransportError extends Error {
 export interface ExternalToolTransport {
   invoke(input: {
     readonly tool: ExternalToolVersion;
+    readonly target: ValidatedExternalTarget;
     readonly arguments: Readonly<Record<string, unknown>>;
     readonly credential?: string;
     readonly idempotencyKey: string;

@@ -12,15 +12,12 @@ import {
 } from "@hoox/domain";
 import {
   ExternalToolTransportError,
+  type ValidatedExternalTarget,
   type ExternalToolReconciliationPort,
   type ExternalToolTransport,
 } from "@hoox/run-contracts";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
 
-export interface ValidatedExternalTarget {
-  readonly url: URL;
-  readonly addresses: readonly string[];
-}
 export type ExternalAddressResolver = (hostname: string) => Promise<readonly string[]>;
 
 function ipv4Private(address: string): boolean {
@@ -66,8 +63,23 @@ function privateAddress(address: string): boolean {
   if (kind !== 6) return true;
   const n = ipv6Value(address);
   if (n === undefined) return true;
-  const prefix = (bits: number, length: number) => n >> BigInt(128 - length) === BigInt(bits);
-  if (n === 0n || n === 1n || prefix(0x7e, 7) || prefix(0x3fa, 10) || prefix(0xff, 8)) return true;
+  const prefix = (bits: bigint, length: number) => n >> BigInt(128 - length) === bits;
+  if (n === 0n || n === 1n || prefix(0x7en, 7) || prefix(0x3fan, 10) || prefix(0xffn, 8))
+    return true;
+  if (prefix(0x3fbn, 10) || prefix(0x20010000n, 32) || prefix(0x64ff9b0000000000000000n, 96)) {
+    if (prefix(0x64ff9b0000000000000000n, 96)) {
+      const embedded = Number(n & 0xffffffffn);
+      return ipv4Private(
+        [embedded >>> 24, (embedded >>> 16) & 255, (embedded >>> 8) & 255, embedded & 255].join(
+          ".",
+        ),
+      );
+    }
+    return true;
+  }
+  if (prefix(0x64ff9b0001n, 48)) return true;
+  const metadataV6 = ipv6Value("fd00:ec2::254");
+  if (n === metadataV6) return true;
   // 兼容地址及 6to4 隧道仍可能指向 IPv4 私网，按内嵌目标重复执行 IPv4 策略。
   if (n >> 32n === 0n) {
     const embedded = Number(n & 0xffffffffn);
@@ -75,7 +87,7 @@ function privateAddress(address: string): boolean {
       [embedded >>> 24, (embedded >>> 16) & 255, (embedded >>> 8) & 255, embedded & 255].join("."),
     );
   }
-  if (prefix(0x2002, 16)) {
+  if (prefix(0x2002n, 16)) {
     const embedded = Number((n >> 80n) & 0xffffffffn);
     if (
       ipv4Private(
@@ -117,12 +129,83 @@ export async function validateExternalHttpsTarget(
   if (
     addresses.length === 0 ||
     addresses.some(
-      (address) => isIP(address) === 0 || (!options.allowPrivate && privateAddress(address)),
+      (address) =>
+        isIP(address) === 0 ||
+        isAlwaysForbiddenAddress(address) ||
+        (!options.allowPrivate && privateAddress(address)),
     )
   )
     throw new Error("EXTERNAL_TARGET_REJECTED");
+  const address = addresses[0];
+  if (!address) throw new Error("EXTERNAL_TARGET_REJECTED");
   // Transport must pin one of these checked addresses for the connection and disable redirects.
-  return Object.freeze({ url, addresses: Object.freeze([...addresses]) });
+  return Object.freeze({
+    url,
+    hostname,
+    servername: hostname,
+    hostHeader: url.host,
+    address,
+    addresses: Object.freeze([...addresses]),
+  });
+}
+
+function isHardForbiddenIpv4(a: number, b: number, c: number, d: number): boolean {
+  return (
+    a === 0 ||
+    a === 127 ||
+    a >= 224 ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b === 100 && c === 100 && d === 200)
+  );
+}
+
+function isAlwaysForbiddenAddress(address: string): boolean {
+  if (isIP(address) === 4) {
+    const [a = 0, b = 0, c = 0, d = 0] = address.split(".").map(Number);
+    return isHardForbiddenIpv4(a, b, c, d);
+  }
+  const n = ipv6Value(address);
+  if (n === undefined) return true;
+  const prefix = (bits: bigint, length: number) => n >> BigInt(128 - length) === bits;
+  if (
+    prefix(0x3fan, 10) ||
+    prefix(0x3fbn, 10) ||
+    prefix(0x20010000n, 32) ||
+    prefix(0x64ff9b0001n, 48) ||
+    n === ipv6Value("fd00:ec2::254")
+  )
+    return true;
+  if (prefix(0x64ff9b0000000000000000n, 96)) {
+    const embedded = Number(n & 0xffffffffn);
+    const [a, b, c, d] = [
+      embedded >>> 24,
+      (embedded >>> 16) & 255,
+      (embedded >>> 8) & 255,
+      embedded & 255,
+    ];
+    return isHardForbiddenIpv4(a, b, c, d);
+  }
+  if (n >> 32n === 0xffffn) {
+    const embedded = Number(n & 0xffffffffn);
+    return isHardForbiddenIpv4(
+      embedded >>> 24,
+      (embedded >>> 16) & 255,
+      (embedded >>> 8) & 255,
+      embedded & 255,
+    );
+  }
+  return false;
+}
+
+/** Transport 应将该结果作为 socket lookup，不能重新解析 URL 主机名。 */
+export function externalTargetConnection(target: ValidatedExternalTarget) {
+  return Object.freeze({
+    hostname: target.hostname,
+    servername: target.servername,
+    hostHeader: target.hostHeader,
+    addresses: target.addresses,
+    address: target.address,
+  });
 }
 
 function toTypeBox(schema: Record<string, unknown>): TSchema {
@@ -170,6 +253,8 @@ function toTypeBox(schema: Record<string, unknown>): TSchema {
 }
 
 export interface ExternalToolExecutionPorts {
+  readonly allowPrivateAddresses?: boolean;
+  readonly resolveAddresses?: ExternalAddressResolver;
   readonly persistStarted: (input: {
     readonly callId: string;
     readonly toolName: string;
@@ -252,9 +337,16 @@ export function createExternalToolAgentTool(
           await ports.persistStarted({ callId, toolName: tool.modelToolName });
           await ports.authorizeAndConsume({ callId, toolName: tool.modelToolName, argsDigest });
         }
+        const target = await validateExternalHttpsTarget(tool.endpoint, {
+          ...(ports.allowPrivateAddresses === undefined
+            ? {}
+            : { allowPrivate: ports.allowPrivateAddresses }),
+          ...(ports.resolveAddresses === undefined ? {} : { resolve: ports.resolveAddresses }),
+        });
         wrote = true;
         const response = await ports.transport.invoke({
           tool,
+          target,
           arguments: args,
           ...(credential === undefined ? {} : { credential }),
           idempotencyKey: callId,
@@ -269,12 +361,12 @@ export function createExternalToolAgentTool(
         let visible = raw;
         if (/json/i.test(response.contentType)) {
           try {
-            visible = JSON.stringify(JSON.parse(raw));
+            visible = JSON.stringify(redactJson(JSON.parse(raw), credential));
           } catch {
             throw new Error("EXTERNAL_TOOL_RESPONSE_INVALID");
           }
         }
-        if (credential) visible = visible.replaceAll(credential, "[凭据已隐藏]");
+        if (credential) visible = visible.split(credential).join("[凭据已隐藏]");
         const cap = Math.max(1, Math.min(8192, ports.maxModelVisibleBytes ?? 8192));
         const bytes = new TextEncoder().encode(visible);
         if (bytes.byteLength > cap) visible = decodeUtf8Prefix(bytes, cap);
@@ -303,6 +395,21 @@ export function createExternalToolAgentTool(
       }
     },
   };
+}
+
+function redactJson(value: unknown, credential?: string): unknown {
+  if (!credential) return value;
+  if (typeof value === "string") return value.split(credential).join("[凭据已隐藏]");
+  if (Array.isArray(value)) return value.map((item) => redactJson(item, credential));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key.split(credential).join("[凭据已隐藏]"),
+        redactJson(item, credential),
+      ]),
+    );
+  }
+  return value;
 }
 
 export function validateExternalToolArguments(

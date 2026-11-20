@@ -7,6 +7,7 @@ export type ExternalToolJsonSchema = Readonly<Record<string, unknown>>;
 export interface ExternalToolVersion {
   readonly toolVersionId: string;
   readonly source: ExternalToolSource;
+  readonly endpoint: string;
   readonly modelToolName: string;
   readonly description: string;
   readonly inputSchema: ExternalToolJsonSchema;
@@ -178,6 +179,15 @@ export function validateExternalToolVersion(input: ExternalToolVersion): Externa
     throw new TypeError("EXTERNAL_TOOL_VERSION_ID_INVALID");
   if (input.source !== "mcp" && input.source !== "http")
     throw new TypeError("EXTERNAL_TOOL_SOURCE_INVALID");
+  if (typeof input.endpoint !== "string" || input.endpoint.length > 2048)
+    throw new TypeError("EXTERNAL_TOOL_ENDPOINT_INVALID");
+  try {
+    const endpoint = new URL(input.endpoint);
+    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.hash)
+      throw new Error();
+  } catch {
+    throw new TypeError("EXTERNAL_TOOL_ENDPOINT_INVALID");
+  }
   if (
     input.source === "http"
       ? !input.modelToolName.startsWith("http__")

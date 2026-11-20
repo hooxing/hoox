@@ -3,6 +3,7 @@ import type { InstallationRepository } from "@hoox/identity";
 import type { BlobStore } from "@hoox/persistence/blob";
 import type {
   CoreRepositories,
+  PgApiKeyRepository,
   PersonalizationSettingsPort,
   RunExperienceReadPort,
   TeamCollaborationPort,
@@ -35,6 +36,7 @@ import type {
 
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
+  readonly apiKeys?: PgApiKeyRepository;
   readonly localAccounts?: LocalAccountAuthService;
   readonly localAccountPasswordRoutes?: boolean;
   readonly embeddedIdentity?: EmbeddedIdentityAuthService;

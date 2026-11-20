@@ -4,6 +4,7 @@ import {
   createThread,
   createWorkspace,
   DomainError,
+  type ApiKeyScope,
   resourceId,
   resourceVersionId,
   runId,
@@ -42,6 +43,7 @@ import {
   type ExplicitSkillInvocation,
 } from "@hoox/skill";
 import type { ApiCreateCapability } from "./capabilities.js";
+import { isApiKeyToken, type ApiKeyAuthenticationPort } from "@hoox/identity";
 import { InvalidThreadCursorError } from "./cursor.js";
 import type {
   ApiClock,
@@ -57,6 +59,7 @@ import type {
 export type ApiFailureKind =
   | "bad_request"
   | "unauthorized"
+  | "forbidden"
   | "not_found"
   | "conflict"
   | "invalid_state"
@@ -75,11 +78,13 @@ interface AuthContext {
   readonly principal: AuthPrincipal;
   readonly scope: TenantScope;
   readonly tenant: TenantBundle;
+  readonly apiKey?: Readonly<{ readonly id: string; readonly scopes: readonly ApiKeyScope[] }>;
 }
 
 interface ServiceDependencies {
   readonly experience?: RunExperienceReadPort;
   readonly auth: AuthContextResolver;
+  readonly apiKeys?: ApiKeyAuthenticationPort;
   readonly repositories: CoreRepositories;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -119,11 +124,33 @@ export class ApiService {
     requestId: string,
     tenantSelector: TenantSelector = Object.freeze({ kind: "absent" }),
   ): Promise<AuthContext> {
-    const principal = await this.dependencies.auth.resolve({ authorization, requestId });
+    const bearer = authorization?.match(/^Bearer ([^\s]+)$/u)?.[1];
+    let principal: AuthPrincipal | undefined;
+    if (bearer?.startsWith("hoox_sk_")) {
+      if (!isApiKeyToken(bearer) || this.dependencies.apiKeys === undefined) {
+        throw new ApiFailure("unauthorized");
+      }
+      const credential = await this.dependencies.apiKeys.authenticateKey({
+        token: bearer,
+        now: this.dependencies.clock.now(),
+      });
+      if (credential === undefined) throw new ApiFailure("unauthorized");
+      principal = {
+        userId: credential.userId,
+        kind: "integration",
+        tenantId: credential.tenantId,
+        apiKey: { id: credential.apiKeyId, scopes: credential.scopes },
+      };
+    } else {
+      principal = await this.dependencies.auth.resolve({ authorization, requestId });
+    }
     if (principal === undefined) throw new ApiFailure("unauthorized");
     if (tenantSelector.kind === "invalid") throw new ApiFailure("bad_request");
     let selectedTenantId = principal.tenantId;
     if (tenantSelector.kind === "selected") {
+      if (principal.apiKey !== undefined && principal.tenantId !== tenantSelector.value) {
+        throw new ApiFailure("not_found");
+      }
       try {
         selectedTenantId = tenantId(tenantSelector.value);
       } catch {
@@ -132,12 +159,17 @@ export class ApiService {
     } else if (selectedTenantId === undefined) {
       throw new ApiFailure("bad_request");
     }
-    // JWT 只能证明 userId；X-Tenant-Id 只是候选 scope，Repository 会用 Membership 与 RLS 复核。
+    // 凭据只证明 User 身份；X-Tenant-Id 是候选 scope，Repository 会用 Membership 与 RLS 复核。
     const scope = { tenantId: selectedTenantId, userId: principal.userId } as const;
     const tenant = await this.dependencies.repositories.tenants.get(scope);
     // 凭据有效但成员关系无效时统一为不存在，不能成为租户成员枚举接口。
     if (tenant === undefined) throw new ApiFailure("not_found");
-    return { principal, scope, tenant };
+    return {
+      principal,
+      scope,
+      tenant,
+      ...(principal.apiKey === undefined ? {} : { apiKey: principal.apiKey }),
+    };
   }
 
   async createThread(auth: AuthContext, title: string, idempotencyKey: string): Promise<ThreadDto> {

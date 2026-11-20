@@ -3249,6 +3249,24 @@ async function rebindRoleScopedPolicies(
       }
     }
   }
+  const agentControlPolicies = await client.query<{ tablename: string; policyname: string }>(
+    `SELECT tablename,policyname FROM pg_policies p WHERE schemaname=$1
+      AND (p.tablename,p.policyname) IN (
+        ('agent_definitions','agent_control_read'), ('agent_definitions','agent_definitions_admin_manage'),
+        ('agent_definition_tenants','agent_control_read'), ('agent_definition_tenants','agent_control_manage'),
+        ('agent_revisions','agent_control_read'), ('agent_revisions','agent_revisions_admin_manage'),
+        ('agent_revision_revocations','agent_control_read'), ('agent_revision_revocations','agent_revision_revocations_admin'),
+        ('agent_definition_commands','agent_commands_admin'), ('agent_definition_audits','agent_audits_admin')
+      )
+      AND EXISTS (SELECT 1 FROM pg_policies gate WHERE gate.schemaname=$1
+        AND gate.tablename='agent_definition_tenants' AND gate.policyname='agent_control_manage')`,
+    [context.schema],
+  );
+  for (const { tablename, policyname } of agentControlPolicies.rows) {
+    await client.query(
+      `ALTER POLICY ${quoteIdentifier(policyname)} ON ${schema}.${quoteIdentifier(tablename)} TO ${quoteIdentifier(context.adminControlRole)}`,
+    );
+  }
   if (await hasExternalToolState(client, context.schema)) {
     for (const [table, policy, target] of externalToolPolicyBindings) {
       const role = target === "migrator" ? context.migratorRole : context.adminControlRole;

@@ -174,6 +174,16 @@ jobs:
           )
           pnpm exec vitest run --config vitest.integration.config.ts "${suites[@]}"
 
+      - name: 验证 AgentDefinition 迁移、默认 Agent 与 Thread 绑定权限
+        env:
+          DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          MIGRATION_DATABASE_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+        # postgres-core 体量大，只运行 Agent 平台新增的用例；必须在 M4 删除受限角色之前执行。
+        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "默认 Agent|AgentDefinition"
+
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:
           RUN_PG_RUN_WORKER_INTEGRATION: "true"

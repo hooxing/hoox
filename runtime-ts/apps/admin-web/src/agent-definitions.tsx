@@ -2,6 +2,7 @@ import type {
   AdminAgentRevisionHistory,
   AdminSetAgentAvailability,
   AgentDefinitionDto,
+  AgentPinnedModelReferenceDto,
   AgentRevisionContentDto,
   AgentRevisionDto,
 } from "@hoox/protocol";
@@ -63,10 +64,16 @@ export function AgentDefinitionsPage({
       />
     );
   if (!query.data) return <Spin aria-label="正在读取 Agent 列表" />;
-  const { items, canManage, builtinToolLimit } = query.data;
+  const { items, canManage, builtinToolLimit, pinnedModelOptions } = query.data;
   if (destination.kind === "create") {
     return canManage ? (
-      <CreateAgent api={api} builtinToolLimit={builtinToolLimit} onOpen={onOpen} onBack={onBack} />
+      <CreateAgent
+        api={api}
+        builtinToolLimit={builtinToolLimit}
+        pinnedModelOptions={pinnedModelOptions}
+        onOpen={onOpen}
+        onBack={onBack}
+      />
     ) : (
       <Alert type="warning" showIcon title="当前账号只有已发布版本的读取权限。" />
     );
@@ -79,6 +86,7 @@ export function AgentDefinitionsPage({
         id={destination.id}
         canManage={canManage}
         builtinToolLimit={builtinToolLimit}
+        pinnedModelOptions={pinnedModelOptions}
         onBack={onBack}
       />
     );
@@ -131,11 +139,13 @@ function revisionId() {
 function CreateAgent({
   api,
   builtinToolLimit,
+  pinnedModelOptions,
   onOpen,
   onBack,
 }: {
   readonly api: AgentDefinitionApiContract;
   readonly builtinToolLimit: readonly string[];
+  readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
   readonly onOpen: (id: string) => void;
   readonly onBack: () => void;
 }) {
@@ -152,6 +162,7 @@ function CreateAgent({
       <Typography.Title level={2}>新建 Agent 草稿</Typography.Title>
       <AgentDefinitionEditor
         builtinToolLimit={builtinToolLimit}
+        pinnedModelOptions={pinnedModelOptions}
         saving={create.isPending}
         onCancel={onBack}
         onSave={async (content, availability = allTenants) => {
@@ -191,12 +202,14 @@ function AgentHistory({
   id,
   canManage,
   builtinToolLimit,
+  pinnedModelOptions,
   onBack,
 }: {
   readonly api: AgentDefinitionApiContract;
   readonly id: string;
   readonly canManage: boolean;
   readonly builtinToolLimit: readonly string[];
+  readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
   readonly onBack: () => void;
 }) {
   const client = useQueryClient();
@@ -374,6 +387,7 @@ function AgentHistory({
               key={edit.newRevisionId}
               initial={active.data.content}
               builtinToolLimit={builtinToolLimit}
+              pinnedModelOptions={pinnedModelOptions}
               saving={busy}
               onCancel={() => setWork(undefined)}
               onSave={(content) =>
@@ -645,7 +659,7 @@ const contentLabels: Record<keyof AgentRevisionContentDto, string> = {
   includeTenantSkills: "叠加 Tenant Skill",
   sandboxTemplateId: "Sandbox 模板",
   sandboxIdleAction: "Sandbox 空闲策略",
-  longTermMemoryEnabled: "长期记忆",
+  memory: "长期记忆",
 };
 
 function contentText(value: AgentRevisionContentDto[keyof AgentRevisionContentDto]): string {

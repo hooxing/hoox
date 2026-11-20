@@ -41,7 +41,7 @@ const current: AgentRevisionDto = {
     skillVersions: [],
     includeTenantSkills: true,
     sandboxIdleAction: "pause",
-    longTermMemoryEnabled: false,
+    memory: { mode: "platform_default" },
   },
 };
 const previous: AgentRevisionDto = {
@@ -61,6 +61,7 @@ function fixture(canManage: boolean) {
     listAgentDefinitions: vi.fn(async () => ({
       canManage,
       builtinToolLimit: ["read"],
+      pinnedModelOptions: [],
       items: [{ definition, revision: summary(current) }],
     })),
     listAgentRevisions: vi.fn(async () => ({
@@ -211,6 +212,7 @@ describe("后台 Agent 管理", () => {
       <AgentDefinitionEditor
         initial={current.content}
         builtinToolLimit={["read"]}
+        pinnedModelOptions={[]}
         saving={false}
         onSave={onSave}
         onCancel={vi.fn()}
@@ -233,6 +235,47 @@ describe("后台 Agent 管理", () => {
         operatorInstructions: "新草稿使用中文回答",
         tools: expect.objectContaining({ builtinTools: ["read"] }),
       }),
+      undefined,
+    );
+  });
+
+  it("保存所选已配置模型的完整固定引用，并可改回平台默认", async () => {
+    const onSave = vi.fn(async () => undefined);
+    const pinned = {
+      mode: "pinned",
+      providerKey: "main",
+      providerRevision: 2,
+      modelId: "model-a",
+    } as const;
+    const container = render(
+      <AgentDefinitionEditor
+        initial={current.content}
+        builtinToolLimit={[]}
+        pinnedModelOptions={[{ ...pinned, providerRevision: 1 }, pinned]}
+        saving={false}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+    const model = field<HTMLSelectElement>(container, "模型");
+    const choice = Array.from(model.options).find((option) => option.text.includes("版本 2"));
+    if (!choice) throw new Error("未找到固定模型版本");
+    select(model, choice.value);
+    select(field<HTMLSelectElement>(container, "长期记忆"), "disabled");
+    act(() => button(container, "保存新草稿").click());
+    await settle();
+    expect(onSave).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        model: pinned,
+        memory: { mode: "configured", longTermEnabled: false },
+      }),
+      undefined,
+    );
+    select(model, "platform_default");
+    act(() => button(container, "保存新草稿").click());
+    await settle();
+    expect(onSave).toHaveBeenLastCalledWith(
+      expect.objectContaining({ model: { mode: "platform_default" } }),
       undefined,
     );
   });

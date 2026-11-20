@@ -71,7 +71,7 @@ describe("外部工具 Admin Control ACL", () => {
     expect(formatTableSetDifference(["runs"], ["runs"])).toBe("缺少 []，多出 []");
   });
 
-  it("0001+0002 实际建表集合与 A1/D1/B1 不存在时的 Runtime 表键完全一致", async () => {
+  it("0001+0002 实际建表集合与 Agent、外部工具和 Run 浏览器迁移不存在时的 Runtime 表键完全一致", async () => {
     const migrationSql = await Promise.all([
       readFile(baselineMigrationUrl, "utf8"),
       readFile(secondMigrationUrl, "utf8"),
@@ -109,6 +109,10 @@ describe("外部工具 Admin Control ACL", () => {
 
     const policy = await activeTablePolicy(client, "it_partial_migration");
     expect([...policy.keys()].sort()).toEqual([...actualTables].sort());
+    expect(policy.has("run_agent_snapshots")).toBe(false);
+    expect(
+      (await activeColumnUpdatePolicy(client, "it_partial_migration")).has("run_agent_snapshots"),
+    ).toBe(false);
   });
 
   it("Runtime 表键仅在外部工具三表齐备时纳入白名单", async () => {
@@ -158,5 +162,60 @@ describe("外部工具 Admin Control ACL", () => {
         }
       }
     }
+  });
+});
+
+describe("API Key Runtime ACL 存在性门控", () => {
+  it("0001+0002 不预期 API Key ACL，0006 状态存在后加入受限更新列", async () => {
+    for (const apiKeyState of [false, true]) {
+      const client = {
+        query: vi.fn(async (sql: string) => ({
+          rows: [
+            sql.includes("policy_count")
+              ? { policy_count: apiKeyState ? "2" : "0" }
+              : { present: sql.includes("api_keys") ? apiKeyState : false },
+          ],
+        })),
+      } as unknown as PoolClient;
+
+      const tables = await activeTablePolicy(client, "it_api_key_policy");
+      const columns = await activeColumnUpdatePolicy(client, "it_api_key_policy");
+      expect(tables.has("api_keys")).toBe(apiKeyState);
+      if (apiKeyState) {
+        expect(columns.get("api_keys")).toEqual(new Set(["last_used_at", "revoked_at"]));
+        expect(columns.get("memberships")).toEqual(new Set(["status"]));
+      } else {
+        expect(columns.has("api_keys")).toBe(false);
+        expect(columns.get("memberships")).toEqual(new Set());
+      }
+    }
+  });
+
+  it("只在 API Key 状态存在时授予撤销列，并由 Runtime 专属 RESTRICTIVE 策略收口", async () => {
+    const [bootstrap, migration] = await Promise.all([
+      readFile(bootstrapUrl, "utf8"),
+      readFile(new URL("../migrations/0006_api_keys.up.sql", import.meta.url), "utf8"),
+    ]);
+    expect(bootstrap).toMatch(
+      /if \(await hasApiKeyState\(client, context\.schema\)\) \{\s*await client\.query\([\s\S]*?GRANT UPDATE\(last_used_at\) ON TABLE \$\{schema\}\.api_keys TO \$\{role\}/u,
+    );
+    expect(bootstrap).toMatch(
+      /if \(await hasApiKeyRevocationPolicyState\(client, context\.schema\)\) \{\s*await client\.query\([\s\S]*?GRANT UPDATE\(revoked_at\) ON TABLE \$\{schema\}\.api_keys TO \$\{role\};\s*GRANT UPDATE\(status\) ON TABLE \$\{schema\}\.memberships TO \$\{role\}/u,
+    );
+    expect(migration).toMatch(
+      /CREATE POLICY api_key_integration_membership_revoke ON memberships AS RESTRICTIVE FOR UPDATE TO %I/u,
+    );
+    // USING 不得引用集成身份：FOR SHARE/UPDATE 会施加 UPDATE 策略的 USING，
+    // 人类成员的授权加锁必须继续命中；集成身份约束只出现在 WITH CHECK 中。
+    expect(migration).toMatch(
+      /USING \(tenant_id = [^\n]*\n\s*AND status = ''active''\)\s*WITH CHECK/u,
+    );
+    expect(migration).toMatch(
+      /WITH CHECK[\s\S]*status = ''revoked''[\s\S]*kind = ''integration''/u,
+    );
+    expect(migration).toMatch(
+      /CREATE POLICY api_key_revocation_guard ON api_keys AS RESTRICTIVE FOR UPDATE TO %I/u,
+    );
+    expect(migration).toMatch(/revoked_at IS NULL/iu);
   });
 });

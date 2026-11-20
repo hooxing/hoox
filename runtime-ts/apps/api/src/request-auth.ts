@@ -1,25 +1,56 @@
+import type { ApiKeyScope } from "@hoox/domain";
 import type { FastifyRequest } from "fastify";
 import { headerValues, requestId } from "./http.js";
 import type { TenantSelector } from "./ports.js";
 import { ApiFailure, type ApiService, type AuthContext } from "./service.js";
 
-export type AuthenticateRequest = (request: FastifyRequest) => Promise<AuthContext>;
+export type AuthenticateRequest = (
+  request: FastifyRequest,
+  requiredScope?: ApiKeyScope,
+) => Promise<AuthContext>;
 export type AuthenticateSelectedTenant = (
   request: FastifyRequest,
   selectedTenantId: string,
+  requiredScope?: ApiKeyScope,
 ) => Promise<AuthContext>;
 
 export function createRequestAuthentication(service: Pick<ApiService, "authenticate">): {
   authenticate: AuthenticateRequest;
   authenticateSelectedTenant: AuthenticateSelectedTenant;
 } {
-  const authenticate = async (request: FastifyRequest) =>
-    service.authenticate(authorization(request), requestId(request), tenantSelector(request));
-  const authenticateSelectedTenant = async (request: FastifyRequest, selectedTenantId: string) =>
-    service.authenticate(authorization(request), requestId(request), {
-      kind: "selected",
-      value: selectedTenantId,
-    });
+  const enforceCredentialBoundary = (
+    auth: AuthContext,
+    requiredScope?: ApiKeyScope,
+  ): AuthContext => {
+    if (
+      auth.apiKey !== undefined &&
+      (requiredScope === undefined || !auth.apiKey.scopes.includes(requiredScope))
+    ) {
+      throw new ApiFailure("forbidden");
+    }
+    return auth;
+  };
+  const authenticate = async (request: FastifyRequest, requiredScope?: ApiKeyScope) =>
+    enforceCredentialBoundary(
+      await service.authenticate(
+        authorization(request),
+        requestId(request),
+        tenantSelector(request),
+      ),
+      requiredScope,
+    );
+  const authenticateSelectedTenant = async (
+    request: FastifyRequest,
+    selectedTenantId: string,
+    requiredScope?: ApiKeyScope,
+  ) =>
+    enforceCredentialBoundary(
+      await service.authenticate(authorization(request), requestId(request), {
+        kind: "selected",
+        value: selectedTenantId,
+      }),
+      requiredScope,
+    );
   return { authenticate, authenticateSelectedTenant };
 }
 

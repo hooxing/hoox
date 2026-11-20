@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   changeTeamMembershipRole,
   createMembership,
+  createPersonalTenant,
   createTeamTenant,
   createUser,
   DomainError,
@@ -10,6 +11,7 @@ import {
   rehydrateThread,
   revokeMembership,
   revokeMembershipForTeamDissolution,
+  rehydrateMembership,
   tenantId,
   threadId,
   userId,
@@ -68,6 +70,49 @@ describe("团队身份领域", () => {
     expect(admin.role).toBe("admin");
     expect(() =>
       changeTeamMembershipRole(created.tenant, revokeMembership(admin), "member"),
+    ).toThrow(DomainError);
+  });
+
+  it("集成身份可作为个人租户 Member，但不能获得管理角色", () => {
+    const owner = createUser(userId("user_personal_owner"), createdAt);
+    const integration = createUser(userId("user_personal_integration"), createdAt, "integration");
+    const created = createPersonalTenant({
+      id: tenantId("tenant_personal_integration"),
+      ownerMembershipId: membershipId("membership_personal_owner"),
+      owner,
+      createdAt,
+    });
+    const membership = createMembership({
+      id: membershipId("membership_personal_integration"),
+      tenant: created.tenant,
+      user: integration,
+      role: "member",
+      createdAt,
+    });
+
+    expect(membership.role).toBe("member");
+    expect(
+      rehydrateMembership(
+        {
+          id: membership.id,
+          tenantId: membership.tenantId,
+          userId: integration.id,
+          role: membership.role,
+          status: membership.status,
+          createdAt: membership.createdAt,
+        },
+        created.tenant,
+        integration,
+      ).role,
+    ).toBe("member");
+    expect(() =>
+      createMembership({
+        id: membershipId("membership_personal_integration_admin"),
+        tenant: created.tenant,
+        user: integration,
+        role: "admin",
+        createdAt,
+      }),
     ).toThrow(DomainError);
   });
 

@@ -10,37 +10,57 @@ export interface ValidatedExternalTarget {
   readonly addresses: readonly string[];
 }
 
-export type ExternalToolCallPhase = "preflight" | "request_written" | "response_received";
+export type ExternalToolFailureDisposition = "not_sent" | "responded_failure";
 
-/** Transport 仅可标注已证明尚未写出的失败；其他异常一律按结果未知处理。 */
+/** 可安全归一化的失败明确排除结果未知；其余传输异常由调用方按 UNKNOWN 处理。 */
 export class ExternalToolTransportError extends Error {
-  override readonly name = "ExternalToolTransportError";
-  readonly phase: "preflight";
+  readonly disposition: ExternalToolFailureDisposition;
   readonly safeCode: "EXTERNAL_TOOL_UNAVAILABLE" | "EXTERNAL_TOOL_REJECTED";
 
+  override readonly name = "ExternalToolTransportError";
   constructor(
-    phase: "preflight",
+    disposition: ExternalToolFailureDisposition,
     safeCode: "EXTERNAL_TOOL_UNAVAILABLE" | "EXTERNAL_TOOL_REJECTED",
   ) {
     super(safeCode);
-    this.phase = phase;
+    this.disposition = disposition;
     this.safeCode = safeCode;
   }
 }
 
-/** 由 B2/B3 提供；传输实现不得自行重试，结果未知交回恢复协议。 */
+export interface ExternalToolCallContext {
+  readonly tenantId: string;
+  readonly endUserId?: string;
+  readonly threadId: string;
+  readonly runId: string;
+}
+
+/** 由 MCP/HTTP 传输实现；不得重试，未分类异常交回恢复协议。 */
 export interface ExternalToolTransport {
   invoke(input: {
     readonly tool: ExternalToolVersion;
     readonly target: ValidatedExternalTarget;
     readonly arguments: Readonly<Record<string, unknown>>;
+    readonly callContext: ExternalToolCallContext;
     readonly credential?: string;
     readonly idempotencyKey: string;
+    /** HTTP 工具版本绑定的方法；HTTP Transport 在缺失时必须以 `not_sent` 拒绝，不得默认 POST。 */
+    readonly method?: "GET" | "POST";
     readonly timeoutMs: number;
+    /** 整次调用（含 DNS 预检）共享的绝对截止时间（Unix 毫秒）；Transport 不得在其后继续等待。 */
+    readonly deadlineAt: number;
     readonly maxResponseBytes: number;
     readonly redirect: "error";
     readonly signal?: AbortSignal;
-  }): Promise<{ readonly body: Uint8Array; readonly contentType: string }>;
+  }): Promise<ExternalToolTransportResponse>;
+}
+
+export interface ExternalToolTransportResponse {
+  /** 空正文表示接收端以合法的空成功响应（如 204）结束。 */
+  readonly body: Uint8Array;
+  readonly contentType: string;
+  /** 本次请求携带的认证材料（签名、时间戳等）；调用方必须从模型可见结果中剔除，且不得写入日志。 */
+  readonly authMaterial?: readonly string[];
 }
 
 export interface ExternalToolRuntimeSnapshot {

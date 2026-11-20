@@ -436,6 +436,11 @@ export interface CreateSafePiSessionOptions {
   /** 固定 Sandbox 只供测试和独立 smoke；生产 Worker 使用按需准备能力。 */
   sandbox?: SandboxHandle;
   prepareSandboxTool?: SandboxToolHandleProvider["prepareSandboxTool"];
+  /**
+   * 可信 Operator 指令，必须显式提供且只来自不可变 Agent 配置；缺省不会回退到默认 Agent，
+   * 避免未来漏传 Agent 快照时静默套用错误身份。它进入字节稳定的 system 前缀，不得含请求级数据。
+   */
+  operatorInstructions: string;
   /** Tenant/Skill/User 只能进入低信任数据分区，不能直接替换系统 Harness。 */
   untrustedPromptContent?: RuntimePromptInput["untrusted"];
   /** 团队与个人长期偏好作为 user/custom 上下文注入，不能替换稳定系统 Harness。 */
@@ -954,6 +959,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   // 能力清单从即将传给 Pi 的同一组真实工具派生，不能维护第二份易漂移的硬编码列表。
   const builtPrompt = buildRuntimeSystemPrompt({
     schemaVersion: 1,
+    operatorInstructions: options.operatorInstructions,
     capabilities: customTools.map((tool) => ({
       id: tool.name,
       description: tool.description,

@@ -96,6 +96,20 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - 轨迹和报文目录只允许写入被 Git 忽略的本地路径。
 - 保留天数和单条大小必须显式限制。
 
+## Worker OpenTelemetry 配置
+
+以下字段在 development 和 production 都可省略，只注入 Agent Worker。修改后重启 Worker。
+
+| 变量 | 默认值 | 约束 |
+| --- | --- | --- |
+| `OTEL_EXPORT_ENABLED` | `false` | 为 `true` 才加载遥测 SDK，启用 Span 和指标导出。 |
+| `OTEL_EXPORT_ENDPOINT` | 无 | 启用时必填。填写 OTLP/HTTP 基地址，可带路径前缀，Worker 追加 `/v1/traces` 和 `/v1/metrics`。不允许 URL 凭据、查询参数或 fragment；跨不可信网络使用 HTTPS。 |
+| `OTEL_EXPORT_HEADERS` | 空 | 可选 JSON 对象，键和值为 HTTP header 名和值，如 `{"Authorization":"Bearer replace-me"}`。两种信号共享请求头；实际凭据仅存于部署秘密，不写入 URL、日志或错误。 |
+| `OTEL_EXPORT_SAMPLE_RATE` | `1` | `0` 到 `1` 的小数。按 Attempt 对整条追踪采样；`0` 只发指标。指标不采样。 |
+| `OTEL_EXPORT_CONTENT_ENABLED` | `false` | 仅对采样到的 Span 生效。开启前按租户敏感数据要求确认后端访问控制和保留期。 |
+
+仅支持 OTLP/HTTP protobuf，不读取 SDK 的 `OTEL_EXPORTER_OTLP_*` 环境变量。后端需要不同的信号路由或凭据时，由部署方的 Collector 分流。信号内容和排障方法见[导出到 OpenTelemetry](../maintainers/diagnostics.md#导出到-opentelemetry)。
+
 ## Production 秘密矩阵
 
 production 示例是字段合集，不是共享 env 文件。部署平台应至少按下表分片：
@@ -104,7 +118,7 @@ production 示例是字段合集，不是共享 env 文件。部署平台应至�
 | --- | --- | --- |
 | API | PostgreSQL、Better Auth 根秘密、JWT 兼容身份、S3 下载签名、TLS/公开 origin | 模型密钥、Sandbox 执行密钥、MinIO root、迁移器凭据 |
 | Scheduler | PostgreSQL、平台共享加密根；Sandbox 与标题模型可由后台接入 | S3 读写密钥、主模型调用密钥、API JWT 私钥 |
-| Agent Worker | PostgreSQL、S3、平台加密根；Sandbox 与主模型可由后台接入 | API 身份签名私钥、Admin 管理凭据 |
+| Agent Worker | PostgreSQL、S3、平台加密根；可选 OTLP 请求头；Sandbox 与主模型可由后台接入 | API 身份签名私钥、Admin 管理凭据 |
 | Admin API | 独立管理身份、Admin Control PG、与 API 同值的 Better Auth 根秘密、Skill Publisher PG 与发布对象存储凭据 | 普通 Runtime 的其他全量秘密 |
 
 生产进程拒绝 development 变量、环境代理、危险 `NODE_*` 和 OpenSSL 配置覆盖；私有 CA 只能通过明确允许的通道注入。

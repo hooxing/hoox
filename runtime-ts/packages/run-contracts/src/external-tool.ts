@@ -14,12 +14,17 @@ export type ExternalToolFailureDisposition = "not_sent" | "responded_failure";
 
 /** 可安全归一化的失败明确排除结果未知；其余传输异常由调用方按 UNKNOWN 处理。 */
 export class ExternalToolTransportError extends Error {
+  readonly disposition: ExternalToolFailureDisposition;
+  readonly safeCode: "EXTERNAL_TOOL_UNAVAILABLE" | "EXTERNAL_TOOL_REJECTED";
+
   override readonly name = "ExternalToolTransportError";
   constructor(
-    readonly disposition: ExternalToolFailureDisposition,
-    readonly safeCode: "EXTERNAL_TOOL_UNAVAILABLE" | "EXTERNAL_TOOL_REJECTED",
+    disposition: ExternalToolFailureDisposition,
+    safeCode: "EXTERNAL_TOOL_UNAVAILABLE" | "EXTERNAL_TOOL_REJECTED",
   ) {
     super(safeCode);
+    this.disposition = disposition;
+    this.safeCode = safeCode;
   }
 }
 

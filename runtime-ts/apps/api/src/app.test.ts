@@ -43,6 +43,7 @@ import { HistoryFileLibraryService, type HistoryFileLibraryFile } from "@hoox/re
 import type { FastifyInstance } from "fastify";
 import { SkillCenterService, type SkillCenterPort, type SkillInstallation } from "@hoox/skill";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createApiKeyToken } from "@hoox/identity";
 import { type ApiDependencies, createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec } from "./cursor.js";
@@ -547,6 +548,7 @@ function fixture(
     readonly personalizations?: ApiDependencies["personalizations"];
     readonly threadForks?: ApiDependencies["threadForks"];
     readonly localAccounts?: ApiDependencies["localAccounts"];
+    readonly apiKeys?: ApiDependencies["apiKeys"];
     readonly installation?: ApiDependencies["installation"];
     readonly demoAdminUserId?: string;
     readonly scheduledTasks?: ApiDependencies["scheduledTasks"];
@@ -619,6 +621,7 @@ function fixture(
       },
     },
     ...(options.localAccounts === undefined ? {} : { localAccounts: options.localAccounts }),
+    ...(options.apiKeys === undefined ? {} : { apiKeys: options.apiKeys }),
     ...(options.installation === undefined ? {} : { installation: options.installation }),
     ...(options.demoAdminUserId === undefined ? {} : { demoAdminUserId: options.demoAdminUserId }),
     repositories: state.repositories,
@@ -1004,6 +1007,130 @@ const openApps: { close(): Promise<void> }[] = [];
 
 afterEach(async () => {
   await Promise.all(openApps.splice(0).map((app) => app.close()));
+});
+
+describe("API Key 路由授权", () => {
+  it("只允许显式声明且具备作用域的路由，并拒绝访问 Key 管理接口", async () => {
+    const token = createApiKeyToken();
+    const owner = personalBundle("owner_a");
+    let grantedScopes: readonly ("threads:read" | "runs:read")[] = ["threads:read"];
+    let keyEnabled = true;
+    const apiKeys = {
+      authenticateKey: vi.fn(async () =>
+        keyEnabled
+          ? {
+              userId: owner.user.id,
+              tenantId: owner.tenant.id,
+              apiKeyId: "key_test",
+              scopes: grantedScopes,
+            }
+          : undefined,
+      ),
+      list: vi.fn(),
+      create: vi.fn(),
+      revoke: vi.fn(),
+    } as unknown as NonNullable<ApiDependencies["apiKeys"]>;
+    const { app } = fixture({ apiKeys });
+    openApps.push(app);
+
+    const allowedRead = await app.inject({
+      method: "GET",
+      url: "/v1/threads/missing-thread",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(allowedRead.statusCode).toBe(404);
+    expect(allowedRead.body).not.toContain(token);
+
+    const createWithoutScope = await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "idempotency-key": "api-key-create-thread-01",
+      },
+      payload: { title: "无创建作用域" },
+    });
+    expect(createWithoutScope.statusCode).toBe(403);
+    expect(createWithoutScope.body).not.toContain(token);
+
+    const crossTenant = await app.inject({
+      method: "GET",
+      url: "/v1/threads",
+      headers: { authorization: `Bearer ${token}`, "x-tenant-id": "tenant_owner_b" },
+    });
+    expect(crossTenant.statusCode).toBe(404);
+    expect(crossTenant.body).not.toContain(token);
+
+    grantedScopes = ["runs:read"];
+    const missingScope = await app.inject({
+      method: "GET",
+      url: "/v1/threads",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(missingScope.statusCode).toBe(403);
+    expect(missingScope.body).not.toContain(token);
+
+    const management = await app.inject({
+      method: "GET",
+      url: "/v1/api-keys",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(management.statusCode).toBe(403);
+    expect(apiKeys.list).not.toHaveBeenCalled();
+
+    keyEnabled = false;
+    const invalid = await app.inject({
+      method: "GET",
+      url: "/v1/threads",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(invalid.statusCode).toBe(401);
+    expect(invalid.body).not.toContain(token);
+  });
+
+  it("创建响应仅一次包含明文，列表只返回前缀和元数据", async () => {
+    const key = {
+      id: "key_test",
+      tenantId: "tenant_owner_a",
+      integrationUserId: "int_test",
+      prefix: "hoox_sk_abcd",
+      name: "测试服务",
+      scopes: ["threads:read"],
+      createdBy: "user_owner_a",
+      createdAt: baseTime,
+    } as const;
+    const createMock = vi.fn(async () => key);
+    const apiKeys = {
+      authenticateKey: vi.fn(),
+      list: vi.fn(async () => [key]),
+      create: createMock,
+      revoke: vi.fn(),
+    } as unknown as NonNullable<ApiDependencies["apiKeys"]>;
+    const { app } = fixture({ apiKeys });
+    openApps.push(app);
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/api-keys",
+      headers: { authorization: "Bearer token-a", "content-type": "application/json" },
+      payload: { name: key.name, scopes: ["threads:read"] },
+    });
+    expect(created.statusCode).toBe(200);
+    const token = created.json().data.token as string;
+    expect(token).toMatch(/^hoox_sk_/u);
+    expect(createMock).toHaveBeenCalledWith(
+      expect.objectContaining({ keyHash: expect.any(Buffer) }),
+    );
+    expect(JSON.stringify(createMock.mock.calls[0])).not.toContain(token);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: "/v1/api-keys",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.body).not.toContain(token);
+  });
 });
 
 describe("Fastify API 契约", () => {

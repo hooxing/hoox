@@ -43,6 +43,7 @@ import {
   type TeamSummary,
   type Thread,
   type ThreadInputReceipt,
+  type AvailableAgent,
   type UploadedResource,
 } from "./api.js";
 import {
@@ -80,6 +81,7 @@ import {
   EmptyConversation,
   InlineArtifactDelivery,
   NavigationSidebar,
+  NewThreadAgentWelcome,
   type PendingThreadInputView,
   pollingRunStatuses,
   RunRecoveryLoading,
@@ -169,6 +171,7 @@ type WorkspaceApi = Pick<
   readonly getThreadContinuity?: RuntimeApi["getThreadContinuity"];
   readonly submitThreadInput?: RuntimeApi["submitThreadInput"];
   readonly getThreadInputReceipt?: RuntimeApi["getThreadInputReceipt"];
+  readonly listAvailableAgents?: RuntimeApi["listAvailableAgents"];
 } & Partial<SkillCenterApi & CloudDriveApi & AutomationCenterApi>;
 
 type TeamAwareWorkspaceApi = WorkspaceApi &
@@ -401,6 +404,8 @@ function AuthenticatedWorkspace({
   const [selectedTeamId, setSelectedTeamId] = useState<string>();
   const [personalThreads, setPersonalThreads] = useState<readonly Thread[]>([]);
   const [teamThreads, setTeamThreads] = useState<readonly Thread[]>([]);
+  const [availableAgents, setAvailableAgents] = useState<readonly AvailableAgent[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState("agent_default");
   const [personalThreadsLoading, setPersonalThreadsLoading] = useState(false);
   const [teamThreadsLoading, setTeamThreadsLoading] = useState(false);
   const [cloudTeamId, setCloudTeamId] = useState<string>();
@@ -584,6 +589,30 @@ function AuthenticatedWorkspace({
       stopped = true;
     };
   }, [apiClient, selectedTeam]);
+
+  useEffect(() => {
+    if (apiClient.listAvailableAgents === undefined) return;
+    let stopped = false;
+    void apiClient
+      .listAvailableAgents(activeTeamId)
+      .then((agents) => {
+        if (stopped) return;
+        setAvailableAgents(agents);
+        setSelectedAgentId((current) =>
+          agents.some((agent) => agent.id === current)
+            ? current
+            : (agents.find((agent) => agent.id === "agent_default")?.id ??
+              agents[0]?.id ??
+              "agent_default"),
+        );
+      })
+      .catch(() => {
+        if (!stopped) setAvailableAgents([]);
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [activeTeamId, apiClient]);
 
   useEffect(() => {
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
@@ -1052,7 +1081,7 @@ function AuthenticatedWorkspace({
         throw new ApiError("文件与引用合计超过 20 个附件，请减少后发送。", 400, false);
       let threadId = state.selectedThreadId;
       if (threadId === undefined) {
-        const thread = await apiClient.createThread(deriveThreadTitle(request));
+        const thread = await apiClient.createThread(deriveThreadTitle(request), selectedAgentId);
         dispatch({ type: "threadCreated", thread });
         if (!navigationRef.current.isCurrent(expectedNavigation)) return;
         moveInputTo(thread.id);
@@ -1348,6 +1377,9 @@ function AuthenticatedWorkspace({
     }
   };
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
+  const selectedAgentName = availableAgents.find(
+    (agent) => agent.id === selected?.agentDefinitionId,
+  )?.displayName;
   const currentRecovery =
     recoveryUi !== undefined &&
     recoveryUi.threadId === state.selectedThreadId &&
@@ -1514,6 +1546,14 @@ function AuthenticatedWorkspace({
                       aria-label={`${thread.title}${thread.status === "archived" ? "，已归档" : ""}`}
                     >
                       <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
+                      {availableAgents.find((agent) => agent.id === thread.agentDefinitionId) && (
+                        <small>
+                          {
+                            availableAgents.find((agent) => agent.id === thread.agentDefinitionId)
+                              ?.displayName
+                          }
+                        </small>
+                      )}
                       {thread.status === "archived" && <small>已归档</small>}
                     </button>
                   ))
@@ -1547,6 +1587,14 @@ function AuthenticatedWorkspace({
                     aria-label={thread.title}
                   >
                     <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
+                    {availableAgents.find((agent) => agent.id === thread.agentDefinitionId) && (
+                      <small>
+                        {
+                          availableAgents.find((agent) => agent.id === thread.agentDefinitionId)
+                            ?.displayName
+                        }
+                      </small>
+                    )}
                   </button>
                   {apiClient.renamePersonalThreadForTenant !== undefined &&
                     apiClient.archiveThreadForTenant !== undefined && (
@@ -1654,11 +1702,18 @@ function AuthenticatedWorkspace({
               <img className="welcome-logo" src={HOOX_HORIZONTAL_PATH} alt="" aria-hidden="true" />
               <h1>准备好协作了吗？</h1>
               <p>描述任务后会自动创建会话，并用首条请求作为标题。</p>
+              <NewThreadAgentWelcome
+                agents={availableAgents}
+                selectedAgentId={selectedAgentId}
+                onSelect={setSelectedAgentId}
+                onSuggestedQuestion={setInput}
+              />
             </div>
           ) : (
             <>
               <ThreadHeader
                 thread={selected}
+                {...(selectedAgentName === undefined ? {} : { agentName: selectedAgentName })}
                 run={state.run}
                 {...(continuity === undefined ? {} : { continuity })}
                 actionLoading={actionLoading}

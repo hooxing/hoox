@@ -3408,3 +3408,112 @@ h2 {
   outline: 2px solid var(--focus-color);
   outline-offset: 2px;
 }
+
+.api-key-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  background: transparent;
+  text-align: left;
+}
+.api-key-entry:hover {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+.api-key-dialog {
+  position: fixed;
+  z-index: 100;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(760px, calc(100dvh - 32px));
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-dialog);
+}
+.api-key-dialog > header,
+.api-key-dialog li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+.api-key-dialog h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.api-key-dialog p {
+  color: var(--text-secondary);
+}
+.api-key-dialog form {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0;
+}
+.api-key-dialog form > label {
+  display: grid;
+  gap: 6px;
+}
+.api-key-dialog input:not([type="checkbox"]) {
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-page);
+  color: var(--text-primary);
+}
+.api-key-dialog fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+}
+.api-key-dialog fieldset label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.api-key-dialog button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: var(--surface-page);
+}
+.api-key-dialog ul {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+.api-key-dialog li {
+  padding: 12px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.api-key-dialog li div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.api-key-dialog code {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.api-key-once {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-page);
+}

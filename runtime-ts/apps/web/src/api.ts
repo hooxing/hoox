@@ -14,6 +14,25 @@ export type AccountSession = {
 
 export type IdentityProviderKey = "google" | "github" | "wechat" | "qq";
 
+export type ApiKeyScope =
+  | "threads:read"
+  | "runs:read"
+  | "threads:create"
+  | "runs:create"
+  | "tool-results:submit"
+  | "webhooks:manage";
+export type ApiKey = {
+  readonly id: string;
+  readonly prefix: string;
+  readonly name: string;
+  readonly note?: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly createdAt: string;
+  readonly expiresAt?: string;
+  readonly revokedAt?: string;
+  readonly lastUsedAt?: string;
+};
+
 export type IdentityAuthConfiguration = {
   readonly emailPasswordEnabled: boolean;
   readonly emailVerificationEnabled: boolean;
@@ -1107,6 +1126,22 @@ export class RuntimeApi {
       if (typeof candidate === "string") return { kind: "url", url: candidate };
     }
     throw new ApiError("预览地址格式无效", 502, true);
+  }
+  listApiKeys(): Promise<{ readonly items: readonly ApiKey[] }> {
+    return this.request("/v1/api-keys");
+  }
+
+  createApiKey(input: {
+    readonly name: string;
+    readonly note?: string;
+    readonly scopes: readonly ApiKeyScope[];
+    readonly expiresAt?: string;
+  }): Promise<{ readonly key: ApiKey; readonly token: string }> {
+    return this.request("/v1/api-keys", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  revokeApiKey(keyId: string): Promise<ApiKey> {
+    return this.request(`/v1/api-keys/${encodeURIComponent(keyId)}`, { method: "DELETE" });
   }
 }
 

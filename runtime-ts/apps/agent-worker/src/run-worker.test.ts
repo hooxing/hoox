@@ -14,6 +14,7 @@ import type { MemoryRetriever } from "@hoox/memory";
 import type { RuntimeAgentEvent } from "@hoox/pi-adapter";
 import type { UncertainLifecycleEvent } from "@hoox/sandbox";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
+import { digestRunSkillSnapshot, type RunSkillSnapshot } from "@hoox/skill";
 import {
   createWorkspaceManifest,
   WorkspaceApplicationError,
@@ -322,7 +323,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.factory.personalizationSnapshots).toEqual([snapshot]);
   });
 
-  it("root 与 SubAgent 的独立 Session 复用同一个已物化 Sandbox", async () => {
+  it("root 与 SubAgent 的独立 Session 复用同一个 Skill 快照和已物化 Sandbox", async () => {
     const root = new BlockingAgentSession();
     const child = new ScriptedAgentSession([
       { type: "agent.started" },
@@ -341,9 +342,29 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       },
       { type: "agent.settled" },
     ]);
-    const h = sandboxHarness([root, child], fakeSeed("subagent-shared-sandbox"), {
-      subagentsEnabled: true,
-    });
+    const items = [
+      {
+        source: "agent" as const,
+        invocationName: "review",
+        canonicalKey: "review",
+        description: "审阅修改",
+        skillVersion: "1.0.0",
+        entrypointDigest: "a".repeat(64),
+        packageDigest: "b".repeat(64),
+      },
+    ];
+    const skills: RunSkillSnapshot = {
+      schemaVersion: 1,
+      digest: digestRunSkillSnapshot({ items }),
+      items,
+    };
+    const h = sandboxHarness(
+      [root, child],
+      { ...fakeSeed("subagent-shared-sandbox"), skills },
+      {
+        subagentsEnabled: true,
+      },
+    );
     const execution = h.worker.execute(h.scope);
     await vi.waitFor(() => expect(root.prompts).toHaveLength(1));
     const control = h.factory.agentControls[0];
@@ -369,6 +390,9 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.factory.agentIdentities[1]).toMatchObject({ agentKind: "subagent" });
     expect(h.factory.agentSnapshots).toHaveLength(2);
     expect(h.factory.agentSnapshots[1]).toBe(h.factory.agentSnapshots[0]);
+    expect(h.factory.skillSnapshots).toHaveLength(2);
+    expect(h.factory.skillSnapshots[0]).toBe(skills);
+    expect(h.factory.skillSnapshots[1]).toBe(skills);
     expect(h.factory.preparedSandboxes).toHaveLength(2);
     expect(h.factory.preparedSandboxes[0]).toBe(h.factory.preparedSandboxes[1]);
     expect(h.sandboxes.acquireCount).toBe(1);

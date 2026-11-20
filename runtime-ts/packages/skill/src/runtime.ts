@@ -14,6 +14,7 @@ const forbiddenDescriptionCharacters = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const forbiddenInvisibleDescriptionCodePoints = new Set([0x034f, 0x115f, 0x1160, 0x3164, 0xffa0]);
 
 export interface RunSkillSnapshotItem {
+  readonly source: "agent" | "tenant";
   readonly invocationName: string;
   readonly canonicalKey: string;
   readonly skillVersion: string;
@@ -71,6 +72,8 @@ export function digestRunSkillSnapshot(
         description: item.description,
         entrypointDigest: item.entrypointDigest,
         packageDigest: item.packageDigest,
+        // 历史快照只包含 Tenant 安装；保留其原有摘要，同时绑定 Agent 来源。
+        ...(item.source === "agent" ? { source: item.source } : {}),
       })),
       explicit:
         value.explicitInvocation === undefined
@@ -475,6 +478,7 @@ export function assertRunSkillSnapshot(value: RunSkillSnapshot): void {
   let previous = "";
   for (const item of value.items) {
     if (
+      (item.source !== "agent" && item.source !== "tenant") ||
       !invocationNamePattern.test(item.invocationName) ||
       item.invocationName <= previous ||
       !canonicalKeyPattern.test(item.canonicalKey) ||

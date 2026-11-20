@@ -9,6 +9,7 @@ import { createRequestAuthentication } from "./request-auth.js";
 import { registerResourceFilesystemHttp } from "./resource-filesystem-http.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerApiKeyRoutes } from "./routes/api-keys.js";
 import { registerAutomationRoutes } from "./routes/automations.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerHistoryFileRoutes } from "./routes/history-files.js";
@@ -101,6 +102,7 @@ export function createApiApp(
   registerHealthRoutes(app, normalizedDependencies);
   registerAutomationRoutes(app, normalizedDependencies.scheduledTasks, authenticate);
   registerAuthRoutes(app, normalizedDependencies);
+  registerApiKeyRoutes(app, normalizedDependencies, authenticate);
   registerPersonalizationRoutes(
     app,
     normalizedDependencies.personalizations,

@@ -38,6 +38,7 @@ import type {
   WorkspaceWriteScope,
 } from "@hoox/persistence/postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
 import {
@@ -79,6 +80,7 @@ import {
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
+import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
 import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
@@ -2747,7 +2749,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(publicAfter.rows[0]?.count).toBe("0");
   });
 
-  it("空 routine manifest 令 Runtime 与 PUBLIC 的 EXECUTE 集合自然为空", async () => {
+  it("Runtime 的业务 Schema 不包含可执行 Routine", async () => {
     const privileges = await migratorPool.query<{
       routine_count: string;
       runtime_execute_count: string;
@@ -3079,6 +3081,196 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         ),
       ),
     ).rejects.toMatchObject({ code: "42501" });
+  });
+});
+
+function postgresSqlState(error: unknown): string | undefined {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { readonly code?: unknown; readonly cause?: unknown };
+    if (
+      typeof candidate.code === "string" &&
+      /^[0-9A-Z]{5}$/.test(candidate.code) &&
+      ![
+        "ECONNREFUSED",
+        "ENOTFOUND",
+        "EAI_AGAIN",
+        "ETIMEDOUT",
+        "EHOSTUNREACH",
+        "ENETUNREACH",
+        "ECONNRESET",
+        "ECONNABORTED",
+        "EPIPE",
+      ].includes(candidate.code)
+    ) {
+      return candidate.code;
+    }
+    current = candidate.cause;
+  }
+  return undefined;
+}
+
+function itWithSqlStateDiagnostic(title: string, test: () => Promise<void>): void {
+  it(title, async () => {
+    try {
+      await test();
+    } catch (error) {
+      const code = postgresSqlState(error);
+      if (code !== undefined) {
+        throw new Error(`PostgreSQL API Key 用例失败（SQLSTATE ${code}）`, { cause: error });
+      }
+      throw error;
+    }
+  });
+}
+
+describe("PostgreSQL API Key 隔离与集成身份", () => {
+  itWithSqlStateDiagnostic(
+    "仅持久化哈希，按 Tenant 隔离并在吊销后同步禁用集成 Membership",
+    async () => {
+      const owner = await createFixture("api_key_owner");
+      const other = await createFixture("api_key_other");
+      const repository = new PgApiKeyRepository(runtimePool);
+      const token = createApiKeyToken();
+      const key = await repository.create({
+        scope: owner.scope,
+        createdBy: owner.user.id,
+        keyHash: hashApiKey(token),
+        prefix: token.slice(0, 12),
+        name: "集成测试",
+        scopes: ["threads:read", "runs:read"],
+        now: timestamp(10),
+      });
+
+      expect((await repository.list(other.scope)).map((item) => item.id)).toEqual([]);
+      const principal = await repository.authenticateKey({ token, now: timestamp(11) });
+      expect(principal).toMatchObject({
+        tenantId: owner.scope.tenantId,
+        userId: key.integrationUserId,
+      });
+      const integration = await repositories.tenants.get({
+        tenantId: owner.scope.tenantId,
+        userId: userId(key.integrationUserId),
+      });
+      expect(integration?.membership.role).toBe("member");
+
+      const raw = await withTenantTransaction(migratorPool, owner.scope, (client) =>
+        client.query<{
+          key_hash: Buffer;
+          kind: string;
+          last_used_at: Date | null;
+        }>(
+          "SELECT k.key_hash, k.last_used_at, u.kind FROM api_keys k JOIN app_users u ON u.id = k.integration_user_id WHERE k.tenant_id = $1 AND k.id = $2",
+          [owner.scope.tenantId, key.id],
+        ),
+      );
+      expect(raw.rows[0]?.key_hash.equals(hashApiKey(token))).toBe(true);
+      expect(raw.rows[0]?.key_hash.equals(Buffer.from(token))).toBe(false);
+      expect(raw.rows[0]?.last_used_at).not.toBeNull();
+      expect(raw.rows[0]?.kind).toBe("integration");
+
+      await repository.revoke(owner.scope, key.id, timestamp(12));
+      const clearRevocation = await withTenantTransaction(runtimePool, owner.scope, (client) =>
+        client.query("UPDATE api_keys SET revoked_at = NULL WHERE tenant_id = $1 AND id = $2", [
+          owner.scope.tenantId,
+          key.id,
+        ]),
+      );
+      expect(clearRevocation.rowCount).toBe(0);
+      const restoreMembership = await withTenantTransaction(
+        runtimePool,
+        { ...owner.scope, userId: key.integrationUserId },
+        (client) =>
+          client.query(
+            "UPDATE memberships SET status = 'active' WHERE tenant_id = $1 AND user_id = $2",
+            [owner.scope.tenantId, key.integrationUserId],
+          ),
+      );
+      expect(restoreMembership.rowCount).toBe(0);
+      expect(
+        (await repository.list(owner.scope)).find((item) => item.id === key.id)?.revokedAt,
+      ).toBe(timestamp(12));
+      expect(await repository.authenticateKey({ token, now: timestamp(13) })).toBeUndefined();
+      expect(
+        await repositories.tenants.get({
+          tenantId: owner.scope.tenantId,
+          userId: userId(key.integrationUserId),
+        }),
+      ).toBeUndefined();
+    },
+  );
+
+  itWithSqlStateDiagnostic("Runtime 不能直接撤销人类成员 Membership", async () => {
+    const owner = await createFixture("api_key_human_guard");
+    const humanId = userId("user_api_key_human_guard_member");
+    await withTenantTransaction(
+      migratorPool,
+      { tenantId: owner.scope.tenantId, userId: humanId },
+      async (client) => {
+        await client.query("INSERT INTO app_users(id, created_at) VALUES ($1, $2)", [
+          humanId,
+          timestamp(10),
+        ]);
+        await client.query(
+          "INSERT INTO memberships(tenant_id, id, user_id, role, status, created_at) VALUES ($1, $2, $3, 'member', 'active', $4)",
+          [owner.scope.tenantId, "mem_api_key_human_guard", humanId, timestamp(10)],
+        );
+      },
+    );
+
+    // FOR SHARE/UPDATE 会施加 UPDATE 策略的 USING；人类成员的授权加锁与 lock_marker
+    // 自更新必须仍然命中，否则 Thread 创建、归档等主路径会退化为 not_authorized。
+    const humanScope = { tenantId: owner.scope.tenantId, userId: humanId };
+    const locked = await withTenantTransaction(runtimePool, humanScope, (client) =>
+      client.query<{ status: string }>(
+        "SELECT status FROM memberships WHERE tenant_id = $1 AND user_id = $2 FOR SHARE",
+        [owner.scope.tenantId, humanId],
+      ),
+    );
+    expect(locked.rows.map((row) => row.status)).toEqual(["active"]);
+    const markerTouch = await withTenantTransaction(runtimePool, humanScope, (client) =>
+      client.query(
+        "UPDATE memberships SET lock_marker = lock_marker WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'",
+        [owner.scope.tenantId, humanId],
+      ),
+    );
+    expect(markerTouch.rowCount).toBe(1);
+
+    await expect(
+      withTenantTransaction(runtimePool, owner.scope, (client) =>
+        client.query(
+          "UPDATE memberships SET status = 'revoked' WHERE tenant_id = $1 AND user_id = $2",
+          [owner.scope.tenantId, humanId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+
+    const unchanged = await withTenantTransaction(migratorPool, owner.scope, (client) =>
+      client.query<{ status: string }>(
+        "SELECT status FROM memberships WHERE tenant_id = $1 AND user_id = $2",
+        [owner.scope.tenantId, humanId],
+      ),
+    );
+    expect(unchanged.rows[0]?.status).toBe("active");
+  });
+
+  it("到期的 Key 无法认证", async () => {
+    const owner = await createFixture("api_key_expired");
+    const repository = new PgApiKeyRepository(runtimePool);
+    const token = createApiKeyToken();
+    await repository.create({
+      scope: owner.scope,
+      createdBy: owner.user.id,
+      keyHash: hashApiKey(token),
+      prefix: token.slice(0, 12),
+      name: "过期测试",
+      scopes: ["threads:read"],
+      now: "2000-01-01T00:00:00.000Z",
+      expiresAt: "2001-01-01T00:00:00.000Z",
+    });
+    expect(await repository.authenticateKey({ token, now: timestamp(14) })).toBeUndefined();
   });
 });
 

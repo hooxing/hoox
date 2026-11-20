@@ -1,6 +1,9 @@
 import type { TokenizerPort } from "@hoox/context-policy";
 import { appendFileReferences } from "@hoox/protocol/file-references";
-import { buildToolCapabilityManifest } from "@hoox/prompt-builder";
+import {
+  buildToolCapabilityManifest,
+  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
+} from "@hoox/prompt-builder";
 import { SandboxRuntimeError } from "@hoox/sandbox";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import {
@@ -568,7 +571,7 @@ describe("Pi 安全适配", () => {
       logicalCwd: "/workspace",
       activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
       promptSchemaVersion: 1,
-      promptVersion: "runtime-system-prompt.v15",
+      promptVersion: "runtime-system-prompt.v16",
       capabilityManifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       compactionEnabled: false,
@@ -884,6 +887,7 @@ describe("Pi 安全适配", () => {
     });
     const options = {
       model,
+      operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
       modelContext: context,
       modelRuntime: runtime,
       sandbox: new FakeSandboxHandle("mutable-context"),
@@ -924,6 +928,7 @@ describe("Pi 安全适配", () => {
       expect(Object.isFrozen(context.model.headers)).toBe(true);
     const options = {
       model,
+      operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
       modelContext: context,
       modelRuntime: runtime,
       sandbox: new FakeSandboxHandle("route-snapshot"),
@@ -1547,6 +1552,7 @@ async function harness(
   const model = faux.getModel();
   const controller = await createSafePiSession({
     model,
+    operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
     modelContext:
       tokenizer === undefined
         ? bindTrustedPiModelContextCapability(modelRuntime, model)

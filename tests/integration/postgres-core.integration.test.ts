@@ -2856,13 +2856,32 @@ describe("PostgreSQL API Key 隔离与集成身份", () => {
       },
     );
 
-    const humanRevocation = await withTenantTransaction(runtimePool, owner.scope, (client) =>
-      client.query(
-        "UPDATE memberships SET status = 'revoked' WHERE tenant_id = $1 AND user_id = $2",
+    // FOR SHARE/UPDATE 会施加 UPDATE 策略的 USING；人类成员的授权加锁与 lock_marker
+    // 自更新必须仍然命中，否则 Thread 创建、归档等主路径会退化为 not_authorized。
+    const humanScope = { tenantId: owner.scope.tenantId, userId: humanId };
+    const locked = await withTenantTransaction(runtimePool, humanScope, (client) =>
+      client.query<{ status: string }>(
+        "SELECT status FROM memberships WHERE tenant_id = $1 AND user_id = $2 FOR SHARE",
         [owner.scope.tenantId, humanId],
       ),
     );
-    expect(humanRevocation.rowCount).toBe(0);
+    expect(locked.rows.map((row) => row.status)).toEqual(["active"]);
+    const markerTouch = await withTenantTransaction(runtimePool, humanScope, (client) =>
+      client.query(
+        "UPDATE memberships SET lock_marker = lock_marker WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'",
+        [owner.scope.tenantId, humanId],
+      ),
+    );
+    expect(markerTouch.rowCount).toBe(1);
+
+    await expect(
+      withTenantTransaction(runtimePool, owner.scope, (client) =>
+        client.query(
+          "UPDATE memberships SET status = 'revoked' WHERE tenant_id = $1 AND user_id = $2",
+          [owner.scope.tenantId, humanId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
 
     const unchanged = await withTenantTransaction(migratorPool, owner.scope, (client) =>
       client.query<{ status: string }>(

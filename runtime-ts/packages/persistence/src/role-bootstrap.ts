@@ -1247,7 +1247,7 @@ async function hasManagedSandboxState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
-async function activeTablePolicy(
+export async function activeTablePolicy(
   client: PoolClient,
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
@@ -1418,7 +1418,7 @@ async function activeTablePolicy(
   return policy;
 }
 
-async function activeColumnUpdatePolicy(
+export async function activeColumnUpdatePolicy(
   client: PoolClient,
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {

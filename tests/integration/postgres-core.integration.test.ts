@@ -47,7 +47,6 @@ import {
   migrateUp,
 } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
-import { getPostgreSqlDiagnosticCause } from "../../runtime-ts/packages/persistence/src/errors.js";
 import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
 import {
   PgAdminControlRepository,
@@ -351,19 +350,10 @@ beforeAll(async () => {
     schema,
     maxConnections: 4,
   });
-  let concurrent: Awaited<ReturnType<typeof migrateUp>>[];
-  try {
-    concurrent = await Promise.all([
-      migrateUp(migratorPool, migrationSecurity),
-      migrateUp(migratorPool, migrationSecurity),
-    ]);
-  } catch (error) {
-    const diagnostic = getPostgreSqlDiagnosticCause(error);
-    if (diagnostic !== undefined) {
-      console.error(`PostgreSQL 集成迁移失败 ${diagnostic.code}: ${diagnostic.message}`);
-    }
-    throw error;
-  }
+  const concurrent = await Promise.all([
+    migrateUp(migratorPool, migrationSecurity),
+    migrateUp(migratorPool, migrationSecurity),
+  ]);
   concurrentMigrationVersions = concurrent.flatMap((records) =>
     records.map((record) => record.version),
   );

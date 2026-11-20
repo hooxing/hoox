@@ -65,6 +65,8 @@ VALUES ('agent_default_revision_1','agent_default',1,'published',
   '{"displayName":"Hoox 默认助手","description":"Hoox 默认 Agent","suggestedQuestions":[],"operatorInstructions":"你是 Hoox，由 Hoox 平台托管的受控 Agent。\n使用中文进行回答，除非用户明确要求使用其他语言。","replyLanguage":"zh-CN","model":{"mode":"platform_default"},"skillVersions":[],"includeTenantSkills":true,"sandboxIdleAction":"pause","longTermMemoryEnabled":false,"tools":{"mode":"platform_default"}}'::jsonb,
   '2797a0554a1733f1c0f48634fd0908b5e2e13bc66e480e15c61b21732547f302','system');
 UPDATE agent_definitions SET current_revision_id='agent_default_revision_1' WHERE id='agent_default';
+-- 先执行延迟的当前 Revision 外键检查，避免后续 ALTER TABLE 遇到待处理触发器事件。
+SET CONSTRAINTS agent_definitions_current_revision_fk IMMEDIATE;
 ALTER TABLE threads ADD COLUMN agent_definition_id text NOT NULL DEFAULT 'agent_default';
 ALTER TABLE threads ADD CONSTRAINT threads_agent_definition_fk FOREIGN KEY(agent_definition_id) REFERENCES agent_definitions(id) ON DELETE RESTRICT;
 CREATE INDEX threads_agent_definition_idx ON threads(agent_definition_id,tenant_id);

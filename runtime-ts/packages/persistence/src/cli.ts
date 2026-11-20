@@ -1,5 +1,5 @@
 import { loadDatabaseDevelopmentEnvironment } from "./development-database-environment.js";
-import { getPostgreSqlDiagnosticCause, PersistenceError } from "./errors.js";
+import { PersistenceError } from "./errors.js";
 import { migrateDown, migrateUp } from "./migrations.js";
 import { assertDestructiveMigrationAllowed } from "./migration-safety.js";
 import { createPostgresPool, probePostgres } from "./postgres.js";
@@ -78,11 +78,8 @@ if (direction !== "up" && direction !== "down") {
       console.log(`数据库迁移完成，当前版本：${current}`);
     } catch (error) {
       const message = error instanceof PersistenceError ? error.message : "未知迁移错误";
-      const postgres = getPostgreSqlDiagnosticCause(error);
+      // 只报告稳定错误，不序列化 cause，避免驱动配置或连接串进入日志。
       console.error(`数据库迁移失败：${message}`);
-      if (postgres !== undefined) {
-        console.error(`PostgreSQL ${postgres.code}: ${postgres.message}`);
-      }
       process.exitCode = 1;
     } finally {
       await pool.end();

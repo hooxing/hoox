@@ -1,6 +1,6 @@
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
-import type { ClientRequest, IncomingMessage } from "node:http";
+import type { ClientRequest, IncomingMessage, ServerResponse } from "node:http";
 import { defineConfig, loadEnv } from "vite";
 import { resolveApiTarget } from "./src/config.js";
 
@@ -15,12 +15,42 @@ export function preserveInstallationSource(
   }
 }
 
+function serveWorkspaceShell(
+  request: IncomingMessage,
+  _response: ServerResponse,
+  next: () => void,
+): void {
+  if (request.method === "GET" || request.method === "HEAD") {
+    const url = URL.parse(request.url ?? "/", "http://127.0.0.1");
+    if (
+      url &&
+      (url.pathname === "/app" ||
+        url.pathname.startsWith("/app/") ||
+        ((url.pathname === "/" || url.pathname === "/index.html") && url.searchParams.has("error")))
+    ) {
+      request.url = `/workspace.html${url.search}`;
+    }
+  }
+  next();
+}
+
 export default defineConfig(({ mode }) => {
   // Vite 只自动加载 VITE_ 前缀；保留旧变量仅用于本地命令行兼容。
   const target = resolveApiTarget({ ...process.env, ...loadEnv(mode, process.cwd(), "VITE_") });
   return {
     worker: { format: "es" },
-    plugins: [react()],
+    plugins: [
+      react(),
+      {
+        name: "hoox-workspace-shell",
+        configureServer(server) {
+          server.middlewares.use(serveWorkspaceShell);
+        },
+        configurePreviewServer(server) {
+          server.middlewares.use(serveWorkspaceShell);
+        },
+      },
+    ],
     publicDir: resolve(import.meta.dirname, "../../public"),
     server: {
       proxy: {

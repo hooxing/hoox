@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bookArtifacts } from "./landing-case.js";
 import { LandingPage } from "./landing-page.js";
+import { renderLanding } from "./landing-prerender.js";
 import { resolveSiteSurface } from "./site-route.js";
 import { InlineArtifactDelivery } from "./workspace-view.js";
 
@@ -56,6 +57,62 @@ describe("正式产品首页", () => {
     }
     expect(container.textContent).toContain("Skills 不扩张工具或权限");
     expect(container.textContent).toContain("当前为 0.x 早期开发阶段");
+  });
+  it("在保留预渲染节点的情况下水合首页交互，不发起安装请求", async () => {
+    await act(async () => root.unmount());
+    const links = { privacyUrl: "https://hoox.example.org/privacy?a=1&b=2" };
+    container.innerHTML = renderLanding(links);
+    const heading = container.querySelector("h1");
+    const onRecoverableError = vi.fn();
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    await act(async () => {
+      root = hydrateRoot(container, <LandingPage {...links} />, { onRecoverableError });
+    });
+    expect(container.querySelector("h1")).toBe(heading);
+    const button = [...container.querySelectorAll("button")].find((item) =>
+      item.textContent?.includes("原生工具调用"),
+    );
+    await act(async () => button?.click());
+    expect(button?.getAttribute("aria-pressed")).toBe("true");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(onRecoverableError).not.toHaveBeenCalled();
+  });
+  it("窄屏披露菜单覆盖所有桌面导航，保留独立工作台入口", async () => {
+    await act(async () => root.render(<LandingPage />));
+    const menu = container.querySelector<HTMLDetailsElement>("details.landing-nav-menu");
+    expect(menu?.open).toBe(false);
+    expect(menu?.querySelector("summary")?.textContent).toBe("菜单");
+    const hrefs = (selector: string) =>
+      [...container.querySelectorAll(selector)].map((link) => link.getAttribute("href"));
+    expect(hrefs(".landing-nav-menu a")).toEqual(hrefs(".landing-nav-sections a"));
+    expect(hrefs(".landing-nav-app")).toEqual(["/app"]);
+  });
+  it("页脚链接指向维护入口，隐私和条款分别按配置显示", async () => {
+    await act(async () => root.render(<LandingPage />));
+    const footerLinks = () =>
+      Object.fromEntries(
+        [...container.querySelectorAll("footer nav a")].map((link) => [
+          link.textContent,
+          link.getAttribute("href"),
+        ]),
+      );
+    expect(footerLinks()).toMatchObject({
+      文档: "https://github.com/hooxing/hoox/blob/main/docs/README.md",
+      变更记录: "https://github.com/hooxing/hoox/blob/main/CHANGELOG.md",
+      GitHub: "https://github.com/hooxing/hoox",
+      Issue: "https://github.com/hooxing/hoox/issues",
+    });
+    expect(footerLinks()).not.toHaveProperty("隐私");
+    expect(footerLinks()).not.toHaveProperty("条款");
+    await act(async () =>
+      root.render(<LandingPage privacyUrl="https://hoox.example.org/privacy" />),
+    );
+    expect(footerLinks()).toHaveProperty("隐私", "https://hoox.example.org/privacy");
+    expect(footerLinks()).not.toHaveProperty("条款");
+    await act(async () => root.render(<LandingPage termsUrl="https://hoox.example.org/terms" />));
+    expect(footerLinks()).not.toHaveProperty("隐私");
+    expect(footerLinks()).toHaveProperty("条款", "https://hoox.example.org/terms");
   });
   it("调用模式、生命周期与供应商切换只更新本地演示，保留能力边界", async () => {
     const fetch = vi.fn();

@@ -28,6 +28,7 @@ import {
 } from "react";
 import {
   type Artifact,
+  type AvailableAgent,
   canPreviewArtifact,
   type HistoryFile,
   type Run,
@@ -1300,6 +1301,51 @@ export function formatArtifactSize(sizeBytes: number): string {
   return `${(sizeBytes / 1_048_576).toFixed(sizeBytes < 10_485_760 ? 1 : 0)} MB`;
 }
 
+export function NewThreadAgentWelcome({
+  agents,
+  selectedAgentId,
+  onSelect,
+  onSuggestedQuestion,
+}: {
+  readonly agents: readonly AvailableAgent[];
+  readonly selectedAgentId: string;
+  readonly onSelect: (agentId: string) => void;
+  readonly onSuggestedQuestion: (question: string) => void;
+}) {
+  const selected = agents.find((agent) => agent.id === selectedAgentId);
+  return (
+    <div className="new-thread-agent-welcome">
+      {agents.length > 1 && (
+        <label className="agent-picker">
+          <span>选择 Agent</span>
+          <select
+            aria-label="选择 Agent"
+            value={selectedAgentId}
+            onChange={(event) => onSelect(event.target.value)}
+          >
+            {agents.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {selected?.welcomeMessage && <p>{selected.welcomeMessage}</p>}
+      {selected?.suggestedQuestions.map((question) => (
+        <button
+          type="button"
+          className="suggested-question"
+          key={question}
+          onClick={() => onSuggestedQuestion(question)}
+        >
+          {question}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function EmptyConversation() {
   return (
     <div className="conversation-empty welcome-empty">
@@ -1832,6 +1878,7 @@ export function NavigationSidebar({
 
 export function ThreadHeader({
   thread,
+  agentName,
   run,
   continuity,
   actionLoading,
@@ -1841,6 +1888,7 @@ export function ThreadHeader({
   onPublishToTeam,
 }: {
   readonly thread: Thread;
+  readonly agentName?: string;
   readonly run: Run | undefined;
   readonly continuity?: ThreadContinuityStatus;
   readonly actionLoading: boolean;
@@ -1862,6 +1910,7 @@ export function ThreadHeader({
       <div className="conversation-title">
         <h1 title={thread.title}>{thread.title}</h1>
         <div className="run-meta">
+          {agentName !== undefined && <span>{agentName}</span>}
           <RunStatusBadge status={run?.status} executionStatus={run?.executionStatus} />
           {workspaceStateLabel !== undefined && <span>{workspaceStateLabel}</span>}
           {(continuity?.queueDepth ?? 0) > 0 && <span>后续任务 {continuity?.queueDepth}</span>}

@@ -17,6 +17,7 @@ const schema = normalizeExternalToolSchema({
 const tool = {
   toolVersionId: "version-1",
   source: "mcp" as const,
+  endpoint: "https://tools.example/mcp",
   modelToolName: "mcp__server__lookup",
   description: "lookup",
   inputSchema: schema.schema,
@@ -72,6 +73,7 @@ describe("外部工具持久化适配器", () => {
               {
                 tool_version_id: tool.toolVersionId,
                 source: "mcp",
+                endpoint: "https://tools.example/mcp",
                 model_tool_name: tool.modelToolName,
                 description: "lookup",
                 input_schema: schema.schema,

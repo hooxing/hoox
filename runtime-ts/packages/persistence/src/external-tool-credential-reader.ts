@@ -19,13 +19,13 @@ export class ExternalToolCredentialDecryptor {
   }
   decrypt(toolVersionId: string, encrypted: EncryptedExternalToolCredential): string {
     if (encrypted.version !== 1) throw new Error("EXTERNAL_TOOL_CREDENTIAL_VERSION_UNSUPPORTED");
-    const decipher = createDecipheriv(
-      "aes-256-gcm",
-      this.key,
-      Buffer.from(encrypted.nonce, "base64url"),
-    );
+    const nonce = Buffer.from(encrypted.nonce, "base64url");
+    const authTag = Buffer.from(encrypted.authTag, "base64url");
+    if (nonce.byteLength !== 12 || authTag.byteLength !== 16)
+      throw new Error("EXTERNAL_TOOL_CREDENTIAL_CIPHERTEXT_INVALID");
+    const decipher = createDecipheriv("aes-256-gcm", this.key, nonce, { authTagLength: 16 });
     decipher.setAAD(Buffer.from(`external-tool:v1:${toolVersionId}`));
-    decipher.setAuthTag(Buffer.from(encrypted.authTag, "base64url"));
+    decipher.setAuthTag(authTag);
     return Buffer.concat([
       decipher.update(Buffer.from(encrypted.ciphertext, "base64url")),
       decipher.final(),

@@ -13,6 +13,12 @@ describe("外部工具凭据托管", () => {
     const decryptor = new ExternalToolCredentialDecryptor("x".repeat(48));
     expect(decryptor.decrypt("tool-v1", first)).toBe("very-secret-token");
     expect(() => decryptor.decrypt("other-tool", first)).toThrow();
+    expect(() => decryptor.decrypt("tool-v1", { ...first, nonce: "AA" })).toThrow(
+      "EXTERNAL_TOOL_CREDENTIAL_CIPHERTEXT_INVALID",
+    );
+    expect(() => decryptor.decrypt("tool-v1", { ...first, authTag: "AA" })).toThrow(
+      "EXTERNAL_TOOL_CREDENTIAL_CIPHERTEXT_INVALID",
+    );
   });
   it("拒绝过短根密钥", () => expect(() => new ExternalToolCredentialCipher("short")).toThrow());
 });

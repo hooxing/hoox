@@ -4,7 +4,9 @@
 
 ## 所有权与生效时机
 
-- AgentDefinition 归平台所有。Tenant 只能使用管理员发布且向它开放的 Agent。Thread 创建后不能换绑 AgentDefinition；Thread 不绑定具体 Revision。现有 Thread 默认绑定内置 Agent。
+- AgentDefinition 归平台所有。Tenant 只能使用管理员发布且向它开放的 Agent。Thread 创建后不能换绑 AgentDefinition；Thread 不绑定具体 Revision。既有 Thread 默认绑定内置 Agent。
+- 工作台通过 `GET /v1/agents` 获取当前 Tenant 可用的已发布展示信息；仅返回名称、简介、头像、欢迎语和建议问题，不返回 Operator 指令或草稿。新建 Thread 可选择其中一个 Agent，未指定时绑定 `agent_default`；只有多个可用 Agent 时才显示选择控件。Thread 列表与对话头部以 Thread 的 `agentDefinitionId` 对应当前可用 Agent 名称。
+- 新建 Thread 选择的 Agent 若 RLS 不可见（不存在、跨 Tenant、不在可用范围或已停用），统一返回 `404 NOT_FOUND`，不区分原因。若定义仍可见但没有可用的已发布 Revision，则返回 `409 AGENT_REVISION_UNAVAILABLE`。已有 Thread 发起 Run 时由 A3 按相同 409 错误码失败关闭。
 - Revision 发布后正文不可改写。发布新 Revision 改变后续 Run 的选择，不修改既有 Run 的内容；停用 Definition 只阻止后续 Run。
 - 受理 Run 时在同一事务内写入 `RunAgentSnapshot`、`RunSkillSnapshot` 和其他受理事实。快照保存 Thread 绑定、Revision ID、内容摘要及完整内容（包括外部工具版本引用，不含外部工具凭据）。可转成 follow-up 的 steer 候选在输入受理时一起固定两个快照，实际转入队列时不重新解析。
 - 当前 Revision 不可见、不是已发布状态或内容无法验证时，持久化返回 `agent_revision_unavailable`，不创建 Run，也不留下部分写入。已经受理的相同幂等键仍可读回原结果。

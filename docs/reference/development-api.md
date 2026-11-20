@@ -20,7 +20,7 @@
 
 | 路由组 | 主要用途 | 当前说明 |
 | --- | --- | --- |
-| `/v1/threads`、`/:threadId/runs`、`/inputs`、`/context`、`/continuity` | 创建任务、执行 Run、统一输入、读取上下文和连续性状态 | [Thread 连续上下文](../architecture/thread-continuity.md) |
+| `/v1/agents`、`/v1/threads`、`/:threadId/runs`、`/inputs`、`/context`、`/continuity` | 列出当前 Tenant 可用 Agent，创建任务、执行 Run、统一输入、读取上下文和连续性状态 | [Agent 定义与工作台选择](../architecture/agent-definition.md)、[Thread 连续上下文](../architecture/thread-continuity.md) |
 | `/v1/threads/:threadId/forks` | 创建同空间分支或发布到已授权团队 | [团队协作](../architecture/team-collaboration.md) |
 | `/v1/me/teams`、`/v1/teams`、`/:teamId/members` | 团队目录、创建、成员角色和解散 | [团队协作](../architecture/team-collaboration.md) |
 | `/v1/skills`、`/v1/me/skills` | 浏览 Skill 目录并管理当前 Tenant 安装 | [Skill Runtime](../architecture/skill-runtime.md) |
@@ -32,6 +32,22 @@
 | `/v1/api-keys` | 为当前 Tenant 创建、列出和吊销服务凭据 | [身份、账号与会话](../architecture/identity-and-session.md#服务凭据与集成身份) |
 
 路径中的 `/me` 表示以当前认证用户发起操作，不必然表示数据属于全局个人空间；最终作用域仍由该路由的 `TenantScope` 和业务校验决定。
+
+## Agent 与 Thread 创建
+
+`GET /v1/agents` 使用当前已认证 Tenant 返回可用的已发布 Agent，API Key 需要 `threads:read` 作用域。响应 `data.items` 中每项只包含 `id`、`displayName`、`description`、可选 `avatarRef`、可选 `welcomeMessage` 和 `suggestedQuestions`；Operator 指令、草稿与 Revision 管理信息不会返回。结果受 Tenant RLS 可见性约束。
+
+创建 Thread 时可在原有标题之外传入 `agentDefinitionId`：
+
+```http
+POST /v1/threads
+Idempotency-Key: create-thread-0001
+Content-Type: application/json
+
+{"title":"整理客户反馈","agentDefinitionId":"agent_support"}
+```
+
+省略该字段时仍绑定 `agent_default`。成功响应的 Thread DTO 带有 `agentDefinitionId`。RLS 不可见的定义（包括不存在、跨 Tenant、不在可用范围和已停用定义）统一返回 `404 NOT_FOUND`，不区分原因；仅定义仍可见但没有可用的已发布 Revision 时返回 `409 AGENT_REVISION_UNAVAILABLE`。已有 Thread 创建 Run 时沿用 A3 的该 409 语义。新建 Thread 不会改写已有 Thread 的 Agent 绑定。
 
 ## 健康端点
 

@@ -99,6 +99,7 @@ import {
   receiptMatches,
   snapshotMatches,
 } from "./run-worker-fact-matching.js";
+import type { WorkerTelemetry } from "./telemetry/runtime.js";
 
 export interface RunWorkerOptions {
   readonly workerId: string;
@@ -158,6 +159,7 @@ interface WorkerDependencies {
   readonly shutdownSignal?: AbortSignal;
   readonly clock: ClockPort;
   readonly metrics: RecoveryMetricsPort;
+  readonly telemetry?: WorkerTelemetry;
   readonly threadContextBodies?: ThreadContextBodyPersistencePort;
   readonly threadSandboxes?: ThreadSandboxSessionLifecyclePort;
   readonly continuityMetrics?: ThreadContinuityMetricsPort;
@@ -259,6 +261,20 @@ export class RunWorker {
       return await this.#releaseScopeMismatch(claim, durableLane);
     }
 
+    if (this.dependencies.telemetry === undefined) {
+      return this.#executeClaimed(scope, claim, durableLane, startupStartedAt);
+    }
+    return this.dependencies.telemetry.runAttempt(scope, claim.snapshot.attempt.attemptId, () =>
+      this.#executeClaimed(scope, claim, durableLane, startupStartedAt),
+    );
+  }
+
+  async #executeClaimed(
+    scope: ExecutionScope,
+    claim: ClaimedExecution,
+    durableLane: DurableOperationLane,
+    startupStartedAt: number,
+  ): Promise<RunWorkerResult> {
     const context = createExecutionContext(scope, claim, durableLane);
     const timings = createRunTimings({
       context,
@@ -1499,6 +1515,11 @@ export class RunWorker {
         acceptOutboxReceipts(context, result.receipt.outbox);
         if (result.attempt.currentRevisionId === undefined) delete context.currentRevisionId;
         else context.currentRevisionId = result.attempt.currentRevisionId;
+        this.dependencies.telemetry?.recordMutation(
+          context.attemptId,
+          input.events,
+          input.nextRunStatus,
+        );
       }
       return result;
     });

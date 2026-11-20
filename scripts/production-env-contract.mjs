@@ -1,3 +1,5 @@
+import { validateOtelEnvironmentExample } from "./env-contract.mjs";
+
 export const expectedProductionEnvironmentKeys = Object.freeze([
   "RUNTIME_ENV",
   "DATABASE_URL",
@@ -83,6 +85,11 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
 ]);
 
 export const optionalProductionEnvironmentKeys = Object.freeze([
+  "OTEL_EXPORT_ENABLED",
+  "OTEL_EXPORT_ENDPOINT",
+  "OTEL_EXPORT_HEADERS",
+  "OTEL_EXPORT_SAMPLE_RATE",
+  "OTEL_EXPORT_CONTENT_ENABLED",
   "THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT",
   "THREAD_CONTEXT_COMPACTION_TARGET_PERCENT",
   "THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS",
@@ -232,6 +239,7 @@ export function validateProductionEnvironmentExample(source) {
   ]) {
     if (values.get(key) !== "true") issues.push(`生产样例 ${key} 必须为 true`);
   }
+  issues.push(...validateOtelEnvironmentExample(values));
   for (const key of secretKeys) {
     const value = values.get(key);
     if (

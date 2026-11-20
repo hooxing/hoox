@@ -88,6 +88,11 @@ export const expectedEnvironmentKeys = Object.freeze([
 ]);
 
 export const optionalEnvironmentKeys = Object.freeze([
+  "OTEL_EXPORT_ENABLED",
+  "OTEL_EXPORT_ENDPOINT",
+  "OTEL_EXPORT_HEADERS",
+  "OTEL_EXPORT_SAMPLE_RATE",
+  "OTEL_EXPORT_CONTENT_ENABLED",
   "POSTGRES_HOST_PORT",
   "POSTGRES_BOOTSTRAP_USER",
   "POSTGRES_BOOTSTRAP_PASSWORD",
@@ -252,6 +257,7 @@ export function validateEnvironmentExample(source) {
   for (const key of values.keys()) {
     if (!expected.has(key)) issues.push(`未登记的环境变量：${key}`);
   }
+  issues.push(...validateOtelEnvironmentExample(values));
   for (const key of placeholderOnlyKeys) {
     const value = values.get(key);
     if (
@@ -263,5 +269,36 @@ export function validateEnvironmentExample(source) {
     }
   }
 
+  return issues;
+}
+
+export function validateOtelEnvironmentExample(values) {
+  const issues = [];
+  for (const key of ["OTEL_EXPORT_ENABLED", "OTEL_EXPORT_CONTENT_ENABLED"]) {
+    if (values.has(key) && values.get(key) !== "false") issues.push(`样例 ${key} 必须为 false`);
+  }
+  if (values.has("OTEL_EXPORT_HEADERS") && values.get("OTEL_EXPORT_HEADERS") !== "") {
+    issues.push("样例 OTEL_EXPORT_HEADERS 必须留空");
+  }
+  const otelEndpoint = values.get("OTEL_EXPORT_ENDPOINT");
+  if (otelEndpoint !== undefined && otelEndpoint !== "") {
+    try {
+      const endpoint = new URL(otelEndpoint);
+      if (
+        endpoint.protocol !== "https:" ||
+        !endpoint.hostname.endsWith(".invalid") ||
+        endpoint.username ||
+        endpoint.password ||
+        /[?#]/u.test(otelEndpoint)
+      )
+        throw new Error();
+    } catch {
+      issues.push("样例 OTEL_EXPORT_ENDPOINT 必须使用无凭据的 HTTPS 占位地址");
+    }
+  }
+  const otelSampleRate = values.get("OTEL_EXPORT_SAMPLE_RATE");
+  if (otelSampleRate !== undefined && !/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/u.test(otelSampleRate)) {
+    issues.push("样例 OTEL_EXPORT_SAMPLE_RATE 必须在 0 与 1 之间");
+  }
   return issues;
 }

@@ -134,6 +134,13 @@ import {
   resolveRuntimeModelProbeConfiguration,
 } from "./runtime-configured-providers.js";
 import { ManagedResourceFilesystemSnapshotMaterializer } from "./sandbox-resource-filesystem-materializer.js";
+import {
+  assembleWorkerTelemetry,
+  parseTelemetryConfiguration,
+  type TelemetryConfiguration,
+  telemetryEnvironmentFields,
+} from "./telemetry/configuration.js";
+import type { WorkerTelemetry } from "./telemetry/runtime.js";
 import { performWorkerMaintenance } from "./worker-maintenance.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
@@ -143,6 +150,7 @@ export const WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS = 60;
 const WORKER_MAX_BLOB_SIZE_BYTES = 32 * 1024 * 1024;
 
 const workerEnvironmentSchema = Object.freeze({
+  ...telemetryEnvironmentFields,
   DATABASE_URL: urlEnvironmentField({
     secret: true,
     protocols: ["postgres:", "postgresql:"],
@@ -315,6 +323,7 @@ const workerEnvironmentSchema = Object.freeze({
 export const workerProcessEnvironmentKeys = Object.freeze(Object.keys(workerEnvironmentSchema));
 
 export interface WorkerProcessConfiguration {
+  readonly telemetry?: TelemetryConfiguration;
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
@@ -645,7 +654,9 @@ export function parseWorkerProcessEnvironment(
   ) {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 在 production 必须为 https");
   }
+  const telemetry = parseTelemetryConfiguration(parsed.values);
   return Object.freeze({
+    ...(telemetry === undefined ? {} : { telemetry }),
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
@@ -935,7 +946,11 @@ async function assembleWorkerRuntime(
         : "hoox-agent-worker-coordinator-development",
     maxConnections: 2,
   });
+  let telemetry: WorkerTelemetry | undefined;
   try {
+    if (configuration.telemetry !== undefined) {
+      telemetry = await assembleWorkerTelemetry(configuration.telemetry);
+    }
     const blobRepository = new PgBlobLifecycleRepository(pool, {
       objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX,
     });
@@ -1003,6 +1018,7 @@ async function assembleWorkerRuntime(
       configuration.model.wireTraceEnabled,
     );
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
+    telemetry?.instrumentModelRuntime(modelRuntime, model);
     const modelContext = await createOpenAiCompatibleModelContextCapability(modelRuntime, model);
     const threadContinuityMetrics = new PgThreadContinuityMetrics(pool);
     const runtimeCompaction = new RuntimeCompactionCoordinator(
@@ -1251,6 +1267,9 @@ async function assembleWorkerRuntime(
         throw new Error(code);
       },
       threadContinuityMetrics,
+      undefined,
+      undefined,
+      telemetry,
     );
     const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(
       pool,
@@ -1290,6 +1309,7 @@ async function assembleWorkerRuntime(
                 defaultModelId: snapshot.model.configuration.defaultModelId,
                 models: snapshot.model.configuration.models,
               });
+        telemetry?.instrumentModelRuntime(dynamicModel.modelRuntime, dynamicModel.model);
         const dynamicModelContext =
           snapshot?.model === undefined
             ? modelContext
@@ -1390,6 +1410,7 @@ async function assembleWorkerRuntime(
         shutdownSignal: shutdown.signal,
         clock: new SystemWorkerClock(),
         metrics: new PgRecoveryMetrics(pool),
+        ...(telemetry === undefined ? {} : { telemetry }),
         continuityMetrics: threadContinuityMetrics,
         ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
         ...(startupTimingDiagnostics === undefined ? {} : { startupTimingDiagnostics }),
@@ -1477,6 +1498,7 @@ async function assembleWorkerRuntime(
         dispatchWakeListener.start(() => loop.wake());
       },
     );
+    const workerTelemetry = telemetry;
     return Object.freeze({
       stopAccepting: async () => {
         loop.stopAccepting();
@@ -1486,6 +1508,9 @@ async function assembleWorkerRuntime(
         await titleConsumer.close();
       },
       resources: Object.freeze([
+        ...(workerTelemetry === undefined
+          ? []
+          : [{ name: "opentelemetry", close: () => workerTelemetry.close() }]),
         Object.freeze({ name: "postgres", close: () => pool.end() }),
         Object.freeze({ name: "worker-coordinator-postgres", close: () => coordinatorPool.end() }),
       ]),
@@ -1502,6 +1527,7 @@ async function assembleWorkerRuntime(
     });
   } catch (error) {
     await Promise.all([
+      telemetry?.close(),
       pool.end().catch(() => undefined),
       coordinatorPool.end().catch(() => undefined),
     ]);

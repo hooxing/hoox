@@ -53,8 +53,8 @@ describe("Hoox 项目身份契约", () => {
       '"hoox.team-switcher.expanded"',
     );
     expect(readText("runtime-ts/packages/persistence/src/postgres.ts")).toContain('"hoox"');
-    expect(readText("scripts/start-development.ps1")).toContain("Hoox - $escapedTitle");
-    expect(readText("scripts/start-development.ps1")).not.toContain("Cube Runtime");
+    expect(readText("scripts/start-development.mjs")).toContain("Hoox 开发环境已全部启动");
+    expect(readText("scripts/start-development.mjs")).not.toContain("Cube Runtime");
   });
 
   it("页面、文档和模型身份统一使用 Hoox", () => {

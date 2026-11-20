@@ -15,7 +15,7 @@
 
 Hoox 是一个面向可靠执行的多租户 Agent Runtime。它把对话、运行、工作区、沙箱、资源与最终交付物组织成可持久化、可恢复、可审计的执行系统，而不是把 Agent 简化为一次模型调用。
 
-Hoox 使用 TypeScript Monorepo 开发，核心运行链路由 PostgreSQL、S3 兼容对象存储、Sandbox Provider 与模型 Provider 共同组成。旧 Python 原型只作为行为参考，不是运行时依赖，也不承担数据兼容。
+Hoox 使用 TypeScript Monorepo 开发，核心运行链路由 PostgreSQL、S3 兼容对象存储、Sandbox Provider 与模型 Provider 共同组成。
 
 > [!IMPORTANT]
 > Hoox 目前处于 `0.x` 开发阶段。开发环境和工程 Gate 已覆盖大量核心边界，但真实生产基础设施、外部身份系统、容量与完整灾难恢复尚未全部验收。请不要把本仓库直接视为可无条件上线的完整产品。

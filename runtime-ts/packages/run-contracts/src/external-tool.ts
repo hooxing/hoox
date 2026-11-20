@@ -39,12 +39,23 @@ export interface ExternalToolTransport {
     readonly callContext: ExternalToolCallContext;
     readonly credential?: string;
     readonly idempotencyKey: string;
+    /** HTTP 工具版本绑定的方法；HTTP Transport 在缺失时必须以 `not_sent` 拒绝，不得默认 POST。 */
     readonly method?: "GET" | "POST";
     readonly timeoutMs: number;
+    /** 整次调用（含 DNS 预检）共享的绝对截止时间（Unix 毫秒）；Transport 不得在其后继续等待。 */
+    readonly deadlineAt: number;
     readonly maxResponseBytes: number;
     readonly redirect: "error";
     readonly signal?: AbortSignal;
-  }): Promise<{ readonly body: Uint8Array; readonly contentType: string }>;
+  }): Promise<ExternalToolTransportResponse>;
+}
+
+export interface ExternalToolTransportResponse {
+  /** 空正文表示接收端以合法的空成功响应（如 204）结束。 */
+  readonly body: Uint8Array;
+  readonly contentType: string;
+  /** 本次请求携带的认证材料（签名、时间戳等）；调用方必须从模型可见结果中剔除，且不得写入日志。 */
+  readonly authMaterial?: readonly string[];
 }
 
 export interface ExternalToolRuntimeSnapshot {

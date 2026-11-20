@@ -377,4 +377,107 @@ describe("外部工具运行骨架", () => {
     );
     expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "same-key" }));
   });
+  it("HTTP 方法只来自版本绑定，缺失时不向 Transport 补默认方法", async () => {
+    const invoke = vi.fn(async (_input: { readonly method?: string }) => ({
+      body: new TextEncoder().encode("ok"),
+      contentType: "text/plain",
+    }));
+    const ports = {
+      getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
+      persistStarted: async () => {},
+      authorizeAndConsume: async () => {},
+      transport: { invoke },
+      recordReceipt: async () => {},
+      requireRecovery: async () => {},
+    };
+    await createExternalToolAgentTool(toolVersion, ports).execute("no-method", { value: "x" });
+    expect(invoke.mock.calls[0]?.[0]).not.toHaveProperty("method");
+    await createExternalToolAgentTool(toolVersion, {
+      ...ports,
+      httpMethodForVersion: () => "GET",
+    }).execute("bound-method", { value: "x" });
+    expect(invoke.mock.calls[1]?.[0]).toMatchObject({ method: "GET" });
+  });
+  it("总超时从 DNS 预检开始，预检耗尽预算时以未写出失败结束", async () => {
+    const invoke = vi.fn(async (_input: { readonly deadlineAt: number }) => ({
+      body: new TextEncoder().encode("ok"),
+      contentType: "text/plain",
+    }));
+    const requireRecovery = vi.fn(async () => undefined);
+    const receipts: string[] = [];
+    const base = {
+      getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
+      persistStarted: async () => {},
+      authorizeAndConsume: async () => {},
+      transport: { invoke },
+      recordReceipt: async ({ receipt }: { readonly receipt: string }) => {
+        receipts.push(receipt);
+      },
+      requireRecovery,
+    };
+    const slowTool = { ...toolVersion, endpoint: "https://slow.example/api", timeoutMs: 100 };
+    const stalled = await createExternalToolAgentTool(slowTool, {
+      ...base,
+      resolveAddresses: () => new Promise<readonly string[]>(() => {}),
+    }).execute("dns-timeout", { value: "x" });
+    expect(stalled.details).toMatchObject({ error: "EXTERNAL_TOOL_UNAVAILABLE" });
+    expect(receipts.at(-1)).toContain("failed");
+    expect(invoke).not.toHaveBeenCalled();
+    expect(requireRecovery).not.toHaveBeenCalled();
+    const started = Date.now();
+    await createExternalToolAgentTool(
+      { ...slowTool, timeoutMs: 1000 },
+      {
+        ...base,
+        resolveAddresses: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return ["8.8.8.8"];
+        },
+      },
+    ).execute("dns-shared", { value: "x" });
+    const deadlineAt = invoke.mock.calls[0]?.[0].deadlineAt ?? Infinity;
+    expect(deadlineAt).toBeLessThanOrEqual(started + 1000 + 5);
+    expect(deadlineAt - Date.now()).toBeLessThan(1000 - 40);
+  });
+  it("合法空成功结果写成功回执，签名与时间戳等认证材料不进入模型可见结果", async () => {
+    const receipts: string[] = [];
+    const signature = "f".repeat(64);
+    const timestamp = "1790000000000";
+    let body = new Uint8Array();
+    let contentType = "";
+    const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
+      persistStarted: async () => {},
+      authorizeAndConsume: async () => {},
+      transport: {
+        invoke: async () => ({ body, contentType, authMaterial: [signature, timestamp] }),
+      },
+      recordReceipt: async ({ receipt }) => {
+        receipts.push(receipt);
+      },
+      requireRecovery: async () => {},
+    });
+    const empty = await agentTool.execute("empty", { value: "x" });
+    expect((empty.content[0] as { text: string }).text).toBe("外部工具调用已成功，未返回内容。");
+    expect(receipts.at(-1)).toContain("succeeded");
+    body = new TextEncoder().encode(
+      JSON.stringify({
+        headers: { "x-hoox-signature": `v1=${signature}`, [signature]: 1 },
+        ts: Number(timestamp),
+        tsText: timestamp,
+      }),
+    );
+    contentType = "application/json";
+    const echoed = (await agentTool.execute("echo-json", { value: "x" })).content[0] as {
+      text: string;
+    };
+    expect(echoed.text).not.toContain(signature);
+    expect(echoed.text).not.toContain(timestamp);
+    body = new TextEncoder().encode(`sig=${signature} ts=${timestamp}`);
+    contentType = "text/plain";
+    const text = (await agentTool.execute("echo-text", { value: "x" })).content[0] as {
+      text: string;
+    };
+    expect(text.text).toBe("sig=[凭据已隐藏] ts=[凭据已隐藏]");
+  });
 });

@@ -88,6 +88,44 @@ describe("RuntimeApi", () => {
     }
   });
 
+  it("按当前 Tenant 读取可用 Agent，并支持在创建 Thread 时提交选择", async () => {
+    const fetcher = vi.fn(
+      async (input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req_agents",
+            data: String(input).endsWith("/v1/agents")
+              ? {
+                  items: [
+                    {
+                      id: "agent_sales",
+                      displayName: "销售助手",
+                      description: "销售",
+                      suggestedQuestions: [],
+                    },
+                  ],
+                }
+              : { id: "thread_sales" },
+          }),
+          { status: 200 },
+        ),
+    );
+    const api = new RuntimeApi(fetcher, "/api");
+    api.setTenantId("tenant_sales");
+    await expect(api.listAvailableAgents()).resolves.toMatchObject([{ id: "agent_sales" }]);
+    await api.createThread("客户跟进", "agent_sales");
+    expect(fetcher.mock.calls[0]?.[0]).toContain("/v1/agents");
+    expect(fetcher.mock.calls[1]?.[0]).toContain("/v1/threads");
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      title: "客户跟进",
+      agentDefinitionId: "agent_sales",
+    });
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("x-tenant-id")).toBe(
+      "tenant_sales",
+    );
+  });
+
   it("创建请求携带开发身份和幂等键", async () => {
     const fetcher = vi
       .fn()
@@ -99,11 +137,16 @@ describe("RuntimeApi", () => {
       );
     const api = new RuntimeApi(fetcher, "/api");
     api.setAccessToken("dev-user-a");
-    await api.createThread("测试");
-    const [, init] = fetcher.mock.calls[0] as [string, RequestInit];
+    await api.createThread("测试", "agent_sales");
+    const [url, init] = fetcher.mock.calls[0] as [string, RequestInit];
     const headers = new Headers(init.headers);
     expect(headers.get("authorization")).toBe("Bearer dev-user-a");
     expect(headers.get("idempotency-key")).toMatch(/^[-a-z0-9]{8,}$/iu);
+    expect(url).toContain("/v1/threads");
+    expect(JSON.parse(String(init.body))).toEqual({
+      title: "测试",
+      agentDefinitionId: "agent_sales",
+    });
   });
 
   it("登录注册不携带旧身份，后续请求使用服务端返回的动态令牌", async () => {

@@ -96,8 +96,9 @@ function eventDetail(payload: unknown): Readonly<Record<string, unknown>> | unde
 }
 
 /**
- * 将 durable Run 事件投影为维护者轨迹。时间来自本地不可变镜像文件的 mtime，
- * 只表示诊断观察时刻，不冒充 PostgreSQL occurred_at。
+ * 将 durable Run 事件投影为维护者轨迹。`observedAt` 由调用方提供：内部轨迹查看器使用本地
+ * 不可变镜像文件的 mtime（只表示诊断观察时刻），后台 Run 浏览器使用 PostgreSQL occurred_at。
+ * 投影结果包含推理、回复等正文；只能展示结构时必须再经过 `outlineTrajectory`。
  */
 export function projectTrajectory(input: readonly ObservedRuntimeEvent[]): TrajectoryProjection {
   const events = [...input].sort((left, right) => left.event.sequence - right.event.sequence);
@@ -331,7 +332,11 @@ export function projectTrajectory(input: readonly ObservedRuntimeEvent[]): Traje
       case "tool.completed": {
         const record = tools.get(payload.callId);
         if (record !== undefined) {
-          record.detail = { ...record.detail, isError: payload.isError };
+          record.detail = {
+            ...record.detail,
+            isError: payload.isError,
+            ...(payload.failure === undefined ? {} : { failure: payload.failure }),
+          };
           closeRecord(record, observed, payload.isError ? "failed" : "completed");
         }
         if (payload.isError) failedToolCalls += 1;
@@ -423,3 +428,4 @@ export function projectTrajectory(input: readonly ObservedRuntimeEvent[]): Traje
 
 export * from "./deepseek.js";
 export * from "./internal.js";
+export * from "./outline.js";

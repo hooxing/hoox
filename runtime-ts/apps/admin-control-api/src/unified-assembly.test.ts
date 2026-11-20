@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
     identityRepositoryConstructed: vi.fn(),
     authorizationConstructed: vi.fn(),
     publicationRepositoryConstructed: vi.fn(),
+    runExplorerRepositoryConstructed: vi.fn(),
   };
 });
 
@@ -66,6 +67,11 @@ vi.mock("@hoox/persistence/admin", () => ({
     }
     read() {
       return Promise.resolve({});
+    }
+  },
+  PgAdminRunExplorerRepository: class {
+    constructor(pool: unknown) {
+      mocks.runExplorerRepositoryConstructed(pool);
     }
   },
   PgIdentityConfigurationRepository: class {
@@ -194,6 +200,8 @@ describe("统一后台 API 固定装配", () => {
         }),
       );
       expect(mocks.adminRepositoryConstructed).toHaveBeenCalledWith(mocks.controlPool);
+      // Run 浏览器只使用 Admin Control 连接，不借用 Skill Publisher 角色。
+      expect(mocks.runExplorerRepositoryConstructed).toHaveBeenCalledWith(mocks.controlPool);
       expect(mocks.authorizationConstructed).toHaveBeenCalledWith(mocks.skillPool);
       expect(mocks.publicationRepositoryConstructed).toHaveBeenCalledWith(
         mocks.skillPool,

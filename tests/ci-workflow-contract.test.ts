@@ -55,6 +55,14 @@ describe("CI 工作流效率契约", () => {
     expect(gate).not.toContain("continue-on-error:");
   });
 
+  it("Agent 平台新增的 PostgreSQL 集成套件在快照之后、M4 黑盒之前运行", () => {
+    const gate = ciJob("m4-development-blackbox");
+    const step = gate.indexOf("name: 验证 Agent 平台新增 PostgreSQL 集成测试");
+    expect(step).toBeGreaterThan(gate.indexOf("postgres-core.integration.test.ts"));
+    expect(step).toBeLessThan(gate.indexOf("pnpm test:integration:m4:clean"));
+    expect(gate).toContain("tests/integration/postgres-admin-run-explorer.integration.test.ts");
+  });
+
   it("工程基线校验只在工程检查成功时通过，失败或跳过不能绕过合并门禁", () => {
     const gate = ciJob("verify");
     expect(gate).toContain("name: 工程基线校验");

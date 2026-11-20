@@ -6,6 +6,7 @@ import {
   digestControlRequest,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
+  RunExplorerError,
   type SandboxControlServicePort,
 } from "@hoox/admin-control";
 import type { AuthContextResolver } from "@hoox/identity/auth";
@@ -69,6 +70,7 @@ import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import type { IdentityAdminService } from "./identity-configuration.js";
 import type { PiModelCatalogPort } from "./pi-model-catalog.js";
+import { registerRunExplorerRoutes, type RunExplorerRouteService } from "./run-explorer-routes.js";
 
 const strict = { additionalProperties: false } as const;
 const AuditQuerySchema = Type.Object(
@@ -106,6 +108,7 @@ type ControlServiceContract = Pick<
 
 export interface AdminControlApiDependencies {
   readonly sandbox?: SandboxControlServicePort;
+  readonly runs?: RunExplorerRouteService;
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
   readonly identity: IdentityAdminService;
@@ -251,6 +254,9 @@ export function createAdminControlApiApp(
           ),
         ),
     );
+  }
+  if (dependencies.runs !== undefined) {
+    registerRunExplorerRoutes(app, dependencies.runs, { actor, success });
   }
   app.get(
     "/v1/admin/control/identity",
@@ -676,6 +682,9 @@ function failureKind(error: unknown): FailureKind {
   if (error instanceof Error && error.message === "IDENTITY_ADMIN_CONFLICT") return "conflict";
   if (error instanceof TypeError && error.message.startsWith("IDENTITY_")) return "bad_request";
   if (error instanceof TypeError) return "bad_request";
+  if (error instanceof RunExplorerError) {
+    return error.code === "NOT_AUTHORIZED" ? "unauthorized" : "not_found";
+  }
   if (error instanceof AdminControlServiceError) {
     if (error.code === "NOT_AUTHORIZED") return "unauthorized";
     if (error.code === "NOT_FOUND") return "not_found";

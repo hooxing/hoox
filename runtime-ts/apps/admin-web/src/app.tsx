@@ -4,6 +4,7 @@ import {
   BarChartOutlined,
   BulbOutlined,
   DatabaseOutlined,
+  HistoryOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   RobotOutlined,
@@ -28,6 +29,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  useParams,
 } from "react-router-dom";
 import { readAdminAccessToken } from "./admin-session.js";
 import {
@@ -41,10 +43,13 @@ import { HOOX_APP_ICON_PATH } from "./brand.js";
 import type { AdminControlApiContract } from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
 import { InstallationProgress } from "./installation-progress.js";
+import { RunExplorerDetail, RunExplorerList } from "./run-explorer.js";
+import { RunExplorerApi, type RunExplorerApiContract } from "./run-explorer-api.js";
 import { SandboxConfigurationPanel } from "./sandbox-configuration-panel.js";
 import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
 
 const defaultApi = new SkillAdminApi();
+const defaultRunApi = new RunExplorerApi();
 const maxSubmissionFiles = 256;
 
 export function browserRouterBasename(baseUrl: string): string | undefined {
@@ -936,6 +941,7 @@ const navigation: NonNullable<MenuProps["items"]> = [
     label: "运营",
     children: [
       { key: "/analytics", icon: <BarChartOutlined />, label: "数据运营" },
+      { key: "/runs", icon: <HistoryOutlined />, label: "运行记录" },
       { key: "/users", icon: <TeamOutlined />, label: "用户管理" },
     ],
   },
@@ -971,6 +977,10 @@ const pageMetadata: Readonly<
     title: "数据运营",
     description: "用户、对话与运行可靠性指标",
   },
+  "/runs": {
+    title: "运行记录",
+    description: "按 Tenant、状态与时间浏览 Run 的结构、耗时与用量",
+  },
   "/users": {
     title: "用户管理",
     description: "账号状态、使用情况与会话治理",
@@ -1004,17 +1014,52 @@ const defaultPageMetadata = {
   description: "平台健康、关键指标与近期变更",
 } as const;
 
+/** 菜单与页头按一级路径匹配；Run 详情等子路由归属其列表菜单项。 */
+function navigationKey(pathname: string): string {
+  return pathname.startsWith("/runs/") ? "/runs" : pathname;
+}
+
+function RunExplorerListRoute({ api }: { readonly api: RunExplorerApiContract }) {
+  const navigate = useNavigate();
+  return (
+    <RunExplorerList
+      api={api}
+      onOpen={(run) =>
+        navigate(`/runs/${encodeURIComponent(run.tenantId)}/${encodeURIComponent(run.runId)}`)
+      }
+    />
+  );
+}
+
+function RunExplorerDetailRoute({ api }: { readonly api: RunExplorerApiContract }) {
+  const navigate = useNavigate();
+  const { tenantId, runId } = useParams();
+  if (tenantId === undefined || runId === undefined) return <Navigate to="/runs" replace />;
+  return (
+    <RunExplorerDetail
+      key={`${tenantId}/${runId}`}
+      api={api}
+      tenantId={tenantId}
+      runId={runId}
+      onBack={() => navigate("/runs")}
+    />
+  );
+}
+
 function AdminPlatform({
   apiClient,
   controlApi,
+  runApi,
 }: {
   readonly apiClient: SkillAdminApiContract;
   readonly controlApi?: AdminControlApiContract;
+  readonly runApi: RunExplorerApiContract;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
-  const metadata = pageMetadata[location.pathname] ?? defaultPageMetadata;
+  const activeKey = navigationKey(location.pathname);
+  const metadata = pageMetadata[activeKey] ?? defaultPageMetadata;
 
   return (
     <Layout className="platform-admin-shell">
@@ -1045,7 +1090,7 @@ function AdminPlatform({
           className="platform-menu"
           mode="inline"
           items={navigation}
-          selectedKeys={[location.pathname]}
+          selectedKeys={[activeKey]}
           onClick={({ key }) =>
             navigate({ pathname: key, search: location.search === "?setup=1" ? "?setup=1" : "" })
           }
@@ -1144,6 +1189,11 @@ function AdminPlatform({
                 />
               }
             />
+            <Route path="/runs" element={<RunExplorerListRoute api={runApi} />} />
+            <Route
+              path="/runs/:tenantId/:runId"
+              element={<RunExplorerDetailRoute api={runApi} />}
+            />
             <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
             <Route path="/sandboxes" element={<SandboxConfigurationPanel />} />
             <Route
@@ -1176,9 +1226,14 @@ function AdminPlatform({
 export function App({
   apiClient,
   controlApi,
+  runApi,
+  initialPath,
 }: {
   readonly apiClient?: SkillAdminApiContract;
   readonly controlApi?: AdminControlApiContract;
+  readonly runApi?: RunExplorerApiContract;
+  /** 仅用于注入客户端的内存路由（测试与嵌入）；真实管理台以浏览器地址为准。 */
+  readonly initialPath?: string;
 }) {
   const queryClient = useMemo(
     () =>
@@ -1256,6 +1311,7 @@ export function App({
           <AdminPlatform
             apiClient={apiClient ?? defaultApi}
             {...(controlApi === undefined ? {} : { controlApi })}
+            runApi={runApi ?? defaultRunApi}
           />
         </QueryClientProvider>
       </AntApp>
@@ -1281,7 +1337,8 @@ export function App({
   return apiClient !== undefined || controlApi !== undefined ? (
     <MemoryRouter
       initialEntries={[
-        apiClient !== undefined && controlApi === undefined ? "/skills" : "/overview",
+        initialPath ??
+          (apiClient !== undefined && controlApi === undefined ? "/skills" : "/overview"),
       ]}
     >
       {platform}

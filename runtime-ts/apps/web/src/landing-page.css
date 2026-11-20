@@ -2572,3 +2572,31 @@ html[data-surface="landing"] {
     display: none;
   }
 }
+
+.landing-roadmap-list {
+  display: grid;
+  gap: 12px;
+  margin: 32px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.landing-roadmap-list li {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px;
+  border: 1px dashed rgba(127, 127, 127, 0.4);
+  border-radius: 12px;
+}
+.landing-roadmap-tag {
+  flex: none;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(127, 127, 127, 0.16);
+}
+.landing-roadmap-note {
+  margin: 20px 0 0;
+  font-size: 14px;
+  opacity: 0.75;
+}

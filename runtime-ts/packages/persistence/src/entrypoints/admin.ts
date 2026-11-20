@@ -6,3 +6,5 @@ export * from "../pg-identity-configuration.js";
 export * from "../pg-sandbox-configuration.js";
 export * from "../pg-skill-publication.js";
 export * from "../skill-publication-object-store.js";
+export * from "../pg-agent-definition.js";
+export * from "../agent-definition-port.js";

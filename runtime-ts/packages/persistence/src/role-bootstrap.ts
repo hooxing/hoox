@@ -178,6 +178,12 @@ const adminControlTables = new Set([
   "admin_control_generation",
   "admin_user_account_audits",
   "run_runtime_config_snapshots",
+  "agent_definitions",
+  "agent_definition_tenants",
+  "agent_revisions",
+  "agent_revision_revocations",
+  "agent_definition_commands",
+  "agent_definition_audits",
 ]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
@@ -188,7 +194,13 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["memberships", new Set(["SELECT", "INSERT"])],
   ["user_personalization_settings", new Set(["SELECT", "INSERT"])],
   ["team_personalization_settings", new Set(["SELECT"])],
-  ["threads", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["threads", new Set(["SELECT", "INSERT"])],
+  ["agent_definitions", new Set(["SELECT"])],
+  ["agent_definition_tenants", new Set(["SELECT"])],
+  ["agent_revisions", new Set(["SELECT"])],
+  ["agent_revision_revocations", new Set(["SELECT"])],
+  ["agent_definition_commands", new Set()],
+  ["agent_definition_audits", new Set()],
   ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspace_revisions", new Set(["SELECT", "INSERT"])],
@@ -323,6 +335,18 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 ]);
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
+  [
+    "threads",
+    new Set([
+      "title",
+      "status",
+      "updated_at",
+      "version",
+      "title_source",
+      "title_generated_at",
+      "title_generation_version",
+    ]),
+  ],
   [
     "runtime_ptc_dispatches",
     new Set([
@@ -1089,6 +1113,16 @@ async function hasInstallationState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasAgentDefinitionState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.agent_definitions',$1::text)) IS NOT NULL
+      AND to_regclass(format('%I.agent_revisions',$1::text)) IS NOT NULL
+      AND to_regclass(format('%I.agent_revision_revocations',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAdminControlState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.platform_control_operators',$1::text)) IS NOT NULL
@@ -1312,6 +1346,17 @@ async function activeTablePolicy(
   }
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
+  }
+  if (!(await hasAgentDefinitionState(client, schema))) {
+    for (const table of [
+      "agent_definitions",
+      "agent_definition_tenants",
+      "agent_revisions",
+      "agent_revision_revocations",
+      "agent_definition_commands",
+      "agent_definition_audits",
+    ])
+      policy.delete(table);
   }
   if (!(await hasRunCompactionSettingsState(client, schema))) {
     policy.delete("run_compaction_settings_snapshots");
@@ -2241,6 +2286,16 @@ async function assertAdminControlBoundary(
         ]
       : [],
   );
+  const agentDefinitionsEnabled =
+    enabled && (await hasAgentDefinitionState(client, context.schema));
+  if (agentDefinitionsEnabled) {
+    allowed.set("agent_definitions", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_tenants", new Set(["SELECT", "INSERT", "DELETE"]));
+    allowed.set("agent_revisions", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_revision_revocations", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_commands", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_audits", new Set(["SELECT", "INSERT"]));
+  }
   if (sandboxEnabled) {
     for (const table of managedSandboxControlTables)
       allowed.set(table, new Set(["SELECT", "INSERT"]));
@@ -2302,6 +2357,13 @@ async function assertAdminControlBoundary(
   );
   if (sandboxEnabled)
     updatePolicy.set("sandbox_control_head", new Set(["generation", "routing_revision"]));
+  if (agentDefinitionsEnabled)
+    updatePolicy.set(
+      "agent_definitions",
+      new Set(["status", "generation", "availability_mode", "current_revision_id", "updated_at"]),
+    );
+  if (agentDefinitionsEnabled) updatePolicy.set("agent_definition_tenants", new Set(["available"]));
+  if (agentDefinitionsEnabled) updatePolicy.set("agent_revisions", new Set(["status"]));
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
@@ -3162,6 +3224,19 @@ async function grantAdminControlAccess(
      GRANT UPDATE(generation,updated_at) ON TABLE ${schema}.admin_control_generation TO ${control};
      GRANT SELECT ON TABLE ${schema}.admin_runtime_statistics TO ${control}`,
   );
+  if (await hasAgentDefinitionState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.agent_definitions TO ${control};
+       GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.agent_definition_tenants TO ${control};
+       GRANT UPDATE(available) ON TABLE ${schema}.agent_definition_tenants TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.agent_revisions,${schema}.agent_revision_revocations,
+         ${schema}.agent_definition_commands,${schema}.agent_definition_audits TO ${control};
+       GRANT UPDATE(status,generation,availability_mode,current_revision_id,updated_at)
+         ON TABLE ${schema}.agent_definitions TO ${control};
+       GRANT UPDATE(status) ON TABLE ${schema}.agent_revisions TO ${control};
+       GRANT USAGE ON SEQUENCE ${schema}.agent_definition_audits_audit_id_seq TO ${control}`,
+    );
+  }
   if (await hasAdminUserOperationsState(client, context.schema)) {
     const identityEnabled = await hasEmbeddedIdentityState(client, context.schema);
     await client.query(
@@ -3264,7 +3339,8 @@ export async function bootstrapRuntimeAccessOnClient(
     );
   }
   await client.query(
-    `GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.threads, ${schema}.runs, ${schema}.workspaces TO ${role}`,
+    `GRANT SELECT, INSERT ON TABLE ${schema}.threads TO ${role};
+     GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.runs, ${schema}.workspaces TO ${role}`,
   );
   await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.workspace_revisions TO ${role}`);
   await client.query(
@@ -3422,6 +3498,11 @@ export async function bootstrapRuntimeAccessOnClient(
         `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
       );
     }
+  }
+  if (await hasAgentDefinitionState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT ON TABLE ${schema}.agent_definitions,${schema}.agent_definition_tenants,${schema}.agent_revisions,${schema}.agent_revision_revocations TO ${role}`,
+    );
   }
   if (await hasAdminControlState(client, context.schema)) {
     await client.query(
@@ -3714,6 +3795,14 @@ export async function bootstrapRuntimeAccessOnClient(
       `GRANT UPDATE(
          state,generation,claim_token,claimed_by,lease_expires_at,next_attempt_at,updated_at
        ) ON TABLE ${schema}.worker_tenant_assignments TO ${role}`,
+    );
+  }
+  const threadUpdateColumns = (await activeColumnUpdatePolicy(client, context.schema)).get(
+    "threads",
+  );
+  if (threadUpdateColumns !== undefined && threadUpdateColumns.size > 0) {
+    await client.query(
+      `GRANT UPDATE(${[...threadUpdateColumns].map(quoteIdentifier).join(",")}) ON TABLE ${schema}.threads TO ${role}`,
     );
   }
   if (await hasThreadHeadState(client, context.schema)) {

@@ -203,7 +203,7 @@ async function main() {
         }).unref();
     }
   }
-  console.log("开发环境已全部启动；日志与状态位于 .tmp/development-runtime。");
+  console.log("Hoox 开发环境已全部启动；日志与状态位于 .tmp/development-runtime。");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))

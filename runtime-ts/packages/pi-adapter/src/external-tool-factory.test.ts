@@ -10,6 +10,7 @@ const s = normalizeExternalToolSchema({
 const make = (name: string): ExternalToolVersion => ({
   toolVersionId: name,
   source: "http",
+  endpoint: "https://8.8.8.8/api",
   modelToolName: name,
   description: "tool",
   inputSchema: s.schema,

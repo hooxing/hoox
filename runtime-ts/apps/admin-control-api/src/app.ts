@@ -66,8 +66,15 @@ import {
   registerSkillAdminApiRoutes,
   type SkillAdminApiRouteDependencies,
 } from "@hoox/skill-admin-api";
+import {
+  AgentDefinitionAccessError,
+  type AgentDefinitionAdminRepositoryPort,
+  AgentDefinitionValidationError,
+} from "@hoox/persistence/admin";
+import { PersistenceError } from "@hoox/persistence/postgres";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { registerAgentDefinitionRoutes } from "./agent-definition-routes.js";
 import type { IdentityAdminService } from "./identity-configuration.js";
 import type { PiModelCatalogPort } from "./pi-model-catalog.js";
 import { registerRunExplorerRoutes, type RunExplorerRouteService } from "./run-explorer-routes.js";
@@ -109,6 +116,7 @@ type ControlServiceContract = Pick<
 export interface AdminControlApiDependencies {
   readonly sandbox?: SandboxControlServicePort;
   readonly runs?: RunExplorerRouteService;
+  readonly agents?: AgentDefinitionAdminRepositoryPort;
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
   readonly identity: IdentityAdminService;
@@ -170,12 +178,12 @@ export function createAdminControlApiApp(
   });
 
   app.setErrorHandler(async (error, request, reply) => {
-    const failure = failureKind(error);
+    const failure = failureKind(error, request);
     request.log.warn({ failure, requestId: request.id }, "后台控制面请求失败");
     const response = failureResponse(
       String(request.id),
       failure,
-      modelConfigurationValidationMessage(error, request, failure),
+      validationMessage(error, request, failure),
     );
     await reply.status(response.status).send(response.body);
   });
@@ -257,6 +265,18 @@ export function createAdminControlApiApp(
   }
   if (dependencies.runs !== undefined) {
     registerRunExplorerRoutes(app, dependencies.runs, { actor, success });
+  }
+  if (dependencies.agents) {
+    registerAgentDefinitionRoutes(app, dependencies.agents, {
+      actor,
+      success,
+      requireJson,
+      idempotencyKey: requireIdempotencyKey,
+      responseSchemas,
+      notFound: () => {
+        throw new AdminControlApiFailure("not_found");
+      },
+    });
   }
   app.get(
     "/v1/admin/control/identity",
@@ -675,13 +695,22 @@ class AdminControlApiFailure extends Error {
   }
 }
 
-function failureKind(error: unknown): FailureKind {
+function failureKind(error: unknown, request: FastifyRequest): FailureKind {
   if (error instanceof AdminControlApiFailure) return error.kind;
   if (error instanceof Error && error.message === "IDENTITY_ADMIN_NOT_AUTHORIZED")
     return "unauthorized";
   if (error instanceof Error && error.message === "IDENTITY_ADMIN_CONFLICT") return "conflict";
   if (error instanceof TypeError && error.message.startsWith("IDENTITY_")) return "bad_request";
   if (error instanceof TypeError) return "bad_request";
+  if (error instanceof AgentDefinitionAccessError) return "unauthorized";
+  if (
+    error instanceof PersistenceError &&
+    request.url.startsWith("/v1/admin/control/agent-definitions")
+  ) {
+    if (error.code === "CONFLICT") return "conflict";
+    if (error.code === "CONSTRAINT_VIOLATION") return "bad_request";
+    if (error.code === "UNAVAILABLE") return "dependency_unavailable";
+  }
   if (error instanceof RunExplorerError) {
     return error.code === "NOT_AUTHORIZED" ? "unauthorized" : "not_found";
   }
@@ -711,12 +740,17 @@ function failureKind(error: unknown): FailureKind {
   return "internal";
 }
 
-function modelConfigurationValidationMessage(
+function validationMessage(
   error: unknown,
   request: FastifyRequest,
   kind: FailureKind,
 ): string | undefined {
-  if (kind !== "bad_request" || !request.url.includes("/model-providers")) return undefined;
+  if (kind !== "bad_request") return undefined;
+  if (error instanceof AgentDefinitionValidationError) return error.message;
+  if (request.url.startsWith("/v1/admin/control/agent-definitions")) {
+    return "Agent 配置字段、可用范围或当前状态不符合要求";
+  }
+  if (!request.url.includes("/model-providers")) return undefined;
   if (error instanceof TypeError) return error.message;
   return "模型配置字段不符合要求，请检查必填项、地址和数值范围";
 }
@@ -771,7 +805,7 @@ function requireJson(request: FastifyRequest): void {
   if (type !== "application/json") throw new AdminControlApiFailure("unsupported_media_type");
 }
 
-function mutationContext(request: FastifyRequest, actorUserId: string): ControlMutationContext {
+function requireIdempotencyKey(request: FastifyRequest): string {
   const idempotencyKey = singleHeader(request, "idempotency-key");
   if (
     idempotencyKey === undefined ||
@@ -779,9 +813,13 @@ function mutationContext(request: FastifyRequest, actorUserId: string): ControlM
   ) {
     throw new AdminControlApiFailure("bad_request");
   }
+  return idempotencyKey;
+}
+
+function mutationContext(request: FastifyRequest, actorUserId: string): ControlMutationContext {
   return Object.freeze({
     actorUserId,
-    idempotencyKey,
+    idempotencyKey: requireIdempotencyKey(request),
     requestDigest: digestControlRequest({
       method: request.method,
       url: request.url,

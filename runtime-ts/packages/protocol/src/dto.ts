@@ -53,6 +53,7 @@ export const ThreadDtoSchema = Type.Object(
     id: IdSchema,
     tenantId: IdSchema,
     createdByUserId: IdSchema,
+    agentDefinitionId: Type.Optional(IdSchema),
     title: Type.String({ minLength: 1, maxLength: 200 }),
     status: Type.Union([Type.Literal("active"), Type.Literal("archived")]),
     createdAt: IsoTimestampSchema,

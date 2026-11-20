@@ -6,6 +6,7 @@ import {
 import {
   defaultModelConfiguration,
   type ModelProviderConfiguration,
+  PinnedRunModelUnavailableError,
   type RunCompactionSettings,
   type RunCompactionSettingsPort,
   type RuntimeControlConfigurationPort,
@@ -106,6 +107,15 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       tenantId: input.scope.tenantId,
       runId: input.scope.runId,
     });
+    const reference = input.agentSnapshot.content.model;
+    if (
+      reference.mode === "pinned" &&
+      (snapshot?.model?.configuration.providerKey !== reference.providerKey ||
+        snapshot.model.revision !== reference.providerRevision ||
+        snapshot.model.configuration.defaultModelId !== reference.modelId ||
+        !snapshot.modelApiKey)
+    )
+      throw new PinnedRunModelUnavailableError();
     const modelMaxOutputTokens =
       snapshot?.model === undefined
         ? this.deploymentModelMaxOutputTokens
@@ -131,17 +141,18 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       input.agentSnapshot.content.tools,
       snapshot?.runtimeSettings?.configuration,
     );
-    const key = [
+    const key = JSON.stringify([
       tools.toolCallingMode,
       tools.enabledTools === undefined ? "default-tools" : JSON.stringify(tools.enabledTools),
       snapshot?.model?.configuration.providerKey ?? "deployment",
       snapshot?.model?.revision ?? 0,
+      snapshot?.model?.configuration.defaultModelId,
       compactionSettings.softLimitPercent,
       compactionSettings.targetPercent,
       compactionSettings.recentUserTokens,
       compactionSettings.maxOutputTokens,
       compactionSettings.timeoutMs,
-    ].join(":");
+    ]);
     let factory = this.factories.get(key);
     if (factory === undefined) {
       factory = this.build(snapshot, compactionSettings, tools);
@@ -179,7 +190,10 @@ export class RuntimeConfiguredMemoryProvider implements MemoryRetriever, MemoryP
     });
     if (snapshot === undefined) return this.fallback;
     const memory = snapshot.memory;
-    if (memory === undefined) return snapshot.model === undefined ? this.fallback : undefined;
+    if (memory === undefined) {
+      const managedModel = snapshot.platformModelConfigured ?? snapshot.model !== undefined;
+      return managedModel ? undefined : this.fallback;
+    }
     if (!memory.configuration.enabled) return undefined;
     const apiKey =
       memory.configuration.apiSecretRef === "managed:memory-api"

@@ -39,6 +39,7 @@ import type {
 } from "@hoox/persistence/postgres";
 import { assertRunSkillSnapshot } from "@hoox/skill";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { AdminControlApiDependencies } from "../../runtime-ts/apps/admin-control-api/src/app.js";
 import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
@@ -512,6 +513,658 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(seed.rows[0]?.content).not.toHaveProperty("memory");
   });
 
+  function pinnedModelFixture() {
+    const cipher = new ModelProviderCredentialCipher(
+      "integration-pinned-model-root-at-least-32-bytes",
+    );
+    const config = new PgAdminControlRepository(adminControlPool, cipher);
+    const service = new AdminControlService(
+      config,
+      config,
+      { async probeModel() {}, async probeMemory() {} },
+      [],
+    );
+    const providerKey = "agent-pinned-model";
+    const configurations = {
+      providerKey,
+      displayName: "Agent 固定模型测试供应商",
+      protocol: "openai-compatible",
+      baseUrl: "https://pinned.example.invalid/v1",
+      defaultModelId: "model-default",
+      models: [
+        {
+          id: "model-default",
+          name: "默认",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 65536,
+          maxTokens: 4096,
+        },
+        {
+          id: "model-selected",
+          name: "固定",
+          enabled: true,
+          reasoning: false,
+          input: ["text", "image"],
+          contextWindow: 32768,
+          maxTokens: 2048,
+        },
+        {
+          id: "model-disabled",
+          name: "停用",
+          enabled: false,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 32768,
+          maxTokens: 1024,
+        },
+      ],
+    } as const;
+    const context = (actorUserId: string, idempotencyKey: string) => ({
+      actorUserId,
+      idempotencyKey,
+      requestDigest: createHash("sha256").update(idempotencyKey).digest("hex"),
+    });
+    return { cipher, config, service, providerKey, configurations, context };
+  }
+
+  it("RunAgentSnapshot 只读解析精确的固定模型，不采用 active、默认条目或部署凭据", async () => {
+    const manager = await createFixture("pinned_runtime_model");
+    const other = await createFixture("pinned_other_tenant");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [manager.user.id],
+    );
+    const { cipher, config, service, providerKey, configurations, context } = pinnedModelFixture();
+    const key = "placeholder-agent-pinned-api-key";
+    const provider = await service.createModelDraft(
+      context(manager.user.id, "pinned-model-runtime-draft"),
+      {
+        ...configurations,
+        apiKey: key,
+      },
+    );
+    const active = await service.saveModelConfiguration(
+      context(manager.user.id, "pinned-model-runtime-active"),
+      {
+        ...configurations,
+        expectedGeneration: await config.generation(manager.user.id),
+        apiKey: "placeholder-distinct-active-model-key",
+      },
+    );
+    try {
+      const defaults = await readDefaultAgentRevision();
+      if (!defaults) throw new Error("默认 Agent Revision 不可见");
+      const reference = {
+        mode: "pinned",
+        providerKey,
+        providerRevision: provider.revision,
+        modelId: "model-selected",
+      } as const;
+      const agents = new PgAgentDefinitionRepository(adminControlPool);
+      const draft = await agents.createDraft({
+        actorUserId: manager.user.id,
+        id: "agent_pinned_runtime_model",
+        revisionId: "agent_pinned_runtime_revision",
+        expectedGeneration: 0,
+        idempotencyKey: "pinned-runtime-agent-draft",
+        availability: { mode: "all_tenants" },
+        content: { ...defaults.content, model: reference },
+      });
+      await agents.publish({
+        actorUserId: manager.user.id,
+        definitionId: draft.definition.id,
+        revisionId: draft.revision.id,
+        expectedGeneration: 0,
+        idempotencyKey: "pinned-runtime-agent-publish",
+      });
+      const thread = rehydrateThread(
+        {
+          ...manager.thread,
+          id: "thread_agent_pinned_runtime",
+          agentDefinitionId: draft.definition.id,
+        },
+        manager.tenant,
+        manager.user,
+        manager.membership,
+      );
+      expect(await repositories.threads.create(manager.scope, thread)).toMatchObject({
+        outcome: "created",
+      });
+      const workspace = createWorkspace({
+        id: workspaceId("workspace_agent_pinned_runtime"),
+        thread,
+        now: timestamp(4),
+      });
+      expect(await repositories.workspaces.create(manager.scope, workspace)).toEqual({
+        outcome: "created",
+      });
+      const run = createRun({ id: runId("run_agent_pinned_runtime"), thread, now: timestamp(5) });
+      expect(
+        await new PgRunDispatchCreation(runtimePool).createQueuedRun({
+          scope: manager.scope,
+          thread,
+          run,
+          inputText: "执行",
+          idempotency: {
+            key: "pinned-runtime-create-run",
+            requestHash: sha256Digest("0".repeat(64)),
+          },
+        }),
+      ).toMatchObject({ outcome: "created" });
+      const scope = { tenantId: manager.tenant.id, runId: run.id };
+      const runtime = new PgRuntimeControlConfigurationRepository(
+        runtimePool,
+        cipher,
+        "placeholder-deployment-key",
+      );
+      const readVisible = (tenantId: string, runId?: string) =>
+        withTenantTransaction(runtimePool, { tenantId }, async (client) => {
+          if (runId)
+            await client.query("SELECT set_config('app.pinned_model_run_id',$1,true)", [runId]);
+          return (
+            await client.query(
+              "SELECT 1 FROM admin_control_config_revisions WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2",
+              [providerKey, provider.revision],
+            )
+          ).rowCount;
+        });
+      expect(await readVisible(scope.tenantId)).toBe(0);
+      expect(await readVisible(other.tenant.id, run.id)).toBe(0);
+      expect(await readVisible(scope.tenantId, run.id)).toBe(1);
+      const resolved = await runtime.resolvePinnedModelConfiguration(scope, reference);
+      expect(resolved.model).toMatchObject({
+        revision: provider.revision,
+        configuration: {
+          providerKey,
+          defaultModelId: reference.modelId,
+          models: expect.arrayContaining([
+            expect.objectContaining({ id: reference.modelId, maxTokens: 2048 }),
+          ]),
+        },
+      });
+      expect(resolved.apiKey === key).toBe(true);
+      const countSnapshots = async () =>
+        Number(
+          (
+            await migratorPool.query<{ count: string }>(
+              "SELECT count(*) AS count FROM run_runtime_config_snapshots WHERE tenant_id=$1 AND run_id=$2",
+              [scope.tenantId, scope.runId],
+            )
+          ).rows[0]?.count,
+        );
+      expect(await countSnapshots()).toBe(0);
+      await expect(
+        runtime.resolvePinnedModelConfiguration(scope, {
+          ...reference,
+          providerRevision: active.revision,
+        }),
+      ).rejects.toThrow("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+      await expect(
+        runtime.resolvePinnedModelConfiguration(scope, { ...reference, modelId: "model-default" }),
+      ).rejects.toThrow("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+      await expect(
+        runtime.resolvePinnedModelConfiguration({ ...scope, tenantId: other.tenant.id }, reference),
+      ).rejects.toThrow("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+      const wrongCipher = new ModelProviderCredentialCipher(
+        "integration-wrong-pinned-root-at-least-32-bytes",
+      );
+      await expect(
+        new PgRuntimeControlConfigurationRepository(
+          runtimePool,
+          wrongCipher,
+          "placeholder-deployment-key",
+        ).resolvePinnedModelConfiguration(scope, reference),
+      ).rejects.toThrow("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+      expect((await runtime.resolveActiveModelConfiguration())?.configuration.defaultModelId).toBe(
+        "model-default",
+      );
+      expect((await runtime.resolveForRun(scope))?.model).toEqual(resolved.model);
+      expect(await countSnapshots()).toBe(1);
+      await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
+        manager.user.id,
+      ]);
+      expect(
+        (
+          await new PgRuntimeControlConfigurationRepository(runtimePool, cipher).resolveForRun(
+            scope,
+          )
+        )?.model,
+      ).toEqual(resolved.model);
+      await migratorPool.query(
+        "DELETE FROM admin_control_config_revisions WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2",
+        [providerKey, provider.revision],
+      );
+      await expect(runtime.resolveForRun(scope)).rejects.toThrow(
+        "PINNED_MODEL_CONFIGURATION_UNAVAILABLE",
+      );
+    } finally {
+      await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
+        manager.user.id,
+      ]);
+    }
+  });
+
+  it("后台 Agent 管理拒绝草稿越权并原子更新可用范围", async () => {
+    const operator = await createFixture("agent_admin_operator");
+    const viewer = await createFixture("agent_admin_viewer");
+    const outsider = await createFixture("agent_admin_outsider");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'operator','active'),($2,'viewer','active')",
+      [operator.user.id, viewer.user.id],
+    );
+    const repository = new PgAgentDefinitionRepository(adminControlPool);
+    const actors = new Map([
+      ["Bearer operator", operator.user.id],
+      ["Bearer viewer", viewer.user.id],
+      ["Bearer outsider", outsider.user.id],
+    ]);
+    const { createAdminControlApiApp } = await import(
+      "../../runtime-ts/apps/admin-control-api/src/app.js"
+    );
+    const app = createAdminControlApiApp({
+      agents: repository,
+      auth: {
+        async resolve(input) {
+          const id = actors.get(input.authorization ?? "");
+          return id === undefined ? undefined : { userId: id };
+        },
+      },
+      control: {} as AdminControlApiDependencies["control"],
+      identity: {} as AdminControlApiDependencies["identity"],
+      modelCatalog: {} as AdminControlApiDependencies["modelCatalog"],
+      skills: {} as AdminControlApiDependencies["skills"],
+      readiness: { async probe() {} },
+    });
+    const route = "/v1/admin/control/agent-definitions";
+    const id = "agent_admin_integration";
+    const definition = `${route}/${id}`;
+    const revisions = `${definition}/revisions`;
+    const first = "agent_admin_draft_1";
+    const second = "agent_admin_draft_2";
+    const content = {
+      displayName: "后台创建的草稿",
+      description: "隔离测试",
+      operatorInstructions: "只提供测试说明。",
+      suggestedQuestions: [],
+      replyLanguage: "zh-CN",
+      model: { mode: "platform_default" },
+      tools: { mode: "platform_default" },
+      skillVersions: [],
+      includeTenantSkills: true,
+      sandboxIdleAction: "pause",
+      memory: { mode: "platform_default" },
+    };
+    const write = (
+      url: string,
+      key: string,
+      payload: object,
+      authorization = "Bearer operator",
+      method: "POST" | "PUT" = "POST",
+    ) => app.inject({ method, url, headers: { authorization, "idempotency-key": key }, payload });
+    const read = (url: string, authorization = "Bearer operator") =>
+      app.inject({ method: "GET", url, headers: { authorization } });
+    try {
+      const draft = {
+        id,
+        revisionId: first,
+        content,
+        expectedGeneration: 0,
+        availability: { mode: "selected_tenants", tenantIds: [operator.tenant.id] },
+      };
+      expect((await read(route, "Bearer outsider")).statusCode).toBe(401);
+      expect((await write(route, "agent-admin-create", draft, "Bearer viewer")).statusCode).toBe(
+        401,
+      );
+      expect((await write(route, "short", draft)).statusCode).toBe(400);
+      const oversized = await write(route, "agent-admin-create", {
+        ...draft,
+        content: { ...content, operatorInstructions: "字".repeat(11_000) },
+      });
+      expect(oversized.statusCode).toBe(400);
+      expect(oversized.json().error.message).toContain("operatorInstructions");
+      const { service, configurations, context, providerKey } = pinnedModelFixture();
+      const provider = await service.createModelDraft(
+        context(operator.user.id, "pinned-model-admin-draft"),
+        {
+          ...configurations,
+          apiKey: "placeholder-admin-pinned-api-key",
+        },
+      );
+      const pinned = {
+        mode: "pinned",
+        providerKey,
+        providerRevision: provider.revision,
+        modelId: "model-selected",
+      };
+      for (const model of [
+        { ...pinned, providerRevision: provider.revision + 100 },
+        { ...pinned, modelId: "model-disabled" },
+        { ...pinned, modelId: "model-missing" },
+      ]) {
+        const invalid = await write(route, "agent-invalid-pinned-model", {
+          ...draft,
+          content: { ...content, model },
+        });
+        expect(invalid.statusCode).toBe(400);
+        expect(invalid.json().error.message).toContain("已保存、已启用");
+      }
+      const invalidTool = await write(route, "agent-admin-create", {
+        ...draft,
+        content: {
+          ...content,
+          tools: {
+            mode: "configured",
+            builtinTools: ["unknown"],
+            externalTools: [],
+            clientTools: [],
+            toolCallingMode: "native",
+          },
+        },
+      });
+      expect(invalidTool.statusCode).toBe(400);
+      expect(invalidTool.json().error.message).toContain("内置工具");
+      const created = await write(route, "agent-admin-create", draft);
+      expect(created.statusCode).toBe(201);
+      expect(created.json().data).toMatchObject({
+        definition: { id, generation: 0 },
+        revision: { id: first },
+      });
+      expect((await write(route, "agent-admin-create", draft)).json().data).toEqual(
+        created.json().data,
+      );
+      expect(
+        (await write(route, "agent-admin-create", { ...draft, revisionId: second })).statusCode,
+      ).toBe(409);
+      const runtimeDraft = await withTenantTransaction(
+        runtimePool,
+        operator.scope,
+        async (client) => {
+          await client.query("SELECT set_config('app.user_id',$1,true)", [operator.user.id]);
+          return client.query("SELECT id FROM agent_revisions WHERE id=$1", [first]);
+        },
+      );
+      expect(runtimeDraft.rows).toEqual([]);
+      const managerList = await read(route);
+      expect(managerList.statusCode).toBe(200);
+      expect(managerList.json().data).toMatchObject({
+        canManage: true,
+        pinnedModelOptions: expect.arrayContaining([pinned]),
+      });
+      expect(managerList.body).not.toContain("placeholder-admin-pinned-api-key");
+      expect(managerList.body).not.toContain("ciphertext");
+      expect((await read(route, "Bearer viewer")).json().data.pinnedModelOptions).toEqual([]);
+      const listItem = managerList
+        .json()
+        .data.items.find((item: { definition: { id: string } }) => item.definition.id === id);
+      expect(listItem).toMatchObject({
+        definition: { availability: draft.availability },
+        revision: { id: first, displayName: content.displayName },
+      });
+      expect(listItem.revision).not.toHaveProperty("content");
+      expect((await read(route, "Bearer viewer")).body).not.toContain(id);
+      expect((await read(revisions, "Bearer viewer")).statusCode).toBe(404);
+      expect((await read(`${revisions}/${first}`, "Bearer viewer")).statusCode).toBe(404);
+      const saved = await write(revisions, "agent-admin-save", {
+        expectedGeneration: 0,
+        revisionId: second,
+        content: { ...content, displayName: "草稿第二版", model: pinned },
+      });
+      expect(saved.statusCode).toBe(201);
+      expect(saved.json().data).toMatchObject({
+        id: second,
+        revision: 2,
+        status: "draft",
+        content: { model: pinned },
+      });
+      expect(
+        (
+          await write(`${revisions}/${first}/publish`, "agent-admin-publish", {
+            expectedGeneration: 0,
+          })
+        ).statusCode,
+      ).toBe(409);
+      expect(
+        (
+          await write(`${revisions}/${first}/publish`, "agent-admin-publish", {
+            expectedGeneration: 1,
+          })
+        ).statusCode,
+      ).toBe(200);
+      const history = await read(revisions, "Bearer viewer");
+      expect(history.statusCode).toBe(200);
+      expect(history.json().data.items.map((item: { id: string }) => item.id)).toEqual([first]);
+      expect((await read(`${revisions}/${first}`, "Bearer viewer")).json().data.content).toEqual(
+        content,
+      );
+      expect((await read(`${revisions}/${second}`, "Bearer viewer")).statusCode).toBe(404);
+      expect((await read(`${revisions}/${second}`)).json().data.content.displayName).toBe(
+        "草稿第二版",
+      );
+      expect((await read(`${route}/agent_default/revisions/${first}`)).statusCode).toBe(404);
+      const seed = await read(`${route}/agent_default/revisions/agent_default_revision_1`);
+      expect(seed.statusCode).toBe(200);
+      expect(seed.json().data.content.memory).toEqual({
+        mode: "configured",
+        longTermEnabled: false,
+      });
+      expect(seed.json().data.content).not.toHaveProperty("longTermMemoryEnabled");
+
+      const scope = (expectedGeneration: number, tenantIds: string[]) => ({
+        expectedGeneration,
+        availability: { mode: "selected_tenants", tenantIds },
+      });
+      const nextScope = scope(2, [viewer.tenant.id]);
+      const availability = `${definition}/availability`;
+      expect(
+        (await write(availability, "agent-admin-scope", nextScope, "Bearer viewer", "PUT"))
+          .statusCode,
+      ).toBe(401);
+      expect(
+        (
+          await write(
+            availability,
+            "agent-admin-scope",
+            scope(1, [viewer.tenant.id]),
+            "Bearer operator",
+            "PUT",
+          )
+        ).statusCode,
+      ).toBe(409);
+      expect(
+        (
+          await write(
+            availability,
+            "agent-admin-scope",
+            scope(2, ["tenant_does_not_exist"]),
+            "Bearer operator",
+            "PUT",
+          )
+        ).statusCode,
+      ).toBe(400);
+      expect((await read(revisions)).json().data.definition).toMatchObject({
+        generation: 2,
+        availability: draft.availability,
+      });
+      const updateScope = () =>
+        write(availability, "agent-admin-scope", nextScope, "Bearer operator", "PUT");
+      const [updated, replay] = await Promise.all([updateScope(), updateScope()]);
+      expect(updated.statusCode).toBe(200);
+      expect(replay.json().data).toEqual(updated.json().data);
+      expect(updated.json().data).toMatchObject({
+        generation: 3,
+        availability: nextScope.availability,
+      });
+      expect(
+        (await repository.listAvailable(operator.tenant.id)).map((item) => item.definition.id),
+      ).not.toContain(id);
+      expect(
+        (await repository.listAvailable(viewer.tenant.id)).map((item) => item.definition.id),
+      ).toContain(id);
+      expect(
+        (
+          await write(`${definition}/deactivate`, "agent-admin-disable", { expectedGeneration: 3 })
+        ).json().data,
+      ).toMatchObject({ status: "disabled", availability: nextScope.availability });
+      expect(
+        (
+          await write(`${revisions}/${first}/revoke`, "agent-admin-revoke", {
+            expectedGeneration: 4,
+            reason: "撤销不合规的配置",
+          })
+        ).json().data.status,
+      ).toBe("revoked");
+      expect((await read(revisions, "Bearer viewer")).json().data.items).toMatchObject([
+        { id: first, status: "revoked" },
+      ]);
+      expect((await read(`${revisions}/${first}`, "Bearer viewer")).json().data.status).toBe(
+        "revoked",
+      );
+      expect(
+        (
+          await app.inject({
+            method: "DELETE",
+            url: `${route}/agent_default`,
+            headers: { authorization: "Bearer operator" },
+          })
+        ).statusCode,
+      ).toBe(404);
+      const allTenants = await write(
+        availability,
+        "agent-admin-scope-all",
+        {
+          expectedGeneration: 5,
+          availability: { mode: "all_tenants" },
+        },
+        "Bearer operator",
+        "PUT",
+      );
+      expect(allTenants.statusCode).toBe(200);
+      expect(allTenants.json().data).toMatchObject({
+        status: "revoked",
+        availability: { mode: "all_tenants" },
+      });
+      expect(
+        (await repository.listAvailable(operator.tenant.id)).map((item) => item.definition.id),
+      ).not.toContain(id);
+      const audit = await administrativePool.query(
+        `SELECT action,generation::text FROM "${schema}".agent_definition_audits WHERE definition_id=$1 ORDER BY audit_id`,
+        [id],
+      );
+      expect(audit.rows).toEqual([
+        { action: "created", generation: "0" },
+        { action: "created", generation: "1" },
+        { action: "published", generation: "2" },
+        { action: "availability_changed", generation: "3" },
+        { action: "disabled", generation: "4" },
+        { action: "revoked", generation: "5" },
+        { action: "availability_changed", generation: "6" },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("后台 Agent 管理在发布时重新校验平台内置工具上限", async () => {
+    const manager = await createFixture("agent_tool_manager");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [manager.user.id],
+    );
+    const agents = new PgAgentDefinitionRepository(adminControlPool);
+    const control = new PgAdminControlRepository(
+      adminControlPool,
+      new ModelProviderCredentialCipher("integration-agent-tool-root-at-least-32-bytes"),
+    );
+    const service = new AdminControlService(
+      control,
+      control,
+      {
+        probeModel: async () => undefined,
+        probeMemory: async () => undefined,
+      },
+      [],
+    );
+    const existing = await agents.readAdminRevision(
+      manager.user.id,
+      "agent_default",
+      "agent_default_revision_1",
+    );
+    if (!existing) throw new Error("默认版本不存在");
+    const created = await agents.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_with_builtin_tools",
+      revisionId: "agent_with_builtin_tools_1",
+      expectedGeneration: 0,
+      idempotencyKey: "agent-tool-create-draft",
+      availability: { mode: "all_tenants" },
+      content: {
+        ...existing.content,
+        tools: {
+          mode: "configured",
+          builtinTools: ["read"],
+          externalTools: [],
+          clientTools: [],
+          toolCallingMode: "native",
+        },
+      },
+    });
+    try {
+      await service.saveRuntimeSettingsConfiguration(
+        {
+          actorUserId: manager.user.id,
+          idempotencyKey: "agent-tool-set-ceiling",
+          requestDigest: "1".repeat(64),
+        },
+        {
+          expectedGeneration: await control.generation(manager.user.id),
+          enabledTools: [],
+          workerMaxConcurrentRuns: 7,
+          userMaxConcurrentRunsPerTenant: 3,
+          compactionSoftLimitPercent: 90,
+          compactionTargetPercent: 65,
+          compactionRecentUserTokens: 2048,
+          compactionMaxOutputTokens: 1024,
+          compactionTimeoutMs: 45000,
+        },
+      );
+      expect((await agents.listDefinitions(manager.user.id)).builtinToolLimit).toEqual([]);
+      await expect(
+        agents.publish({
+          actorUserId: manager.user.id,
+          definitionId: created.definition.id,
+          revisionId: created.revision.id,
+          expectedGeneration: 0,
+          idempotencyKey: "agent-tool-publish-denied",
+        }),
+      ).rejects.toMatchObject({
+        code: "CONSTRAINT_VIOLATION",
+        message: expect.stringContaining("内置工具"),
+      });
+      expect(
+        (await agents.listRevisions(manager.user.id, created.definition.id))?.definition,
+      ).toMatchObject({ generation: 0, status: "draft" });
+    } finally {
+      await migratorPool.query(
+        "DELETE FROM admin_control_activation_events WHERE actor_user_id=$1",
+        [manager.user.id],
+      );
+      await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
+        manager.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM admin_control_audits WHERE actor_user_id=$1", [
+        manager.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM admin_control_commands WHERE actor_user_id=$1", [
+        manager.user.id,
+      ]);
+      await migratorPool.query("DELETE FROM admin_control_config_revisions WHERE created_by=$1", [
+        manager.user.id,
+      ]);
+    }
+  });
+
   it("AgentDefinition 发布、可用范围、撤销与 Thread 绑定 ACL", async () => {
     const manager = await createFixture("agent_manager");
     const other = await createFixture("agent_other_tenant");
@@ -600,6 +1253,14 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(
       (await repository.listAvailable(manager.tenant.id)).map((item) => item.definition.id),
     ).toContain("agent_scope_test");
+    const visibleSelection = await repository.readVisibleCurrent(
+      manager.tenant.id,
+      "agent_scope_test",
+    );
+    expect(visibleSelection?.revision?.content.displayName).toBe("测试助手第二版");
+    expect(
+      await repository.readVisibleCurrent(other.tenant.id, "agent_scope_test"),
+    ).toBeUndefined();
     expect(
       (await repository.listAvailable(other.tenant.id)).map((item) => item.definition.id),
     ).not.toContain("agent_scope_test");
@@ -638,6 +1299,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         expectedGeneration: 3,
       }),
     ).resolves.toMatchObject({ status: "disabled", generation: 4 });
+    expect(
+      await repository.readVisibleCurrent(manager.tenant.id, "agent_scope_test"),
+    ).toBeUndefined();
     await expect(
       repository.revoke({
         actorUserId: manager.user.id,
@@ -689,6 +1353,34 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(
       await repository.readCurrentPublished(manager.tenant.id, "agent_revoke_test"),
     ).toBeUndefined();
+    const revisionless = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_visible_without_revision",
+      availability: { mode: "selected_tenants", tenantIds: [manager.tenant.id] },
+      content,
+      revisionId: "agent_visible_without_revision_v1",
+      idempotencyKey: "agent-revisionless-create",
+      expectedGeneration: 0,
+    });
+    await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: revisionless.definition.id,
+      revisionId: revisionless.revision.id,
+      idempotencyKey: "agent-revisionless-publish",
+      expectedGeneration: 0,
+    });
+    const clearedRevision = await withTenantTransaction(adminControlPool, manager.scope, (client) =>
+      client.query("UPDATE agent_definitions SET current_revision_id=NULL WHERE id=$1", [
+        revisionless.definition.id,
+      ]),
+    );
+    expect(clearedRevision.rowCount).toBe(1);
+    const visibleWithoutRevision = await repository.readVisibleCurrent(
+      manager.tenant.id,
+      revisionless.definition.id,
+    );
+    expect(visibleWithoutRevision?.definition.id).toBe(revisionless.definition.id);
+    expect(visibleWithoutRevision?.revision).toBeUndefined();
   });
 
   it("RunAgentSnapshot 固定创建时的 Revision，发布、停用与重启恢复不改写，撤销阻断安全点和许可", async () => {
@@ -2329,6 +3021,21 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       { version: 4, name: "agent_definitions" },
     ]);
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(migrationContract.count);
+  });
+
+  it("外部工具原始名称迁移仅允许 MCP 版本绑定远程工具名", async () => {
+    const result = await migratorPool.query<{ column_name: string; constraint_definition: string }>(
+      `SELECT column_state.column_name, pg_get_constraintdef(constraint_row.oid) AS constraint_definition
+         FROM information_schema.columns column_state
+         JOIN pg_constraint constraint_row ON constraint_row.conrelid = format('%I.%I',$1::text,'external_tool_versions')::regclass
+        WHERE column_state.table_schema=$1 AND column_state.table_name='external_tool_versions'
+          AND column_state.column_name='remote_tool_name'
+          AND constraint_row.conname='external_tool_versions_remote_name_source_check'`,
+      [schema],
+    );
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]?.constraint_definition).toContain("remote_tool_name IS NOT NULL");
+    expect(result.rows[0]?.constraint_definition).toContain("remote_tool_name IS NULL");
   });
 
   it("外部工具密文仅允许 Admin Control 写入，Runtime 零权限", async () => {

@@ -14,6 +14,7 @@ import {
   ModelProviderCredentialCipher,
   PgAdminControlRepository,
   PgAdminRunExplorerRepository,
+  PgAgentDefinitionRepository,
   PgIdentityConfigurationRepository,
   PgSandboxControlRepository,
   PgSkillPublicationAuthorization,
@@ -170,6 +171,7 @@ async function assembleRealService(
             }),
           ),
       },
+      agents: new PgAgentDefinitionRepository(controlPool),
       runs: new RunExplorerService(
         new PgAdminRunExplorerRepository(controlPool),
         () => `run_content_${randomUUID().replaceAll("-", "")}`,

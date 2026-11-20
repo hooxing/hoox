@@ -1088,6 +1088,29 @@ describe("工作台 Agent 路由", () => {
     expect([...state.threads.values()][0]?.entity.agentDefinitionId).toBe("agent_sales");
   });
 
+  it("省略 Agent 选择器时保留内建默认 Agent，不查询 AgentDefinition 目录", async () => {
+    const readVisibleCurrent = vi.fn(async () => {
+      throw new Error("省略选择器不应查询目录");
+    });
+    const agentDefinitions = {
+      listAvailable: vi.fn(async () => []),
+      readVisibleCurrent,
+    } as unknown as NonNullable<ApiDependencies["agentDefinitions"]>;
+    const { app } = fixture({ agentDefinitions });
+    openApps.push(app);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "agent-thread-default" },
+      payload: { title: "默认体验" },
+    });
+
+    expect(created.statusCode).toBe(200);
+    expect(created.json().data.agentDefinitionId).toBe("agent_default");
+    expect(readVisibleCurrent).not.toHaveBeenCalled();
+  });
+
   it("对 RLS 不可见的 Agent 统一返回 404，对仍可见但缺少发布 Revision 的 Agent 返回 409", async () => {
     let visible = false;
     let hasRevision = true;

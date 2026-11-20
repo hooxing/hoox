@@ -15,11 +15,16 @@ export type ExternalToolCallPhase = "preflight" | "request_written" | "response_
 /** Transport 仅可标注已证明尚未写出的失败；其他异常一律按结果未知处理。 */
 export class ExternalToolTransportError extends Error {
   override readonly name = "ExternalToolTransportError";
+  readonly phase: "preflight";
+  readonly safeCode: "EXTERNAL_TOOL_UNAVAILABLE" | "EXTERNAL_TOOL_REJECTED";
+
   constructor(
-    readonly phase: "preflight",
-    readonly safeCode: "EXTERNAL_TOOL_UNAVAILABLE" | "EXTERNAL_TOOL_REJECTED",
+    phase: "preflight",
+    safeCode: "EXTERNAL_TOOL_UNAVAILABLE" | "EXTERNAL_TOOL_REJECTED",
   ) {
     super(safeCode);
+    this.phase = phase;
+    this.safeCode = safeCode;
   }
 }
 

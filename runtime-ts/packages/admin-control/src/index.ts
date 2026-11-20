@@ -1,6 +1,11 @@
-import { normalizeRuntimeToolSelection, type RuntimeToolName } from "@hoox/protocol";
+import {
+  type AgentPinnedModelReferenceDto,
+  normalizeRuntimeToolSelection,
+  type RuntimeToolName,
+} from "@hoox/protocol";
 import { createHash } from "node:crypto";
 
+export * from "./agent-definition.js";
 export * from "./run-compaction-settings.js";
 export * from "./run-explorer.js";
 export * from "./sandbox-configuration.js";
@@ -1088,12 +1093,35 @@ export class AdminControlService {
   }
 }
 
+export type PinnedRunModelReference = Omit<AgentPinnedModelReferenceDto, "mode">;
+
+export interface PinnedRunModelConfiguration {
+  readonly model: ControlRevision<ModelProviderConfiguration>;
+  readonly apiKey: string;
+}
+
+export class PinnedRunModelUnavailableError extends Error {
+  constructor() {
+    super("PINNED_MODEL_CONFIGURATION_UNAVAILABLE");
+  }
+}
+
+export interface PinnedRunModelConfigurationPort {
+  /** 只读当前 Run 已固定的精确版本与模型；引用、版本或凭据不匹配时抛错。 */
+  resolvePinnedModelConfiguration(
+    scope: { readonly tenantId: string; readonly runId: string },
+    reference: PinnedRunModelReference,
+  ): Promise<PinnedRunModelConfiguration>;
+}
+
 export interface RuntimeControlConfigurationSnapshot {
   readonly generation: number;
   readonly model?: ControlRevision<ModelProviderConfiguration>;
   /** 仅存在于 Worker 内存中的解密结果，不属于任何控制面 DTO。 */
   readonly modelApiKey?: string;
   readonly memoryApiKey?: string;
+  /** 固定模型覆盖执行模型，但不改变平台记忆的部署回退条件。 */
+  readonly platformModelConfigured?: boolean;
   readonly memory?: ControlRevision<MemoryProviderConfiguration>;
   readonly runtimeSettings?: ControlRevision<RuntimeSettingsConfiguration>;
 }

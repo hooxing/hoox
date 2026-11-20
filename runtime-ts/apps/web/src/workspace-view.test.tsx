@@ -13,6 +13,7 @@ import {
   formatArtifactType,
   InlineArtifactDelivery,
   NavigationSidebar,
+  NewThreadAgentWelcome,
   RunStatusBadge,
   RunTimeline,
   RunTranscript,
@@ -166,6 +167,55 @@ describe("工作台展示组件", () => {
       );
       expect(container.querySelector(".assistant-markdown p")).toBe(paragraph);
       expect(container.querySelectorAll(".assistant-markdown p")).toHaveLength(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it("多 Agent 时显示选择器、欢迎语和可填入输入框的建议问题", () => {
+    const salesAgent = {
+      id: "agent_sales",
+      displayName: "销售助手",
+      description: "销售",
+      welcomeMessage: "想跟进哪位客户？",
+      suggestedQuestions: ["整理本周线索"],
+    };
+    const agents = [
+      { id: "agent_default", displayName: "默认助手", description: "默认", suggestedQuestions: [] },
+      salesAgent,
+    ];
+    const onSelect = vi.fn();
+    const onSuggestedQuestion = vi.fn();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <NewThreadAgentWelcome
+            agents={agents}
+            selectedAgentId="agent_sales"
+            onSelect={onSelect}
+            onSuggestedQuestion={onSuggestedQuestion}
+          />,
+        ),
+      );
+      expect(container.querySelector("select")?.value).toBe("agent_sales");
+      expect(container.textContent).toContain("想跟进哪位客户？");
+      const suggestion = container.querySelector(".suggested-question");
+      expect(suggestion?.textContent).toBe("整理本周线索");
+      act(() => suggestion?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      expect(onSuggestedQuestion).toHaveBeenCalledWith("整理本周线索");
+      act(() =>
+        root.render(
+          <NewThreadAgentWelcome
+            agents={[salesAgent]}
+            selectedAgentId="agent_sales"
+            onSelect={onSelect}
+            onSuggestedQuestion={onSuggestedQuestion}
+          />,
+        ),
+      );
+      expect(container.querySelector("select")).toBeNull();
     } finally {
       act(() => root.unmount());
     }

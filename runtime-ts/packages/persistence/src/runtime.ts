@@ -31,6 +31,7 @@ import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-sta
 import { PgSkillCenterRepository } from "./pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "./pg-skill-filesystem.js";
 import { PgThreadCreation } from "./pg-thread-creation.js";
+import { PgAgentDefinitionRepository } from "./pg-agent-definition.js";
 import { PgTeamCollaborationRepository, PgThreadForkRepository } from "./pg-team-collaboration.js";
 import { PgThreadInputRouting } from "./pg-thread-input.js";
 import type {
@@ -89,6 +90,7 @@ export interface MigrationRuntime {
 /** API 常驻进程所需的 PostgreSQL 能力集合；身份框架只获得专用数据库适配入口。 */
 export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
+  readonly agentDefinitions: PgAgentDefinitionRepository;
   readonly archiveThread: ArchiveThreadCommandPort;
   readonly renamePersonalThread: RenamePersonalThreadCommandPort;
   readonly threadCreation: PgThreadCreation;
@@ -134,6 +136,7 @@ export function createApiPersistenceRuntime(
     options.teamCoordinator === undefined ? undefined : createPostgresPool(options.teamCoordinator);
   return Object.freeze({
     repositories: new PgCoreRepositories(pool),
+    agentDefinitions: new PgAgentDefinitionRepository(pool),
     archiveThread: new PgArchiveThreadCommand(pool),
     renamePersonalThread: new PgRenamePersonalThreadCommand(pool),
     threadCreation: new PgThreadCreation(pool),

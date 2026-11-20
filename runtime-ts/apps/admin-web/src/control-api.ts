@@ -1,4 +1,13 @@
 import type {
+  AdminAgentDefinitionList,
+  AdminAgentGeneration,
+  AdminAgentRevisionHistory,
+  AdminCreateAgentDefinition,
+  AdminRevokeAgentRevision,
+  AdminSaveAgentRevision,
+  AdminSetAgentAvailability,
+  AgentDefinitionDto,
+  AgentRevisionDto,
   AdminControlOverviewDto,
   ControlAuditEventDto,
   CreateMemoryProviderDraftRequest,
@@ -133,6 +142,67 @@ export class AdminControlApi {
       this.pendingIdempotencyKeys.delete(requestFingerprint);
     }
     return (body as SuccessEnvelope<T>).data;
+  }
+
+  listAgentDefinitions(): Promise<AdminAgentDefinitionList> {
+    return this.request("/agent-definitions", { cache: "no-store" });
+  }
+
+  listAgentRevisions(id: string): Promise<AdminAgentRevisionHistory> {
+    return this.request(`${agentPath(id)}/revisions`, { cache: "no-store" });
+  }
+
+  readAgentRevision(id: string, revisionId: string): Promise<AgentRevisionDto> {
+    return this.request(agentRevisionPath(id, revisionId), { cache: "no-store" });
+  }
+
+  createAgentDefinition(
+    input: AdminCreateAgentDefinition,
+  ): Promise<{ definition: AgentDefinitionDto; revision: AgentRevisionDto }> {
+    return this.request("/agent-definitions", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  saveAgentRevision(id: string, input: AdminSaveAgentRevision): Promise<AgentRevisionDto> {
+    return this.request(`${agentPath(id)}/revisions`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  publishAgentRevision(
+    id: string,
+    revisionId: string,
+    input: AdminAgentGeneration,
+  ): Promise<AgentDefinitionDto> {
+    return this.request(`${agentRevisionPath(id, revisionId)}/publish`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  deactivateAgentDefinition(id: string, input: AdminAgentGeneration): Promise<AgentDefinitionDto> {
+    return this.request(`${agentPath(id)}/deactivate`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  revokeAgentRevision(
+    id: string,
+    revisionId: string,
+    input: AdminRevokeAgentRevision,
+  ): Promise<AgentDefinitionDto> {
+    return this.request(`${agentRevisionPath(id, revisionId)}/revoke`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  setAgentAvailability(id: string, input: AdminSetAgentAvailability): Promise<AgentDefinitionDto> {
+    return this.request(`${agentPath(id)}/availability`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
   }
 
   overview(): Promise<AdminControlOverviewDto> {
@@ -326,4 +396,25 @@ export type AdminControlApiContract = Pick<
   | "saveRuntimeSettingsConfiguration"
   | "probe"
   | "publish"
+>;
+
+function agentPath(id: string): string {
+  return `/agent-definitions/${encodeURIComponent(id)}`;
+}
+
+function agentRevisionPath(id: string, revisionId: string): string {
+  return `${agentPath(id)}/revisions/${encodeURIComponent(revisionId)}`;
+}
+
+export type AgentDefinitionApiContract = Pick<
+  AdminControlApi,
+  | "listAgentDefinitions"
+  | "listAgentRevisions"
+  | "readAgentRevision"
+  | "createAgentDefinition"
+  | "saveAgentRevision"
+  | "publishAgentRevision"
+  | "deactivateAgentDefinition"
+  | "revokeAgentRevision"
+  | "setAgentAvailability"
 >;

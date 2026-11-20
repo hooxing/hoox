@@ -93,7 +93,10 @@ export const ThreadRunListQuerySchema = Type.Object(
 export type ThreadRunListQuery = Static<typeof ThreadRunListQuerySchema>;
 
 export const CreateThreadRequestSchema = Type.Object(
-  { title: Type.String({ minLength: 1, maxLength: 200 }) },
+  {
+    title: Type.String({ minLength: 1, maxLength: 200 }),
+    agentDefinitionId: Type.Optional(IdSchema),
+  },
   strict,
 );
 export type CreateThreadRequest = Static<typeof CreateThreadRequestSchema>;

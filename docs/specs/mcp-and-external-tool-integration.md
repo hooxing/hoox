@@ -100,7 +100,7 @@ Run 创建时按与 `RunSkillSnapshot` 同级的方式固定：启用 Server 的
 | Run 快照 | 未开始 | `apps/api` Run 创建、`@hoox/run-contracts`、`@hoox/persistence` | 跨恢复 `toolSchemaHash` 一致、后续发布不影响已有 Run |
 | Pi 工具协议 | 未开始 | `@hoox/pi-adapter` 新工具工厂、`pi-session.ts` 注册 | schema 固定、manifest 派生、非法参数回执 |
 | 执行路由 | 未开始 | `@hoox/tool-router`、`apps/agent-worker/src/pi-session-factory.ts` | 许可绑定、参数摘要、结果未知不重放 |
-| Transport 客户端 | 未开始 | 新 MCP 客户端模块或包 | 超时、响应上限、协议错误归一化 |
+| Transport 客户端 | 部分实现 | `@hoox/tool-router` MCP Streamable HTTP 客户端 | 本地假 Server 覆盖初始化、清单探测、调用、Schema 拒绝、受控协议错误、响应上限与未知结果；真实 MCP Server 冒烟待验证 |
 | 协作与提示词边界 | 未开始 | `@hoox/run-contracts` 子 Agent 白名单、`@hoox/prompt-builder` 版本 | 子 Agent 只能按显式授权下放；Prompt 变更同步版本与测试 |
 
 ## 9. 验收门槛

@@ -31,7 +31,7 @@ Better Auth 与 Hoox API 同进程运行，不需要独立身份服务。它负�
 
 Tenant API Key 用于服务到服务访问，与 Hoox Session 是不同凭据。Key 只以 `hoox_sk_` 前缀加高熵随机串交付；数据库只保存 SHA-256 哈希、可公开前缀和元数据，创建响应是唯一能读取明文的地方。列表只返回前缀、名称、备注、作用域、创建/到期/吊销/最近使用时间。Key 可到期或吊销，最近使用时间按五分钟窗口节流更新。
 
-每个 Key 创建独立 `integration` User，并在所属 Tenant 创建 `member` Membership。该身份没有登录账号，不可登录工作台；创建者只作为审计元数据，离开 Tenant 不会改变 Key 身份。吊销不可恢复；专用数据库函数在同一事务内只对 `integration` 身份执行 active → revoked，并同步写入 Key 吊销时间。之后请求同时无法通过凭据校验或 Membership 授权。该身份模型可供终端用户映射复用，但映射本身不属于此边界。
+每个 Key 创建独立 `integration` User，并在所属 Tenant 创建 `member` Membership；个人 Tenant 仍只允许人类 Owner 管理，集成身份以 Member 加入，不获得个人空间管理权。该身份没有登录账号，不可登录工作台；创建者只作为审计元数据，离开 Tenant 不会改变 Key 身份。吊销不可恢复；专用数据库函数在同一事务内只对 `integration` 身份执行 active → revoked，并同步写入 Key 吊销时间。之后请求同时无法通过凭据校验或 Membership 授权。该身份模型可供终端用户映射复用，但映射本身不属于此边界。
 
 API Key 认证成功后，API 仍使用该集成 User 从 Membership 重建 `TenantScope`，所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。API Key 管理、登录会话、账号与团队成员管理均为人类会话边界。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
 

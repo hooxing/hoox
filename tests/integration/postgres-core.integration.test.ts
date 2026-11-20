@@ -2720,20 +2720,41 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 });
 
+function postgresSqlState(error: unknown): string | undefined {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { readonly code?: unknown; readonly cause?: unknown };
+    if (
+      typeof candidate.code === "string" &&
+      /^[0-9A-Z]{5}$/.test(candidate.code) &&
+      ![
+        "ECONNREFUSED",
+        "ENOTFOUND",
+        "EAI_AGAIN",
+        "ETIMEDOUT",
+        "EHOSTUNREACH",
+        "ENETUNREACH",
+        "ECONNRESET",
+        "ECONNABORTED",
+        "EPIPE",
+      ].includes(candidate.code)
+    ) {
+      return candidate.code;
+    }
+    current = candidate.cause;
+  }
+  return undefined;
+}
+
 function itWithSqlStateDiagnostic(title: string, test: () => Promise<void>): void {
   it(title, async () => {
     try {
       await test();
     } catch (error) {
-      const cause =
-        typeof error === "object" && error !== null
-          ? (error as { readonly cause?: unknown }).cause
-          : undefined;
-      const code =
-        typeof cause === "object" && cause !== null
-          ? (cause as { readonly code?: unknown }).code
-          : undefined;
-      if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) {
+      const code = postgresSqlState(error);
+      if (code !== undefined) {
         throw new Error(`PostgreSQL API Key 用例失败（SQLSTATE ${code}）`, { cause: error });
       }
       throw error;
@@ -2771,13 +2792,15 @@ describe("PostgreSQL API Key 隔离与集成身份", () => {
       });
       expect(integration?.membership.role).toBe("member");
 
-      const raw = await migratorPool.query<{
-        key_hash: Buffer;
-        kind: string;
-        last_used_at: Date | null;
-      }>(
-        "SELECT k.key_hash, k.last_used_at, u.kind FROM api_keys k JOIN app_users u ON u.id = k.integration_user_id WHERE k.tenant_id = $1 AND k.id = $2",
-        [owner.scope.tenantId, key.id],
+      const raw = await withTenantTransaction(migratorPool, owner.scope, (client) =>
+        client.query<{
+          key_hash: Buffer;
+          kind: string;
+          last_used_at: Date | null;
+        }>(
+          "SELECT k.key_hash, k.last_used_at, u.kind FROM api_keys k JOIN app_users u ON u.id = k.integration_user_id WHERE k.tenant_id = $1 AND k.id = $2",
+          [owner.scope.tenantId, key.id],
+        ),
       );
       expect(raw.rows[0]?.key_hash.equals(hashApiKey(token))).toBe(true);
       expect(raw.rows[0]?.key_hash.equals(Buffer.from(token))).toBe(false);
@@ -2807,29 +2830,35 @@ describe("PostgreSQL API Key 隔离与集成身份", () => {
     "Runtime 不能直接改 Membership 状态，窄撤销函数也拒绝人类身份",
     async () => {
       const owner = await createFixture("api_key_human_guard");
-      const humanId = userId("user_api_key_human_guard");
-      await withTenantTransaction(runtimePool, owner.scope, async (client) => {
-        await client.query("INSERT INTO app_users(id, created_at) VALUES ($1, $2)", [
-          humanId,
-          timestamp(10),
-        ]);
-        await client.query(
-          "INSERT INTO memberships(tenant_id, id, user_id, role, status, created_at) VALUES ($1, $2, $3, 'member', 'active', $4)",
-          [owner.scope.tenantId, "mem_api_key_human_guard", humanId, timestamp(10)],
-        );
-      });
+      const humanId = userId("user_api_key_human_guard_member");
+      await withTenantTransaction(
+        migratorPool,
+        { tenantId: owner.scope.tenantId, userId: humanId },
+        async (client) => {
+          await client.query("INSERT INTO app_users(id, created_at) VALUES ($1, $2)", [
+            humanId,
+            timestamp(10),
+          ]);
+          await client.query(
+            "INSERT INTO memberships(tenant_id, id, user_id, role, status, created_at) VALUES ($1, $2, $3, 'member', 'active', $4)",
+            [owner.scope.tenantId, "mem_api_key_human_guard", humanId, timestamp(10)],
+          );
+        },
+      );
       const humanKeyId = "key_human_guard";
-      await migratorPool.query(
-        `INSERT INTO api_keys(tenant_id, id, integration_user_id, key_hash, key_prefix, name, scopes, created_by_user_id, created_at)
-       VALUES ($1, $2, $3, $4, 'hoox_sk_test', '防护测试', ARRAY['threads:read'], $5, $6)`,
-        [
-          owner.scope.tenantId,
-          humanKeyId,
-          humanId,
-          randomBytes(32),
-          owner.scope.userId,
-          timestamp(11),
-        ],
+      await withTenantTransaction(migratorPool, owner.scope, (client) =>
+        client.query(
+          `INSERT INTO api_keys(tenant_id, id, integration_user_id, key_hash, key_prefix, name, scopes, created_by_user_id, created_at)
+           VALUES ($1, $2, $3, $4, 'hoox_sk_test', '防护测试', ARRAY['threads:read'], $5, $6)`,
+          [
+            owner.scope.tenantId,
+            humanKeyId,
+            humanId,
+            randomBytes(32),
+            owner.scope.userId,
+            timestamp(11),
+          ],
+        ),
       );
 
       await expect(
@@ -2846,11 +2875,13 @@ describe("PostgreSQL API Key 隔离与集成身份", () => {
         ),
       ).rejects.toMatchObject({ code: "42501" });
 
-      const unchanged = await migratorPool.query<{ status: string; revoked_at: Date | null }>(
-        `SELECT m.status, k.revoked_at FROM memberships m
-       JOIN api_keys k ON k.tenant_id = m.tenant_id AND k.integration_user_id = m.user_id
-       WHERE m.tenant_id = $1 AND m.user_id = $2`,
-        [owner.scope.tenantId, humanId],
+      const unchanged = await withTenantTransaction(migratorPool, owner.scope, (client) =>
+        client.query<{ status: string; revoked_at: Date | null }>(
+          `SELECT m.status, k.revoked_at FROM memberships m
+           JOIN api_keys k ON k.tenant_id = m.tenant_id AND k.integration_user_id = m.user_id
+           WHERE m.tenant_id = $1 AND m.user_id = $2`,
+          [owner.scope.tenantId, humanId],
+        ),
       );
       expect(unchanged.rows[0]).toEqual({ status: "active", revoked_at: null });
     },

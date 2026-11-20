@@ -22,7 +22,11 @@ function iso(value: unknown): string {
 }
 
 function mapUser(row: QueryResultRow, prefix: string): User {
-  return rehydrateUser({ id: row[`${prefix}_id`], createdAt: iso(row[`${prefix}_created_at`]) });
+  return rehydrateUser({
+    id: row[`${prefix}_id`],
+    kind: row[`${prefix}_kind`],
+    createdAt: iso(row[`${prefix}_created_at`]),
+  });
 }
 
 function mapMembership(

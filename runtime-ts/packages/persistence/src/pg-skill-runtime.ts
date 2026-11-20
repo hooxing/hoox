@@ -105,6 +105,7 @@ export async function createRunSkillSnapshot(
     readonly runId: string;
     readonly userId: string;
     readonly explicitInvocation?: ExplicitSkillInvocation;
+    readonly includeTenantSkills?: boolean;
   },
 ): Promise<void> {
   const rows = await client.query<SnapshotRow>(
@@ -123,9 +124,9 @@ export async function createRunSkillSnapshot(
          ON entrypoint.skill_id=version.skill_id
         AND entrypoint.skill_version=version.version
         AND entrypoint.normalized_path=version.entrypoint_path
-      WHERE installation.tenant_id=$1 AND installation.status='enabled'
+      WHERE installation.tenant_id=$1 AND installation.status='enabled' AND $2::boolean
       ORDER BY installation.invocation_name COLLATE "C"`,
-    [input.tenantId],
+    [input.tenantId, input.includeTenantSkills !== false],
   );
   if (
     rows.rows.length > 64 ||

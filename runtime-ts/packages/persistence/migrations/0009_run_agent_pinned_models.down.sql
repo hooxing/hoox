@@ -1,0 +1,1 @@
+DROP POLICY runtime_agent_pinned_model_read ON admin_control_config_revisions;

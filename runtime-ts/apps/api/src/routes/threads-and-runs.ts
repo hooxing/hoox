@@ -67,6 +67,7 @@ export function registerThreadAndRunRoutes(
             200: ThreadSuccessEnvelopeSchema,
             400: ErrorEnvelopeSchema,
             401: ErrorEnvelopeSchema,
+            403: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             409: ErrorEnvelopeSchema,
             415: ErrorEnvelopeSchema,
@@ -76,7 +77,7 @@ export function registerThreadAndRunRoutes(
         },
       },
       async (request) => {
-        const auth = await authenticate(request);
+        const auth = await authenticate(request, "threads:create");
         return success(
           request,
           await service.createThread(auth, request.body.title, requireIdempotencyKey(request)),
@@ -98,6 +99,7 @@ export function registerThreadAndRunRoutes(
               200: ThreadForkSuccessEnvelopeSchema,
               400: ErrorEnvelopeSchema,
               401: ErrorEnvelopeSchema,
+              403: ErrorEnvelopeSchema,
               404: ErrorEnvelopeSchema,
               409: ErrorEnvelopeSchema,
               415: ErrorEnvelopeSchema,
@@ -158,6 +160,7 @@ export function registerThreadAndRunRoutes(
             200: RunSuccessEnvelopeSchema,
             400: ErrorEnvelopeSchema,
             401: ErrorEnvelopeSchema,
+            403: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             409: ErrorEnvelopeSchema,
             415: ErrorEnvelopeSchema,
@@ -168,7 +171,7 @@ export function registerThreadAndRunRoutes(
         },
       },
       async (request) => {
-        const auth = await authenticate(request);
+        const auth = await authenticate(request, "runs:create");
         return success(
           request,
           await service.createRun(
@@ -194,6 +197,7 @@ export function registerThreadAndRunRoutes(
               200: ThreadInputReceiptSuccessEnvelopeSchema,
               400: ErrorEnvelopeSchema,
               401: ErrorEnvelopeSchema,
+              403: ErrorEnvelopeSchema,
               404: ErrorEnvelopeSchema,
               409: ErrorEnvelopeSchema,
               415: ErrorEnvelopeSchema,
@@ -226,6 +230,7 @@ export function registerThreadAndRunRoutes(
               200: ThreadInputReceiptSuccessEnvelopeSchema,
               400: ErrorEnvelopeSchema,
               401: ErrorEnvelopeSchema,
+              403: ErrorEnvelopeSchema,
               404: ErrorEnvelopeSchema,
               500: ErrorEnvelopeSchema,
               503: ErrorEnvelopeSchema,
@@ -233,7 +238,7 @@ export function registerThreadAndRunRoutes(
           },
         },
         async (request) => {
-          const auth = await authenticate(request);
+          const auth = await authenticate(request, "threads:read");
           return success(
             request,
             await service.getThreadInputReceipt(
@@ -256,6 +261,7 @@ export function registerThreadAndRunRoutes(
           200: ThreadPageSuccessEnvelopeSchema,
           400: ErrorEnvelopeSchema,
           401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
           404: ErrorEnvelopeSchema,
           500: ErrorEnvelopeSchema,
           503: ErrorEnvelopeSchema,
@@ -263,7 +269,7 @@ export function registerThreadAndRunRoutes(
       },
     },
     async (request) => {
-      const auth = await authenticate(request);
+      const auth = await authenticate(request, "threads:read");
       return success(request, await service.listThreads(auth, request.query));
     },
   );
@@ -277,6 +283,7 @@ export function registerThreadAndRunRoutes(
           200: ThreadSuccessEnvelopeSchema,
           400: ErrorEnvelopeSchema,
           401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
           404: ErrorEnvelopeSchema,
           500: ErrorEnvelopeSchema,
           503: ErrorEnvelopeSchema,
@@ -284,7 +291,7 @@ export function registerThreadAndRunRoutes(
       },
     },
     async (request) => {
-      const auth = await authenticate(request);
+      const auth = await authenticate(request, "threads:read");
       return success(request, await service.getThread(auth, request.params.threadId));
     },
   );
@@ -300,6 +307,7 @@ export function registerThreadAndRunRoutes(
           200: ThreadSuccessEnvelopeSchema,
           400: ErrorEnvelopeSchema,
           401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
           404: ErrorEnvelopeSchema,
           415: ErrorEnvelopeSchema,
           500: ErrorEnvelopeSchema,
@@ -325,6 +333,7 @@ export function registerThreadAndRunRoutes(
           200: ThreadSuccessEnvelopeSchema,
           400: ErrorEnvelopeSchema,
           401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
           404: ErrorEnvelopeSchema,
           409: ErrorEnvelopeSchema,
           500: ErrorEnvelopeSchema,
@@ -348,6 +357,7 @@ export function registerThreadAndRunRoutes(
           200: ThreadRunPageSuccessEnvelopeSchema,
           400: ErrorEnvelopeSchema,
           401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
           404: ErrorEnvelopeSchema,
           500: ErrorEnvelopeSchema,
           503: ErrorEnvelopeSchema,
@@ -355,7 +365,7 @@ export function registerThreadAndRunRoutes(
       },
     },
     async (request) => {
-      const auth = await authenticate(request);
+      const auth = await authenticate(request, "runs:read");
       return success(
         request,
         await service.listLatestRuns(auth, request.params.threadId, request.query),
@@ -372,6 +382,7 @@ export function registerThreadAndRunRoutes(
           200: RunSuccessEnvelopeSchema,
           400: ErrorEnvelopeSchema,
           401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
           404: ErrorEnvelopeSchema,
           500: ErrorEnvelopeSchema,
           503: ErrorEnvelopeSchema,
@@ -379,7 +390,7 @@ export function registerThreadAndRunRoutes(
       },
     },
     async (request) => {
-      const auth = await authenticate(request);
+      const auth = await authenticate(request, "runs:read");
       return success(
         request,
         await service.getRun(auth, request.params.threadId, request.params.runId),
@@ -396,6 +407,7 @@ export function registerThreadAndRunRoutes(
           200: RunSuccessEnvelopeSchema,
           400: ErrorEnvelopeSchema,
           401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
           404: ErrorEnvelopeSchema,
           409: ErrorEnvelopeSchema,
           422: ErrorEnvelopeSchema,
@@ -424,6 +436,7 @@ export function registerThreadAndRunRoutes(
             200: ThreadContextPageSuccessEnvelopeSchema,
             400: ErrorEnvelopeSchema,
             401: ErrorEnvelopeSchema,
+            403: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             500: ErrorEnvelopeSchema,
             503: ErrorEnvelopeSchema,
@@ -431,7 +444,7 @@ export function registerThreadAndRunRoutes(
         },
       },
       async (request) => {
-        const auth = await authenticate(request);
+        const auth = await authenticate(request, "threads:read");
         const read = await dependencies.threadContext?.listMessages({
           scope: auth.scope,
           threadId: threadId(request.params.threadId),
@@ -496,6 +509,7 @@ export function registerThreadAndRunRoutes(
             200: ThreadContinuityStatusSuccessEnvelopeSchema,
             400: ErrorEnvelopeSchema,
             401: ErrorEnvelopeSchema,
+            403: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             500: ErrorEnvelopeSchema,
             503: ErrorEnvelopeSchema,
@@ -503,7 +517,7 @@ export function registerThreadAndRunRoutes(
         },
       },
       async (request) => {
-        const auth = await authenticate(request);
+        const auth = await authenticate(request, "threads:read");
         const read = await dependencies.threadContinuity?.getStatus({
           scope: auth.scope,
           threadId: threadId(request.params.threadId),

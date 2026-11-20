@@ -11,6 +11,8 @@ import {
   RuntimeConfiguredSessionFactory,
 } from "./runtime-configured-providers.js";
 
+import { fakeAgentSnapshot } from "./testing/agent-snapshot.js";
+
 function snapshot(revision: number, maxTokens = 8192): RuntimeControlConfigurationSnapshot {
   return {
     generation: revision,
@@ -98,6 +100,7 @@ function memorySnapshot(enabled: boolean): RuntimeControlConfigurationSnapshot {
 
 function createInput(runId: string): Parameters<AgentSessionFactoryPort["create"]>[0] {
   return {
+    agentSnapshot: fakeAgentSnapshot(),
     scope: { tenantId: "tenant-a", threadId: "thread-a", runId },
   } as Parameters<AgentSessionFactoryPort["create"]>[0];
 }
@@ -140,8 +143,90 @@ describe("Run 固定运行配置", () => {
       deploymentSettings,
     });
     expect(build).toHaveBeenCalledTimes(2);
-    expect(build).toHaveBeenNthCalledWith(1, undefined, deploymentSettings);
+    expect(build).toHaveBeenNthCalledWith(1, undefined, deploymentSettings, {
+      toolCallingMode: "native",
+    });
     expect(configured.create).toHaveBeenCalledTimes(3);
+  });
+
+  function pinnedInput(runId: string, modelId: string) {
+    return {
+      ...createInput(runId),
+      agentSnapshot: fakeAgentSnapshot({
+        model: { mode: "pinned", providerKey: "main", providerRevision: 2, modelId },
+      }),
+    };
+  }
+
+  it("同一 Provider Revision 的不同固定模型不会共用 Session 工厂", async () => {
+    const original = snapshot(2).model;
+    const modelA = original?.configuration.models[0];
+    if (!original || !modelA) throw new Error("测试缺少模型配置");
+    const configuration = {
+      ...original.configuration,
+      models: [modelA, { ...modelA, id: "other" }],
+    };
+    const forModel = (modelId: string) => ({
+      ...snapshot(2),
+      model: { ...original, configuration: { ...configuration, defaultModelId: modelId } },
+    });
+    const resolveForRun = vi
+      .fn()
+      .mockResolvedValueOnce(forModel(modelA.id))
+      .mockResolvedValueOnce(forModel("other"))
+      .mockResolvedValueOnce(forModel(modelA.id));
+    const build = vi.fn(async () => ({
+      create: vi.fn(async () => ({}) as Awaited<ReturnType<AgentSessionFactoryPort["create"]>>),
+    }));
+    const factory = new RuntimeConfiguredSessionFactory(
+      { resolveForRun },
+      { resolveForRun: async () => deploymentSettings },
+      deploymentSettings,
+      8192,
+      build,
+    );
+    await factory.create(pinnedInput("run-a", modelA.id));
+    await factory.create(pinnedInput("run-b", "other"));
+    await factory.create(pinnedInput("run-a", modelA.id));
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(build.mock.calls).toMatchObject([
+      [
+        { model: { configuration: { defaultModelId: modelA.id } } },
+        deploymentSettings,
+        { toolCallingMode: "native" },
+      ],
+      [
+        { model: { configuration: { defaultModelId: "other" } } },
+        deploymentSettings,
+        { toolCallingMode: "native" },
+      ],
+    ]);
+  });
+
+  it.each([
+    { name: "部署模型", value: undefined },
+    { name: "不同 Revision", value: snapshot(1) },
+    { name: "相同 Revision 的其他模型", value: snapshot(2) },
+    {
+      name: "没有凭据",
+      value: { ...snapshot(2), modelApiKey: "" },
+    },
+  ])("固定模型不回退到$name", async ({ value }) => {
+    const build = vi.fn();
+    const resolveCompaction = vi.fn();
+    const factory = new RuntimeConfiguredSessionFactory(
+      { resolveForRun: async () => value },
+      { resolveForRun: resolveCompaction },
+      deploymentSettings,
+      8192,
+      build,
+    );
+    const modelId = value?.modelApiKey === "" ? "model-2" : "requested";
+    await expect(factory.create(pinnedInput("run-missing", modelId))).rejects.toThrow(
+      "PINNED_MODEL_CONFIGURATION_UNAVAILABLE",
+    );
+    expect(resolveCompaction).not.toHaveBeenCalled();
+    expect(build).not.toHaveBeenCalled();
   });
 
   it("同一模型恢复不同压缩快照时不复用错误的 Session 工厂", async () => {
@@ -166,8 +251,8 @@ describe("Run 固定运行配置", () => {
     await factory.create(createInput("run-second"));
     await factory.create(createInput("run-first"));
     expect(build).toHaveBeenCalledTimes(2);
-    expect(build).toHaveBeenNthCalledWith(1, snapshot(2), first);
-    expect(build).toHaveBeenNthCalledWith(2, snapshot(2), second);
+    expect(build).toHaveBeenNthCalledWith(1, snapshot(2), first, { toolCallingMode: "native" });
+    expect(build).toHaveBeenNthCalledWith(2, snapshot(2), second, { toolCallingMode: "native" });
   });
 
   it("相同模型与压缩参数在 native 和 PTC 模式分别缓存，回到原模式复用原工厂", async () => {
@@ -199,8 +284,10 @@ describe("Run 固定运行配置", () => {
     for (const input of inputs) await factory.create(input);
 
     expect(build).toHaveBeenCalledTimes(2);
-    expect(build).toHaveBeenNthCalledWith(1, native, deploymentSettings);
-    expect(build).toHaveBeenNthCalledWith(2, ptc, deploymentSettings);
+    expect(build).toHaveBeenNthCalledWith(1, native, deploymentSettings, {
+      toolCallingMode: "native",
+    });
+    expect(build).toHaveBeenNthCalledWith(2, ptc, deploymentSettings, { toolCallingMode: "ptc" });
     expect(nativeFactory.create.mock.calls).toEqual([[inputs[0]], [inputs[2]]]);
     expect(ptcFactory.create.mock.calls).toEqual([[inputs[1]], [inputs[3]]]);
   });
@@ -231,8 +318,54 @@ describe("Run 固定运行配置", () => {
       await factory.create(createInput(run));
 
     expect(build).toHaveBeenCalledTimes(2);
-    expect(build).toHaveBeenNthCalledWith(1, legacy, deploymentSettings);
-    expect(build).toHaveBeenNthCalledWith(2, ptc, deploymentSettings);
+    expect(build).toHaveBeenNthCalledWith(1, legacy, deploymentSettings, {
+      toolCallingMode: "native",
+    });
+    expect(build).toHaveBeenNthCalledWith(2, ptc, deploymentSettings, { toolCallingMode: "ptc" });
+  });
+
+  it("显式 Agent 内置工具名单取平台上限与实际工具目录的交集", async () => {
+    const session = { dispose() {} } as Awaited<ReturnType<AgentSessionFactoryPort["create"]>>;
+    const platform = toolModeSnapshot("native");
+    if (platform.runtimeSettings === undefined) throw new Error("测试缺少平台运行设置");
+    const build = vi.fn<ConstructorParameters<typeof RuntimeConfiguredSessionFactory>[4]>(
+      async () => ({ create: async () => session }),
+    );
+    const store = {
+      resolveForRun: async () =>
+        ({
+          ...platform,
+          runtimeSettings: {
+            ...platform.runtimeSettings,
+            configuration: {
+              ...platform.runtimeSettings?.configuration,
+              enabledTools: ["read", "write"],
+            },
+          },
+        }) as RuntimeControlConfigurationSnapshot,
+    };
+    const factory = new RuntimeConfiguredSessionFactory(
+      store,
+      { resolveForRun: async () => deploymentSettings },
+      deploymentSettings,
+      8192,
+      build,
+    );
+    const configured = fakeAgentSnapshot({
+      tools: {
+        mode: "configured",
+        toolCallingMode: "ptc",
+        builtinTools: ["exec_command", "read", "not_a_runtime_tool"],
+        externalTools: [],
+        clientTools: [],
+      },
+    });
+    await factory.create({ ...createInput("run-agent-configured"), agentSnapshot: configured });
+    await factory.create(createInput("run-agent-platform-default"));
+    expect(build.mock.calls.map(([, , tools]) => tools)).toEqual([
+      { toolCallingMode: "ptc", enabledTools: ["read"] },
+      { toolCallingMode: "native", enabledTools: ["read", "write"] },
+    ]);
   });
 
   it("新 Run 按固定模型裁剪预算，恢复时保持仓储已保存的实际预算", async () => {
@@ -254,7 +387,7 @@ describe("Run 固定运行配置", () => {
       runId: "run-resume",
       deploymentSettings: { ...deploymentSettings, maxOutputTokens: 8192 },
     });
-    expect(build).toHaveBeenCalledWith(modelSnapshot, saved);
+    expect(build).toHaveBeenCalledWith(modelSnapshot, saved, { toolCallingMode: "native" });
   });
 
   it.each([
@@ -277,7 +410,9 @@ describe("Run 固定运行配置", () => {
       8192,
       originalBuild,
     ).create(createInput("run-fallback-resume"));
-    expect(originalBuild).toHaveBeenCalledWith(undefined, deploymentSettings);
+    expect(originalBuild).toHaveBeenCalledWith(undefined, deploymentSettings, {
+      toolCallingMode: "native",
+    });
 
     const restoredBuild = vi.fn(async () => ({ create: async () => session }));
     await new RuntimeConfiguredSessionFactory(
@@ -294,10 +429,14 @@ describe("Run 固定运行配置", () => {
       restoredBuild,
     ).create(createInput("run-fallback-resume"));
     expect(saved).toEqual(deploymentSettings);
-    expect(restoredBuild).toHaveBeenCalledWith(restoredModel, {
-      ...deploymentSettings,
-      maxOutputTokens: 2048,
-    });
+    expect(restoredBuild).toHaveBeenCalledWith(
+      restoredModel,
+      {
+        ...deploymentSettings,
+        maxOutputTokens: 2048,
+      },
+      { toolCallingMode: "native" },
+    );
   });
 
   it("记忆按 Run 快照选择，显式关闭覆盖部署回退且同一 revision 复用实例", async () => {

@@ -1,6 +1,6 @@
-# Development 诊断指南
+# 诊断指南
 
-本页面向维护者，描述模型网络报文和内部轨迹查看能力。诊断数据可能包含完整 Prompt、思考、工具参数、模型生成的 Tool Call 和模型可见回执，必须按敏感用户数据处理。
+本页面向维护者，描述 Development 的模型网络报文和内部轨迹查看，以及 Worker 的 OpenTelemetry 导出。诊断数据可能包含完整 Prompt、思考、工具参数、模型生成的 Tool Call 和模型可见回执，必须按敏感用户数据处理。
 
 ## 模型网络报文诊断
 
@@ -132,6 +132,24 @@ Attempt 下拉框支持切换单次 Attempt，默认组合各 Run 的最新 Atte
 - 删除诊断数据前确认相关故障证据已经完成受控留存。
 - 关闭 `MODEL_WIRE_TRACE_ENABLED` 只停止新增采集，不自动删除既有记录。
 - production 在保留清理 consumer 完成部署前若开启该变量，Worker 应在触达外部依赖之前失败关闭。
+
+## 导出到 OpenTelemetry
+
+Agent Worker 默认不导出。将以下配置注入 Worker 并重启，连接支持 OTLP/HTTP protobuf 的后端或 Collector；[配置契约](../reference/configuration.md#worker-opentelemetry-配置)列出了认证、采样和正文选项。
+
+```dotenv
+OTEL_EXPORT_ENABLED=true
+OTEL_EXPORT_ENDPOINT=https://otel-collector.example.invalid
+OTEL_EXPORT_CONTENT_ENABLED=false
+```
+
+在后端按 `service.name=hoox-agent-worker` 查找：
+
+- 每个已领取并通过栅栏快照校验的 Attempt 有一个 `invoke_agent` 根 Span。子 Span 包括实际 Provider 流调用（含子 Agent 和模型压缩调用）以及已确认开始的工具调用。`hoox.run.id`、`hoox.attempt.id`、`hoox.thread.id`、`hoox.tenant.id` 是供关联的不透明 ID。`hoox.outcome` 区分 `success`、`failure`、`unknown`；等待用户输入是正常的 Attempt 收口，不代表 Run 成功。工具缺少确认的结束事件或受控回执结果未确认时标记 `unknown`。
+- `hoox.run.completed` 统计 Worker 确认终态的 Run；`hoox.run.failed` 只统计已确认失败的 Run。`hoox.run.attempt.completed` 统计 Attempt 收口，等待和恢复不计入 Run 完成数。延迟见 `gen_ai.invoke_agent.duration` 和 `gen_ai.client.inference.duration`，输入与输出 Token 见 `gen_ai.client.inference.usage.input_tokens` 和 `gen_ai.client.inference.usage.output_tokens`。指标不带租户、Thread、Run 或 Attempt ID。
+- Span 队列满时查看 `otel.sdk.processor.span.processed` 的 `error.type=queue_full`；采集层丢弃、网络发送失败和接收端报告的部分拒绝见 `hoox.otel.export.unsent`。这些计数不会写入 Run。Worker 不补传丢失的 Span；进程退出时在总关闭预算内最多等待遥测刷新 3 秒。若收集端始终不可用，计数也可能无法送达。
+
+只在获准处理租户正文的后端启用 `OTEL_EXPORT_CONTENT_ENABLED`。正文包括 Provider 层的系统指令、文本消息、模型输出与工具调用内容；原生工具在 Worker 已有事件提供正文时附带参数和成功结果的文本。PTC 子工具在 Worker 只有结构化开始、完成事实，不补采正文。导出不包含模型认证、请求头、原始网络报文、图像或附件字节以及模型思考内容。单个正文属性超过 8 KiB 时省略。这些正文仍可能含敏感信息，删除与保留由接收端负责。此开关与 `MODEL_WIRE_TRACE_ENABLED` 无关。
 
 ## 其他排障入口
 

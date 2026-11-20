@@ -192,6 +192,7 @@ const adminControlTables = new Set([
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
+  ["api_keys", new Set(["SELECT", "INSERT"])],
   ["user_accounts", new Set(["SELECT", "INSERT"])],
   ["user_sessions", new Set(["SELECT", "INSERT", "DELETE"])],
   ["tenants", new Set(["SELECT", "INSERT"])],
@@ -339,6 +340,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 ]);
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
+  ["api_keys", new Set(["last_used_at"])],
   // Agent 定义、Run 浏览器审计和外部工具版本均不得由 Runtime 执行列级更新。
   [
     "threads",
@@ -1128,6 +1130,14 @@ async function hasInstallationState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasRunAgentSnapshotState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.run_agent_snapshots',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAgentDefinitionState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.agent_definitions',$1::text)) IS NOT NULL
@@ -1225,6 +1235,33 @@ const managedSandboxRuntimeTables = [
   "sandbox_control_head",
 ] as const;
 
+async function hasApiKeyState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.api_keys',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasApiKeyRevocationPolicyState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ readonly policy_count: string }>(
+    `SELECT count(*)::text AS policy_count
+       FROM pg_policies
+      WHERE schemaname = $1
+        AND ((tablename = 'api_keys' AND policyname = 'api_key_revocation_guard')
+          OR (tablename = 'memberships' AND policyname = 'api_key_integration_membership_revoke'))`,
+    [schema],
+  );
+  const count = Number(result.rows[0]?.policy_count ?? "0");
+  if (count !== 0 && count !== 2) {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "API Key 撤销 RLS 策略状态不完整");
+  }
+  return count === 2;
+}
+
 async function hasManagedSandboxState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.sandbox_control_head',$1::text)) IS NOT NULL AS present",
@@ -1250,6 +1287,7 @@ export async function activeTablePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
+  if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
   if (await hasManagedSandboxState(client, schema)) {
     for (const table of managedSandboxControlTables) policy.set(table, new Set());
     for (const table of managedSandboxRuntimeTables) policy.set(table, new Set(["SELECT"]));
@@ -1382,6 +1420,9 @@ export async function activeTablePolicy(
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
   }
+  if (await hasRunAgentSnapshotState(client, schema)) {
+    policy.set("run_agent_snapshots", new Set(["SELECT", "INSERT"]));
+  }
   if (!(await hasAgentDefinitionState(client, schema))) {
     for (const table of [
       "agent_definitions",
@@ -1421,11 +1462,25 @@ export async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  const apiKeyState = await hasApiKeyState(client, schema);
+  const apiKeyRevocationPolicyState =
+    apiKeyState && (await hasApiKeyRevocationPolicyState(client, schema));
+  if (!apiKeyState) policy.delete("api_keys");
+  else
+    policy.set(
+      "api_keys",
+      apiKeyRevocationPolicyState
+        ? new Set(["last_used_at", "revoked_at"])
+        : new Set(["last_used_at"]),
+    );
   if (await hasInstallationState(client, schema)) {
     policy.set("installation_state", new Set(["administrator_user_id", "initialized_at"]));
   }
   if (await hasEmbeddedIdentityState(client, schema)) {
     policy.set("user_accounts", new Set(["better_auth_user_id", "display_name", "updated_at"]));
+  }
+  if (await hasRunAgentSnapshotState(client, schema)) {
+    policy.set("run_agent_snapshots", new Set());
   }
   if (await hasAgentDefinitionState(client, schema)) {
     for (const table of [
@@ -1451,6 +1506,7 @@ export async function activeColumnUpdatePolicy(
   }
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
+  if (apiKeyRevocationPolicyState) membershipUpdateColumns.add("status");
   if (await hasMembershipLockMarker(client)) membershipUpdateColumns.add("lock_marker");
   policy.set("memberships", membershipUpdateColumns);
   if (!(await hasPersonalizationSettingsState(client, schema))) {
@@ -1769,7 +1825,6 @@ interface MigrationContextSafetyRow {
   readonly migrator_has_routine_default_acl: boolean;
   readonly migrator_owns_other_schema: boolean;
   readonly migrator_owns_cross_schema_relation: boolean;
-  readonly target_schema_has_routine: boolean;
   readonly target_schema_has_prohibited_owned_object: boolean;
   readonly migrator_owns_cross_schema_routine: boolean;
   readonly migrator_owns_cross_schema_object: boolean;
@@ -1884,10 +1939,6 @@ async function inspectMigrationContext(
             AND schema_state.nspname <> 'information_schema'
             AND schema_state.nspname !~ '^pg_'
        ) AS migrator_owns_cross_schema_relation,
-       EXISTS (
-         SELECT 1 FROM pg_proc routine
-          WHERE routine.pronamespace = (SELECT oid FROM target_schema)
-       ) AS target_schema_has_routine,
        EXISTS (
          SELECT 1 FROM pg_type type_state
           WHERE type_state.typowner = (SELECT oid FROM migrator)
@@ -2596,32 +2647,13 @@ async function assertNoPublicSchemaPrivileges(client: PoolClient): Promise<void>
   }
 }
 
-async function assertRoutinePrivilegeBoundary(
-  client: PoolClient,
-  context: MigrationSecurityContext,
-): Promise<void> {
-  const runtimePrivileges = await client.query<{ count: string }>(
-    `SELECT count(*)::text AS count
-       FROM pg_proc routine
-      WHERE routine.pronamespace = current_schema()::regnamespace
-        AND (
-          has_function_privilege($1, routine.oid, 'EXECUTE')
-          OR has_function_privilege($2, routine.oid, 'EXECUTE')
-          OR has_function_privilege($3, routine.oid, 'EXECUTE')
-        )`,
-    [context.runtimeRole, context.teamCoordinatorRole, context.adminControlRole],
+async function assertRoutinePrivilegeBoundary(client: PoolClient): Promise<void> {
+  const routines = await client.query<{ readonly count: string }>(
+    `SELECT count(*)::text AS count FROM pg_proc
+      WHERE pronamespace = current_schema()::regnamespace`,
   );
-  const publicPrivileges = await client.query<{ count: string }>(
-    `SELECT count(*)::text AS count
-       FROM pg_proc routine
-       CROSS JOIN LATERAL aclexplode(
-         COALESCE(routine.proacl, acldefault('f'::"char", routine.proowner))
-       ) acl
-      WHERE routine.pronamespace = current_schema()::regnamespace
-        AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'`,
-  );
-  if (runtimePrivileges.rows[0]?.count !== "0" || publicPrivileges.rows[0]?.count !== "0") {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "Routine 执行权限偏离空白名单");
+  if (routines.rows[0]?.count !== "0") {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "业务 Schema 不得包含 Routine");
   }
 }
 
@@ -2934,7 +2966,7 @@ async function assertActiveRuntimeWhitelist(
   await assertDatabaseAndSchemaBoundary(client, context, true);
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
-  await assertRoutinePrivilegeBoundary(client, context);
+  await assertRoutinePrivilegeBoundary(client);
   await assertSkillPublisherBoundary(
     client,
     context,
@@ -3018,7 +3050,7 @@ async function assertRuntimeAccessRemoved(
   await assertDatabaseAndSchemaBoundary(client, context, false);
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
-  await assertRoutinePrivilegeBoundary(client, context);
+  await assertRoutinePrivilegeBoundary(client);
   await assertSkillPublisherBoundary(client, context, false);
   await assertWorkerCoordinatorBoundary(client, context, false);
   await assertTeamCoordinatorBoundary(client, context, false);
@@ -3131,6 +3163,15 @@ async function rebindRoleScopedPolicies(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const schema = quoteIdentifier(context.schema);
+  if (
+    (await hasApiKeyState(client, context.schema)) &&
+    (await hasApiKeyRevocationPolicyState(client, context.schema))
+  ) {
+    await client.query(
+      `ALTER POLICY api_key_integration_membership_revoke ON ${schema}.memberships TO ${quoteIdentifier(context.runtimeRole)};
+       ALTER POLICY api_key_revocation_guard ON ${schema}.api_keys TO ${quoteIdentifier(context.runtimeRole)}`,
+    );
+  }
   if (await hasManagedSandboxState(client, context.schema)) {
     for (const table of [...managedSandboxControlTables, "sandbox_configuration_bindings"]) {
       await client.query(
@@ -3248,6 +3289,33 @@ async function rebindRoleScopedPolicies(
         );
       }
     }
+  }
+  const pinnedModelPolicy = await client.query<{ present: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1
+      AND tablename='admin_control_config_revisions' AND policyname='runtime_agent_pinned_model_read') AS present`,
+    [context.schema],
+  );
+  if (pinnedModelPolicy.rows[0]?.present) {
+    await client.query(`ALTER POLICY runtime_agent_pinned_model_read
+      ON ${schema}.admin_control_config_revisions TO ${quoteIdentifier(context.runtimeRole)}`);
+  }
+  const agentControlPolicies = await client.query<{ tablename: string; policyname: string }>(
+    `SELECT tablename,policyname FROM pg_policies p WHERE schemaname=$1
+      AND (p.tablename,p.policyname) IN (
+        ('agent_definitions','agent_control_read'), ('agent_definitions','agent_definitions_admin_manage'),
+        ('agent_definition_tenants','agent_control_read'), ('agent_definition_tenants','agent_control_manage'),
+        ('agent_revisions','agent_control_read'), ('agent_revisions','agent_revisions_admin_manage'),
+        ('agent_revision_revocations','agent_control_read'), ('agent_revision_revocations','agent_revision_revocations_admin'),
+        ('agent_definition_commands','agent_commands_admin'), ('agent_definition_audits','agent_audits_admin')
+      )
+      AND EXISTS (SELECT 1 FROM pg_policies gate WHERE gate.schemaname=$1
+        AND gate.tablename='agent_definition_tenants' AND gate.policyname='agent_control_manage')`,
+    [context.schema],
+  );
+  for (const { tablename, policyname } of agentControlPolicies.rows) {
+    await client.query(
+      `ALTER POLICY ${quoteIdentifier(policyname)} ON ${schema}.${quoteIdentifier(tablename)} TO ${quoteIdentifier(context.adminControlRole)}`,
+    );
   }
   if (await hasExternalToolState(client, context.schema)) {
     for (const [table, policy, target] of externalToolPolicyBindings) {
@@ -3428,6 +3496,22 @@ export async function bootstrapRuntimeAccessOnClient(
   await client.query(
     `GRANT SELECT, INSERT ON TABLE ${schema}.app_users, ${schema}.tenants, ${schema}.memberships TO ${role}`,
   );
+  await client.query(
+    `REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA ${schema}
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+  );
+  if (await hasApiKeyState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.api_keys TO ${role};
+       GRANT UPDATE(last_used_at) ON TABLE ${schema}.api_keys TO ${role}`,
+    );
+    if (await hasApiKeyRevocationPolicyState(client, context.schema)) {
+      await client.query(
+        `GRANT UPDATE(revoked_at) ON TABLE ${schema}.api_keys TO ${role};
+         GRANT UPDATE(status) ON TABLE ${schema}.memberships TO ${role}`,
+      );
+    }
+  }
   if (await hasMembershipLockMarker(client)) {
     await client.query(`GRANT UPDATE(lock_marker) ON TABLE ${schema}.memberships TO ${role}`);
   }
@@ -3632,6 +3716,12 @@ export async function bootstrapRuntimeAccessOnClient(
         `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
       );
     }
+  }
+  if (await hasRunAgentSnapshotState(client, context.schema)) {
+    await client.query(
+      `ALTER POLICY agent_revision_revocations_snapshot_read ON ${schema}.agent_revision_revocations TO ${role};
+       GRANT SELECT,INSERT ON TABLE ${schema}.run_agent_snapshots TO ${role}`,
+    );
   }
   if (await hasAgentDefinitionState(client, context.schema)) {
     await client.query(

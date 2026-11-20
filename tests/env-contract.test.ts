@@ -10,6 +10,17 @@ import {
 function validExample(): string {
   return [...expectedEnvironmentKeys, ...optionalEnvironmentKeys]
     .map((key) => {
+      switch (key) {
+        case "OTEL_EXPORT_ENABLED":
+        case "OTEL_EXPORT_CONTENT_ENABLED":
+          return `${key}=false`;
+        case "OTEL_EXPORT_ENDPOINT":
+          return `${key}=https://otel.example.invalid`;
+        case "OTEL_EXPORT_HEADERS":
+          return `${key}=`;
+        case "OTEL_EXPORT_SAMPLE_RATE":
+          return `${key}=1`;
+      }
       if (
         key === "DATABASE_URL" ||
         key === "DATABASE_WORKER_COORDINATOR_URL" ||
@@ -52,6 +63,27 @@ function validExample(): string {
 }
 
 describe("环境变量示例契约", () => {
+  it("OTLP 样例拒绝带凭据的端点和请求头且不回显配置值", () => {
+    const issues = validateEnvironmentExample(
+      validExample()
+        .replace(
+          /^OTEL_EXPORT_ENDPOINT=.*$/mu,
+          "OTEL_EXPORT_ENDPOINT=https://otel.example.invalid/?auth=secret-placeholder",
+        )
+        .replace(
+          /^OTEL_EXPORT_HEADERS=.*$/mu,
+          'OTEL_EXPORT_HEADERS={"authorization":"secret-placeholder"}',
+        ),
+    );
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("OTEL_EXPORT_ENDPOINT"),
+        expect.stringContaining("OTEL_EXPORT_HEADERS"),
+      ]),
+    );
+    expect(issues.join(" ")).not.toContain("secret-placeholder");
+  });
+
   it("基础部署样例不要求供应商与后台运行参数，可选回退仍登记", () => {
     const source = validExample()
       .split("\n")

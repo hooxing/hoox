@@ -26,6 +26,7 @@ import {
   workspaceRevisionId,
 } from "@hoox/domain";
 import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@hoox/pi-adapter";
+import type { RunAgentSnapshot, RunAgentStopCode } from "@hoox/run-contracts";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import type { RunSkillSnapshot } from "@hoox/skill";
 import { createWorkspaceManifest } from "@hoox/workspace";
@@ -75,6 +76,7 @@ import type {
   WorkspaceRevisionCandidate,
   WorkspaceRevisionVerifierPort,
 } from "../ports.js";
+import { fakeAgentSnapshot } from "./agent-snapshot.js";
 
 interface FakeRecord {
   readonly scope: ExecutionScope;
@@ -87,6 +89,7 @@ interface FakeRecord {
   readonly attachments: readonly UserInputAttachmentReference[];
   answer?: string;
   rolloutProjection: ControlledRolloutProjection;
+  readonly agent?: RunAgentSnapshot | RunAgentStopCode;
   readonly skills?: RunSkillSnapshot;
   projectionVersion: number;
   contextNextSequence: number;
@@ -129,6 +132,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   unavailableMutationAttempts = 0;
   fenceLostMutationKeyIncludes: string | undefined;
   idempotencyConflictKeyIncludes: string | undefined;
+  agentRevisionRevoked = false;
   forceInspectUnavailable = false;
   rejectInspectNext = false;
   forceFenceLost = false;
@@ -183,6 +187,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       attachments: seed.attachments ?? [],
       ...(seed.answer === undefined ? {} : { answer: seed.answer }),
       rolloutProjection: seed.rolloutProjection,
+      agent: seed.agent ?? fakeAgentSnapshot(),
       ...(seed.skills === undefined ? {} : { skills: seed.skills }),
       projectionVersion: 0,
       contextNextSequence: 1,
@@ -247,6 +252,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     return {
       outcome: "claimed",
       snapshot: {
+        agent: record.agent ?? "AGENT_SNAPSHOT_INVALID",
         run: record.run,
         tenantKind: record.tenantKind,
         memorySubjectUserId: record.memorySubjectUserId,
@@ -335,6 +341,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       databaseNow: now,
       run: record.run,
       workspace: record.workspace,
+      ...(this.agentRevisionRevoked ? { agentRevisionRevoked: true } : {}),
     };
   }
 
@@ -707,6 +714,8 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     }
     const contextEntryCount =
       command.threadSteer === undefined ? (command.threadContextAppend?.entries.length ?? 0) : 1;
+    const killSandbox =
+      typeof record.agent === "object" && record.agent.content.sandboxIdleAction === "kill";
     const receipt: RuntimeMutationReceiptV1 = {
       schemaVersion: 1,
       idempotencyKey: command.idempotencyKey,
@@ -774,14 +783,14 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
         ? {}
         : {
             threadSandbox:
-              this.threadSandboxHandoffRunId === undefined
+              this.threadSandboxHandoffRunId === undefined || killSandbox
                 ? ({
                     schemaVersion: 1,
                     outcome: "effect_pending",
                     sessionId: command.threadSandboxTerminal.sessionId,
                     generation: command.threadSandboxTerminal.generation,
                     effectId: `${attempt.attemptId}/sandbox/terminal-pause`,
-                    effectKind: "pause",
+                    effectKind: killSandbox ? "terminate" : "pause",
                   } as const)
                 : ({
                     schemaVersion: 1,
@@ -1070,6 +1079,9 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
   readonly resourceFilesystemRequirements: boolean[] = [];
   attestCount = 0;
   terminalEffectCount = 0;
+  readonly terminalReceipts: Array<
+    Parameters<ThreadSandboxSessionLifecyclePort["completeTerminalEffect"]>[0]["receipt"]
+  > = [];
   terminateCount = 0;
   nextAcquire: ThreadSandboxAcquireResult | undefined;
   nextRenew: "renewed" | "lease_lost" | "unavailable" | undefined;
@@ -1132,8 +1144,11 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
     return result;
   }
 
-  async completeTerminalEffect(): Promise<"settled" | "unknown" | "not_owner"> {
+  async completeTerminalEffect(
+    input: Parameters<ThreadSandboxSessionLifecyclePort["completeTerminalEffect"]>[0],
+  ): Promise<"settled" | "unknown" | "not_owner"> {
     this.terminalEffectCount += 1;
+    this.terminalReceipts.push(input.receipt);
     const result = this.nextTerminalEffect ?? "settled";
     this.nextTerminalEffect = undefined;
     return result;
@@ -1264,6 +1279,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
   readonly todoWriters: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["writeTodo"]> = [];
   readonly agentControls: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["agentControl"]> =
     [];
+  readonly agentSnapshots: RunAgentSnapshot[] = [];
   readonly agentIdentities: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["agent"]> = [];
   readonly initialInputTexts: Array<
     Parameters<AgentSessionFactoryPort["create"]>[0]["initialInputText"]
@@ -1291,6 +1307,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     this.todoWriters.push(input.writeTodo);
     this.agentControls.push(input.agentControl);
     this.agentIdentities.push(input.agent);
+    this.agentSnapshots.push(input.agentSnapshot);
     this.initialInputTexts.push(input.initialInputText);
     this.personalizationSnapshots.push(input.personalizationSnapshot);
     let safePointChain = Promise.resolve();
@@ -1448,6 +1465,7 @@ export interface FakeSeed {
   readonly attachments?: readonly UserInputAttachmentReference[];
   readonly answer?: string;
   readonly rolloutProjection: ControlledRolloutProjection;
+  readonly agent?: RunAgentSnapshot | RunAgentStopCode;
   readonly skills?: RunSkillSnapshot;
 }
 

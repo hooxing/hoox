@@ -12,8 +12,10 @@
     "start:production": "node dist/production-main.js"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.82.1",
     "@hoox/admin-control": "workspace:*",
     "@hoox/artifact": "workspace:*",
+    "@hoox/automation": "workspace:*",
     "@hoox/context-policy": "workspace:*",
     "@hoox/domain": "workspace:*",
     "@hoox/memory": "workspace:*",
@@ -25,11 +27,14 @@
     "@hoox/run-contracts": "workspace:*",
     "@hoox/sandbox": "workspace:*",
     "@hoox/skill": "workspace:*",
+    "@hoox/thread-title": "workspace:*",
     "@hoox/tool-router": "workspace:*",
     "@hoox/trajectory": "workspace:*",
     "@hoox/workspace": "workspace:*",
-    "@earendil-works/pi-ai": "0.82.1",
-    "@hoox/automation": "workspace:*",
-    "@hoox/thread-title": "workspace:*"
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/otlp-transformer": "0.301.2",
+    "@opentelemetry/resources": "3.1.1",
+    "@opentelemetry/sdk-metrics": "3.1.1",
+    "@opentelemetry/sdk-trace": "3.1.1"
   }
 }

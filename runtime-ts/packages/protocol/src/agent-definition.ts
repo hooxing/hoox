@@ -2,8 +2,9 @@ import { type Static, Type } from "@sinclair/typebox";
 import { IdSchema, IsoTimestampSchema, Sha256DigestSchema } from "./schemas.js";
 
 const strict = { additionalProperties: false } as const;
+export const AGENT_OPERATOR_INSTRUCTIONS_MAX_BYTES = 32768;
 const boundedText = (maxLength: number) => Type.String({ minLength: 1, maxLength });
-const AgentAvailabilitySchema = Type.Union([
+export const AgentAvailabilitySchema = Type.Union([
   Type.Object({ mode: Type.Literal("all_tenants") }, strict),
   Type.Object(
     {
@@ -13,12 +14,19 @@ const AgentAvailabilitySchema = Type.Union([
     strict,
   ),
 ]);
+export const AgentPinnedModelReferenceSchema = Type.Object(
+  {
+    mode: Type.Literal("pinned"),
+    providerKey: IdSchema,
+    providerRevision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    modelId: boundedText(200),
+  },
+  strict,
+);
+export type AgentPinnedModelReferenceDto = Static<typeof AgentPinnedModelReferenceSchema>;
 const AgentModelReferenceSchema = Type.Union([
   Type.Object({ mode: Type.Literal("platform_default") }, strict),
-  Type.Object(
-    { mode: Type.Literal("pinned"), providerRevisionId: IdSchema, modelId: boundedText(200) },
-    strict,
-  ),
+  AgentPinnedModelReferenceSchema,
 ]);
 export const AgentRevisionContentSchema = Type.Object(
   {
@@ -27,7 +35,7 @@ export const AgentRevisionContentSchema = Type.Object(
     avatarRef: Type.Optional(boundedText(512)),
     welcomeMessage: Type.Optional(Type.String({ maxLength: 2048 })),
     suggestedQuestions: Type.Array(boundedText(500), { maxItems: 12 }),
-    operatorInstructions: boundedText(32768),
+    operatorInstructions: boundedText(AGENT_OPERATOR_INSTRUCTIONS_MAX_BYTES),
     replyLanguage: boundedText(100),
     model: AgentModelReferenceSchema,
     tools: Type.Union([
@@ -69,7 +77,10 @@ export const AgentRevisionContentSchema = Type.Object(
     includeTenantSkills: Type.Boolean(),
     sandboxTemplateId: Type.Optional(IdSchema),
     sandboxIdleAction: Type.Union([Type.Literal("pause"), Type.Literal("kill")]),
-    longTermMemoryEnabled: Type.Boolean(),
+    memory: Type.Union([
+      Type.Object({ mode: Type.Literal("platform_default") }, strict),
+      Type.Object({ mode: Type.Literal("configured"), longTermEnabled: Type.Boolean() }, strict),
+    ]),
   },
   { ...strict, $id: "v1.AgentRevisionContent" },
 );

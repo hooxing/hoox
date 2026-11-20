@@ -132,6 +132,8 @@ describe("MCP Streamable HTTP transport", () => {
       arguments: {},
       credential: "secret-token",
       idempotencyKey: "call-1",
+      callContext: { tenantId: "tenant-test", threadId: "thread-test", runId: "run-test" },
+      deadlineAt: Date.now() + 1000,
       timeoutMs: 1000,
       maxResponseBytes: 1024,
       redirect: "error",
@@ -171,12 +173,16 @@ describe("MCP Streamable HTTP transport", () => {
         arguments: {},
         credential: "secret-token",
         idempotencyKey: "call-1",
+        callContext: { tenantId: "tenant-test", threadId: "thread-test", runId: "run-test" },
+        deadlineAt: Date.now() + 1000,
         timeoutMs: 1000,
         maxResponseBytes: 1024,
         redirect: "error",
       })
       .catch((caught: unknown) => caught);
-    expect((error as Error).message).toBe("MCP_TOOL_ERROR");
+    expect(error).toBeInstanceOf(ExternalToolTransportError);
+    expect((error as ExternalToolTransportError).disposition).toBe("responded_failure");
+    expect((error as ExternalToolTransportError).safeCode).toBe("EXTERNAL_TOOL_REJECTED");
     expect((error as Error).message).not.toContain("secret-token");
   });
 
@@ -293,12 +299,17 @@ describe("MCP Streamable HTTP transport", () => {
         target: t,
         arguments: {},
         idempotencyKey: "call",
+        callContext: { tenantId: "tenant-test", threadId: "thread-test", runId: "run-test" },
+        deadlineAt: Date.now() + 1000,
         timeoutMs: 1000,
         maxResponseBytes,
         redirect: "error",
         credential: "secret-token",
       });
-    await expect(call()).rejects.toThrow("MCP_PROTOCOL_ERROR");
+    await expect(call()).rejects.toMatchObject({
+      disposition: "responded_failure",
+      safeCode: "EXTERNAL_TOOL_REJECTED",
+    });
     const redirectServer = await fakeMcp(() => ({
       status: 302,
       headers: { location: "http://example.invalid" },
@@ -310,11 +321,16 @@ describe("MCP Streamable HTTP transport", () => {
         target: redirectServer.target,
         arguments: {},
         idempotencyKey: "call",
+        callContext: { tenantId: "tenant-test", threadId: "thread-test", runId: "run-test" },
+        deadlineAt: Date.now() + 1000,
         timeoutMs: 1000,
         maxResponseBytes: 1024,
         redirect: "error",
       }),
-    ).rejects.toThrow("MCP_PROTOCOL_ERROR");
+    ).rejects.toMatchObject({
+      disposition: "responded_failure",
+      safeCode: "EXTERNAL_TOOL_REJECTED",
+    });
     const oversized = await fakeMcp(() => ({ raw: "x".repeat(200) }));
     await expect(
       new McpExternalToolTransport(oversized.exchange).invoke({
@@ -322,11 +338,94 @@ describe("MCP Streamable HTTP transport", () => {
         target: oversized.target,
         arguments: {},
         idempotencyKey: "call",
+        callContext: { tenantId: "tenant-test", threadId: "thread-test", runId: "run-test" },
+        deadlineAt: Date.now() + 1000,
         timeoutMs: 1000,
         maxResponseBytes: 10,
         redirect: "error",
       }),
-    ).rejects.toThrow("MCP_RESPONSE_LIMIT");
+    ).rejects.toThrow("EXTERNAL_TOOL_RESULT_UNKNOWN");
+  });
+
+  it("向 Transport 传递可信上下文但不序列化，并按响应可知性分类", async () => {
+    const target = {
+      url: new URL("https://example.invalid/mcp"),
+      hostname: "example.invalid",
+      servername: "example.invalid",
+      hostHeader: "example.invalid",
+      address: "8.8.8.8",
+      addresses: ["8.8.8.8"],
+    } as ValidatedExternalTarget;
+    const context = { tenantId: "tenant-secret", threadId: "thread-secret", runId: "run-secret" };
+    const deadlineAt = Date.now() + 10_000;
+    let observed: { deadlineAt?: number; callContext?: unknown; body?: string } = {};
+    const transport = new McpExternalToolTransport(async (input) => {
+      observed = {
+        deadlineAt: input.deadlineAt,
+        callContext: input.callContext,
+        body: new TextDecoder().decode(input.body),
+      };
+      return {
+        status: 200,
+        contentType: "application/json",
+        body: new TextEncoder().encode("not-json"),
+      };
+    });
+    const tool = {
+      source: "mcp" as const,
+      remoteToolName: "remote",
+      toolVersionId: "v1",
+      endpoint: target.url.href,
+      modelToolName: "mcp__srv__model-name",
+      description: "",
+      inputSchema: {},
+      inputSchemaDigest: "",
+      timeoutMs: 1000,
+      maxResponseBytes: 1024,
+      sideEffect: "read_only" as const,
+      idempotent: false,
+      credentialRef: null,
+    };
+    const failure = await transport
+      .invoke({
+        tool,
+        target,
+        arguments: {},
+        idempotencyKey: "call",
+        callContext: context,
+        deadlineAt,
+        timeoutMs: 1000,
+        maxResponseBytes: 1024,
+        redirect: "error",
+      })
+      .catch((error: unknown) => error);
+    expect(observed.deadlineAt).toBe(deadlineAt);
+    expect(observed.callContext).toBe(context);
+    expect(observed.body).not.toContain("tenant-secret");
+    expect(observed.body).not.toContain("thread-secret");
+    expect(observed.body).not.toContain("run-secret");
+    expect(observed.body).toContain('"name":"remote"');
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("EXTERNAL_TOOL_RESULT_UNKNOWN");
+
+    const serverFailure = new McpExternalToolTransport(async () => ({
+      status: 503,
+      contentType: "application/json",
+      body: new Uint8Array(),
+    }));
+    await expect(
+      serverFailure.invoke({
+        tool,
+        target,
+        arguments: {},
+        idempotencyKey: "call",
+        callContext: context,
+        deadlineAt,
+        timeoutMs: 1000,
+        maxResponseBytes: 1024,
+        redirect: "error",
+      }),
+    ).rejects.toThrow("EXTERNAL_TOOL_RESULT_UNKNOWN");
   });
 
   it("区分写出前超时与写出后超时，错误不包含凭据", async () => {
@@ -354,7 +453,7 @@ describe("MCP Streamable HTTP transport", () => {
       credentialRef: null,
     };
     const before = new McpExternalToolTransport(async () => {
-      throw new ExternalToolTransportError("preflight", "EXTERNAL_TOOL_UNAVAILABLE");
+      throw new ExternalToolTransportError("not_sent", "EXTERNAL_TOOL_UNAVAILABLE");
     });
     await expect(
       before.invoke({
@@ -362,6 +461,8 @@ describe("MCP Streamable HTTP transport", () => {
         target,
         arguments: {},
         idempotencyKey: "1",
+        callContext: { tenantId: "tenant-test", threadId: "thread-test", runId: "run-test" },
+        deadlineAt: Date.now() + 1000,
         timeoutMs: 10,
         maxResponseBytes: 10,
         redirect: "error",
@@ -376,6 +477,8 @@ describe("MCP Streamable HTTP transport", () => {
         target: delayed.target,
         arguments: {},
         idempotencyKey: "1",
+        callContext: { tenantId: "tenant-test", threadId: "thread-test", runId: "run-test" },
+        deadlineAt: Date.now() + 1000,
         timeoutMs: 5,
         maxResponseBytes: 1024,
         redirect: "error",
@@ -383,7 +486,7 @@ describe("MCP Streamable HTTP transport", () => {
       })
       .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toBe("MCP_RESULT_UNKNOWN");
+    expect((failure as Error).message).toBe("EXTERNAL_TOOL_RESULT_UNKNOWN");
     expect((failure as Error).message).not.toContain("never-log");
   });
 });

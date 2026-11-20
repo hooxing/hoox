@@ -24,6 +24,11 @@ const make = (name: string): ExternalToolVersion => ({
 describe("外部工具 Pi 工厂", () => {
   it("按快照名称排序，不接入 Session", () => {
     const create = createExternalToolFactory({
+      getCallContext: () => ({
+        tenantId: "tenant-fake",
+        threadId: "thread-fake",
+        runId: "run-fake",
+      }),
       persistStarted: async () => {},
       authorizeAndConsume: async () => {},
       transport: { invoke: async () => ({ body: new Uint8Array(), contentType: "text/plain" }) },

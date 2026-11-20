@@ -9,6 +9,27 @@ import {
 const example = readFileSync(new URL("../deploy/production.env.example", import.meta.url), "utf8");
 
 describe("production 部署配置契约", () => {
+  it("OTLP 样例拒绝带凭据的端点和请求头且不回显配置值", () => {
+    const issues = validateProductionEnvironmentExample(
+      example
+        .replace(
+          /^OTEL_EXPORT_ENDPOINT=.*$/mu,
+          "OTEL_EXPORT_ENDPOINT=https://otel.example.invalid/?auth=secret-placeholder",
+        )
+        .replace(
+          /^OTEL_EXPORT_HEADERS=.*$/mu,
+          'OTEL_EXPORT_HEADERS={"authorization":"secret-placeholder"}',
+        ),
+    );
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("OTEL_EXPORT_ENDPOINT"),
+        expect.stringContaining("OTEL_EXPORT_HEADERS"),
+      ]),
+    );
+    expect(issues.join(" ")).not.toContain("secret-placeholder");
+  });
+
   it("基础部署样例不要求供应商与后台运行参数，可选回退仍登记", () => {
     const source = example
       .split("\n")

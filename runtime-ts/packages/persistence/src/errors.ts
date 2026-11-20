@@ -5,17 +5,11 @@ export type PersistenceErrorCode =
   | "UNAVAILABLE"
   | "UNEXPECTED";
 
-export interface PostgreSqlDiagnosticCause {
-  readonly kind: "postgresql";
-  readonly code: string;
-  readonly message: string;
-}
-
 export class PersistenceError extends Error {
   readonly code: PersistenceErrorCode;
 
-  constructor(code: PersistenceErrorCode, message: string, cause?: unknown) {
-    super(message, cause === undefined ? undefined : { cause });
+  constructor(code: PersistenceErrorCode, message: string) {
+    super(message);
     this.name = "PersistenceError";
     this.code = code;
   }
@@ -31,47 +25,12 @@ export abstract class PersistenceUnavailableCause extends Error {}
 
 interface PgLikeError {
   readonly code?: unknown;
-  readonly message?: unknown;
 }
 
 function pgCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const code = (error as PgLikeError).code;
   return typeof code === "string" ? code : undefined;
-}
-
-function postgresDiagnostic(error: unknown): PostgreSqlDiagnosticCause | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
-  const candidate = error as PgLikeError;
-  if (
-    typeof candidate.code !== "string" ||
-    !/^[0-9A-Z]{5}$/u.test(candidate.code) ||
-    typeof candidate.message !== "string"
-  ) {
-    return undefined;
-  }
-  // 只保留 SQLSTATE 与 message；detail、query、连接参数可能包含业务数据或凭据。
-  const message = candidate.message
-    .replace(/postgres(?:ql)?:\/\/[^\s'"<>]+/giu, "[数据库连接地址已隐藏]")
-    .replace(/password\s*=\s*[^\s,;]+/giu, "password=[已隐藏]");
-  return Object.freeze({ kind: "postgresql", code: candidate.code, message });
-}
-
-export function getPostgreSqlDiagnosticCause(
-  error: unknown,
-): PostgreSqlDiagnosticCause | undefined {
-  if (!(error instanceof PersistenceError)) return undefined;
-  const cause = error.cause;
-  if (
-    typeof cause !== "object" ||
-    cause === null ||
-    (cause as PostgreSqlDiagnosticCause).kind !== "postgresql" ||
-    typeof (cause as PostgreSqlDiagnosticCause).code !== "string" ||
-    typeof (cause as PostgreSqlDiagnosticCause).message !== "string"
-  ) {
-    return undefined;
-  }
-  return cause as PostgreSqlDiagnosticCause;
 }
 
 const unavailableSystemCodes = new Set([
@@ -90,23 +49,21 @@ const unavailableSystemCodes = new Set([
 export function mapPersistenceError(error: unknown, operation: string): PersistenceError {
   if (error instanceof PersistenceError) return error;
   if (error instanceof PersistenceUnavailableCause) {
-    const diagnostic = postgresDiagnostic(error.cause);
-    return new PersistenceError("UNAVAILABLE", `${operation}暂时不可用`, diagnostic);
+    return new PersistenceError("UNAVAILABLE", `${operation}暂时不可用`);
   }
   const code = pgCode(error);
-  const diagnostic = postgresDiagnostic(error);
   if (code === "23505") {
-    return new PersistenceError("CONFLICT", `${operation}发生并发冲突`, diagnostic);
+    return new PersistenceError("CONFLICT", `${operation}发生并发冲突`);
   }
   if (code?.startsWith("23") === true) {
-    return new PersistenceError("CONSTRAINT_VIOLATION", `${operation}违反数据约束`, diagnostic);
+    return new PersistenceError("CONSTRAINT_VIOLATION", `${operation}违反数据约束`);
   }
   if (
     unavailableSystemCodes.has(code ?? "") ||
     code?.startsWith("08") === true ||
     code === "57P01"
   ) {
-    return new PersistenceError("UNAVAILABLE", `${operation}暂时不可用`, diagnostic);
+    return new PersistenceError("UNAVAILABLE", `${operation}暂时不可用`);
   }
-  return new PersistenceError("UNEXPECTED", `${operation}失败`, diagnostic);
+  return new PersistenceError("UNEXPECTED", `${operation}失败`);
 }

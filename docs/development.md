@@ -4,11 +4,11 @@
 
 ## 前置环境
 
-- Windows PowerShell 5.1 或 PowerShell 7；一键启动脚本当前依赖 Windows 进程与端口能力。
+- macOS、Linux 或 Windows；统一使用 Node.js 启动器，Windows 可用 PowerShell 兼容入口。
 - Node.js `24.18.0`。
 - Corepack 与 pnpm `10.15.1`。
-- Docker Compose v2，用于 MinIO。
-- 专用 PostgreSQL 17 数据库。
+- Docker Compose v2，用于本地 PostgreSQL 与 MinIO。
+- PostgreSQL 17：可使用本地 Compose，或连接外部专用 PostgreSQL。
 - 执行任务前需要可用 Sandbox Provider：CubeSandbox、E2B 或腾讯云 AGS，可在启动后的后台接入。
 - 可选的线上 OpenAI-compatible 模型；可在首次运行页面之后配置，不要求本地模型。
 
@@ -16,7 +16,7 @@
 
 ## 1. 获取依赖
 
-```powershell
+```sh
 corepack enable
 corepack pnpm install --frozen-lockfile
 ```
@@ -25,11 +25,11 @@ corepack pnpm install --frozen-lockfile
 
 ## 2. 创建本地配置
 
-```powershell
-Copy-Item .env.example .env
+```sh
+cp .env.example .env
 ```
 
-编辑 `.env`，至少准备以下类别：
+Windows PowerShell 可用 `Copy-Item .env.example .env`。编辑 `.env`，至少准备以下类别：
 
 - PostgreSQL Runtime、Migrator、Worker Coordinator、Team Coordinator、Admin Control 和 Skill Publisher 连接；
 - MinIO/S3；
@@ -51,7 +51,7 @@ Copy-Item .env.example .env
 
 完成一次性数据库与 Schema 准备后，日常拉取包含新增应用角色的代码时运行：
 
-```powershell
+```sh
 pnpm db:setup
 ```
 
@@ -69,14 +69,14 @@ pnpm db:setup
 
 精确权限、不变量和迁移器校验见[维护者开发边界](maintainers/runtime-development-boundaries.md#postgresql-角色-bootstrap)。数据库角色属于整个 PostgreSQL 集群，同一集群的开发、预览和生产数据库应使用不同角色集合。
 
-## 3. 启动本地对象存储
+## 3. 启动本地 PostgreSQL 与对象存储
 
-```powershell
-docker compose -f docker-compose.dev.yml --env-file .env up -d
-docker compose -f docker-compose.dev.yml --env-file .env ps
+```sh
+docker compose --profile local-postgres -f docker-compose.dev.yml --env-file .env up -d
+docker compose --profile local-postgres -f docker-compose.dev.yml --env-file .env ps
 ```
 
-Compose 只管理 MinIO，不启动 PostgreSQL、CubeSandbox、E2B 或模型服务。
+默认 Compose 命令只启动 MinIO；`local-postgres` profile 显式启用本地 PostgreSQL，宿主端口只绑定 `127.0.0.1`。启用 profile 前必须在 `.env` 设置非空 `POSTGRES_BOOTSTRAP_PASSWORD`，并与 `DATABASE_BOOTSTRAP_URL` 密码一致；若未设置，PostgreSQL 容器会因官方镜像拒绝空密码而退出，不影响 MinIO。使用外部专用 PostgreSQL 时按其连接信息填写 `.env`，保持不带 profile 的原命令即可。Compose 不启动 CubeSandbox、E2B 或模型服务。角色初始化与迁移见第 5 步。
 
 默认入口：
 
@@ -87,9 +87,9 @@ Compose 只管理 MinIO，不启动 PostgreSQL、CubeSandbox、E2B 或模型服�
 
 ## 4. 检查外部服务
 
-将 `.env` 加载到当前 PowerShell，供显式冒烟和集成测试使用：
+需要在 PowerShell 中运行显式冒烟或集成测试时，可将 `.env` 加载到当前会话：
 
-```powershell
+```sh
 Get-Content .env | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object {
   $name, $value = $_.Split('=', 2)
   Set-Item -Path "Env:$name" -Value $value
@@ -98,7 +98,7 @@ Get-Content .env | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEa
 
 检查基础端点：
 
-```powershell
+```sh
 $database = [Uri]$env:DATABASE_URL
 Test-NetConnection -ComputerName $database.Host -Port $database.Port
 Invoke-WebRequest -UseBasicParsing "$($env:S3_ENDPOINT)/minio/health/live"
@@ -111,15 +111,15 @@ if ($env:CUBESANDBOX_API_URL) {
 
 ## 5. 执行数据库迁移
 
-```powershell
-corepack pnpm db:migrate:up
+```sh
+corepack pnpm db:setup
 ```
 
 默认关闭固定开发身份，首次管理员在启动后的页面显式创建。需要隔离测试身份时，才启用 `DEV_AUTH_ENABLED=true` 并执行 `corepack pnpm dev:identity:provision`；该命令幂等，已存在数据必须与配置的 User、个人 Tenant 和 owner Membership 完全匹配，否则失败关闭。
 
 ## 6. 执行 Worker 预检
 
-```powershell
+```sh
 corepack pnpm dev:worker:check
 ```
 
@@ -129,8 +129,8 @@ corepack pnpm dev:worker:check
 
 推荐启动包含管理面的完整拓扑：
 
-```powershell
-.\scripts\start-development.ps1
+```sh
+corepack pnpm dev:up
 ```
 
 默认拓扑包含 Admin API、Admin Web，以及：
@@ -142,26 +142,26 @@ corepack pnpm dev:worker:check
 
 Scheduler 是完整开发拓扑的必需进程，负责 Sandbox cleanup、生命周期 effect、定时任务和可选标题生成。只启动 API、Web 与 Worker 会留下未消费的后台工作。
 
-首次启动后访问 `http://127.0.0.1:4173/admin/`，创建管理员邮箱和密码，再在模型页面填写线上模型地址、API Key 和模型，选择“保存并使用”。Worker 无模型时保持运行且不领取任务，配置后自动恢复；无需重新启动。账号和模型保存在数据库中，后续启动显示登录页面。不要删除安装状态来重跑向导。
+首次启动后访问 `http://127.0.0.1:4173/admin/`，创建管理员邮箱和密码，再在后台配置 E2B 沙箱和任意 OpenAI 兼容模型，选择“保存并使用”。E2B 与模型均为后台配置，密钥无需写入 `.env`；CubeSandbox 和腾讯云 AGS 是可选 Provider。Worker 无模型时保持运行且不领取任务，配置后自动恢复；无需重新启动。账号和模型保存在数据库中，后续启动显示登录页面。不要删除安装状态来重跑向导。
 
 生产或非直接回环安装必须设置至少 32 字节的 `INSTALLATION_SETUP_TOKEN`，并在页面输入令牌；生产基础秘密与反向代理仍须按部署规范准备。
 
-`-IncludeSkill` 保留为兼容参数；已经完成配置且不需要管理面时可使用：
+已经完成配置且不需要管理面时可使用：
 
-```powershell
-.\scripts\start-development.ps1 -CoreOnly
+```sh
+corepack pnpm dev:up -- --core-only
 ```
 
-macOS/Linux 可分别运行 `pnpm dev:api`、`pnpm dev:admin-control:api`、`pnpm dev:scheduler`、`pnpm dev:worker`、`pnpm dev:web` 和 `pnpm dev:admin:web`；统一从 `http://127.0.0.1:4173/admin/` 进入首次配置。
+Windows PowerShell 也可运行 `./scripts/start-development.ps1`。启动器支持 `--skip-build`、`--core-only`、`--include-skill`、`--no-browser`；只复用健康服务并启动缺失进程，不会启动或修改数据库、对象存储、Sandbox、模型或代理。
 
 其他参数：
 
-```powershell
-.\scripts\start-development.ps1 -SkipBuild
-.\scripts\start-development.ps1 -NoBrowser
+```sh
+corepack pnpm dev:up -- --skip-build
+corepack pnpm dev:up -- --no-browser
 ```
 
-脚本会复用已经健康的服务，只为缺失应用打开新的 PowerShell 窗口；不会启动或修改外部 PostgreSQL、Sandbox、模型和代理。
+日志和进程状态保存在被 Git 忽略的 `.tmp/development-runtime/`。
 
 ## 本地入口
 
@@ -181,7 +181,7 @@ macOS/Linux 可分别运行 `pnpm dev:api`、`pnpm dev:admin-control:api`、`pnp
 
 需要独立观察日志时，在不同终端运行：
 
-```powershell
+```sh
 corepack pnpm dev:api
 corepack pnpm dev:worker
 corepack pnpm dev:scheduler
@@ -196,14 +196,14 @@ corepack pnpm dev:admin:web
 
 文档改动至少执行：
 
-```powershell
+```sh
 corepack pnpm format:check
 corepack pnpm lint
 ```
 
 代码或行为改动按范围增加类型检查和测试。跨工作区依赖、构建、发布或影响不明确时执行：
 
-```powershell
+```sh
 corepack pnpm check:clean-workspace
 ```
 
@@ -211,7 +211,7 @@ corepack pnpm check:clean-workspace
 
 ## 停止本地 MinIO
 
-```powershell
+```sh
 docker compose -f docker-compose.dev.yml --env-file .env down
 ```
 

@@ -9,7 +9,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 | `.env.example` | development 基础部署配置 | 否，只能复制为本机 `.env` 后填写 |
 | `.env` | 开发者本机真实配置 | 不得提交 |
 | `deploy/production.env.example` | API、Scheduler、Worker 和统一 Admin API 的 production 基础字段合集 | 否，必须由部署平台按服务拆分注入 |
-| `docker-compose.dev.yml` | 只管理 development MinIO | 否，不包含完整 Runtime |
+| `docker-compose.dev.yml` | 管理 development PostgreSQL 与 MinIO | 否，不包含完整 Runtime |
 
 配置校验脚本分别读取 `scripts/env-contract.mjs` 和 `scripts/production-env-contract.mjs`。新增、删除或重命名变量时，示例和契约必须同步更新。
 
@@ -18,6 +18,9 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 `.env.example` 包含基础部署字段；每个进程只读取其声明的变量。模型、沙箱、记忆和运行策略优先在后台配置，可选环境回退由契约脚本单独登记。
 
 ### PostgreSQL
+
+- Compose 的 PostgreSQL 17 位于 `local-postgres` profile，命名卷持久化数据，宿主端口仅绑定 `127.0.0.1`。只有明确启用该 profile 时才需设置非空 `POSTGRES_BOOTSTRAP_PASSWORD`，并使它与 `DATABASE_BOOTSTRAP_URL` 密码一致；该变量在环境契约中为可选，以兼容已有外部数据库 `.env`。
+- 可以改用外部专用 PostgreSQL；此时应将所有数据库 URL 指向该实例，并使用不带 `--profile local-postgres` 的 Compose 命令，仅启动 MinIO。
 
 - Runtime、迁移器、Worker Coordinator、Team Coordinator、Admin Control 和 Skill Publisher 使用不同连接或角色。
 - `DATABASE_URL` 面向本机 Runtime 进程；Docker 内访问使用单独 endpoint。

@@ -1,82 +1,55 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import { parseArgs, parseDotEnv } from "../scripts/start-development.mjs";
+const launcherUrl = new URL("../scripts/start-development.mjs", import.meta.url);
 
 const scriptUrl = new URL("../scripts/start-development.ps1", import.meta.url);
 
-describe("Windows development 一键启动脚本", () => {
-  it("使用 Windows PowerShell 5.1 可识别的 UTF-8 BOM", async () => {
-    const scriptBytes = await readFile(scriptUrl);
-
-    expect([...scriptBytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+describe("跨平台开发环境启动入口", () => {
+  it("解析跨平台启动参数并拒绝冲突选项", () => {
+    expect(parseArgs(["--skip-build", "--no-browser"])).toMatchObject({
+      skipBuild: true,
+      noBrowser: true,
+    });
+    expect(() => parseArgs(["--core-only", "--include-skill"])).toThrow("不能同时使用");
+    expect(() => parseArgs(["--unknown"])).toThrow("未知启动参数");
   });
 
-  it("只执行非首次启动动作并启动核心开发拓扑", async () => {
-    const script = await readFile(scriptUrl, "utf8");
+  it("读取简单 dotenv 值并保留等号", () => {
+    expect(parseDotEnv("# ignored\nA=one\nB='two=2'\nC=\"three\"")).toEqual({
+      A: "one",
+      B: "two=2",
+      C: "three",
+    });
+  });
 
-    expect(script).toContain("corepack pnpm build");
+  it("按顺序构建、预检并覆盖完整核心与默认管理拓扑", async () => {
+    const script = await readFile(launcherUrl, "utf8");
+    expect(script).toContain('"corepack", ["pnpm", "build"]');
     expect(script).toContain("development-preflight-main.js");
-    expect(script).toContain("runtime-ts\\apps\\api\\dist\\development-main.js");
-    expect(script).toContain("runtime-ts\\apps\\agent-worker\\dist\\development-main.js");
-    expect(script).toContain("runtime-ts\\apps\\scheduler\\dist\\development-main.js");
+    for (const entry of [
+      "apps/api/",
+      "apps/agent-worker/",
+      "apps/scheduler/",
+      "apps/admin-control-api/",
+    ]) {
+      expect(script).toContain(entry);
+    }
     expect(script).toContain("@hoox/web");
-    expect(script).toContain('Start-Process "http://127.0.0.1:4173/app"');
-
-    expect(script).not.toContain("docker compose");
-    expect(script).not.toContain("pnpm install");
-    expect(script).not.toContain("db:migrate:up");
-    expect(script).not.toContain("dev:identity:provision");
-  });
-
-  it("只检查 .env 外部依赖，不负责启动或修改外部服务", async () => {
-    const script = await readFile(scriptUrl, "utf8");
-
-    expect(script).toContain("检查 .env 配置的 PostgreSQL、S3、CubeSandbox 与模型服务");
-    expect(script).toContain("development-preflight-main.js");
-    expect(script).not.toContain("docker compose");
-    expect(script).not.toContain("docker-compose.dev.yml");
-  });
-
-  it("默认启动平台管理服务以支持首次配置", async () => {
-    const script = await readFile(scriptUrl, "utf8");
-
-    expect(script).toContain("[switch]$IncludeSkill");
-    expect(script).not.toContain("Read-Host $skillPrompt");
-    expect(script).toContain("$startSkillServices = $true");
-    expect(script).toContain("http://127.0.0.1:4173/admin/");
-    expect(script).toContain("if ($startSkillServices)");
     expect(script).toContain("@hoox/admin-web");
-    expect(script).toContain(
-      String.raw`runtime-ts\apps\admin-control-api\dist\development-main.js`,
-    );
-    expect(script).toContain("ADMIN_CONTROL_LISTEN_PORT");
+    expect(script).toContain("waitReady");
+    expect(script).toContain("portOpen");
+    expect(script).toContain('"pids.json"');
+    expect(script).not.toContain("docker compose");
+    expect(script).not.toContain("db:setup");
   });
 
-  it("复用已运行的应用进程，只启动缺失服务", async () => {
-    const script = await readFile(scriptUrl, "utf8");
-
-    expect(script).toContain("Test-DevelopmentProcess");
-    expect(script).toContain("[复用] $($service.Name) 已运行");
-    expect(script).toContain("$servicesToStart += $service");
-  });
-
-  it("端口冲突时失败关闭，不会终止已有进程", async () => {
-    const script = await readFile(scriptUrl, "utf8");
-
-    expect(script).toContain("Get-NetTCPConnection -State Listen");
-    expect(script).toContain("脚本不会自动终止已有进程");
-    expect(script).not.toContain("Stop-Process");
-  });
-
-  it("提供双击入口和非交互启动参数", async () => {
-    const [script, launcher] = await Promise.all([
-      readFile(scriptUrl, "utf8"),
-      readFile(new URL("../start-development.cmd", import.meta.url), "utf8"),
-    ]);
-
-    expect(script).toContain("[switch]$CoreOnly");
-    expect(script).toContain("[switch]$IncludeSkill");
-    expect(script).toContain("[switch]$SkipBuild");
-    expect(script).toContain("[switch]$NoBrowser");
-    expect(launcher).toContain("scripts\\start-development.ps1");
+  it("PowerShell 兼容入口保留 Windows PowerShell 5.1 编碼并只转发启动参数", async () => {
+    const bytes = await readFile(scriptUrl);
+    expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    const script = bytes.toString("utf8");
+    expect(script).toContain("corepack pnpm dev:up");
+    expect(script).toContain("--core-only");
+    expect(script).not.toContain("Start-Process");
   });
 });

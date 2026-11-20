@@ -88,6 +88,9 @@ export const expectedEnvironmentKeys = Object.freeze([
 ]);
 
 export const optionalEnvironmentKeys = Object.freeze([
+  "POSTGRES_HOST_PORT",
+  "POSTGRES_BOOTSTRAP_USER",
+  "POSTGRES_BOOTSTRAP_PASSWORD",
   "THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT",
   "THREAD_CONTEXT_COMPACTION_TARGET_PERCENT",
   "THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS",
@@ -144,6 +147,7 @@ export const optionalEnvironmentKeys = Object.freeze([
 ]);
 
 const placeholderOnlyKeys = new Set([
+  "POSTGRES_BOOTSTRAP_PASSWORD",
   "DATABASE_URL",
   "DATABASE_WORKER_COORDINATOR_URL",
   "DATABASE_TEAM_COORDINATOR_URL",

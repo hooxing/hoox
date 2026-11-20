@@ -123,21 +123,22 @@ function RuntimeHero() {
     >
       <div className="landing-hero-copy">
         <p className="landing-eyebrow">
-          <span className="landing-dot" /> 开源 Agent Runtime 与团队工作台
+          <span className="landing-dot" /> 开源、可自托管的云端 Agent 平台
         </p>
         <h1 id="hero-title">
-          为你的 Agent，
+          写好指令，接上工具，
           <br />
-          <span className="landing-title-accent">配齐执行底座。</span>
+          <span className="landing-title-accent">就是你自己的 Agent。</span>
         </h1>
         <p className="landing-hero-lead">
-          接上模型与沙箱，
+          Agent 在云端沙箱里读文件、跑代码，
           <br />
-          让执行、上下文与团队协作连起来。
+          把成果文件交付给你和你的团队。
         </p>
         <p className="landing-hero-description">
-          从工具编排、连续任务到文件交付与运行追踪。
-          <br className="landing-desktop-break" />用 Hoox 搭建你能掌控的 Agent。
+          今天已可用：沙箱执行、文件交付、Skill 中心与团队协作。
+          <br className="landing-desktop-break" />
+          自定义 Agent、外部工具与 API 即将推出，见下方路线图。
         </p>
         <div className="landing-actions">
           <a className="landing-button landing-button-primary" href="/app">
@@ -153,8 +154,8 @@ function RuntimeHero() {
           <span>TypeScript</span>
           <span>自主部署</span>
         </div>
-        <a href="#execution" className="landing-discover">
-          探索执行方式 <ArrowDown size={14} aria-hidden="true" />
+        <a href="#proof" className="landing-discover">
+          看一个真实任务 <ArrowDown size={14} aria-hidden="true" />
         </a>
       </div>
       <div
@@ -178,7 +179,7 @@ function RuntimeHero() {
       >
         <div className="landing-art-chrome">
           <span>
-            <Radio size={12} aria-hidden="true" /> HOOX / RUNTIME
+            <Radio size={12} aria-hidden="true" /> HOOX / 云端 AGENT
           </span>
           <span>机制演示</span>
         </div>
@@ -230,9 +231,9 @@ function RuntimeHero() {
             <div className="landing-core-halo" aria-hidden="true" />
             <div className="landing-core-chip">
               <span className="landing-core-wordmark">
-                Hoox<span>RUNTIME</span>
+                Hoox<span>CLOUD</span>
               </span>
-              <span className="landing-core-caption">CONTEXT · EXECUTION · STATE</span>
+              <span className="landing-core-caption">SANDBOX · SKILLS · FILES</span>
               <div className="landing-core-pins" aria-hidden="true">
                 {"abcdefghijkl".split("").map((pin) => (
                   <span key={pin} />
@@ -309,7 +310,7 @@ function ExecutionSection() {
       aria-labelledby="execution-title"
     >
       <SectionHeading
-        index="01"
+        index="02"
         label="执行方式"
         title={
           <span id="execution-title">
@@ -388,7 +389,7 @@ function ExecutionSection() {
             </pre>
             <div className="landing-code-result">
               <Check size={14} aria-hidden="true" />
-              {step >= 3 ? "所需结果已返回，模型继续整理报告" : "工具通过同一受控边界执行"}
+              {step >= 3 ? "所需结果已返回，模型继续整理报告" : "工具在隔离沙箱中执行"}
             </div>
           </div>
           <div className="landing-execution-visual">
@@ -450,14 +451,14 @@ function ContinuitySection() {
         data-motion={clock.motionState}
       >
         <div className="landing-section-copy">
-          <p className="landing-eyebrow">02 / 连续工作</p>
+          <p className="landing-eyebrow">03 / 连续工作</p>
           <h2>
             执行可以暂停，
             <br />
             工作有据可续。
           </h2>
           <p>
-            连续上下文与工作区独立持久保存。
+            对话记忆与工作文件单独保存。
             <br />
             按任务需要选择实例复用或任务后销毁。
           </p>
@@ -465,14 +466,14 @@ function ContinuitySection() {
             <History size={20} aria-hidden="true" />
             <div>
               <strong>上下文留得住</strong>
-              <p>后续输入从持久事实重建对话。</p>
+              <p>再次发消息时，Agent 记得之前聊过的内容。</p>
             </div>
           </div>
           <div className="landing-feature-line">
             <Files size={20} aria-hidden="true" />
             <div>
               <strong>工作区有版本</strong>
-              <p>实例需要重建时，恢复已保存的工作。</p>
+              <p>沙箱重建后，已保存的文件仍在。</p>
             </div>
           </div>
           <RepositoryLink
@@ -547,8 +548,8 @@ function ContinuitySection() {
                 : step === 3
                   ? policy === "pause"
                     ? "恢复实例，接着处理后续任务"
-                    : "新建实例，从持久化工作区接续"
-                  : "上下文与工作区逐步持久保存"}
+                    : "新建实例，从已保存的文件接续"
+                  : "对话与文件逐步保存"}
             </p>
           </div>
           <ol className="landing-lifecycle-steps">
@@ -562,12 +563,11 @@ function ContinuitySection() {
           <div className="landing-persistence-layer">
             <Database size={18} aria-hidden="true" />
             <div>
-              <strong>Thread Context + Workspace Revision</strong>
-              <span>持久保存，不随实例销毁而删除</span>
+              <strong>对话记忆 + 工作文件版本</strong>
+              <span>不随沙箱销毁而丢失</span>
             </div>
             <ShieldCheck size={18} aria-hidden="true" />
           </div>
-          <p className="landing-boundary">暂停与恢复受供应商能力、TTL 和保留策略约束。</p>
         </div>
       </section>
     </div>
@@ -585,7 +585,7 @@ function TeamSection() {
       data-motion={clock.motionState}
     >
       <SectionHeading
-        index="03"
+        index="04"
         label="团队工作台"
         title={
           <>
@@ -723,7 +723,7 @@ function IntegrationSection() {
       data-motion={clock.motionState}
     >
       <SectionHeading
-        index="04"
+        index="05"
         label="服务接入"
         title={
           <>
@@ -734,9 +734,9 @@ function IntegrationSection() {
         }
       >
         <p>
-          保持统一的执行边界，
+          在后台配置你选择的模型与沙箱，
           <br />
-          连接你选择的服务。
+          不需要改代码。
         </p>
         <RepositoryLink
           path="/blob/main/docs/architecture/sandbox-providers.md"
@@ -751,7 +751,7 @@ function IntegrationSection() {
             <Sparkles size={20} aria-hidden="true" />
             <div>
               <strong>模型服务</strong>
-              <span>按 Provider 契约接入</span>
+              <span>任意 OpenAI 兼容端点</span>
             </div>
           </div>
           <div>
@@ -765,7 +765,7 @@ function IntegrationSection() {
         <span className="landing-map-incoming" aria-hidden="true" />
         <div className="landing-map-core">
           <span>Hoox</span>
-          <small>统一执行与持久身份</small>
+          <small>统一调度与保存</small>
         </div>
         <svg
           className="landing-provider-route"
@@ -809,20 +809,16 @@ function IntegrationSection() {
       </div>
       <div className="landing-integration-note">
         <span role="status">接入示意：{provider}</span>
-        <p>
-          新实例采用配置；存量实例保留原有供应商身份。
-          <br />
-          不进行跨供应商自动故障转移。
-        </p>
+        <p>新建的沙箱采用当前配置；已有沙箱继续使用原来的供应商，不会自动切换。</p>
       </div>
     </section>
   );
 }
 
 const traceEvents = [
-  { title: "领取任务", detail: "Worker 获得当前执行租约", icon: Workflow },
-  { title: "准备上下文", detail: "从持久事实重建当前对话", icon: History },
-  { title: "完成工具操作", detail: "执行状态与受控回执形成记录", icon: Code2 },
+  { title: "领取任务", detail: "任务排队后开始执行", icon: Workflow },
+  { title: "准备上下文", detail: "载入对话历史与资料", icon: History },
+  { title: "完成工具操作", detail: "每次工具调用都留下记录", icon: Code2 },
   { title: "发布交付物", detail: "调研报告.md 已就绪", icon: FileCheck2 },
 ] as const;
 function OperationsSection() {
@@ -837,7 +833,7 @@ function OperationsSection() {
     >
       <div className="landing-wrap landing-section">
         <SectionHeading
-          index="05"
+          index="06"
           label="部署与运维"
           title={
             <>
@@ -889,7 +885,7 @@ function OperationsSection() {
               </span>
               <span>
                 <ShieldCheck size={16} aria-hidden="true" />
-                Worker 调度
+                执行调度
               </span>
             </aside>
             <div key={clock.revision} className="landing-trace-list">
@@ -912,7 +908,7 @@ function OperationsSection() {
           </div>
           <div className="landing-console-footer">
             <span role="status">
-              {clock.finished ? "执行完成，关键状态形成持久记录" : "沿时间线查看执行过程"}
+              {clock.finished ? "执行完成，每一步都有记录" : "沿时间线查看执行过程"}
             </span>
             <span>示意内容，不读取用户任务</span>
           </div>
@@ -920,11 +916,7 @@ function OperationsSection() {
         <div className="landing-deployment-row">
           <div>
             <strong>在你的基础设施上运行。</strong>
-            <p>
-              部署需要 PostgreSQL、S3 兼容存储、Sandbox 与模型服务。
-              <br />
-              当前为 0.x 早期开发阶段。
-            </p>
+            <p>部署需要 PostgreSQL、S3 兼容存储、沙箱服务与模型服务。</p>
           </div>
           <RepositoryLink
             path="/blob/main/docs/development.md"
@@ -938,9 +930,55 @@ function OperationsSection() {
   );
 }
 
+const roadmapItems = [
+  "后台定义多个 Agent：编辑指令、选择模型与 Skill",
+  "不改代码接入外部工具（MCP / HTTP）",
+  "Playground：发布前试跑与对比版本",
+  "API Key 与公开 API：把 Hoox 嵌入你的产品",
+  "评测：用样例集回归检查 Agent 质量",
+] as const;
+function RoadmapSection() {
+  return (
+    <section id="roadmap" className="landing-section landing-wrap landing-roadmap">
+      <SectionHeading
+        index="07"
+        label="路线图"
+        title={
+          <>
+            打造你自己的 Agent，
+            <br />
+            这些即将推出。
+          </>
+        }
+      >
+        <p>以下能力尚未发布，不在当前版本中。</p>
+        <RepositoryLink
+          path="/blob/main/docs/plans/20261119-custom-agent-platform.md"
+          className="landing-text-link"
+        >
+          查看实施计划
+        </RepositoryLink>
+      </SectionHeading>
+      <ul className="landing-roadmap-list">
+        {roadmapItems.map((item) => (
+          <li key={item}>
+            <span className="landing-roadmap-tag">即将推出</span>
+            {item}
+          </li>
+        ))}
+      </ul>
+      <p className="landing-roadmap-note">
+        当前为 0.x
+        早期开发阶段：公共接口可能变化，尚未完成生产环境验收。沙箱的暂停与恢复取决于所选供应商的能力与保留策略。
+      </p>
+    </section>
+  );
+}
+
 function SectionLinks() {
   return (
     <>
+      <a href="#proof">真实任务</a>
       <a href="#execution">执行方式</a>
       <a href="#team">团队协作</a>
       <a href="#architecture">部署</a>
@@ -987,33 +1025,34 @@ export function LandingPage({ privacyUrl, termsUrl }: LandingLinks = {}) {
         <div className="landing-principles landing-wrap">
           <span>
             <Workflow size={16} aria-hidden="true" />
-            执行方式可选
+            云端沙箱执行
           </span>
           <span>
             <History size={16} aria-hidden="true" />
-            任务状态可恢复
+            成果文件交付
           </span>
           <span>
             <ScanLine size={16} aria-hidden="true" />
-            运行过程可追踪
+            Skill 可复用
           </span>
           <span>
             <Users size={16} aria-hidden="true" />
-            团队工作可接续
+            团队可接续
           </span>
+        </div>
+        <div id="proof" className="landing-section landing-wrap landing-proof">
+          <div className="landing-proof-heading">
+            <p className="landing-eyebrow">01 / 真实任务</p>
+            <p>一本电子书，如何变成可预览、可下载的思维导图。</p>
+          </div>
+          <BookCase />
         </div>
         <ExecutionSection />
         <ContinuitySection />
         <TeamSection />
         <IntegrationSection />
         <OperationsSection />
-        <div className="landing-section landing-wrap landing-proof">
-          <div className="landing-proof-heading">
-            <p className="landing-eyebrow">06 / 从请求到成果</p>
-            <p>看看工作台如何把资料变成交付物。</p>
-          </div>
-          <BookCase />
-        </div>
+        <RoadmapSection />
         <section className="landing-open-source landing-wrap" aria-labelledby="opensource-title">
           <p className="landing-eyebrow">OPEN SOURCE. YOUR CONTROL.</p>
           <h2 id="opensource-title">下一步，把你的 Agent 跑起来。</h2>
@@ -1037,7 +1076,7 @@ export function LandingPage({ privacyUrl, termsUrl }: LandingLinks = {}) {
         <a href="/" aria-label="返回 Hoox 首页">
           <img src={HOOX_HORIZONTAL_PATH} alt="Hoox" width="108" height="34" />
         </a>
-        <span>开源 Agent Runtime · 团队工作台</span>
+        <span>开源、可自托管的云端 Agent 平台</span>
         <nav aria-label="页脚导航">
           <a href="/app">工作台</a>
           <RepositoryLink path="/blob/main/docs/README.md">文档</RepositoryLink>

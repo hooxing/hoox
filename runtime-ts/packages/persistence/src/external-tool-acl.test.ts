@@ -162,15 +162,14 @@ describe("外部工具 Admin Control ACL", () => {
 });
 
 describe("API Key Runtime ACL 存在性门控", () => {
-  it("0001+0002 不预期 API Key 表或函数，完整迁移后才加入对应白名单", async () => {
+  it("0001+0002 不预期 API Key ACL，0006 状态存在后加入受限更新列", async () => {
     for (const apiKeyState of [false, true]) {
       const client = {
         query: vi.fn(async (sql: string) => ({
           rows: [
-            {
-              present:
-                sql.includes("api_keys") || sql.includes("revoke_api_key") ? apiKeyState : false,
-            },
+            sql.includes("policy_count")
+              ? { policy_count: apiKeyState ? "2" : "0" }
+              : { present: sql.includes("api_keys") ? apiKeyState : false },
           ],
         })),
       } as unknown as PoolClient;
@@ -178,22 +177,36 @@ describe("API Key Runtime ACL 存在性门控", () => {
       const tables = await activeTablePolicy(client, "it_api_key_policy");
       const columns = await activeColumnUpdatePolicy(client, "it_api_key_policy");
       expect(tables.has("api_keys")).toBe(apiKeyState);
-      expect(columns.has("api_keys")).toBe(apiKeyState);
-      if (apiKeyState) expect(columns.get("api_keys")).toEqual(new Set(["last_used_at"]));
-      else expect(columns.get("api_keys")).toBeUndefined();
+      if (apiKeyState) {
+        expect(columns.get("api_keys")).toEqual(new Set(["last_used_at", "revoked_at"]));
+        expect(columns.get("memberships")).toEqual(new Set(["status"]));
+      } else {
+        expect(columns.has("api_keys")).toBe(false);
+        expect(columns.get("memberships")).toEqual(new Set());
+      }
     }
   });
 
-  it("表 ACL 与撤销函数 EXECUTE 分别按各自对象存在性授予", async () => {
-    const bootstrap = await readFile(bootstrapUrl, "utf8");
+  it("只在 API Key 状态存在时授予撤销列，并由 Runtime 专属 RESTRICTIVE 策略收口", async () => {
+    const [bootstrap, migration] = await Promise.all([
+      readFile(bootstrapUrl, "utf8"),
+      readFile(new URL("../migrations/0006_api_keys.up.sql", import.meta.url), "utf8"),
+    ]);
     expect(bootstrap).toMatch(
-      /if \(await hasApiKeyState\(client, context\.schema\)\) \{\s*await client\.query\([\s\S]*?GRANT SELECT, INSERT ON TABLE \$\{schema\}\.api_keys TO \$\{role\};\s*GRANT UPDATE\(last_used_at\) ON TABLE \$\{schema\}\.api_keys TO \$\{role\}/u,
+      /if \(await hasApiKeyState\(client, context\.schema\)\) \{\s*await client\.query\([\s\S]*?GRANT UPDATE\(last_used_at\) ON TABLE \$\{schema\}\.api_keys TO \$\{role\}/u,
     );
     expect(bootstrap).toMatch(
-      /if \(await hasApiKeyRoutineState\(client, context\.schema\)\) \{\s*await client\.query\(\s*`GRANT EXECUTE ON FUNCTION \$\{schema\}\.revoke_api_key/u,
+      /if \(await hasApiKeyRevocationPolicyState\(client, context\.schema\)\) \{\s*await client\.query\([\s\S]*?GRANT UPDATE\(revoked_at\) ON TABLE \$\{schema\}\.api_keys TO \$\{role\};\s*GRANT UPDATE\(status\) ON TABLE \$\{schema\}\.memberships TO \$\{role\}/u,
     );
-    expect(bootstrap).toMatch(
-      /async function hasApiKeyRoutineState\([\s\S]*?proname = 'revoke_api_key'[\s\S]*?proargtypes\[0\] = 'text'::regtype[\s\S]*?proargtypes\[1\] = 'timestamptz'::regtype/u,
+    expect(migration).toMatch(
+      /CREATE POLICY api_key_integration_membership_revoke ON memberships AS RESTRICTIVE FOR UPDATE TO %I/u,
     );
+    expect(migration).toMatch(
+      /status = ''active''[\s\S]*kind = ''integration''[\s\S]*status = ''revoked''/u,
+    );
+    expect(migration).toMatch(
+      /CREATE POLICY api_key_revocation_guard ON api_keys AS RESTRICTIVE FOR UPDATE TO %I/u,
+    );
+    expect(migration).toMatch(/revoked_at IS NULL/iu);
   });
 });

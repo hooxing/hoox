@@ -31,59 +31,31 @@ CREATE POLICY api_keys_hash_usage_policy ON api_keys FOR UPDATE
   USING (key_hash = decode(NULLIF(current_setting('app.api_key_hash', true), ''), 'hex'))
   WITH CHECK (key_hash = decode(NULLIF(current_setting('app.api_key_hash', true), ''), 'hex'));
 
--- Runtime 不能直接改授权状态；该窄函数同时锁定 Key 并撤销其集成 Membership。
-CREATE FUNCTION revoke_api_key(p_api_key_id text, p_revoked_at timestamptz)
-RETURNS boolean
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path FROM CURRENT
-AS $$
+DO $$
 DECLARE
-  v_tenant_id text := NULLIF(current_setting('app.tenant_id', true), '');
-  v_integration_user_id text;
-  v_user_kind text;
-  v_membership_status text;
-  v_updated integer;
+  runtime_role name := NULLIF(current_setting('app.runtime_role', true), '');
 BEGIN
-  IF v_tenant_id IS NULL OR p_revoked_at IS NULL THEN
-    RAISE EXCEPTION 'API Key 撤销上下文无效' USING ERRCODE = '42501';
+  IF runtime_role IS NULL THEN
+    RAISE EXCEPTION 'Runtime 数据库角色未配置';
   END IF;
 
-  SELECT integration_user_id INTO v_integration_user_id
-    FROM api_keys
-   WHERE tenant_id = v_tenant_id AND id = p_api_key_id AND revoked_at IS NULL
-   FOR UPDATE;
-  IF NOT FOUND THEN
-    RETURN false;
-  END IF;
-
-  SELECT kind INTO v_user_kind FROM app_users WHERE id = v_integration_user_id;
-  IF v_user_kind IS DISTINCT FROM 'integration' THEN
-    RAISE EXCEPTION 'API Key 目标身份不是集成身份' USING ERRCODE = '42501';
-  END IF;
-
-  SELECT status INTO v_membership_status FROM memberships
-   WHERE tenant_id = v_tenant_id AND user_id = v_integration_user_id
-   FOR UPDATE;
-  IF NOT FOUND OR v_membership_status NOT IN ('active', 'revoked') THEN
-    RAISE EXCEPTION '集成身份 Membership 状态无效' USING ERRCODE = '42501';
-  END IF;
-  IF v_membership_status = 'active' THEN
-    UPDATE memberships SET status = 'revoked'
-     WHERE tenant_id = v_tenant_id AND user_id = v_integration_user_id AND status = 'active';
-    GET DIAGNOSTICS v_updated = ROW_COUNT;
-    IF v_updated <> 1 THEN
-      RAISE EXCEPTION '集成身份 Membership 状态发生并发变化' USING ERRCODE = '40001';
-    END IF;
-  END IF;
-
-  UPDATE api_keys SET revoked_at = p_revoked_at
-   WHERE tenant_id = v_tenant_id AND id = p_api_key_id AND revoked_at IS NULL;
-  GET DIAGNOSTICS v_updated = ROW_COUNT;
-  IF v_updated <> 1 THEN
-    RAISE EXCEPTION 'API Key 撤销状态发生并发变化' USING ERRCODE = '40001';
-  END IF;
-  RETURN true;
-END;
+  -- Runtime 只能将集成身份的 active Membership 转为 revoked；已 revoked 行不再可更新。
+  EXECUTE format(
+    'CREATE POLICY api_key_integration_membership_revoke ON memberships AS RESTRICTIVE FOR UPDATE TO %I
+       USING (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')
+         AND status = ''active''
+         AND EXISTS (SELECT 1 FROM app_users WHERE app_users.id = memberships.user_id AND app_users.kind = ''integration''))
+       WITH CHECK (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')
+         AND status = ''revoked''
+         AND EXISTS (SELECT 1 FROM app_users WHERE app_users.id = memberships.user_id AND app_users.kind = ''integration''))',
+    runtime_role
+  );
+  -- revoked_at IS NULL 排除已吊销行；列级 ACL 再限制可更新列。
+  EXECUTE format(
+    'CREATE POLICY api_key_revocation_guard ON api_keys AS RESTRICTIVE FOR UPDATE TO %I
+       USING (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''') AND revoked_at IS NULL)
+       WITH CHECK (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), ''''))',
+    runtime_role
+  );
+END
 $$;
-REVOKE ALL ON FUNCTION revoke_api_key(text, timestamptz) FROM PUBLIC;

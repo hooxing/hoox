@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "@hoox/prompt-builder";
 import { RUNTIME_TOOL_NAMES } from "@hoox/protocol";
 import {
   createModels,
@@ -43,6 +44,7 @@ async function harness(
   };
   const options: Parameters<typeof createSafePiSession>[0] = {
     model,
+    operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
     modelRuntime,
     modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
     sandbox,

@@ -138,7 +138,7 @@ describe("正式产品首页", () => {
     expect(container.querySelector(".landing-cube-front")?.textContent).toContain("Sandbox B");
     await choose("沙箱供应商接入演示", "腾讯云 AGS");
     expect(container.textContent).toContain("接入示意：腾讯云 AGS");
-    expect(container.textContent).toContain("不进行跨供应商自动故障转移");
+    expect(container.textContent).toContain("已有沙箱继续使用原来的供应商，不会自动切换");
     expect(container.textContent).toContain("分支生成后各自推进，不双向同步");
     expect(container.textContent).toContain("文本快照");
     expect(container.textContent).toContain("Mem0 可选接入");

@@ -1,17 +1,19 @@
 import { createAdminSessionAuthResolver } from "./session-auth.js";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   AdminControlService,
   type DeploymentSettingDescriptor,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
   type ProviderProbePort,
+  RunExplorerService,
 } from "@hoox/admin-control";
 import { userId } from "@hoox/domain";
 import { type AuthContextResolver, createProductionJwtAuthResolver } from "@hoox/identity/auth";
 import {
   ModelProviderCredentialCipher,
   PgAdminControlRepository,
+  PgAdminRunExplorerRepository,
   PgIdentityConfigurationRepository,
   PgSandboxControlRepository,
   PgSkillPublicationAuthorization,
@@ -168,6 +170,10 @@ async function assembleRealService(
             }),
           ),
       },
+      runs: new RunExplorerService(
+        new PgAdminRunExplorerRepository(controlPool),
+        () => `run_content_${randomUUID().replaceAll("-", "")}`,
+      ),
       auth: input.auth,
       identity: createIdentityAdminService({
         repository: new PgIdentityConfigurationRepository(controlPool),

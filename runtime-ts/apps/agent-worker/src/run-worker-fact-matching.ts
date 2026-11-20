@@ -219,6 +219,9 @@ export function receiptMatches(
       : receipt.threadSandbox?.schemaVersion === 1 &&
         receipt.threadSandbox.sessionId === command.threadSandboxTerminal.sessionId &&
         receipt.threadSandbox.generation === command.threadSandboxTerminal.generation &&
+        (context.sandboxIdleAction !== "kill" ||
+          (receipt.threadSandbox.outcome === "effect_pending" &&
+            receipt.threadSandbox.effectKind === "terminate")) &&
         (receipt.threadSandbox.outcome === "effect_pending"
           ? (receipt.threadSandbox.effectKind === "pause" ||
               receipt.threadSandbox.effectKind === "terminate") &&

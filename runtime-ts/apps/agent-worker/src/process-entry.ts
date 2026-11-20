@@ -225,6 +225,7 @@ const workerEnvironmentSchema = Object.freeze({
     maximum: 10_000_000,
   }),
   MODEL_WIRE_TRACE_ENABLED: booleanEnvironmentField(),
+  EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES: booleanEnvironmentField({ requiredIn: [] }),
   MODEL_WIRE_TRACE_RETENTION_DAYS: integerEnvironmentField({ minimum: 1, maximum: 365 }),
   // 每个 request/response 原始字节独立上限；超过后保存精确前缀并标为 truncated。
   MODEL_WIRE_TRACE_MAX_BYTES: integerEnvironmentField({ minimum: 1, maximum: 8 * 1024 * 1024 }),
@@ -365,6 +366,7 @@ export interface WorkerProcessConfiguration {
     proxyScheme?: "http" | "https";
     resourceVolumeDriver: string;
   }>;
+  readonly externalToolsAllowPrivateAddresses: boolean;
   readonly model: Readonly<{
     baseUrl: string;
     apiKey: string;
@@ -692,6 +694,8 @@ export function parseWorkerProcessEnvironment(
         parsed.values.CUBESANDBOX_RESOURCE_VOLUME_DRIVER ?? "runtime-resourcefs",
       ...proxyRouting,
     }),
+    externalToolsAllowPrivateAddresses:
+      parsed.values.EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES ?? false,
     model: Object.freeze({
       baseUrl: parsed.values.MODEL_BASE_URL ?? "https://unconfigured.invalid/v1",
       apiKey: parsed.values.MODEL_API_KEY ?? "",
@@ -1295,7 +1299,7 @@ async function assembleWorkerRuntime(
       new PgRunCompactionSettingsRepository(pool),
       configuration.threadContext.compaction,
       configuration.model.maxOutputTokens,
-      async (snapshot, compactionSettings) => {
+      async (snapshot, compactionSettings, tools) => {
         if (snapshot?.model === undefined && configuration.model.apiKey === "")
           throw new Error("MODEL_CONFIGURATION_REQUIRED");
         const configuredProvider = snapshot?.model?.configuration;
@@ -1330,10 +1334,7 @@ async function assembleWorkerRuntime(
           threadContinuityMetrics,
         );
         return deploymentSessions.withModel({
-          toolCallingMode: snapshot?.runtimeSettings?.configuration.toolCallingMode ?? "native",
-          ...(snapshot?.runtimeSettings?.configuration.enabledTools === undefined
-            ? {}
-            : { enabledTools: snapshot.runtimeSettings.configuration.enabledTools }),
+          ...tools,
           model: dynamicModel.model,
           modelRuntime: dynamicModel.modelRuntime,
           modelContext: dynamicModelContext,

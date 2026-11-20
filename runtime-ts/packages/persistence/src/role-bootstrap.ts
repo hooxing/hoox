@@ -178,17 +178,34 @@ const adminControlTables = new Set([
   "admin_control_generation",
   "admin_user_account_audits",
   "run_runtime_config_snapshots",
+  "external_tool_versions",
+  "external_tool_credentials",
+  "external_tool_revocations",
+  "agent_definitions",
+  "agent_definition_tenants",
+  "agent_revisions",
+  "agent_revision_revocations",
+  "agent_definition_commands",
+  "agent_definition_audits",
+  "admin_run_content_access_audits",
 ]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
+  ["api_keys", new Set(["SELECT", "INSERT"])],
   ["user_accounts", new Set(["SELECT", "INSERT"])],
   ["user_sessions", new Set(["SELECT", "INSERT", "DELETE"])],
   ["tenants", new Set(["SELECT", "INSERT"])],
   ["memberships", new Set(["SELECT", "INSERT"])],
   ["user_personalization_settings", new Set(["SELECT", "INSERT"])],
   ["team_personalization_settings", new Set(["SELECT"])],
-  ["threads", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["threads", new Set(["SELECT", "INSERT"])],
+  ["agent_definitions", new Set(["SELECT"])],
+  ["agent_definition_tenants", new Set(["SELECT"])],
+  ["agent_revisions", new Set(["SELECT"])],
+  ["agent_revision_revocations", new Set(["SELECT"])],
+  ["agent_definition_commands", new Set()],
+  ["agent_definition_audits", new Set()],
   ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspace_revisions", new Set(["SELECT", "INSERT"])],
@@ -323,6 +340,20 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 ]);
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
+  ["api_keys", new Set(["last_used_at"])],
+  // Agent 定义、Run 浏览器审计和外部工具版本均不得由 Runtime 执行列级更新。
+  [
+    "threads",
+    new Set([
+      "title",
+      "status",
+      "updated_at",
+      "version",
+      "title_source",
+      "title_generated_at",
+      "title_generation_version",
+    ]),
+  ],
   [
     "runtime_ptc_dispatches",
     new Set([
@@ -1072,6 +1103,16 @@ async function hasScheduledTaskState(client: PoolClient, schema: string): Promis
   return result.rows[0]?.present === true;
 }
 
+async function hasExternalToolState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.external_tool_versions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_credentials',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_revocations',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasEmbeddedIdentityState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.better_auth_users',$1::text)) IS NOT NULL
@@ -1084,6 +1125,24 @@ async function hasEmbeddedIdentityState(client: PoolClient, schema: string): Pro
 async function hasInstallationState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.installation_state',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasRunAgentSnapshotState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.run_agent_snapshots',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasAgentDefinitionState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.agent_definitions',$1::text)) IS NOT NULL
+      AND to_regclass(format('%I.agent_revisions',$1::text)) IS NOT NULL
+      AND to_regclass(format('%I.agent_revision_revocations',$1::text)) IS NOT NULL AS present`,
     [schema],
   );
   return result.rows[0]?.present === true;
@@ -1110,6 +1169,25 @@ async function hasAdminUserOperationsState(client: PoolClient, schema: string): 
   );
   return result.rows[0]?.present === true;
 }
+
+/** 后台 Run 浏览器的审计表与受限视图；只有它们齐备时才授予 Admin Control 访问。 */
+async function hasAdminRunExplorerState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.admin_run_content_access_audits',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_directory',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_event_outline',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_event_content',$1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+const adminRunExplorerViews = [
+  "admin_run_directory",
+  "admin_run_event_outline",
+  "admin_run_event_content",
+] as const;
 
 async function hasRunCompactionSettingsState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
@@ -1157,6 +1235,33 @@ const managedSandboxRuntimeTables = [
   "sandbox_control_head",
 ] as const;
 
+async function hasApiKeyState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.api_keys',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasApiKeyRevocationPolicyState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ readonly policy_count: string }>(
+    `SELECT count(*)::text AS policy_count
+       FROM pg_policies
+      WHERE schemaname = $1
+        AND ((tablename = 'api_keys' AND policyname = 'api_key_revocation_guard')
+          OR (tablename = 'memberships' AND policyname = 'api_key_integration_membership_revoke'))`,
+    [schema],
+  );
+  const count = Number(result.rows[0]?.policy_count ?? "0");
+  if (count !== 0 && count !== 2) {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "API Key 撤销 RLS 策略状态不完整");
+  }
+  return count === 2;
+}
+
 async function hasManagedSandboxState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.sandbox_control_head',$1::text)) IS NOT NULL AS present",
@@ -1165,11 +1270,24 @@ async function hasManagedSandboxState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
-async function activeTablePolicy(
+export function formatTableSetDifference(
+  expectedTables: readonly string[],
+  actualTables: readonly string[],
+): string {
+  const expected = new Set(expectedTables);
+  const actual = new Set(actualTables);
+  const missing = [...expected].filter((table) => !actual.has(table)).sort();
+  const extra = [...actual].filter((table) => !expected.has(table)).sort();
+  const format = (tables: readonly string[]): string => `[${tables.join(",")}]`;
+  return `缺少 ${format(missing)}，多出 ${format(extra)}`;
+}
+
+export async function activeTablePolicy(
   client: PoolClient,
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
+  if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
   if (await hasManagedSandboxState(client, schema)) {
     for (const table of managedSandboxControlTables) policy.set(table, new Set());
     for (const table of managedSandboxRuntimeTables) policy.set(table, new Set(["SELECT"]));
@@ -1285,6 +1403,14 @@ async function activeTablePolicy(
   if (!(await hasEmbeddedIdentityState(client, schema))) {
     for (const table of embeddedIdentityTables) policy.delete(table);
   }
+  if (await hasExternalToolState(client, schema)) {
+    for (const table of [
+      "external_tool_versions",
+      "external_tool_credentials",
+      "external_tool_revocations",
+    ])
+      policy.set(table, new Set());
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -1294,8 +1420,26 @@ async function activeTablePolicy(
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
   }
+  if (await hasRunAgentSnapshotState(client, schema)) {
+    policy.set("run_agent_snapshots", new Set(["SELECT", "INSERT"]));
+  }
+  if (!(await hasAgentDefinitionState(client, schema))) {
+    for (const table of [
+      "agent_definitions",
+      "agent_definition_tenants",
+      "agent_revisions",
+      "agent_revision_revocations",
+      "agent_definition_commands",
+      "agent_definition_audits",
+    ])
+      policy.delete(table);
+  }
   if (!(await hasRunCompactionSettingsState(client, schema))) {
     policy.delete("run_compaction_settings_snapshots");
+  }
+  // 正文访问审计只属于 Admin Control；Runtime 与 Team Coordinator 保持零 ACL。
+  if (await hasAdminRunExplorerState(client, schema)) {
+    policy.set("admin_run_content_access_audits", new Set());
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -1313,19 +1457,56 @@ async function activeTablePolicy(
   return policy;
 }
 
-async function activeColumnUpdatePolicy(
+export async function activeColumnUpdatePolicy(
   client: PoolClient,
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  const apiKeyState = await hasApiKeyState(client, schema);
+  const apiKeyRevocationPolicyState =
+    apiKeyState && (await hasApiKeyRevocationPolicyState(client, schema));
+  if (!apiKeyState) policy.delete("api_keys");
+  else
+    policy.set(
+      "api_keys",
+      apiKeyRevocationPolicyState
+        ? new Set(["last_used_at", "revoked_at"])
+        : new Set(["last_used_at"]),
+    );
   if (await hasInstallationState(client, schema)) {
     policy.set("installation_state", new Set(["administrator_user_id", "initialized_at"]));
   }
   if (await hasEmbeddedIdentityState(client, schema)) {
     policy.set("user_accounts", new Set(["better_auth_user_id", "display_name", "updated_at"]));
   }
+  if (await hasRunAgentSnapshotState(client, schema)) {
+    policy.set("run_agent_snapshots", new Set());
+  }
+  if (await hasAgentDefinitionState(client, schema)) {
+    for (const table of [
+      "agent_definitions",
+      "agent_definition_tenants",
+      "agent_revisions",
+      "agent_revision_revocations",
+      "agent_definition_commands",
+      "agent_definition_audits",
+    ])
+      policy.set(table, new Set());
+  }
+  if (await hasAdminRunExplorerState(client, schema)) {
+    policy.set("admin_run_content_access_audits", new Set());
+  }
+  if (await hasExternalToolState(client, schema)) {
+    for (const table of [
+      "external_tool_versions",
+      "external_tool_credentials",
+      "external_tool_revocations",
+    ])
+      policy.set(table, new Set());
+  }
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
+  if (apiKeyRevocationPolicyState) membershipUpdateColumns.add("status");
   if (await hasMembershipLockMarker(client)) membershipUpdateColumns.add("lock_marker");
   policy.set("memberships", membershipUpdateColumns);
   if (!(await hasPersonalizationSettingsState(client, schema))) {
@@ -1644,7 +1825,6 @@ interface MigrationContextSafetyRow {
   readonly migrator_has_routine_default_acl: boolean;
   readonly migrator_owns_other_schema: boolean;
   readonly migrator_owns_cross_schema_relation: boolean;
-  readonly target_schema_has_routine: boolean;
   readonly target_schema_has_prohibited_owned_object: boolean;
   readonly migrator_owns_cross_schema_routine: boolean;
   readonly migrator_owns_cross_schema_object: boolean;
@@ -1759,10 +1939,6 @@ async function inspectMigrationContext(
             AND schema_state.nspname <> 'information_schema'
             AND schema_state.nspname !~ '^pg_'
        ) AS migrator_owns_cross_schema_relation,
-       EXISTS (
-         SELECT 1 FROM pg_proc routine
-          WHERE routine.pronamespace = (SELECT oid FROM target_schema)
-       ) AS target_schema_has_routine,
        EXISTS (
          SELECT 1 FROM pg_type type_state
           WHERE type_state.typowner = (SELECT oid FROM migrator)
@@ -2141,7 +2317,10 @@ async function assertTeamCoordinatorBoundary(
   );
   for (const row of privileges.rows) {
     if (row.allowed !== (tablePolicy.get(row.table_name)?.has(row.privilege) ?? false)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Team Coordinator 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Team Coordinator 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2168,7 +2347,7 @@ async function assertTeamCoordinatorBoundary(
       if (row.allowed !== columnPolicy.get(row.table_name)?.has(row.column_name)) {
         throw new PersistenceError(
           "CONSTRAINT_VIOLATION",
-          "Team Coordinator 列级 UPDATE 权限偏离白名单",
+          `Team Coordinator 列级 UPDATE 权限偏离白名单：${row.table_name}.${row.column_name}`,
         );
       }
     }
@@ -2184,8 +2363,12 @@ async function assertTeamCoordinatorBoundary(
       WHERE relation.relnamespace=current_schema()::regnamespace AND relation.relkind='S'`,
     [context.teamCoordinatorRole, context.schema, sequencePrivileges],
   );
-  if (sequences.rows.some((row) => row.allowed)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "Team Coordinator 不得持有 sequence 权限");
+  const grantedSequences = sequences.rows.filter((row) => row.allowed).map((row) => row.table_name);
+  if (grantedSequences.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `Team Coordinator 不得持有 sequence 权限：${grantedSequences.sort().join(",")}`,
+    );
   }
   await assertDatabaseAndSchemaBoundary(
     client,
@@ -2201,7 +2384,9 @@ async function assertAdminControlBoundary(
 ): Promise<void> {
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
+  const runExplorerEnabled = enabled && (await hasAdminRunExplorerState(client, context.schema));
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
+  const externalToolsEnabled = enabled && (await hasExternalToolState(client, context.schema));
   const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
     enabled
@@ -2217,6 +2402,21 @@ async function assertAdminControlBoundary(
         ]
       : [],
   );
+  if (externalToolsEnabled) {
+    allowed.set("external_tool_versions", new Set(["SELECT", "INSERT"]));
+    allowed.set("external_tool_credentials", new Set(["INSERT"]));
+    allowed.set("external_tool_revocations", new Set(["SELECT", "INSERT"]));
+  }
+  const agentDefinitionsEnabled =
+    enabled && (await hasAgentDefinitionState(client, context.schema));
+  if (agentDefinitionsEnabled) {
+    allowed.set("agent_definitions", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_tenants", new Set(["SELECT", "INSERT", "DELETE"]));
+    allowed.set("agent_revisions", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_revision_revocations", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_commands", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_audits", new Set(["SELECT", "INSERT"]));
+  }
   if (sandboxEnabled) {
     for (const table of managedSandboxControlTables)
       allowed.set(table, new Set(["SELECT", "INSERT"]));
@@ -2224,6 +2424,9 @@ async function assertAdminControlBoundary(
   if (userOperationsEnabled) {
     allowed.set("admin_user_account_audits", new Set(["SELECT", "INSERT"]));
     allowed.set("user_sessions", new Set(["DELETE"]));
+  }
+  if (runExplorerEnabled) {
+    allowed.set("admin_run_content_access_audits", new Set(["SELECT", "INSERT"]));
   }
   if (identityEnabled) {
     allowed.set("identity_auth_configuration", new Set(["SELECT", "INSERT", "UPDATE"]));
@@ -2251,7 +2454,10 @@ async function assertAdminControlBoundary(
   );
   for (const row of privileges.rows) {
     if (row.allowed !== (allowed.get(row.table_name)?.has(row.privilege) ?? false)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Admin Control 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Admin Control 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2275,6 +2481,13 @@ async function assertAdminControlBoundary(
   );
   if (sandboxEnabled)
     updatePolicy.set("sandbox_control_head", new Set(["generation", "routing_revision"]));
+  if (agentDefinitionsEnabled)
+    updatePolicy.set(
+      "agent_definitions",
+      new Set(["status", "generation", "availability_mode", "current_revision_id", "updated_at"]),
+    );
+  if (agentDefinitionsEnabled) updatePolicy.set("agent_definition_tenants", new Set(["available"]));
+  if (agentDefinitionsEnabled) updatePolicy.set("agent_revisions", new Set(["status"]));
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
@@ -2298,7 +2511,7 @@ async function assertAdminControlBoundary(
       if (row.allowed !== updatePolicy.get(row.table_name)?.has(row.column_name)) {
         throw new PersistenceError(
           "CONSTRAINT_VIOLATION",
-          "Admin Control 列级 UPDATE 权限偏离白名单",
+          `Admin Control 列级 UPDATE 权限偏离白名单：${row.table_name}.${row.column_name}`,
         );
       }
     }
@@ -2332,7 +2545,7 @@ async function assertAdminControlBoundary(
       if (row.allowed !== selectPolicy.get(row.table_name)?.has(row.column_name)) {
         throw new PersistenceError(
           "CONSTRAINT_VIOLATION",
-          "Admin Control 列级 SELECT 权限偏离白名单",
+          `Admin Control 列级 SELECT 权限偏离白名单：${row.table_name}.${row.column_name}`,
         );
       }
     }
@@ -2352,13 +2565,21 @@ async function assertAdminControlBoundary(
     [
       context.adminControlRole,
       context.schema,
-      ["admin_runtime_statistics", "admin_user_directory"],
+      ["admin_runtime_statistics", "admin_user_directory", ...adminRunExplorerViews],
     ],
   );
   for (const row of viewPrivileges.rows) {
-    const expected = row.view_name === "admin_runtime_statistics" ? enabled : userOperationsEnabled;
+    const expected =
+      row.view_name === "admin_runtime_statistics"
+        ? enabled
+        : row.view_name === "admin_user_directory"
+          ? userOperationsEnabled
+          : runExplorerEnabled;
     if (row.allowed !== expected) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Admin Control 受限视图权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Admin Control 受限视图权限偏离白名单：${row.view_name}.SELECT`,
+      );
     }
   }
   await assertDatabaseAndSchemaBoundary(
@@ -2426,32 +2647,13 @@ async function assertNoPublicSchemaPrivileges(client: PoolClient): Promise<void>
   }
 }
 
-async function assertRoutinePrivilegeBoundary(
-  client: PoolClient,
-  context: MigrationSecurityContext,
-): Promise<void> {
-  const runtimePrivileges = await client.query<{ count: string }>(
-    `SELECT count(*)::text AS count
-       FROM pg_proc routine
-      WHERE routine.pronamespace = current_schema()::regnamespace
-        AND (
-          has_function_privilege($1, routine.oid, 'EXECUTE')
-          OR has_function_privilege($2, routine.oid, 'EXECUTE')
-          OR has_function_privilege($3, routine.oid, 'EXECUTE')
-        )`,
-    [context.runtimeRole, context.teamCoordinatorRole, context.adminControlRole],
+async function assertRoutinePrivilegeBoundary(client: PoolClient): Promise<void> {
+  const routines = await client.query<{ readonly count: string }>(
+    `SELECT count(*)::text AS count FROM pg_proc
+      WHERE pronamespace = current_schema()::regnamespace`,
   );
-  const publicPrivileges = await client.query<{ count: string }>(
-    `SELECT count(*)::text AS count
-       FROM pg_proc routine
-       CROSS JOIN LATERAL aclexplode(
-         COALESCE(routine.proacl, acldefault('f'::"char", routine.proowner))
-       ) acl
-      WHERE routine.pronamespace = current_schema()::regnamespace
-        AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'`,
-  );
-  if (runtimePrivileges.rows[0]?.count !== "0" || publicPrivileges.rows[0]?.count !== "0") {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "Routine 执行权限偏离空白名单");
+  if (routines.rows[0]?.count !== "0") {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "业务 Schema 不得包含 Routine");
   }
 }
 
@@ -2494,7 +2696,10 @@ async function assertSkillPublisherBoundary(
   );
   for (const row of privileges.rows) {
     if (row.allowed !== (allowed.get(row.table_name)?.has(row.privilege) ?? false)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Skill Publisher 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Skill Publisher 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2534,7 +2739,7 @@ async function assertSkillPublisherBoundary(
     if (row.allowed !== (updateColumns.get(row.table_name)?.has(row.column_name) ?? false)) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
-        "Skill Publisher 列级 UPDATE 权限偏离白名单",
+        `Skill Publisher 列级 UPDATE 权限偏离白名单：${row.table_name}.${row.column_name}`,
       );
     }
   }
@@ -2595,7 +2800,10 @@ async function assertWorkerCoordinatorBoundary(
     const expected =
       enabled && row.table_name === "worker_tenant_assignments" && row.privilege === "SELECT";
     if (row.allowed !== expected) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Worker Coordinator 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Worker Coordinator 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2687,7 +2895,10 @@ async function assertActiveRuntimeWhitelist(
   const actualTables = relationResult.rows.map((row) => row.table_name);
   const expectedTables = [...tablePolicy.keys()].sort();
   if (JSON.stringify(actualTables) !== JSON.stringify(expectedTables)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "业务表集合与 Runtime 权限策略不一致");
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `业务表集合与 Runtime 权限策略不一致：${formatTableSetDifference(expectedTables, actualTables)}`,
+    );
   }
 
   const privileges = await client.query<PrivilegeRow>(
@@ -2701,7 +2912,10 @@ async function assertActiveRuntimeWhitelist(
   );
   for (const row of privileges.rows) {
     if (row.allowed !== tablePolicy.get(row.table_name)?.has(row.privilege)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Runtime 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2725,7 +2939,10 @@ async function assertActiveRuntimeWhitelist(
   );
   for (const row of columnUpdates.rows) {
     if (row.allowed !== columnUpdatePolicy.get(row.table_name)?.has(row.column_name)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 列级 UPDATE 权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Runtime 列级 UPDATE 权限偏离白名单：${row.table_name}.${row.column_name}`,
+      );
     }
   }
 
@@ -2739,13 +2956,17 @@ async function assertActiveRuntimeWhitelist(
       WHERE relation.relnamespace = current_schema()::regnamespace AND relation.relkind = 'S'`,
     [context.runtimeRole, context.schema, sequencePrivileges],
   );
-  if (sequences.rows.some((row) => row.allowed)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 不得持有 sequence 权限");
+  const grantedSequences = sequences.rows.filter((row) => row.allowed).map((row) => row.table_name);
+  if (grantedSequences.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `Runtime 不得持有 sequence 权限：${grantedSequences.sort().join(",")}`,
+    );
   }
   await assertDatabaseAndSchemaBoundary(client, context, true);
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
-  await assertRoutinePrivilegeBoundary(client, context);
+  await assertRoutinePrivilegeBoundary(client);
   await assertSkillPublisherBoundary(
     client,
     context,
@@ -2778,10 +2999,12 @@ async function assertRuntimeAccessRemoved(
       WHERE relnamespace = current_schema()::regnamespace AND relkind IN ('r', 'p')
       ORDER BY relname`,
   );
-  if (
-    JSON.stringify(relations.rows.map((row) => row.table_name)) !== JSON.stringify([migrationTable])
-  ) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "down 后仍残留业务表");
+  const actualTables = relations.rows.map((row) => row.table_name);
+  if (JSON.stringify(actualTables) !== JSON.stringify([migrationTable])) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `down 后业务表集合不符：${formatTableSetDifference([migrationTable], actualTables)}`,
+    );
   }
   const privileges = await client.query<PrivilegeRow>(
     `SELECT relation.relname AS table_name, requested.privilege,
@@ -2794,8 +3017,15 @@ async function assertRuntimeAccessRemoved(
         AND relation.relkind IN ('r', 'p')`,
     [context.runtimeRole, context.schema, tablePrivileges],
   );
-  if (privileges.rows.some((row) => row.allowed)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "down 后 Runtime 仍持有表权限");
+  const grantedTablePrivileges = privileges.rows
+    .filter((row) => row.allowed)
+    .map((row) => `${row.table_name}.${row.privilege}`)
+    .sort();
+  if (grantedTablePrivileges.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `down 后 Runtime 仍持有表权限：${grantedTablePrivileges.join(",")}`,
+    );
   }
   const sequences = await client.query<PrivilegeRow>(
     `SELECT relation.relname AS table_name, requested.privilege,
@@ -2807,13 +3037,20 @@ async function assertRuntimeAccessRemoved(
       WHERE relation.relnamespace = current_schema()::regnamespace AND relation.relkind = 'S'`,
     [context.runtimeRole, context.schema, sequencePrivileges],
   );
-  if (sequences.rows.some((row) => row.allowed)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "down 后 Runtime 仍持有 sequence 权限");
+  const remainingSequences = sequences.rows
+    .filter((row) => row.allowed)
+    .map((row) => row.table_name)
+    .sort();
+  if (remainingSequences.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `down 后 Runtime 仍持有 sequence 权限：${remainingSequences.join(",")}`,
+    );
   }
   await assertDatabaseAndSchemaBoundary(client, context, false);
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
-  await assertRoutinePrivilegeBoundary(client, context);
+  await assertRoutinePrivilegeBoundary(client);
   await assertSkillPublisherBoundary(client, context, false);
   await assertWorkerCoordinatorBoundary(client, context, false);
   await assertTeamCoordinatorBoundary(client, context, false);
@@ -2865,6 +3102,15 @@ const adminControlPolicyBindings = Object.freeze([
   ["run_runtime_config_snapshots", "run_runtime_config_snapshots_runtime_policy", "runtime"],
 ] as const);
 
+const externalToolPolicyBindings = Object.freeze([
+  ["external_tool_versions", "external_tool_versions_migrator_policy", "migrator"],
+  ["external_tool_credentials", "external_tool_credentials_migrator_policy", "migrator"],
+  ["external_tool_revocations", "external_tool_revocations_migrator_policy", "migrator"],
+  ["external_tool_versions", "external_tool_versions_admin_policy", "control"],
+  ["external_tool_credentials", "external_tool_credentials_admin_policy", "control"],
+  ["external_tool_revocations", "external_tool_revocations_admin_policy", "control"],
+] as const);
+
 const embeddedIdentityPolicyBindings = Object.freeze([
   ["better_auth_users", "better_auth_users_migrator_policy", "migrator"],
   ["better_auth_sessions", "better_auth_sessions_migrator_policy", "migrator"],
@@ -2892,11 +3138,40 @@ const adminUserOperationsPolicyBindings = Object.freeze([
   ["user_sessions", "user_sessions_admin_control_delete_policy", "control"],
 ] as const);
 
+const adminRunExplorerPolicyBindings = Object.freeze([
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_migrator_policy",
+    "migrator",
+  ],
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_control_read_policy",
+    "control",
+  ],
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_control_insert_policy",
+    "control",
+  ],
+  ["execution_attempts", "execution_attempts_admin_projection_read", "migrator"],
+  ["run_events", "run_events_admin_projection_read", "migrator"],
+] as const);
+
 async function rebindRoleScopedPolicies(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
   const schema = quoteIdentifier(context.schema);
+  if (
+    (await hasApiKeyState(client, context.schema)) &&
+    (await hasApiKeyRevocationPolicyState(client, context.schema))
+  ) {
+    await client.query(
+      `ALTER POLICY api_key_integration_membership_revoke ON ${schema}.memberships TO ${quoteIdentifier(context.runtimeRole)};
+       ALTER POLICY api_key_revocation_guard ON ${schema}.api_keys TO ${quoteIdentifier(context.runtimeRole)}`,
+    );
+  }
   if (await hasManagedSandboxState(client, context.schema)) {
     for (const table of [...managedSandboxControlTables, "sandbox_configuration_bindings"]) {
       await client.query(
@@ -3006,6 +3281,22 @@ async function rebindRoleScopedPolicies(
         );
       }
     }
+    if (await hasAdminRunExplorerState(client, context.schema)) {
+      for (const [table, policy, target] of adminRunExplorerPolicyBindings) {
+        const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
+        await client.query(
+          `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+        );
+      }
+    }
+  }
+  if (await hasExternalToolState(client, context.schema)) {
+    for (const [table, policy, target] of externalToolPolicyBindings) {
+      const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+      );
+    }
   }
 }
 
@@ -3102,6 +3393,19 @@ async function grantAdminControlAccess(
      GRANT UPDATE(generation,updated_at) ON TABLE ${schema}.admin_control_generation TO ${control};
      GRANT SELECT ON TABLE ${schema}.admin_runtime_statistics TO ${control}`,
   );
+  if (await hasAgentDefinitionState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.agent_definitions TO ${control};
+       GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.agent_definition_tenants TO ${control};
+       GRANT UPDATE(available) ON TABLE ${schema}.agent_definition_tenants TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.agent_revisions,${schema}.agent_revision_revocations,
+         ${schema}.agent_definition_commands,${schema}.agent_definition_audits TO ${control};
+       GRANT UPDATE(status,generation,availability_mode,current_revision_id,updated_at)
+         ON TABLE ${schema}.agent_definitions TO ${control};
+       GRANT UPDATE(status) ON TABLE ${schema}.agent_revisions TO ${control};
+       GRANT USAGE ON SEQUENCE ${schema}.agent_definition_audits_audit_id_seq TO ${control}`,
+    );
+  }
   if (await hasAdminUserOperationsState(client, context.schema)) {
     const identityEnabled = await hasEmbeddedIdentityState(client, context.schema);
     await client.query(
@@ -3111,6 +3415,19 @@ async function grantAdminControlAccess(
        GRANT UPDATE(status,updated_at) ON TABLE ${schema}.user_accounts TO ${control};
        GRANT DELETE ON TABLE ${schema}.user_sessions TO ${control};
        GRANT SELECT ON TABLE ${schema}.admin_user_directory TO ${control}`,
+    );
+  }
+  if (await hasAdminRunExplorerState(client, context.schema)) {
+    // 只授予视图读取与审计写入；Run、Attempt、事件与指标底表仍对 Admin Control 零 ACL。
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
+       GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
+    );
+  }
+  if (await hasExternalToolState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_versions,${schema}.external_tool_revocations TO ${control};
+       GRANT INSERT ON TABLE ${schema}.external_tool_credentials TO ${control}`,
     );
   }
   if (await hasEmbeddedIdentityState(client, context.schema)) {
@@ -3152,6 +3469,22 @@ export async function bootstrapRuntimeAccessOnClient(
   await client.query(
     `GRANT SELECT, INSERT ON TABLE ${schema}.app_users, ${schema}.tenants, ${schema}.memberships TO ${role}`,
   );
+  await client.query(
+    `REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA ${schema}
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+  );
+  if (await hasApiKeyState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.api_keys TO ${role};
+       GRANT UPDATE(last_used_at) ON TABLE ${schema}.api_keys TO ${role}`,
+    );
+    if (await hasApiKeyRevocationPolicyState(client, context.schema)) {
+      await client.query(
+        `GRANT UPDATE(revoked_at) ON TABLE ${schema}.api_keys TO ${role};
+         GRANT UPDATE(status) ON TABLE ${schema}.memberships TO ${role}`,
+      );
+    }
+  }
   if (await hasMembershipLockMarker(client)) {
     await client.query(`GRANT UPDATE(lock_marker) ON TABLE ${schema}.memberships TO ${role}`);
   }
@@ -3197,7 +3530,8 @@ export async function bootstrapRuntimeAccessOnClient(
     );
   }
   await client.query(
-    `GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.threads, ${schema}.runs, ${schema}.workspaces TO ${role}`,
+    `GRANT SELECT, INSERT ON TABLE ${schema}.threads TO ${role};
+     GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.runs, ${schema}.workspaces TO ${role}`,
   );
   await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.workspace_revisions TO ${role}`);
   await client.query(
@@ -3355,6 +3689,17 @@ export async function bootstrapRuntimeAccessOnClient(
         `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
       );
     }
+  }
+  if (await hasRunAgentSnapshotState(client, context.schema)) {
+    await client.query(
+      `ALTER POLICY agent_revision_revocations_snapshot_read ON ${schema}.agent_revision_revocations TO ${role};
+       GRANT SELECT,INSERT ON TABLE ${schema}.run_agent_snapshots TO ${role}`,
+    );
+  }
+  if (await hasAgentDefinitionState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT ON TABLE ${schema}.agent_definitions,${schema}.agent_definition_tenants,${schema}.agent_revisions,${schema}.agent_revision_revocations TO ${role}`,
+    );
   }
   if (await hasAdminControlState(client, context.schema)) {
     await client.query(
@@ -3647,6 +3992,14 @@ export async function bootstrapRuntimeAccessOnClient(
       `GRANT UPDATE(
          state,generation,claim_token,claimed_by,lease_expires_at,next_attempt_at,updated_at
        ) ON TABLE ${schema}.worker_tenant_assignments TO ${role}`,
+    );
+  }
+  const threadUpdateColumns = (await activeColumnUpdatePolicy(client, context.schema)).get(
+    "threads",
+  );
+  if (threadUpdateColumns !== undefined && threadUpdateColumns.size > 0) {
+    await client.query(
+      `GRANT UPDATE(${[...threadUpdateColumns].map(quoteIdentifier).join(",")}) ON TABLE ${schema}.threads TO ${role}`,
     );
   }
   if (await hasThreadHeadState(client, context.schema)) {

@@ -22,7 +22,11 @@ function iso(value: unknown): string {
 }
 
 function mapUser(row: QueryResultRow, prefix: string): User {
-  return rehydrateUser({ id: row[`${prefix}_id`], createdAt: iso(row[`${prefix}_created_at`]) });
+  return rehydrateUser({
+    id: row[`${prefix}_id`],
+    kind: row[`${prefix}_kind`],
+    createdAt: iso(row[`${prefix}_created_at`]),
+  });
 }
 
 function mapMembership(
@@ -75,6 +79,7 @@ export function mapThread(row: QueryResultRow, tenant: Tenant): Thread {
       id: row.thread_id,
       tenantId: row.tenant_id,
       createdByUserId: row.thread_created_by_user_id,
+      agentDefinitionId: row.thread_agent_definition_id,
       title: row.thread_title,
       status: row.thread_status,
       createdAt: iso(row.thread_created_at),

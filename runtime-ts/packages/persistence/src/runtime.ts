@@ -14,6 +14,7 @@ import {
   PgRenamePersonalThreadCommand,
 } from "./pg-core-repositories.js";
 import { PgIdentityConfigurationRepository } from "./pg-identity-configuration.js";
+import { PgApiKeyRepository } from "./pg-api-keys.js";
 import { PgLocalAccountRepository } from "./pg-local-account.js";
 import { PgPersonalizationSettingsRepository } from "./pg-personalization-settings.js";
 import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
@@ -106,6 +107,7 @@ export interface ApiPersistenceRuntime {
   readonly skillFilesystem: PgSkillFilesystemCatalog;
   readonly personalizations: PgPersonalizationSettingsRepository;
   readonly scheduledTasks: PgScheduledTaskRepository;
+  readonly apiKeys: PgApiKeyRepository;
   readonly localAccounts: PgLocalAccountRepository;
   readonly identityConfigurations: PgIdentityConfigurationRepository;
   readonly identityDatabase: Pool;
@@ -165,6 +167,7 @@ export function createApiPersistenceRuntime(
     skillFilesystem: new PgSkillFilesystemCatalog(pool),
     personalizations: new PgPersonalizationSettingsRepository(pool, teamCoordinatorPool),
     scheduledTasks: new PgScheduledTaskRepository(pool),
+    apiKeys: new PgApiKeyRepository(pool),
     localAccounts: new PgLocalAccountRepository(pool),
     identityConfigurations: new PgIdentityConfigurationRepository(pool),
     identityDatabase: pool,

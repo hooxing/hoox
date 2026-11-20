@@ -7,6 +7,8 @@
 - development API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`。
 - Web 开发服务器通过同源代理访问 API，不启用宽松 CORS。
 - `Authorization: Bearer dev-user-a|dev-user-b` 只用于固定隔离测试 fixture。
+- 服务端凭据使用 `Authorization: Bearer hoox_sk_…`。明文只在 `POST /v1/api-keys` 创建成功响应中返回一次；Tenant Owner/Admin 可列出前缀与元数据并吊销。API Key 需具备路由显式声明的作用域；未声明作用域的路由默认拒绝 API Key，Key 管理、会话、账号及团队成员路由仅接受人类会话。
+- API Key 绑定不可登录的集成 User 与 Tenant `member` Membership；认证后仍从 Membership 重建 TenantScope 并受 PostgreSQL RLS 限制。
 - `/api/auth/*` 承载内嵌 Better Auth 的邮箱、OAuth 和手机号协议；`/v1/auth/config` 返回公开启用状态，`/v1/auth/exchange` 把 Better Auth Cookie Session 交换为 Hoox 会话。
 - `/v1/auth/register` 和 `/v1/auth/login` 只在 development 显式保留，用于本地账号兼容和测试。
 - 服务端始终从已认证 User 和 PostgreSQL Membership 重建 `TenantScope`。`X-Tenant-ID` 只选择个人或团队空间，不能替代 Membership 授权。
@@ -27,6 +29,7 @@
 | `/v1/automations` | 管理 Thread 定时任务 | `@hoox/automation`、Protocol Schema 和 API 测试 |
 | `/api/auth/*`、`/v1/auth/config`、`/v1/auth/exchange` | 注册登录、邮箱验证 OTP、OAuth/手机号流程和 Hoox 会话交换 | [身份、账号与会话](../architecture/identity-and-session.md) |
 | `/v1/resources/uploads` | 通过受控上传协议创建 ResourceVersion | [架构总览](../architecture/overview.md) |
+| `/v1/api-keys` | 为当前 Tenant 创建、列出和吊销服务凭据 | [身份、账号与会话](../architecture/identity-and-session.md#服务凭据与集成身份) |
 
 路径中的 `/me` 表示以当前认证用户发起操作，不必然表示数据属于全局个人空间；最终作用域仍由该路由的 `TenantScope` 和业务校验决定。
 
@@ -111,7 +114,7 @@ GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/content
 - 相同幂等键只接受相同 request hash。
 - COMMIT 响应未知时只按原 scope、幂等键和请求摘要精确读回，禁止再次写入猜测结果。
 
-Schema、超限、畸形 JSON、危险原型键和游标错误统一映射为 400 `INVALID_REQUEST`；不支持的创建请求媒体类型返回 415 `UNSUPPORTED_MEDIA_TYPE`。Fastify、AJV、SQL 和领域内部消息不能直接返回客户端。
+Schema、超限、畸形 JSON、危险原型键和游标错误统一映射为 400 `INVALID_REQUEST`；不支持的创建请求媒体类型返回 415 `UNSUPPORTED_MEDIA_TYPE`。Fastify、AJV、SQL 和领域内部消息不能直接返回客户端。Thread 或 Run 创建所绑定的 Agent 已停用或没有可用的已发布 Revision 时返回 409 `AGENT_REVISION_UNAVAILABLE`；响应使用固定提示，不暴露持久层诊断信息。
 
 ## 对象存储 origin
 

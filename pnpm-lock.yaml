@@ -396,6 +396,12 @@ importers:
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@hoox/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
+      '@hoox/trajectory':
+        specifier: workspace:*
+        version: link:../trajectory
 
   runtime-ts/packages/artifact:
     dependencies:

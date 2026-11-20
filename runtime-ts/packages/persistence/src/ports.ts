@@ -139,7 +139,8 @@ export type ThreadInputSubmitResult =
         | "key_conflict"
         | "parent_inactive"
         | "not_authorized"
-        | "skill_not_available";
+        | "skill_not_available"
+        | "agent_revision_unavailable";
     }
   | { readonly outcome: "legacy_drain_required" };
 
@@ -190,7 +191,12 @@ export type IdempotentCreateResult<T> =
 
 export type IdempotentRunEnqueueResult<T> =
   | IdempotentCreateResult<T>
-  | { readonly outcome: "legacy_drain_required" | "skill_not_available" };
+  | {
+      readonly outcome:
+        | "legacy_drain_required"
+        | "skill_not_available"
+        | "agent_revision_unavailable";
+    };
 
 /** Thread、空 Workspace、幂等记录和有效 Membership 重验必须共用事务。 */
 export interface ThreadCreationPort {

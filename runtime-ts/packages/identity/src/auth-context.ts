@@ -1,12 +1,15 @@
-import type { TenantId, UserId } from "@hoox/domain";
+import type { ApiKeyScope, TenantId, UserId } from "@hoox/domain";
+import type { AuthPrincipalKind } from "./api-key.js";
 
 export interface AuthPrincipal {
   readonly userId: UserId;
+  readonly kind?: AuthPrincipalKind;
   /**
-   * 固定开发 fixture 才携带已绑定的 tenant。生产 JWT principal 只有受验签保护的 sub，
-   * 租户由请求选择器与 PostgreSQL Membership/RLS 二次授权后再构造 TenantScope。
+   * 固定开发 fixture 与服务凭据携带已绑定的 tenant；生产 JWT 只有受验签保护的 sub。
+   * 业务 TenantScope 仍需由 PostgreSQL Membership/RLS 二次授权后构造。
    */
   readonly tenantId?: TenantId;
+  readonly apiKey?: Readonly<{ readonly id: string; readonly scopes: readonly ApiKeyScope[] }>;
 }
 
 /**

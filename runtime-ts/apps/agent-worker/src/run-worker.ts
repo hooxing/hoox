@@ -453,7 +453,7 @@ export class RunWorker {
     shutdown?.addEventListener("abort", onShutdown, { once: true });
     if (shutdown?.aborted) onShutdown();
     const timeout = this.dependencies.clock.schedule(this.#runTimeoutMs, () => {
-      if (context.stopped === "shutdown") return;
+      if (context.stopped === "shutdown" || context.stopped === "agent_revision_revoked") return;
       context.stopped = "timeout";
       executionAbort.abort("run_timeout");
       void requestAbort();
@@ -493,6 +493,21 @@ export class RunWorker {
 
   async #runAttempt(run: ActiveRun): Promise<RunWorkerResult> {
     const { context, snapshot, scope, cancellation } = run;
+    if (typeof snapshot.agent === "string")
+      return await this.finalizeWithoutRevision(context, "failed", snapshot.agent);
+    const { content } = snapshot.agent;
+    if (
+      content.model.mode === "pinned" ||
+      content.sandboxTemplateId !== undefined ||
+      (content.tools.mode === "configured" &&
+        (content.tools.externalTools.length > 0 || content.tools.clientTools.length > 0))
+    ) {
+      return await this.finalizeWithoutRevision(
+        context,
+        "failed",
+        "AGENT_CONFIGURATION_UNSUPPORTED",
+      );
+    }
     try {
       assertControlledRolloutProjection(snapshot.rolloutProjection);
     } catch {
@@ -551,16 +566,16 @@ export class RunWorker {
                 },
               }) as Promise<RunPersonalizationSnapshot>,
           );
+    const preSession = await run.timings.measureStartup("pre_session_stop_point", () =>
+      this.stopPoint(context, cancellation),
+    );
+    if (preSession) return await this.finishStopped(context, preSession);
     const promptInput: AgentUserInput = {
       text: await run.timings.measureStartup("memory_retrieve", () =>
         this.withRetrievedMemory(snapshot, scope, initialUserText),
       ),
       attachments: snapshot.answer === undefined ? (snapshot.attachments ?? []) : [],
     };
-    const preSession = await run.timings.measureStartup("pre_session_stop_point", () =>
-      this.stopPoint(context, cancellation),
-    );
-    if (preSession) return await this.finishStopped(context, preSession);
     const agentSupervisor = this.#createAgentSupervisor(
       run,
       sandboxes.ensureReady,
@@ -619,6 +634,8 @@ export class RunWorker {
       return undefined;
     }
     const { context, scope, snapshot, cancellation } = run;
+    if (typeof snapshot.agent === "string") throw new Error(snapshot.agent);
+    const agentSnapshot = snapshot.agent;
     return new AgentSupervisor({
       persistence: this.dependencies.agentControl,
       rootAgentThreadId: rootAgentThreadId(context.attemptId),
@@ -637,6 +654,7 @@ export class RunWorker {
             checkpointId: `${child.identity.agentThreadId}:${child.identity.agentTurnId}`,
             items: Object.freeze([]),
           }),
+          agentSnapshot,
           ...(snapshot.skills === undefined ? {} : { skillSnapshot: snapshot.skills }),
           ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
           ...(child.history === undefined ? {} : { threadActiveHistory: child.history }),
@@ -667,6 +685,7 @@ export class RunWorker {
   ): Promise<WorkerAgentSessionPort> {
     const { context, scope, snapshot, cancellation, timings } = run;
     const { personalizationSnapshot, agentSupervisor } = input;
+    if (typeof snapshot.agent === "string") throw new Error(snapshot.agent);
     return this.dependencies.sessions.create({
       scope,
       attemptId: context.attemptId,
@@ -674,6 +693,7 @@ export class RunWorker {
       ensureSandboxReady: input.ensureSandboxReady,
       rolloutProjection: snapshot.rolloutProjection,
       initialInputText: input.initialInputText,
+      agentSnapshot: snapshot.agent,
       ...(snapshot.skills === undefined ? {} : { skillSnapshot: snapshot.skills }),
       ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
       ...(timings.startupObserver === undefined ? {} : { startupTiming: timings.startupObserver }),
@@ -965,12 +985,15 @@ export class RunWorker {
     }
     const preSettle = await this.stopPoint(context, cancellation);
     if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
+    const killSandbox =
+      typeof run.snapshot.agent !== "string" &&
+      run.snapshot.agent.content.sandboxIdleAction === "kill";
     if (sandbox !== undefined) {
       if (context.threadSandboxLease === undefined) {
         const settled = await measureExecutionPhase(
           context.phaseTiming,
           "sandbox_settle",
-          this.settleSandbox.bind(this, context, sandbox, "pause"),
+          this.settleSandbox.bind(this, context, sandbox, killSandbox ? "close" : "pause"),
         );
         if (settled.outcome !== "settled") return settled.result;
         const postSettle = await this.stopPoint(context, cancellation);
@@ -1014,6 +1037,8 @@ export class RunWorker {
   ): Promise<RunWorkerResult> {
     const { context, cancellation } = run;
     const sandbox = run.sandboxes?.current;
+    const preSettle = await this.stopPoint(context, cancellation);
+    if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
     if (sandbox === undefined) {
       const finalizing = await this.prepareNoSandboxTerminal(context);
       if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
@@ -1106,12 +1131,15 @@ export class RunWorker {
   }
 
   private async withRetrievedMemory(
-    snapshot: Pick<ClaimedExecutionSnapshot, "tenantKind" | "memorySubjectUserId">,
+    snapshot: Pick<ClaimedExecutionSnapshot, "agent" | "tenantKind" | "memorySubjectUserId">,
     scope: ExecutionScope,
     userText: string,
   ): Promise<string> {
     const retriever = this.dependencies.memoryRetriever;
     if (
+      typeof snapshot.agent === "string" ||
+      (snapshot.agent.content.memory.mode === "configured" &&
+        !snapshot.agent.content.memory.longTermEnabled) ||
       retriever === undefined ||
       snapshot.tenantKind === undefined ||
       snapshot.memorySubjectUserId === undefined
@@ -1148,6 +1176,7 @@ export class RunWorker {
           return context.stopped;
         }
         acceptInspection(context, inspected);
+        if (inspected.agentRevisionRevoked) context.stopped = "agent_revision_revoked";
         refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
         return context.stopped;
       }
@@ -1166,6 +1195,7 @@ export class RunWorker {
     }
     if (!inspectionMatches(context, inspected)) return "scope_mismatch";
     acceptInspection(context, inspected);
+    if (inspected.agentRevisionRevoked) return "agent_revision_revoked";
 
     const renewingSandboxLease = context.threadSandboxLease;
     if (renewingSandboxLease === undefined) return undefined;
@@ -1339,8 +1369,8 @@ export class RunWorker {
         context.stopped =
           result.outcome === "authorized" || result.outcome === "scope_mismatch"
             ? "scope_mismatch"
-            : result.outcome === "cancelled"
-              ? "cancelled"
+            : result.outcome === "cancelled" || result.outcome === "agent_revision_revoked"
+              ? result.outcome
               : result.outcome === "conflict" || result.outcome === "fence_lost"
                 ? "fence_lost"
                 : "unavailable";
@@ -1374,8 +1404,8 @@ export class RunWorker {
       ) {
         if (context.stopped === undefined) {
           context.stopped =
-            consumed.outcome === "cancelled"
-              ? "cancelled"
+            consumed.outcome === "cancelled" || consumed.outcome === "agent_revision_revoked"
+              ? consumed.outcome
               : consumed.outcome === "unavailable"
                 ? "unavailable"
                 : consumed.outcome === "scope_mismatch"
@@ -1760,6 +1790,7 @@ export class RunWorker {
     const lifecycle = this.dependencies.threadSandboxes;
     if (
       turn.kind === "waiting" ||
+      context.sandboxIdleAction === "kill" ||
       context.threadSandboxLease === undefined ||
       lifecycle?.hasQueuedFollowUp === undefined
     ) {
@@ -1822,6 +1853,7 @@ export class RunWorker {
     const retainThreadSandbox =
       sandbox !== undefined &&
       context.threadSandboxLease !== undefined &&
+      context.sandboxIdleAction === "pause" &&
       runStatus === "failed" &&
       code === "PROTOCOL" &&
       context.modelStopReason === "length";
@@ -1907,19 +1939,18 @@ export class RunWorker {
   ): Promise<RunWorkerResult> {
     closeEventAcceptance(context);
     if (context.abortPromise) await context.abortPromise;
-    if (stopped === "cancelled") {
+    if (stopped === "cancelled" || stopped === "agent_revision_revoked") {
       const retainedThreadSandbox =
         sandbox !== undefined && context.threadSandboxLease !== undefined ? sandbox : undefined;
       const deferredCleanupOutbox =
         sandbox !== undefined && context.threadSandboxLease === undefined
           ? [cleanupOutbox(context, sandbox, "started", "close")]
           : [];
-      // API 已提交 cancelled 后，不能再等待外部 Sandbox settle；原子关闭 Attempt，并把
-      // 已 armed 的普通 Sandbox 推进为 started，交给 Scheduler 持久清理。
+      // 先持久化停止事实，再让清理消费者处理 Sandbox；未知清理结果不得重开执行。
       return await this.finalizeWithoutRevision(
         context,
-        "cancelled",
-        "CANCELLED",
+        stopped === "cancelled" ? "cancelled" : "failed",
+        stopped === "cancelled" ? "CANCELLED" : "AGENT_REVISION_REVOKED",
         retainedThreadSandbox,
         false,
         deferredCleanupOutbox,

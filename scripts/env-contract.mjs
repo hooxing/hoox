@@ -149,6 +149,7 @@ export const optionalEnvironmentKeys = Object.freeze([
   "DEMO_ADMIN_USER_ID",
   "INSTALLATION_SETUP_TOKEN",
   "ADMIN_CONTROL_IDENTITY_API_URL",
+  "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES",
 ]);
 
 const placeholderOnlyKeys = new Set([

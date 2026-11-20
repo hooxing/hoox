@@ -163,6 +163,7 @@ const secretKeys = new Set([
   "MEM0_SCOPE_HMAC_KEY",
   "MODEL_ID",
   "RESOURCE_FILESYSTEM_SIGNING_KEY",
+  "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES",
 ]);
 
 function parseLines(source) {

@@ -1,5 +1,6 @@
 import {
   CalendarClock,
+  KeyRound,
   Cloud,
   LoaderCircle,
   Pencil,
@@ -54,6 +55,7 @@ import {
   readAccountSession,
 } from "./account-access.js";
 import { type AutomationCenterApi, AutomationCenterDialog } from "./automation-center.js";
+import { ApiKeyManager } from "./api-key-manager.js";
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { clearAccountDrafts, useConversationDraft } from "./conversation-draft.js";
@@ -170,6 +172,7 @@ type WorkspaceApi = Pick<
 } & Partial<SkillCenterApi & CloudDriveApi & AutomationCenterApi>;
 
 type TeamAwareWorkspaceApi = WorkspaceApi &
+  Partial<Pick<RuntimeApi, "listApiKeys" | "createApiKey" | "revokeApiKey">> &
   Partial<PersonalizationApi> &
   Partial<
     TeamWorkspaceApi &
@@ -353,6 +356,7 @@ function AuthenticatedWorkspace({
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [uploadFiles, setUploadFiles] = useState<readonly File[]>([]);
+  const [apiKeysOpen, setApiKeysOpen] = useState(false);
   const [historyFiles, setHistoryFiles] = useState<readonly HistoryFile[]>([]);
   const [pendingInputs, setPendingInputs] = useState<readonly PendingConversationInput[]>([]);
   const [continuity, setContinuity] =
@@ -1401,6 +1405,19 @@ function AuthenticatedWorkspace({
         className={`workspace ${navigationOpen ? "navigation-open" : ""} ${filePreview ? "has-file-preview" : ""}`}
       >
         {dialog}
+        {apiKeysOpen &&
+          apiClient.listApiKeys !== undefined &&
+          apiClient.createApiKey !== undefined &&
+          apiClient.revokeApiKey !== undefined && (
+            <ApiKeyManager
+              api={{
+                listApiKeys: apiClient.listApiKeys.bind(apiClient),
+                createApiKey: apiClient.createApiKey.bind(apiClient),
+                revokeApiKey: apiClient.revokeApiKey.bind(apiClient),
+              }}
+              onClose={() => setApiKeysOpen(false)}
+            />
+          )}
         <NavigationSidebar
           isCompact={isCompact}
           isOpen={navigationOpen}
@@ -1559,6 +1576,17 @@ function AuthenticatedWorkspace({
               ))
             )}
           </ThreadNavigation>
+          {apiClient.listApiKeys !== undefined &&
+            apiClient.createApiKey !== undefined &&
+            apiClient.revokeApiKey !== undefined &&
+            (activeTeam === undefined ||
+              activeTeam.role === "owner" ||
+              activeTeam.role === "admin") && (
+              <button type="button" className="api-key-entry" onClick={() => setApiKeysOpen(true)}>
+                <KeyRound size={17} />
+                API Key
+              </button>
+            )}
           <AccountMenu
             profile={accountProfile}
             {...(selectedTeam === undefined ? {} : { activeTeamName: selectedTeam.displayName })}

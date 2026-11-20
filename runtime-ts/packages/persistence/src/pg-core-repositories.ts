@@ -48,6 +48,7 @@ const authColumns = `
 
 const threadColumns = `
   th.id AS thread_id, th.created_by_user_id AS thread_created_by_user_id,
+  th.agent_definition_id AS thread_agent_definition_id,
   th.title AS thread_title, th.status AS thread_status, th.version AS thread_version,
   th.created_at AS thread_created_at, th.updated_at AS thread_updated_at,
   thread_creator.id AS thread_creator_id,
@@ -215,8 +216,8 @@ export class PgThreadRepository implements ThreadRepository {
     try {
       return await withTenantTransaction(this.pool, scope, async (client) => {
         const result = await client.query<{ version: string }>(
-          `INSERT INTO threads(tenant_id, id, created_by_user_id, title, status, created_at, updated_at)
-           SELECT $1, $3, $2, $4, $5, $6, $7
+          `INSERT INTO threads(tenant_id, id, created_by_user_id, title, status, created_at, updated_at, agent_definition_id)
+           SELECT $1, $3, $2, $4, $5, $6, $7, $8
             WHERE EXISTS (SELECT 1 FROM memberships
               WHERE tenant_id = $1 AND user_id = $2 AND status = 'active')
            ON CONFLICT DO NOTHING RETURNING version`,
@@ -228,6 +229,7 @@ export class PgThreadRepository implements ThreadRepository {
             thread.status,
             thread.createdAt,
             thread.updatedAt,
+            thread.agentDefinitionId,
           ],
         );
         const version = result.rows[0]?.version;

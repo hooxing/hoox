@@ -58,8 +58,8 @@ export class PgThreadCreation implements ThreadCreationPort {
         const afterLockReplay = await this.readReplay(client, input);
         if (afterLockReplay !== undefined) return afterLockReplay;
         const createdThread = await client.query(
-          `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at,agent_definition_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [
             input.scope.tenantId,
             input.thread.id,
@@ -68,6 +68,7 @@ export class PgThreadCreation implements ThreadCreationPort {
             input.thread.status,
             input.thread.createdAt,
             input.thread.updatedAt,
+            input.thread.agentDefinitionId,
           ],
         );
         if (createdThread.rowCount !== 1) throw new TypeError("创建 Thread 未写入");
@@ -147,7 +148,7 @@ export class PgThreadCreation implements ThreadCreationPort {
     if (existing === undefined) return undefined;
     if (existing.request_hash !== input.idempotency.requestHash) return { outcome: "key_conflict" };
     const thread = await client.query<QueryResultRow>(
-      `SELECT id,created_by_user_id,title,status,created_at,updated_at
+      `SELECT id,created_by_user_id,title,status,created_at,updated_at,agent_definition_id
          FROM threads WHERE tenant_id=$1 AND id=$2`,
       [input.scope.tenantId, existing.thread_id],
     );
@@ -162,6 +163,7 @@ export class PgThreadCreation implements ThreadCreationPort {
           id: String(row.id),
           tenantId: input.scope.tenantId,
           createdByUserId: String(row.created_by_user_id),
+          agentDefinitionId: String(row.agent_definition_id),
           title: String(row.title),
           status: String(row.status),
           createdAt: storedTimestamp(row.created_at),

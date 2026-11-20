@@ -938,7 +938,26 @@ function OperationsSection() {
   );
 }
 
-export function LandingPage() {
+function SectionLinks() {
+  return (
+    <>
+      <a href="#execution">执行方式</a>
+      <a href="#team">团队协作</a>
+      <a href="#architecture">部署</a>
+      <RepositoryLink>
+        <Github size={16} aria-hidden="true" />
+        GitHub
+      </RepositoryLink>
+    </>
+  );
+}
+
+export interface LandingLinks {
+  readonly privacyUrl?: string | undefined;
+  readonly termsUrl?: string | undefined;
+}
+
+export function LandingPage({ privacyUrl, termsUrl }: LandingLinks = {}) {
   return (
     <div className="landing-page">
       <a href="#main-content" className="landing-skip">
@@ -949,13 +968,15 @@ export function LandingPage() {
           <img src={HOOX_HORIZONTAL_PATH} alt="Hoox" width="136" height="42" />
         </a>
         <nav aria-label="首页导航">
-          <a href="#execution">执行方式</a>
-          <a href="#team">团队协作</a>
-          <a href="#architecture">部署</a>
-          <RepositoryLink className="landing-nav-github">
-            <Github size={16} aria-hidden="true" />
-            GitHub
-          </RepositoryLink>
+          <div className="landing-nav-sections">
+            <SectionLinks />
+          </div>
+          <details className="landing-nav-menu">
+            <summary>菜单</summary>
+            <div>
+              <SectionLinks />
+            </div>
+          </details>
           <a href="/app" className="landing-nav-app">
             打开工作台 <ArrowUpRight size={16} aria-hidden="true" />
           </a>
@@ -1017,10 +1038,16 @@ export function LandingPage() {
           <img src={HOOX_HORIZONTAL_PATH} alt="Hoox" width="108" height="34" />
         </a>
         <span>开源 Agent Runtime · 团队工作台</span>
-        <div>
+        <nav aria-label="页脚导航">
           <a href="/app">工作台</a>
+          <RepositoryLink path="/blob/main/docs/README.md">文档</RepositoryLink>
+          <RepositoryLink path="/blob/main/CHANGELOG.md">变更记录</RepositoryLink>
+          <RepositoryLink>GitHub</RepositoryLink>
+          <RepositoryLink path="/issues">Issue</RepositoryLink>
           <RepositoryLink path="/blob/main/LICENSE">Apache-2.0</RepositoryLink>
-        </div>
+          {privacyUrl && <a href={privacyUrl}>隐私</a>}
+          {termsUrl && <a href={termsUrl}>条款</a>}
+        </nav>
       </footer>
     </div>
   );

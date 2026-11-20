@@ -19,6 +19,8 @@ export {
   type TrustedPiModelContextCapability,
 } from "./pi-session.js";
 export type { ToolCallingMode } from "./ptc-tools.js";
+// 默认 Agent 指令由 prompt-builder 拥有；经 pi-adapter 转出，Worker 无需直接依赖 Prompt 组装包。
+export { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "@hoox/prompt-builder";
 export * from "./rollout-recovery.js";
 export * from "./runtime-compaction.js";
 export * from "./thread-history.js";

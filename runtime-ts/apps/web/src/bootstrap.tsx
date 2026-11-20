@@ -1,15 +1,19 @@
-import { createRoot } from "react-dom/client";
+import { createRoot, hydrateRoot } from "react-dom/client";
+import { LandingPage } from "./landing-page.js";
 import { resolveSiteSurface } from "./site-route.js";
-import { SiteRoot } from "./site-root.js";
 
-const surface = resolveSiteSurface(window.location);
-document.documentElement.dataset.surface = surface;
-if (surface === "workspace") {
-  document.title = "Hoox 工作台";
-  const robots = document.createElement("meta");
-  robots.name = "robots";
-  robots.content = "noindex, nofollow";
-  document.head.append(robots);
+if (resolveSiteSurface(window.location) === "workspace") {
+  void import("./workspace-bootstrap.js");
+} else {
+  const rootElement = document.getElementById("root");
+  if (rootElement !== null) {
+    const app = (
+      <LandingPage
+        privacyUrl={rootElement.dataset.privacyUrl}
+        termsUrl={rootElement.dataset.termsUrl}
+      />
+    );
+    if (rootElement.hasAttribute("data-prerendered")) hydrateRoot(rootElement, app);
+    else createRoot(rootElement).render(app);
+  }
 }
-const rootElement = document.getElementById("root");
-if (rootElement !== null) createRoot(rootElement).render(<SiteRoot surface={surface} />);

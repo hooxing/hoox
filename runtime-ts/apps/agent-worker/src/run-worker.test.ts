@@ -39,7 +39,6 @@ import type { RunStartupTimingDiagnosticsPort } from "./run-startup-diagnostics.
 import { RunWorker, type RunWorkerOptions } from "./run-worker.js";
 import {
   BlockingAgentSession,
-  FakeArtifactPublication,
   FakeCancellationPort,
   FakeClock,
   FakeExecutionPersistence,
@@ -99,7 +98,6 @@ function harness(
   const factory = new FakeSessionFactory(sessions, prepareSandboxBeforeInput);
   const cancellation = new FakeCancellationPort();
   const shutdown = new AbortController();
-  const artifacts = new FakeArtifactPublication();
   const clock = new FakeClock();
   const metrics = new FakeRecoveryMetrics();
   const continuityMetrics = {
@@ -117,7 +115,6 @@ function harness(
       sessions: factory,
       cancellation,
       shutdownSignal: shutdown.signal,
-      artifacts,
       clock,
       metrics,
       continuityMetrics,
@@ -147,7 +144,6 @@ function harness(
     factory,
     cancellation,
     shutdown,
-    artifacts,
     clock,
     metrics,
     continuityMetrics,
@@ -1676,17 +1672,6 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     }
   });
 
-  it("旧 Artifact 修正配置不再改变新 Run 的完成协议", () => {
-    expect(() =>
-      harness([], fakeSeed("artifact-round-limit"), { maxArtifactCorrectionRounds: 99 }),
-    ).not.toThrow();
-    expect(() =>
-      harness([], fakeSeed("artifact-budget-limit"), {
-        artifactCorrectionPromptBudgetBytes: 1,
-      }),
-    ).not.toThrow();
-  });
-
   it("初始 Projection 按 UTF-8 字节拒绝 emoji 超限，不能先启动 Sandbox 或 Session", async () => {
     const seed = fakeSeed("emoji-projection");
     const oversized = "😀".repeat(5_000);
@@ -2056,7 +2041,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.persistence.record(h.scope).workspace.currentRevisionId).toBeUndefined();
   });
 
-  it("verify 完成后丢 claim，旧完成门不运行且 Revision 仍未提交", async () => {
+  it("verify 完成后丢 claim 时不提交 Revision 或成功终态", async () => {
     const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-after-verify");
     h.persistence.afterMutation = (command) => {
@@ -2068,9 +2053,9 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
 
     const record = h.persistence.record(h.scope);
-    expect(h.artifacts.calls).toBe(0);
     expect(record.workspace.currentRevisionId).toBeUndefined();
     expect(record.run.status).toBe("running");
+    expect(record.attempt?.status).not.toBe("succeeded");
   });
 
   it("Revision+终态事务响应丢失时按幂等键读回，不重复提交 Revision", async () => {
@@ -3330,7 +3315,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(maximumConcurrent).toBe(1);
   });
 
-  it("Sandbox、Workspace 与 Artifact 异常分别映射稳定错误码", async () => {
+  it("Sandbox 与 Workspace 异常分别映射稳定错误码", async () => {
     const acquire = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     acquire.sandboxes.nextAcquire = { outcome: "failed", code: "SANDBOX_FAILED" };
     await expect(acquire.worker.execute(acquire.scope)).resolves.toEqual({
@@ -3348,17 +3333,6 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       outcome: "recovery_required",
       code: "WORKSPACE_CONFLICT",
     });
-
-    const artifactSession = new ScriptedAgentSession(successfulEvents);
-    const artifact = harness([artifactSession]);
-    artifact.artifacts.beforeReturn = () => {
-      throw new Error("旧 Artifact 完成门不应再被调用");
-    };
-    await expect(artifact.worker.execute(artifact.scope)).resolves.toEqual({
-      outcome: "succeeded",
-    });
-    expect(artifact.artifacts.calls).toBe(0);
-    expect(artifactSession.prompts).toHaveLength(1);
   });
 
   it("Thread Sandbox 的确定性创建失败终止 Run，后续任务不再排队", async () => {
@@ -3426,24 +3400,18 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     }
   });
 
-  it("模型完成后不依赖旧声明、发布意图或 Artifact 修正门", async () => {
+  it("模型完成后 Run 与 Attempt 均进入成功终态", async () => {
     const session = new ScriptedAgentSession(successfulEvents);
     const h = harness([session]);
-    h.artifacts.beforeReturn = () => {
-      throw new Error("旧完成门不应被调用");
-    };
-
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
 
     expect(h.factory.createCount).toBe(1);
     expect(session.prompts).toHaveLength(1);
-    expect(h.artifacts.calls).toBe(0);
     expect(h.persistence.permits).toHaveLength(1);
-    expect(
-      h.persistence
-        .record(h.scope)
-        .events.filter((event) => event.kind === "artifact_correction_requested"),
-    ).toHaveLength(0);
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("succeeded");
+    expect(record.attempt).toMatchObject({ status: "succeeded" });
+    expect(record.mutations.has("attempt-1/final/succeeded")).toBe(true);
   });
 
   it("跨 Tenant scope 被拒绝且不泄漏或改写原记录", async () => {

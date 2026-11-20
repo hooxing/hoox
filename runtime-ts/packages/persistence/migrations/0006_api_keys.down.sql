@@ -6,6 +6,7 @@ BEGIN
   END IF;
 END
 $$;
-DROP FUNCTION revoke_api_key(text, timestamptz);
+DROP POLICY api_key_revocation_guard ON api_keys;
+DROP POLICY api_key_integration_membership_revoke ON memberships;
 DROP TABLE api_keys;
 ALTER TABLE app_users DROP COLUMN kind;

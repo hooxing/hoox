@@ -9,6 +9,7 @@ import {
 } from "@hoox/domain";
 import { hashApiKey, type ApiKeyAuthenticationPort, type ApiKeyPrincipal } from "@hoox/identity";
 import type { PoolClient, QueryResultRow } from "pg";
+import { PersistenceError } from "./errors.js";
 import type { TenantScope } from "./ports.js";
 import { TransactionCommitUnknownError, withTransaction, type Pool as PgPool } from "./postgres.js";
 
@@ -165,11 +166,30 @@ export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
   async revoke(scope: TenantScope, id: string, now: string): Promise<ApiKeyRecord | undefined> {
     return transaction(this.pool, async (client) => {
       await setTenant(client, scope);
-      const revoked = await client.query<{ readonly revoked: boolean }>(
-        "SELECT revoke_api_key($1, $2) AS revoked",
-        [id, now],
+      const revoked = await client.query<{ readonly integration_user_id: string }>(
+        `UPDATE api_keys SET revoked_at = $3
+          WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL
+          RETURNING integration_user_id`,
+        [scope.tenantId, id, now],
       );
-      if (revoked.rows[0]?.revoked !== true) return undefined;
+      const integrationUserId = revoked.rows[0]?.integration_user_id;
+      if (integrationUserId === undefined) return undefined;
+      const membership = await client.query(
+        `UPDATE memberships SET status = 'revoked'
+          WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'
+            AND EXISTS (
+              SELECT 1 FROM app_users
+               WHERE app_users.id = memberships.user_id AND app_users.kind = 'integration'
+            )
+          RETURNING user_id`,
+        [scope.tenantId, integrationUserId],
+      );
+      if (membership.rowCount !== 1) {
+        throw new PersistenceError(
+          "CONSTRAINT_VIOLATION",
+          "API Key 集成身份 Membership 未能同步吊销",
+        );
+      }
       const result = await client.query<ApiKeyRow>(
         `SELECT ${columns} FROM api_keys WHERE tenant_id = $1 AND id = $2`,
         [scope.tenantId, id],

@@ -9,8 +9,6 @@
 [![pnpm](https://img.shields.io/badge/pnpm-10.15.1-F69220?logo=pnpm&logoColor=white)](package.json)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> **Hoox** —— 你说，它做。
-
 公开入口：[Hoox](https://hoox.aisay.cc/) · [工作台](https://hoox.aisay.cc/app)。首页介绍产品与开源能力；工作台需要登录。演示环境不替代生产就绪验收。
 
 **Hoox 是一个开源、可自托管的云端 Agent 平台。写好指令、接上你的工具、上架 Skill，就是你自己的专属 Agent。**
@@ -166,7 +164,7 @@ tests/              跨包、集成和黑盒测试
 
 欢迎提交可复现的问题、文档改进、测试和边界清晰的功能。开始前请阅读[贡献指南](CONTRIBUTING.md)；安全问题请按[安全策略](SECURITY.md)私下报告，不要创建公开 Issue。
 
-Hoox 的代码、维护者说明和 Git 提交使用中文；公共标识符、协议字段和已有技术名词保持英文。
+Issue、讨论、Pull Request 和提交信息可以使用中文或英文。维护者自己的代码注释、文档和提交主要使用中文，因此中文文档更完整；英文版见 [README.en.md](README.en.md)。
 
 ## 安全与生产使用
 

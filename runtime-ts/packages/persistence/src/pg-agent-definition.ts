@@ -430,6 +430,41 @@ export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPor
     }
   }
 
+  async readVisibleCurrent(
+    tenantId: string,
+    definitionId: string,
+  ): Promise<
+    | { readonly definition: StoredAgentDefinition; readonly revision?: StoredAgentRevision }
+    | undefined
+  > {
+    return withTenantTransaction(
+      this.pool,
+      { tenantId },
+      async (client) => {
+        const result = await client.query<DefinitionRow>(
+          `SELECT id,status,generation::text,availability_mode,current_revision_id,created_at,updated_at
+             FROM agent_definitions WHERE id=$1`,
+          [definitionId],
+        );
+        const row = result.rows[0];
+        if (row === undefined) return undefined;
+        if (row.current_revision_id === null) return { definition: mapDefinition(row) };
+        const revision = await readRevision(client, row.current_revision_id);
+        if (revision === undefined || (await revocationExists(client, revision.id))) {
+          return { definition: mapDefinition(row) };
+        }
+        try {
+          return {
+            definition: mapDefinition(row),
+            revision: mapRevision(revision, false),
+          };
+        } catch {
+          return { definition: mapDefinition(row) };
+        }
+      },
+      { readOnly: true },
+    );
+  }
   async listAvailable(
     tenantId: string,
   ): Promise<readonly { definition: StoredAgentDefinition; revision: StoredAgentRevision }[]> {

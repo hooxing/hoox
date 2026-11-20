@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  agentBuiltinToolLimit,
+  agentDefinitionAccess,
+  type ControlOperatorRole,
+} from "@hoox/admin-control";
+import {
+  DomainError,
   tenantId,
   validateAgentRevisionContent,
   type AgentAvailability,
@@ -8,10 +14,14 @@ import {
 import type { QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import type {
+  AgentDefinitionAdminRepositoryPort,
   AgentDefinitionRepositoryPort,
+  SetAgentAvailabilityInput,
   StoredAgentDefinition,
   StoredAgentRevision,
+  StoredAgentRevisionSummary,
 } from "./agent-definition-port.js";
+import { mapSavedModelProviderConfiguration } from "./pg-admin-control.js";
 import type { Pool, PoolClient } from "./postgres.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
 
@@ -67,8 +77,19 @@ function mapDefinition(
   });
 }
 function mapRevision(row: RevisionRow, revoked: boolean): StoredAgentRevision {
-  const content = validateAgentRevisionContent(row.content);
-  if (digest(content) !== row.content_digest) throw new TypeError("AgentRevision 摘要不匹配");
+  if (digest(row.content) !== row.content_digest) throw new TypeError("AgentRevision 摘要不匹配");
+  const { longTermMemoryEnabled, ...contentWithMemory } = row.content as AgentRevisionContent & {
+    readonly longTermMemoryEnabled?: boolean;
+  };
+  // 初始种子只在读取时投影为当前协议，历史正文与摘要保持不变。
+  const content = validateAgentRevisionContent(
+    row.id === "agent_default_revision_1" && typeof longTermMemoryEnabled === "boolean"
+      ? {
+          ...contentWithMemory,
+          memory: { mode: "configured", longTermEnabled: longTermMemoryEnabled },
+        }
+      : row.content,
+  );
   return Object.freeze({
     id: row.id,
     definitionId: row.definition_id,
@@ -80,21 +101,173 @@ function mapRevision(row: RevisionRow, revoked: boolean): StoredAgentRevision {
     createdBy: row.created_by,
   });
 }
+export class AgentDefinitionAccessError extends PersistenceError {
+  constructor() {
+    super("CONSTRAINT_VIOLATION", "Agent 管理权限不足");
+  }
+}
+
+export class AgentDefinitionValidationError extends PersistenceError {
+  constructor(message: string) {
+    super("CONSTRAINT_VIOLATION", message);
+  }
+}
+
+async function resolveAgentAccess(client: PoolClient, actorUserId: string) {
+  await client.query("SELECT set_config('app.user_id',$1,true)", [actorUserId]);
+  const result = await client.query<{ role: ControlOperatorRole }>(
+    "SELECT role FROM platform_control_operators WHERE user_id=$1 AND status='active'",
+    [actorUserId],
+  );
+  const access = agentDefinitionAccess(result.rows[0]?.role);
+  if (!access) throw new AgentDefinitionAccessError();
+  return access;
+}
+
 async function admin<T>(
   pool: Pool,
   actorUserId: string,
   action: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
   return withTransaction(pool, async (client) => {
-    await client.query("SELECT set_config('app.user_id',$1,true)", [actorUserId]);
-    const operator = await client.query(
-      "SELECT 1 FROM platform_control_operators WHERE user_id=$1 AND status='active' AND role IN ('operator','admin')",
-      [actorUserId],
-    );
-    if (operator.rowCount !== 1)
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Agent 管理权限不足");
+    if (!(await resolveAgentAccess(client, actorUserId)).canManage) {
+      throw new AgentDefinitionAccessError();
+    }
     return action(client);
   });
+}
+
+async function adminRead<T>(
+  pool: Pool,
+  actorUserId: string,
+  action: (client: PoolClient, canManage: boolean) => Promise<T>,
+): Promise<T> {
+  try {
+    return await withTransaction(
+      pool,
+      async (client) => {
+        const { canManage } = await resolveAgentAccess(client, actorUserId);
+        return action(client, canManage);
+      },
+      { readOnly: true, isolationLevel: "REPEATABLE READ" },
+    );
+  } catch (error) {
+    throw mapPersistenceError(error, "读取 Agent 管理数据");
+  }
+}
+
+async function builtinToolLimit(client: PoolClient) {
+  const result = await client.query<{ configuration: { enabledTools?: unknown } }>(`
+    SELECT c.configuration
+    FROM admin_control_active_configs a
+    JOIN admin_control_config_revisions c USING (object_kind,object_key,revision)
+    WHERE a.object_kind='runtime_settings' AND a.object_key='global'
+  `);
+  return agentBuiltinToolLimit(result.rows[0]?.configuration.enabledTools);
+}
+
+type PinnedModel = Extract<AgentRevisionContent["model"], { mode: "pinned" }>;
+
+function selectableModels(
+  objectKey: string,
+  revision: string,
+  configuration: unknown,
+): PinnedModel[] {
+  const provider = mapSavedModelProviderConfiguration(configuration);
+  const providerRevision = Number(revision);
+  if (
+    !provider.credentialConfigured ||
+    provider.providerKey !== objectKey ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(objectKey) ||
+    !Number.isSafeInteger(providerRevision) ||
+    providerRevision < 1
+  )
+    return [];
+  return provider.models.flatMap((model) =>
+    model.enabled && Buffer.byteLength(model.id, "utf8") <= 200
+      ? [{ mode: "pinned", providerKey: objectKey, providerRevision, modelId: model.id }]
+      : [],
+  );
+}
+
+async function listPinnedModelOptions(client: PoolClient): Promise<PinnedModel[]> {
+  const result = await client.query<{
+    object_key: string;
+    revision: string;
+    configuration: unknown;
+  }>(
+    `SELECT object_key,revision::text,configuration FROM admin_control_config_revisions
+      WHERE object_kind='model_provider' ORDER BY object_key,admin_control_config_revisions.revision DESC`,
+  );
+  return result.rows.flatMap((row) =>
+    selectableModels(row.object_key, row.revision, row.configuration),
+  );
+}
+
+async function validateDraft(client: PoolClient, value: AgentRevisionContent) {
+  let content: AgentRevisionContent;
+  try {
+    content = validateAgentRevisionContent(value);
+  } catch (error) {
+    if (error instanceof DomainError) throw new AgentDefinitionValidationError(error.message);
+    throw error;
+  }
+  if (content.model.mode === "pinned") {
+    const { providerKey, providerRevision, modelId } = content.model;
+    const result = await client.query<{ configuration: unknown }>(
+      `SELECT configuration FROM admin_control_config_revisions
+        WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2`,
+      [providerKey, providerRevision],
+    );
+    const row = result.rows[0];
+    if (
+      !row ||
+      !selectableModels(providerKey, String(providerRevision), row.configuration).some(
+        (model) => model.modelId === modelId,
+      )
+    )
+      throw new AgentDefinitionValidationError("请选择已保存、已启用且绑定托管凭据的模型");
+  }
+  if (content.tools.mode === "configured") {
+    // 平台运行设置使用同一行的排他锁激活，避免校验通过后按过期名单提交。
+    await client.query(
+      "SELECT generation FROM admin_control_generation WHERE singleton='global' FOR SHARE",
+    );
+    const allowed = await builtinToolLimit(client);
+    const requested = content.tools.builtinTools;
+    if (
+      new Set(requested).size !== requested.length ||
+      requested.some((name) => !allowed.includes(name))
+    ) {
+      throw new AgentDefinitionValidationError(
+        "内置工具只能选择平台运行设置中启用的工具，且不得重复",
+      );
+    }
+  }
+  return content;
+}
+
+function availabilityIds(availability: AgentAvailability) {
+  if (availability.mode === "all_tenants") return [];
+  const ids = availability.tenantIds;
+  if (ids.length < 1 || ids.length > 1000 || new Set(ids).size !== ids.length) {
+    throw new AgentDefinitionValidationError("请提供 1 至 1000 个不重复的 Tenant ID");
+  }
+  return [...ids].sort();
+}
+
+async function insertScopes(
+  client: PoolClient,
+  id: string,
+  ids: readonly string[],
+  available: boolean,
+) {
+  if (ids.length === 0) return;
+  await client.query(
+    `INSERT INTO agent_definition_tenants(definition_id,tenant_id,available)
+     SELECT $1,tenant_id,$3 FROM unnest($2::text[]) AS tenant_id`,
+    [id, ids, available],
+  );
 }
 async function lockIdempotency(
   client: PoolClient,
@@ -136,10 +309,14 @@ async function readDefinition(
   );
   return row.rows[0];
 }
-async function scopeIds(client: PoolClient, id: string): Promise<string[]> {
+async function scopeIds(
+  client: PoolClient,
+  id: string,
+  includeInactive = false,
+): Promise<string[]> {
   const result = await client.query<{ tenant_id: string }>(
-    "SELECT tenant_id FROM agent_definition_tenants WHERE definition_id=$1 AND available ORDER BY tenant_id",
-    [id],
+    "SELECT tenant_id FROM agent_definition_tenants WHERE definition_id=$1 AND ($2 OR available) ORDER BY tenant_id",
+    [id, includeInactive],
   );
   return result.rows.map((row) => row.tenant_id);
 }
@@ -157,8 +334,89 @@ async function revocationExists(client: PoolClient, id: string): Promise<boolean
   );
   return result.rowCount === 1;
 }
-export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPort {
+interface RevisionSummaryRow extends Omit<RevisionRow, "content"> {
+  display_name: string;
+  revoked: boolean;
+}
+const revisionSummaryColumns = `r.id,r.definition_id,r.revision::text,r.status,r.content_digest,
+  r.created_by,r.created_at,r.content->>'displayName' AS display_name,
+  EXISTS(SELECT 1 FROM agent_revision_revocations v WHERE v.revision_id=r.id) AS revoked`;
+
+function mapRevisionSummary(row: RevisionSummaryRow): StoredAgentRevisionSummary {
+  return {
+    id: row.id,
+    definitionId: row.definition_id,
+    revision: Number(row.revision),
+    status: row.revoked ? "revoked" : row.status,
+    displayName: row.display_name,
+    digest: row.content_digest,
+    createdBy: row.created_by,
+    createdAt: timestamp(row.created_at),
+  };
+}
+
+export class PgAgentDefinitionRepository
+  implements AgentDefinitionRepositoryPort, AgentDefinitionAdminRepositoryPort
+{
   constructor(private readonly pool: Pool) {}
+
+  async listDefinitions(actorUserId: string) {
+    return adminRead(this.pool, actorUserId, async (client, canManage) => {
+      const result = await client.query<
+        DefinitionRow & { tenant_ids: string[]; summary: RevisionSummaryRow | null }
+      >(
+        `SELECT d.id,d.status,d.generation::text,d.availability_mode,d.current_revision_id,
+           d.created_at,d.updated_at,
+           ARRAY(SELECT tenant_id FROM agent_definition_tenants s WHERE s.definition_id=d.id ORDER BY tenant_id) AS tenant_ids,
+           row_to_json(summary) AS summary
+         FROM agent_definitions d
+         LEFT JOIN LATERAL (
+           SELECT ${revisionSummaryColumns} FROM agent_revisions r WHERE r.definition_id=d.id
+             AND ($1 OR r.status IN ('published','revoked'))
+             AND (r.id=d.current_revision_id OR d.current_revision_id IS NULL)
+           ORDER BY r.revision DESC LIMIT 1
+         ) summary ON true
+         WHERE $1 OR d.status<>'draft'
+         ORDER BY d.is_builtin DESC,d.id`,
+        [canManage],
+      );
+      return {
+        canManage,
+        builtinToolLimit: canManage ? await builtinToolLimit(client) : [],
+        pinnedModelOptions: canManage ? await listPinnedModelOptions(client) : [],
+        items: result.rows.map((row) => ({
+          definition: mapDefinition(row, row.tenant_ids),
+          ...(row.summary === null ? {} : { revision: mapRevisionSummary(row.summary) }),
+        })),
+      };
+    });
+  }
+
+  async listRevisions(actorUserId: string, definitionId: string) {
+    return adminRead(this.pool, actorUserId, async (client, canManage) => {
+      const row = await readDefinition(client, definitionId);
+      if (!row || (!canManage && row.status === "draft")) return undefined;
+      const revisions = await client.query<RevisionSummaryRow>(
+        `SELECT ${revisionSummaryColumns} FROM agent_revisions r WHERE r.definition_id=$1
+           AND ($2 OR r.status IN ('published','revoked')) ORDER BY r.revision DESC`,
+        [definitionId, canManage],
+      );
+      return {
+        definition: mapDefinition(row, await scopeIds(client, definitionId, true)),
+        items: revisions.rows.map(mapRevisionSummary),
+      };
+    });
+  }
+
+  async readAdminRevision(actorUserId: string, definitionId: string, revisionId: string) {
+    return adminRead(this.pool, actorUserId, async (client, canManage) => {
+      const row = await readRevision(client, revisionId);
+      if (!row || row.definition_id !== definitionId || (!canManage && row.status === "draft")) {
+        return undefined;
+      }
+      return mapRevision(row, await revocationExists(client, row.id));
+    });
+  }
 
   async createDraft(input: {
     actorUserId: string;
@@ -177,19 +435,14 @@ export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPor
           return replay as { definition: StoredAgentDefinition; revision: StoredAgentRevision };
         if (input.expectedGeneration !== 0)
           throw new PersistenceError("CONFLICT", "Agent generation 已变化");
-        const normalizedContent = validateAgentRevisionContent(input.content);
+        const normalizedContent = await validateDraft(client, input.content);
         const digestValue = digest(normalizedContent);
-        const ids =
-          input.availability.mode === "selected_tenants" ? input.availability.tenantIds : [];
+        const ids = availabilityIds(input.availability);
         await client.query(
           "INSERT INTO agent_definitions(id,status,generation,availability_mode) VALUES($1,'draft',0,$2)",
           [input.id, input.availability.mode],
         );
-        for (const tenantId of ids)
-          await client.query(
-            "INSERT INTO agent_definition_tenants(definition_id,tenant_id) VALUES($1,$2)",
-            [input.id, tenantId],
-          );
+        await insertScopes(client, input.id, ids, false);
         await client.query(
           "INSERT INTO agent_revisions(id,definition_id,revision,status,content,content_digest,created_by) VALUES($1,$2,1,'draft',$3,$4,$5)",
           [
@@ -236,11 +489,11 @@ export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPor
         if (
           !definition ||
           Number(definition.generation) !== input.expectedGeneration ||
-          !["published", "disabled"].includes(definition.status)
+          definition.status === "revoked"
         ) {
           throw new PersistenceError("CONFLICT", "Agent generation 或状态已变化");
         }
-        const content = validateAgentRevisionContent(input.content);
+        const content = await validateDraft(client, input.content);
         const latest = await client.query<{ next_revision: string }>(
           "SELECT (COALESCE(max(revision),0)+1)::text AS next_revision FROM agent_revisions WHERE definition_id=$1",
           [input.definitionId],
@@ -301,6 +554,7 @@ export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPor
           revision.status !== "draft"
         )
           throw new PersistenceError("CONSTRAINT_VIOLATION", "Agent 草稿 Revision 不存在");
+        await validateDraft(client, revision.content);
         await client.query(
           "UPDATE agent_definition_tenants SET available=true WHERE definition_id=$1",
           [input.definitionId],
@@ -314,7 +568,7 @@ export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPor
         ]);
         const row = await readDefinition(client, input.definitionId);
         if (!row) throw new TypeError("Agent 发布后记录缺失");
-        const result = mapDefinition(row, await scopeIds(client, row.id));
+        const result = mapDefinition(row, await scopeIds(client, row.id, true));
         await client.query(
           "INSERT INTO agent_definition_audits(actor_user_id,definition_id,revision_id,action,generation,reason) VALUES($1,$2,$3,'published',$4,'发布 Agent Revision')",
           [input.actorUserId, input.definitionId, input.revisionId, row.generation],
@@ -324,6 +578,39 @@ export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPor
       });
     } catch (error) {
       throw mapPersistenceError(error, "发布 Agent Revision");
+    }
+  }
+
+  async setAvailability(input: SetAgentAvailabilityInput): Promise<StoredAgentDefinition> {
+    try {
+      return await admin(this.pool, input.actorUserId, async (client) => {
+        const request = { action: "availability_changed", ...input };
+        const replay = await lockIdempotency(client, input.idempotencyKey, request);
+        if (replay !== undefined) return replay as StoredAgentDefinition;
+        const def = await readDefinition(client, input.definitionId, true);
+        if (!def || Number(def.generation) !== input.expectedGeneration)
+          throw new PersistenceError("CONFLICT", "Agent generation 已变化");
+        const ids = availabilityIds(input.availability);
+        await client.query("DELETE FROM agent_definition_tenants WHERE definition_id=$1", [
+          input.definitionId,
+        ]);
+        await insertScopes(client, input.definitionId, ids, def.status === "published");
+        await client.query(
+          "UPDATE agent_definitions SET availability_mode=$2,generation=generation+1,updated_at=clock_timestamp() WHERE id=$1",
+          [input.definitionId, input.availability.mode],
+        );
+        const row = await readDefinition(client, input.definitionId);
+        if (!row) throw new TypeError("Agent 可用范围更新后记录缺失");
+        const result = mapDefinition(row, ids);
+        await client.query(
+          "INSERT INTO agent_definition_audits(actor_user_id,definition_id,action,generation,reason) VALUES($1,$2,'availability_changed',$3,$4)",
+          [input.actorUserId, input.definitionId, row.generation, "设置 Agent 可用范围"],
+        );
+        await recordCommand(client, input.idempotencyKey, request, result);
+        return result;
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "设置 Agent 可用范围");
     }
   }
 
@@ -373,7 +660,7 @@ export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPor
         );
         const row = await readDefinition(client, input.definitionId);
         if (!row) throw new TypeError("Agent 撤销后记录缺失");
-        const result = mapDefinition(row, await scopeIds(client, row.id));
+        const result = mapDefinition(row, await scopeIds(client, row.id, true));
         await client.query(
           "INSERT INTO agent_definition_audits(actor_user_id,definition_id,revision_id,action,generation,reason) VALUES($1,$2,$3,'revoked',$4,$5)",
           [input.actorUserId, input.definitionId, input.revisionId, row.generation, input.reason],
@@ -417,7 +704,7 @@ export class PgAgentDefinitionRepository implements AgentDefinitionRepositoryPor
         );
         const row = await readDefinition(client, input.definitionId);
         if (!row) throw new TypeError("Agent 状态变更后记录缺失");
-        const result = mapDefinition(row, await scopeIds(client, row.id));
+        const result = mapDefinition(row, await scopeIds(client, row.id, true));
         await client.query(
           "INSERT INTO agent_definition_audits(actor_user_id,definition_id,action,generation,reason) VALUES($1,$2,$3,$4,$5)",
           [input.actorUserId, input.definitionId, action, row.generation, reason],

@@ -49,6 +49,10 @@ Content-Type: application/json
 
 省略该字段时仍绑定 `agent_default`。成功响应的 Thread DTO 带有 `agentDefinitionId`。RLS 不可见的定义（包括不存在、跨 Tenant、不在可用范围和已停用定义）统一返回 `404 NOT_FOUND`，不区分原因；仅定义仍可见但没有可用的已发布 Revision 时返回 `409 AGENT_REVISION_UNAVAILABLE`。已有 Thread 创建 Run 时沿用 A3 的该 409 语义。新建 Thread 不会改写已有 Thread 的 Agent 绑定。
 
+## 后台 Agent 固定模型
+
+`GET /v1/admin/control/agent-definitions` 为可管理 Agent 的 `operator` 和 `admin` 返回 `pinnedModelOptions`；`viewer` 得到空数组。选项只包含 `mode: "pinned"`、`providerKey`、`providerRevision` 和 `modelId`，不包含凭据。创建 Agent 或保存 Revision 时，把该选项作为 `content.model` 提交；跟随平台默认时提交 `{ "mode": "platform_default" }`。不存在、未启用或未绑定托管凭据的引用返回 400。发布时会重新校验。角色及版本语义见 [后台控制面](../architecture/admin-control-plane.md#agent-定义与版本管理)。
+
 ## 健康端点
 
 | 方法 | 路径 | 语义 |

@@ -12,6 +12,10 @@ import {
   digestControlRequest,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
+  type PinnedRunModelConfiguration,
+  type PinnedRunModelConfigurationPort,
+  type PinnedRunModelReference,
+  PinnedRunModelUnavailableError,
   normalizeRuntimeSettingsConfiguration,
   normalizeStoredMemoryProviderConfiguration,
   normalizeStoredModelProviderConfiguration,
@@ -117,19 +121,22 @@ function safeNonnegativeNumber(value: string, name: string): number {
   return parsed;
 }
 
+export function mapSavedModelProviderConfiguration(value: unknown): ModelProviderConfiguration {
+  if (typeof value !== "object" || value === null) throw new Error("控制面配置损坏");
+  const {
+    credential,
+    secretRef: _legacySecretRef,
+    ...configuration
+  } = value as Record<string, unknown>;
+  return normalizeStoredModelProviderConfiguration({
+    ...configuration,
+    credentialConfigured: isEncryptedModelProviderCredential(credential),
+  } as unknown as ModelProviderConfiguration);
+}
+
 function mapConfiguration(kind: ControlObjectKind, value: unknown): Configuration {
   if (typeof value !== "object" || value === null) throw new Error("控制面配置损坏");
-  if (kind === "model_provider") {
-    const {
-      credential,
-      secretRef: _legacySecretRef,
-      ...configuration
-    } = value as Record<string, unknown>;
-    return normalizeStoredModelProviderConfiguration({
-      ...configuration,
-      credentialConfigured: isEncryptedModelProviderCredential(credential),
-    } as unknown as ModelProviderConfiguration);
-  }
+  if (kind === "model_provider") return mapSavedModelProviderConfiguration(value);
   if (kind === "memory_provider") {
     return normalizeStoredMemoryProviderConfiguration(value as MemoryProviderConfiguration);
   }
@@ -1335,13 +1342,12 @@ function mapRuntimeSnapshot(
   row: ActiveConfigurationRow,
   credentialCipher: ModelProviderCredentialCipher,
   legacyModelApiKey?: string,
+  pinned?: PinnedRunModelConfiguration,
 ): RuntimeControlConfigurationSnapshot {
   const model =
-    row.model_configuration === null
+    pinned !== undefined || row.model_configuration === null
       ? undefined
       : resolveRuntimeModelConfiguration(row, credentialCipher, legacyModelApiKey);
-  const modelConfiguration = model?.configuration;
-  const modelApiKey = model?.apiKey;
   const memoryConfiguration =
     row.memory_configuration === null
       ? undefined
@@ -1364,17 +1370,23 @@ function mapRuntimeSnapshot(
   return Object.freeze({
     generation: safeInteger(row.generation, "运行配置 Generation", 0),
     ...(memoryApiKey === undefined ? {} : { memoryApiKey }),
-    ...(modelConfiguration === undefined
-      ? {}
-      : {
-          modelApiKey: modelApiKey as string,
-          model: snapshotRevision({
-            configuration: modelConfiguration as ModelProviderConfiguration,
-            revision: safeInteger(row.model_revision as string, "模型 Revision", 1),
-            createdBy: row.model_created_by as string,
-            createdAt: row.model_created_at as Date | string,
+    ...(pinned !== undefined
+      ? {
+          model: pinned.model,
+          modelApiKey: pinned.apiKey,
+          platformModelConfigured: row.model_key !== null,
+        }
+      : model === undefined
+        ? {}
+        : {
+            modelApiKey: model.apiKey,
+            model: snapshotRevision({
+              configuration: model.configuration,
+              revision: safeInteger(row.model_revision as string, "模型 Revision", 1),
+              createdBy: row.model_created_by as string,
+              createdAt: row.model_created_at as Date | string,
+            }),
           }),
-        }),
     ...(memoryConfiguration === undefined ||
     row.memory_revision === null ||
     row.memory_created_by === null ||
@@ -1404,8 +1416,12 @@ function mapRuntimeSnapshot(
   });
 }
 
-/** Runtime 只能读取已发布配置并为自己的 Tenant/Run 固定一次快照。 */
-export class PgRuntimeControlConfigurationRepository implements RuntimeControlConfigurationPort {
+type RunConfigurationScope = { readonly tenantId: string; readonly runId: string };
+
+/** Runtime 为自己的 Tenant/Run 固定平台配置，仅能精确读取该 Run 引用的额外模型版本。 */
+export class PgRuntimeControlConfigurationRepository
+  implements RuntimeControlConfigurationPort, PinnedRunModelConfigurationPort
+{
   constructor(
     private readonly pool: Pool,
     private readonly credentialCipher: ModelProviderCredentialCipher,
@@ -1499,10 +1515,88 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
     }
   }
 
-  async resolveForRun(input: { readonly tenantId: string; readonly runId: string }) {
+  async resolvePinnedModelConfiguration(
+    scope: RunConfigurationScope,
+    reference: PinnedRunModelReference,
+  ): Promise<PinnedRunModelConfiguration> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        scope,
+        (client) => this.readPinnedModel(client, scope, reference),
+        { readOnly: true },
+      );
+    } catch (error) {
+      if (error instanceof PinnedRunModelUnavailableError) throw error;
+      throw mapPersistenceError(error, "读取 Agent 固定模型配置");
+    }
+  }
+
+  private async readPinnedModel(
+    client: PoolClient,
+    scope: RunConfigurationScope,
+    reference: PinnedRunModelReference,
+  ): Promise<PinnedRunModelConfiguration> {
+    await client.query("SELECT set_config('app.pinned_model_run_id',$1,true)", [scope.runId]);
+    const result = await client.query<{
+      model_key: string;
+      model_configuration: unknown;
+      created_by: string;
+      created_at: Date | string;
+    }>(
+      `SELECT c.object_key AS model_key,c.configuration AS model_configuration,c.created_by,c.created_at
+       FROM run_agent_snapshots s
+       JOIN admin_control_config_revisions c ON c.object_kind='model_provider'
+         AND c.object_key=$3 AND c.revision=$4
+       WHERE s.tenant_id=$1 AND s.run_id=$2 AND s.content #> '{model}'=jsonb_build_object(
+         'mode','pinned','providerKey',$3::text,'providerRevision',$4::bigint,'modelId',$5::text)`,
+      [
+        scope.tenantId,
+        scope.runId,
+        reference.providerKey,
+        reference.providerRevision,
+        reference.modelId,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new PinnedRunModelUnavailableError();
+    let resolved: ReturnType<typeof resolveRuntimeModelConfiguration>;
+    try {
+      resolved = resolveRuntimeModelConfiguration(row, this.credentialCipher);
+    } catch {
+      throw new PinnedRunModelUnavailableError();
+    }
+    const { configuration, apiKey } = resolved;
+    if (
+      !apiKey ||
+      configuration.providerKey !== reference.providerKey ||
+      !configuration.models.some((model) => model.id === reference.modelId && model.enabled)
+    )
+      throw new PinnedRunModelUnavailableError();
+    return Object.freeze({
+      model: snapshotRevision({
+        configuration: Object.freeze({ ...configuration, defaultModelId: reference.modelId }),
+        revision: reference.providerRevision,
+        createdBy: row.created_by,
+        createdAt: row.created_at,
+      }),
+      apiKey,
+    });
+  }
+
+  async resolveForRun(input: RunConfigurationScope) {
     try {
       return await withTenantTransaction(this.pool, input, async (client) => {
-        const existing = await this.readSnapshot(client, input);
+        // 记忆可能先于 Session 创建平台快照，两条路径均从持久化 Agent 快照读取引用。
+        const reference = await client.query<{ model: PinnedRunModelReference }>(
+          `SELECT content->'model' AS model FROM run_agent_snapshots
+           WHERE tenant_id=$1 AND run_id=$2 AND content #>> '{model,mode}'='pinned'`,
+          [input.tenantId, input.runId],
+        );
+        const model = reference.rows[0]?.model;
+        const pinned =
+          model === undefined ? undefined : await this.readPinnedModel(client, input, model);
+        const existing = await this.readSnapshot(client, input, pinned);
         if (existing !== undefined) return existing;
         const active = await client.query<ActiveConfigurationRow>(activeConfigurationSql);
         const row = active.rows[0];
@@ -1529,18 +1623,20 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
           ],
         );
         return (
-          (await this.readSnapshot(client, input)) ??
-          mapRuntimeSnapshot(row, this.credentialCipher, this.legacyModelApiKey)
+          (await this.readSnapshot(client, input, pinned)) ??
+          mapRuntimeSnapshot(row, this.credentialCipher, this.legacyModelApiKey, pinned)
         );
       });
     } catch (error) {
+      if (error instanceof PinnedRunModelUnavailableError) throw error;
       throw mapPersistenceError(error, "解析 Run 固定运行配置");
     }
   }
 
   private async readSnapshot(
     client: PoolClient,
-    input: { readonly tenantId: string; readonly runId: string },
+    input: RunConfigurationScope,
+    pinned?: PinnedRunModelConfiguration,
   ): Promise<RuntimeControlConfigurationSnapshot | undefined> {
     const result = await client.query<ActiveConfigurationRow>(
       `SELECT snapshot.generation::text,
@@ -1571,6 +1667,6 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
     const row = result.rows[0];
     return row === undefined
       ? undefined
-      : mapRuntimeSnapshot(row, this.credentialCipher, this.legacyModelApiKey);
+      : mapRuntimeSnapshot(row, this.credentialCipher, this.legacyModelApiKey, pinned);
   }
 }

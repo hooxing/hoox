@@ -114,20 +114,6 @@ async function appliedMigrations(client: PoolClient): Promise<readonly Migration
   return result.rows;
 }
 
-function postgresSqlState(error: unknown): string | undefined {
-  const seen = new Set<object>();
-  let current: unknown = error;
-  while (typeof current === "object" && current !== null && !seen.has(current)) {
-    seen.add(current);
-    const candidate = current as { readonly code?: unknown; readonly cause?: unknown };
-    if (typeof candidate.code === "string" && /^[0-9A-Z]{5}$/.test(candidate.code)) {
-      return candidate.code;
-    }
-    current = candidate.cause;
-  }
-  return undefined;
-}
-
 export async function migrateUp(
   pool: Pool,
   options: MigrationUpOptions,
@@ -185,13 +171,7 @@ export async function migrateUp(
     });
     return records;
   } catch (error) {
-    const mapped = mapPersistenceError(error, "执行向前迁移");
-    const code = postgresSqlState(error);
-    if (code !== undefined) {
-      // 保留脱敏后的 SQLSTATE 供迁移故障诊断；绝不把驱动错误消息或 SQL 向上暴露。
-      Object.defineProperty(mapped, "cause", { value: Object.freeze({ code }) });
-    }
-    throw mapped;
+    throw mapPersistenceError(error, "执行向前迁移");
   }
 }
 

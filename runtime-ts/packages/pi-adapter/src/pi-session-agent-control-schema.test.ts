@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "@hoox/prompt-builder";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import {
   createModels,
@@ -56,6 +57,7 @@ it("真实 Pi 循环只发送公开 schema，合法与非法协作调用均形�
   const model = faux.getModel();
   const controller = await createSafePiSession({
     model,
+    operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
     modelRuntime,
     modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
     sandbox: new FakeSandboxHandle("schema-test"),

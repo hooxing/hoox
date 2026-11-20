@@ -10,7 +10,6 @@ import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import { createDevelopmentOpenAiCompatibleModel } from "./process-entry.js";
 import { RunWorker } from "./run-worker.js";
 import {
-  FakeArtifactPublication,
   FakeCancellationPort,
   FakeClock,
   FakeExecutionPersistence,
@@ -258,7 +257,6 @@ function createRunWorker(
       orphanSandboxes: sandboxes,
       sessions,
       cancellation: new FakeCancellationPort(),
-      artifacts: new FakeArtifactPublication(),
       clock: new FakeClock(),
       metrics: new FakeRecoveryMetrics(),
     },

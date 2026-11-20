@@ -30,6 +30,12 @@
 
 `api`、`agent-worker` 和 `scheduler` 是生产 Runtime 的三个核心进程。后台管理面使用独立身份；统一 Admin API 内部继续隔离 Admin Control 与 Skill Publisher 的数据库角色和发布凭据。`@hoox/skill-admin-api` 是由统一进程装配的 Skill 路由模块，不是独立部署进程。Trajectory Viewer 属于内部诊断工具，不是公开产品入口。
 
+### HTTP API 内部入口
+
+`runtime-ts/apps/api/src/app.ts` 负责 Fastify 配置、依赖快照、请求认证与通用中间件装配，并按顺序挂载路由。新增或修改端点时，按职责进入 `runtime-ts/apps/api/src/routes/`：账号和首次安装在 `auth.ts`、`installation.ts`，Thread 与 Run 命令和查询在 `threads-and-runs.ts`，事件分页和 SSE 在 `run-events.ts`，交付物在 `artifacts.ts`。历史文件、上传、Skill、团队、定时任务、个性化及模型报文诊断分别由同目录的对应模块注册。ResourceFS 仍由 `resource-filesystem-http.ts` 在独立的 Fastify 插件作用域内注册，以隔离其请求体解析规则。
+
+租户认证的 HTTP 入口在 `request-auth.ts`，通用请求日志和错误信封在 `http-middleware.ts`；路由负责协议校验和调用服务端口，不替代共享包的领域授权或持久化规则。
+
 ## 共享包
 
 ### 领域与公开契约

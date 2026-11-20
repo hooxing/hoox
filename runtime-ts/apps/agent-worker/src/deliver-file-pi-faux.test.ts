@@ -13,6 +13,7 @@ import {
   bindTrustedPiModelContextCapability,
   createSafePiSession,
   type RuntimeAgentEvent,
+  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
 } from "@hoox/pi-adapter";
 import type { ExternalEffectCall } from "@hoox/run-contracts";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
@@ -151,6 +152,7 @@ describe("Pi Faux deliver_file 纵向链路", () => {
     const model = faux.getModel();
     const controller = await createSafePiSession({
       model,
+      operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
       modelContext: bindTrustedPiModelContextCapability(runtime, model),
       modelRuntime: runtime,
       sandbox: new FakeSandboxHandle("faux-deliver-session"),

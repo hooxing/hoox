@@ -178,6 +178,9 @@ const adminControlTables = new Set([
   "admin_control_generation",
   "admin_user_account_audits",
   "run_runtime_config_snapshots",
+  "external_tool_versions",
+  "external_tool_credentials",
+  "external_tool_revocations",
 ]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
@@ -308,6 +311,9 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["admin_control_commands", new Set()],
   ["admin_control_audits", new Set()],
   ["admin_control_generation", new Set(["SELECT"])],
+  ["external_tool_versions", new Set()],
+  ["external_tool_credentials", new Set()],
+  ["external_tool_revocations", new Set()],
   ["better_auth_users", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["better_auth_sessions", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["better_auth_accounts", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
@@ -2214,6 +2220,9 @@ async function assertAdminControlBoundary(
           ["admin_control_commands", new Set(["SELECT", "INSERT"])],
           ["admin_control_audits", new Set(["SELECT", "INSERT"])],
           ["admin_control_generation", new Set(["SELECT"])],
+          ["external_tool_versions", new Set(["SELECT", "INSERT"])],
+          ["external_tool_credentials", new Set(["INSERT"])],
+          ["external_tool_revocations", new Set(["SELECT", "INSERT"])],
         ]
       : [],
   );
@@ -2863,6 +2872,12 @@ const adminControlPolicyBindings = Object.freeze([
   ["admin_control_active_configs", "runtime_control_active_read_policy", "runtime"],
   ["admin_control_generation", "runtime_control_generation_read_policy", "runtime"],
   ["run_runtime_config_snapshots", "run_runtime_config_snapshots_runtime_policy", "runtime"],
+  ["external_tool_versions", "external_tool_versions_migrator_policy", "migrator"],
+  ["external_tool_credentials", "external_tool_credentials_migrator_policy", "migrator"],
+  ["external_tool_revocations", "external_tool_revocations_migrator_policy", "migrator"],
+  ["external_tool_versions", "external_tool_versions_admin_policy", "control"],
+  ["external_tool_credentials", "external_tool_credentials_admin_policy", "control"],
+  ["external_tool_revocations", "external_tool_revocations_admin_policy", "control"],
 ] as const);
 
 const embeddedIdentityPolicyBindings = Object.freeze([

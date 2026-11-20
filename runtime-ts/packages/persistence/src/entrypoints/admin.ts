@@ -5,3 +5,5 @@ export * from "../pg-identity-configuration.js";
 export * from "../pg-sandbox-configuration.js";
 export * from "../pg-skill-publication.js";
 export * from "../skill-publication-object-store.js";
+export * from "../external-tool-credential.js";
+export * from "../pg-external-tools.js";

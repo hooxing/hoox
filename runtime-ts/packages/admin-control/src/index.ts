@@ -1,6 +1,7 @@
 import { normalizeRuntimeToolSelection, type RuntimeToolName } from "@hoox/protocol";
 import { createHash } from "node:crypto";
 
+export * from "./agent-definition.js";
 export * from "./run-compaction-settings.js";
 export * from "./run-explorer.js";
 export * from "./sandbox-configuration.js";

@@ -2,8 +2,9 @@ import { type Static, Type } from "@sinclair/typebox";
 import { IdSchema, IsoTimestampSchema, Sha256DigestSchema } from "./schemas.js";
 
 const strict = { additionalProperties: false } as const;
+export const AGENT_OPERATOR_INSTRUCTIONS_MAX_BYTES = 32768;
 const boundedText = (maxLength: number) => Type.String({ minLength: 1, maxLength });
-const AgentAvailabilitySchema = Type.Union([
+export const AgentAvailabilitySchema = Type.Union([
   Type.Object({ mode: Type.Literal("all_tenants") }, strict),
   Type.Object(
     {
@@ -27,7 +28,7 @@ export const AgentRevisionContentSchema = Type.Object(
     avatarRef: Type.Optional(boundedText(512)),
     welcomeMessage: Type.Optional(Type.String({ maxLength: 2048 })),
     suggestedQuestions: Type.Array(boundedText(500), { maxItems: 12 }),
-    operatorInstructions: boundedText(32768),
+    operatorInstructions: boundedText(AGENT_OPERATOR_INSTRUCTIONS_MAX_BYTES),
     replyLanguage: boundedText(100),
     model: AgentModelReferenceSchema,
     tools: Type.Union([

@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => {
     authorizationConstructed: vi.fn(),
     publicationRepositoryConstructed: vi.fn(),
     runExplorerRepositoryConstructed: vi.fn(),
+    agentRepositoryConstructed: vi.fn(),
   };
 });
 
@@ -67,6 +68,11 @@ vi.mock("@hoox/persistence/admin", () => ({
     }
     read() {
       return Promise.resolve({});
+    }
+  },
+  PgAgentDefinitionRepository: class {
+    constructor(pool: unknown) {
+      mocks.agentRepositoryConstructed(pool);
     }
   },
   PgAdminRunExplorerRepository: class {
@@ -200,6 +206,7 @@ describe("统一后台 API 固定装配", () => {
         }),
       );
       expect(mocks.adminRepositoryConstructed).toHaveBeenCalledWith(mocks.controlPool);
+      expect(mocks.agentRepositoryConstructed).toHaveBeenCalledWith(mocks.controlPool);
       // Run 浏览器只使用 Admin Control 连接，不借用 Skill Publisher 角色。
       expect(mocks.runExplorerRepositoryConstructed).toHaveBeenCalledWith(mocks.controlPool);
       expect(mocks.authorizationConstructed).toHaveBeenCalledWith(mocks.skillPool);
@@ -217,6 +224,7 @@ describe("统一后台 API 固定装配", () => {
         runtimeEnvironment: "development",
       });
       expect(dependencies.skills.publications).toBeDefined();
+      expect(dependencies.agents).toBeDefined();
       await expect(
         dependencies.auth.resolve({
           authorization: "Bearer unified-admin-token",

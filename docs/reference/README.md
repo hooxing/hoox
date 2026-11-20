@@ -4,6 +4,7 @@
 
 | 文档 | 什么时候阅读 | 回答的问题 |
 | --- | --- | --- |
+| [Webhook](webhooks.md) | 注册 Tenant 回调或实现接收端时 | 可订阅哪些事件、如何验签、如何按至少一次语义去重？ |
 | [HTTP 工具](http-tools.md) | 编写业务方 HTTP 工具接收端或维护 Hoox HTTP Transport 时 | 请求签名格式、受控 OpenAPI 导入范围与失败语义是什么 |
 | [配置参考](configuration.md) | 配置 API、Worker、Scheduler、存储、模型或 Sandbox 时 | 有哪些环境变量、默认值、必填范围和秘密边界 |
 | [命令参考](commands.md) | 启动、迁移、校验或执行外部服务 Gate 时 | 应运行哪个命令，前置条件和影响范围是什么 |

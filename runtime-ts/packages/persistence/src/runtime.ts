@@ -15,6 +15,7 @@ import {
 } from "./pg-core-repositories.js";
 import { PgIdentityConfigurationRepository } from "./pg-identity-configuration.js";
 import { PgApiKeyRepository } from "./pg-api-keys.js";
+import { PgWebhookRepository } from "./pg-webhooks.js";
 import { PgLocalAccountRepository } from "./pg-local-account.js";
 import { PgPersonalizationSettingsRepository } from "./pg-personalization-settings.js";
 import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
@@ -108,6 +109,7 @@ export interface ApiPersistenceRuntime {
   readonly personalizations: PgPersonalizationSettingsRepository;
   readonly scheduledTasks: PgScheduledTaskRepository;
   readonly apiKeys: PgApiKeyRepository;
+  readonly webhooks: PgWebhookRepository;
   readonly localAccounts: PgLocalAccountRepository;
   readonly identityConfigurations: PgIdentityConfigurationRepository;
   readonly identityDatabase: Pool;
@@ -168,6 +170,7 @@ export function createApiPersistenceRuntime(
     personalizations: new PgPersonalizationSettingsRepository(pool, teamCoordinatorPool),
     scheduledTasks: new PgScheduledTaskRepository(pool),
     apiKeys: new PgApiKeyRepository(pool),
+    webhooks: new PgWebhookRepository(pool),
     localAccounts: new PgLocalAccountRepository(pool),
     identityConfigurations: new PgIdentityConfigurationRepository(pool),
     identityDatabase: pool,
@@ -417,6 +420,7 @@ export function createMigrationRuntime(
     readonly workerCoordinatorRole: string;
     readonly teamCoordinatorRole: string;
     readonly adminControlRole: string;
+    readonly webhookDispatcherRole?: string;
     readonly schema: string;
   },
 ): MigrationRuntime {
@@ -428,6 +432,9 @@ export function createMigrationRuntime(
     workerCoordinatorRole: options.workerCoordinatorRole,
     teamCoordinatorRole: options.teamCoordinatorRole,
     adminControlRole: options.adminControlRole,
+    ...(options.webhookDispatcherRole === undefined
+      ? {}
+      : { webhookDispatcherRole: options.webhookDispatcherRole }),
     schema: options.schema,
   } as const;
   return {

@@ -13,6 +13,8 @@ psql --set=ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
   --set=worker_password="$DATABASE_WORKER_COORDINATOR_PASSWORD" \
   --set=team_role="$DATABASE_TEAM_COORDINATOR_ROLE" \
   --set=team_password="$DATABASE_TEAM_COORDINATOR_PASSWORD" \
+  --set=webhook_role="$DATABASE_WEBHOOK_DISPATCHER_ROLE" \
+  --set=webhook_password="$DATABASE_WEBHOOK_DISPATCHER_PASSWORD" \
   --set=admin_role="$DATABASE_ADMIN_CONTROL_ROLE" \
   --set=admin_password="$DATABASE_ADMIN_CONTROL_PASSWORD" \
   --set=runtime_schema="$DATABASE_SCHEMA" <<'SQL'
@@ -23,7 +25,8 @@ CREATE ROLE :"skill_role" LOGIN NOINHERIT PASSWORD :'skill_password';
 CREATE ROLE :"worker_role" LOGIN NOINHERIT PASSWORD :'worker_password';
 CREATE ROLE :"team_role" LOGIN NOINHERIT PASSWORD :'team_password';
 CREATE ROLE :"admin_role" LOGIN NOINHERIT PASSWORD :'admin_password';
-GRANT CONNECT ON DATABASE :"database_name" TO :"runtime_role", :"migrator_role", :"skill_role", :"worker_role", :"team_role", :"admin_role";
+CREATE ROLE :"webhook_role" LOGIN NOINHERIT PASSWORD :'webhook_password';
+GRANT CONNECT ON DATABASE :"database_name" TO :"runtime_role", :"migrator_role", :"skill_role", :"worker_role", :"team_role", :"admin_role", :"webhook_role";
 CREATE SCHEMA :"runtime_schema" AUTHORIZATION :"migrator_role";
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 SQL

@@ -56,6 +56,7 @@ import {
 } from "./account-access.js";
 import { type AutomationCenterApi, AutomationCenterDialog } from "./automation-center.js";
 import { ApiKeyManager } from "./api-key-manager.js";
+import { WebhookManager } from "./webhook-manager.js";
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { clearAccountDrafts, useConversationDraft } from "./conversation-draft.js";
@@ -172,7 +173,19 @@ type WorkspaceApi = Pick<
 } & Partial<SkillCenterApi & CloudDriveApi & AutomationCenterApi>;
 
 type TeamAwareWorkspaceApi = WorkspaceApi &
-  Partial<Pick<RuntimeApi, "listApiKeys" | "createApiKey" | "revokeApiKey">> &
+  Partial<
+    Pick<
+      RuntimeApi,
+      | "listApiKeys"
+      | "createApiKey"
+      | "revokeApiKey"
+      | "listWebhooks"
+      | "createWebhook"
+      | "rotateWebhookSecret"
+      | "disableWebhook"
+      | "deleteWebhook"
+    >
+  > &
   Partial<PersonalizationApi> &
   Partial<
     TeamWorkspaceApi &
@@ -357,6 +370,7 @@ function AuthenticatedWorkspace({
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [uploadFiles, setUploadFiles] = useState<readonly File[]>([]);
   const [apiKeysOpen, setApiKeysOpen] = useState(false);
+  const [webhooksOpen, setWebhooksOpen] = useState(false);
   const [historyFiles, setHistoryFiles] = useState<readonly HistoryFile[]>([]);
   const [pendingInputs, setPendingInputs] = useState<readonly PendingConversationInput[]>([]);
   const [continuity, setContinuity] =
@@ -1418,6 +1432,23 @@ function AuthenticatedWorkspace({
               onClose={() => setApiKeysOpen(false)}
             />
           )}
+        {webhooksOpen &&
+          apiClient.listWebhooks &&
+          apiClient.createWebhook &&
+          apiClient.rotateWebhookSecret &&
+          apiClient.disableWebhook &&
+          apiClient.deleteWebhook && (
+            <WebhookManager
+              api={{
+                listWebhooks: apiClient.listWebhooks.bind(apiClient),
+                createWebhook: apiClient.createWebhook.bind(apiClient),
+                rotateWebhookSecret: apiClient.rotateWebhookSecret.bind(apiClient),
+                disableWebhook: apiClient.disableWebhook.bind(apiClient),
+                deleteWebhook: apiClient.deleteWebhook.bind(apiClient),
+              }}
+              onClose={() => setWebhooksOpen(false)}
+            />
+          )}
         <NavigationSidebar
           isCompact={isCompact}
           isOpen={navigationOpen}
@@ -1585,6 +1616,18 @@ function AuthenticatedWorkspace({
               <button type="button" className="api-key-entry" onClick={() => setApiKeysOpen(true)}>
                 <KeyRound size={17} />
                 API Key
+              </button>
+            )}
+          {apiClient.listWebhooks &&
+            apiClient.createWebhook &&
+            apiClient.rotateWebhookSecret &&
+            apiClient.disableWebhook &&
+            apiClient.deleteWebhook &&
+            (activeTeam === undefined ||
+              activeTeam.role === "owner" ||
+              activeTeam.role === "admin") && (
+              <button type="button" className="api-key-entry" onClick={() => setWebhooksOpen(true)}>
+                Webhook 管理
               </button>
             )}
           <AccountMenu

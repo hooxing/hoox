@@ -82,6 +82,10 @@ import {
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
 import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
 import {
+  enqueueWebhookEvent,
+  PgWebhookRepository,
+} from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
+import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
@@ -272,8 +276,10 @@ interface IsolatedMigrationTarget {
     readonly workerCoordinatorRole: string;
     readonly teamCoordinatorRole: string;
     readonly adminControlRole: string;
+    readonly webhookDispatcherRole: string;
     readonly schema: string;
   };
+  readonly webhookDispatcherConnectionString: string;
   close(): Promise<void>;
 }
 
@@ -285,8 +291,12 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   const isolatedCoordinatorRole = `it_coord_${isolatedSuffix}`;
   const isolatedTeamCoordinatorRole = `it_team_${isolatedSuffix}`;
   const isolatedAdminControlRole = `it_control_${isolatedSuffix}`;
-  const isolatedSchema = `it_${suffix}_${isolatedSuffix}`;
+  const isolatedWebhookDispatcherRole = `it_webhook_${isolatedSuffix}`;
   const password = randomBytes(24).toString("hex");
+  const isolatedWebhookDispatcherUrl = new URL(migrationDatabaseUrl);
+  isolatedWebhookDispatcherUrl.username = isolatedWebhookDispatcherRole;
+  isolatedWebhookDispatcherUrl.password = password;
+  const isolatedSchema = `it_${suffix}_${isolatedSuffix}`;
   const url = new URL(migrationDatabaseUrl);
   url.username = isolatedRole;
   url.password = password;
@@ -301,7 +311,9 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedAdminControlRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}";
+     CREATE ROLE "${isolatedWebhookDispatcherRole}" LOGIN PASSWORD '${password}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
      CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedRole}"`,
   );
   const pool = createPostgresPool({
@@ -320,15 +332,18 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
       workerCoordinatorRole: isolatedCoordinatorRole,
       teamCoordinatorRole: isolatedTeamCoordinatorRole,
       adminControlRole: isolatedAdminControlRole,
+      webhookDispatcherRole: isolatedWebhookDispatcherRole,
       schema: isolatedSchema,
     },
+    webhookDispatcherConnectionString: isolatedWebhookDispatcherUrl.toString(),
     close: async () => {
       if (closed) return;
       closed = true;
       await pool.end();
       await administrativePool.query(
         `DROP SCHEMA "${isolatedSchema}" CASCADE;
-         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}";
+         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
+         DROP ROLE "${isolatedWebhookDispatcherRole}";
          DROP ROLE "${isolatedAdminControlRole}";
          DROP ROLE "${isolatedTeamCoordinatorRole}";
          DROP ROLE "${isolatedCoordinatorRole}";
@@ -412,6 +427,153 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("Webhook Dispatcher 只能读取投递 Outbox，不能读取订阅或业务表", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_dispatcher");
+    const dispatcher = createPostgresPool({
+      connectionString: target.webhookDispatcherConnectionString,
+      schema: target.context.schema,
+      maxConnections: 1,
+    });
+    try {
+      await migrateUp(target.pool, target.context);
+      await expect(
+        dispatcher.query("SELECT id FROM webhook_outbox LIMIT 1"),
+      ).resolves.toBeDefined();
+      await expect(
+        dispatcher.query("SELECT id FROM tenant_webhooks LIMIT 1"),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(dispatcher.query("SELECT id FROM runs LIMIT 1")).rejects.toMatchObject({
+        code: "42501",
+      });
+      const tenant = `tenant_webhook_${process.pid}`;
+      const user = `user_webhook_${process.pid}`;
+      const webhook = `wh_${process.pid}`;
+      await administrativePool.query(
+        `INSERT INTO "${target.context.schema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
+        [user],
+      );
+      await administrativePool.query(
+        `INSERT INTO "${target.context.schema}".tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,clock_timestamp())`,
+        [tenant, user],
+      );
+      const runtimeForWebhook = createPostgresPool({
+        connectionString: runtimeDatabaseUrl,
+        schema: target.context.schema,
+      });
+      try {
+        const client = await runtimeForWebhook.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            "SELECT set_config('app.tenant_id',$1,true),set_config('app.user_id',$2,true)",
+            [tenant, user],
+          );
+          await client.query(
+            `INSERT INTO tenant_webhooks(tenant_id,id,name,endpoint_url,event_types,secret_ciphertext,created_by_user_id,created_at) VALUES($1,$2,'integration','https://hooks.example.invalid/a',ARRAY['run.succeeded'],$3::jsonb,$4,clock_timestamp())`,
+            [
+              tenant,
+              webhook,
+              JSON.stringify({ version: 1, nonce: "n", ciphertext: "c", authTag: "t" }),
+              user,
+            ],
+          );
+          await enqueueWebhookEvent({
+            client,
+            tenantId: tenant,
+            eventId: "evt_webhook_txn",
+            eventType: "run.succeeded",
+            payload: { id: "evt_webhook_txn", type: "run.succeeded", data: { runId: "run_hook" } },
+          });
+          await client.query("ROLLBACK");
+        } finally {
+          client.release();
+        }
+        const rolledBack = await administrativePool.query(
+          `SELECT count(*)::int AS count FROM "${target.context.schema}".webhook_outbox WHERE tenant_id=$1`,
+          [tenant],
+        );
+        expect(rolledBack.rows[0]?.count).toBe(0);
+        const committed = await runtimeForWebhook.connect();
+        try {
+          await committed.query("BEGIN");
+          await committed.query(
+            "SELECT set_config('app.tenant_id',$1,true),set_config('app.user_id',$2,true)",
+            [tenant, user],
+          );
+          await committed.query(
+            `INSERT INTO tenant_webhooks(tenant_id,id,name,endpoint_url,event_types,secret_ciphertext,created_by_user_id,created_at) VALUES($1,$2,'integration','https://hooks.example.invalid/a',ARRAY['run.succeeded'],$3::jsonb,$4,clock_timestamp())`,
+            [
+              tenant,
+              webhook,
+              JSON.stringify({ version: 1, nonce: "n", ciphertext: "c", authTag: "t" }),
+              user,
+            ],
+          );
+          await enqueueWebhookEvent({
+            client: committed,
+            tenantId: tenant,
+            eventId: "evt_webhook_txn",
+            eventType: "run.succeeded",
+            payload: { id: "evt_webhook_txn", type: "run.succeeded", data: { runId: "run_hook" } },
+          });
+          await committed.query("COMMIT");
+        } finally {
+          committed.release();
+        }
+        const visible = await dispatcher.query(
+          `SELECT event_id,event_type,payload->>'id' AS payload_id FROM webhook_outbox WHERE tenant_id=$1`,
+          [tenant],
+        );
+        expect(visible.rows).toEqual([
+          {
+            event_id: "evt_webhook_txn",
+            event_type: "run.succeeded",
+            payload_id: "evt_webhook_txn",
+          },
+        ]);
+        const repository = new PgWebhookRepository(runtimeForWebhook);
+        const scope = { tenantId: tenant, userId: user };
+        await expect(
+          repository.rotate(scope, webhook, {
+            version: 1,
+            nonce: "n2",
+            ciphertext: "c2",
+            authTag: "t2",
+          }),
+        ).resolves.toBe(true);
+        const rotated = await administrativePool.query(
+          `SELECT secret_ciphertext FROM "${target.context.schema}".webhook_outbox WHERE tenant_id=$1 AND webhook_id=$2`,
+          [tenant, webhook],
+        );
+        expect(rotated.rows[0]?.secret_ciphertext).toEqual({
+          version: 1,
+          nonce: "n2",
+          ciphertext: "c2",
+          authTag: "t2",
+        });
+        await administrativePool.query(
+          `UPDATE "${target.context.schema}".webhook_outbox SET state='disabled',attempts=12,last_error_code='delivery_failed' WHERE tenant_id=$1 AND webhook_id=$2`,
+          [tenant, webhook],
+        );
+        expect((await repository.list(scope))[0]?.disabledReason).toBe("delivery_failed");
+        await expect(
+          repository.rotate(scope, webhook, {
+            version: 1,
+            nonce: "n3",
+            ciphertext: "c3",
+            authTag: "t3",
+          }),
+        ).resolves.toBe(true);
+        expect((await repository.list(scope))[0]?.disabledReason).toBe("delivery_failed");
+      } finally {
+        await runtimeForWebhook.end();
+      }
+    } finally {
+      await dispatcher.end();
+      await target.close();
+    }
+  });
+
   it("为迁移前已有 Thread 回填不可变默认 Agent 绑定", async () => {
     const target = await createIsolatedMigrationTarget("agent_backfill");
     const oldMigrations = await mkdtemp(join(tmpdir(), "hoox-agent-old-migrations-"));

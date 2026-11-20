@@ -20,6 +20,7 @@ if (direction !== "up" && direction !== "down") {
   const workerCoordinatorRole = environment.DATABASE_WORKER_COORDINATOR_ROLE;
   const teamCoordinatorRole = environment.DATABASE_TEAM_COORDINATOR_ROLE;
   const adminControlRole = environment.DATABASE_ADMIN_CONTROL_ROLE;
+  const webhookDispatcherRole = environment.DATABASE_WEBHOOK_DISPATCHER_ROLE;
   const schema = environment.DATABASE_SCHEMA;
   if (connectionString === undefined || connectionString.length === 0) {
     console.error("迁移失败：缺少 MIGRATION_DATABASE_URL");
@@ -38,6 +39,9 @@ if (direction !== "up" && direction !== "down") {
     process.exitCode = 2;
   } else if (teamCoordinatorRole === undefined || teamCoordinatorRole.length === 0) {
     console.error("迁移失败：缺少 DATABASE_TEAM_COORDINATOR_ROLE");
+    process.exitCode = 2;
+  } else if (webhookDispatcherRole === undefined || webhookDispatcherRole.length === 0) {
+    console.error("迁移失败：缺少 DATABASE_WEBHOOK_DISPATCHER_ROLE");
     process.exitCode = 2;
   } else if (adminControlRole === undefined || adminControlRole.length === 0) {
     console.error("迁移失败：缺少 DATABASE_ADMIN_CONTROL_ROLE");
@@ -60,6 +64,7 @@ if (direction !== "up" && direction !== "down") {
         workerCoordinatorRole,
         teamCoordinatorRole,
         adminControlRole,
+        webhookDispatcherRole,
         schema,
       } as const;
       let records: Awaited<ReturnType<typeof migrateUp>>;

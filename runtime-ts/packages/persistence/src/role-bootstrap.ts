@@ -193,6 +193,8 @@ const adminControlTables = new Set([
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
   ["api_keys", new Set(["SELECT", "INSERT"])],
+  ["tenant_webhooks", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+  ["webhook_outbox", new Set(["SELECT", "INSERT"])],
   ["user_accounts", new Set(["SELECT", "INSERT"])],
   ["user_sessions", new Set(["SELECT", "INSERT", "DELETE"])],
   ["tenants", new Set(["SELECT", "INSERT"])],
@@ -1288,6 +1290,14 @@ export async function activeTablePolicy(
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
   if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
+  const webhook = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.tenant_webhooks',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  if (!webhook.rows[0]?.present) {
+    policy.delete("tenant_webhooks");
+    policy.delete("webhook_outbox");
+  }
   if (await hasManagedSandboxState(client, schema)) {
     for (const table of managedSandboxControlTables) policy.set(table, new Set());
     for (const table of managedSandboxRuntimeTables) policy.set(table, new Set(["SELECT"]));
@@ -1462,6 +1472,12 @@ export async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  const webhookOutboxState = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.webhook_outbox',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  if (webhookOutboxState.rows[0]?.present)
+    policy.set("webhook_outbox", new Set(["secret_ciphertext"]));
   const apiKeyState = await hasApiKeyState(client, schema);
   const apiKeyRevocationPolicyState =
     apiKeyState && (await hasApiKeyRevocationPolicyState(client, schema));
@@ -1684,6 +1700,7 @@ export interface MigrationSecurityContext {
   readonly workerCoordinatorRole: string;
   readonly teamCoordinatorRole: string;
   readonly adminControlRole: string;
+  readonly webhookDispatcherRole?: string;
   readonly schema: string;
 }
 
@@ -1699,6 +1716,7 @@ function validateContext(context: MigrationSecurityContext): void {
   quoteIdentifier(context.workerCoordinatorRole);
   quoteIdentifier(context.teamCoordinatorRole);
   quoteIdentifier(context.adminControlRole);
+  if (context.webhookDispatcherRole !== undefined) quoteIdentifier(context.webhookDispatcherRole);
   assertSafeSchemaName(context.schema);
   if (
     new Set([
@@ -1708,7 +1726,8 @@ function validateContext(context: MigrationSecurityContext): void {
       context.workerCoordinatorRole,
       context.teamCoordinatorRole,
       context.adminControlRole,
-    ]).size !== 6
+      ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
+    ]).size !== (context.webhookDispatcherRole === undefined ? 6 : 7)
   ) {
     throw new PersistenceError(
       "CONSTRAINT_VIOLATION",
@@ -2088,6 +2107,11 @@ export async function assertMigrationContextSafe(
     ...context,
     workerCoordinatorRole: context.adminControlRole,
   });
+  if (context.webhookDispatcherRole !== undefined)
+    await assertWorkerCoordinatorContextSafe(client, {
+      ...context,
+      workerCoordinatorRole: context.webhookDispatcherRole,
+    });
 }
 
 async function assertBootstrapContextSafe(
@@ -2114,6 +2138,12 @@ async function assertBootstrapContextSafe(
     },
     true,
   );
+  if (context.webhookDispatcherRole !== undefined)
+    await assertWorkerCoordinatorContextSafe(
+      client,
+      { ...context, workerCoordinatorRole: context.webhookDispatcherRole },
+      true,
+    );
 }
 
 interface RoleDatabaseScopeRow {
@@ -2138,6 +2168,7 @@ export function databaseRoles(context: MigrationSecurityContext): readonly strin
     context.workerCoordinatorRole,
     context.teamCoordinatorRole,
     context.adminControlRole,
+    ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
   ];
 }
 
@@ -2237,6 +2268,8 @@ async function activeTeamCoordinatorTablePolicy(
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   if (!(await hasTeamCollaborationState(client, schema))) return new Map();
   const policy = new Map(await activeTablePolicy(client, schema));
+  policy.delete("tenant_webhooks");
+  policy.delete("webhook_outbox");
   for (const table of localAccountTables) policy.set(table, new Set());
   policy.set("team_member_directory", new Set(["SELECT", "INSERT"]));
   if (await hasPersonalizationSettingsState(client, schema)) {
@@ -3451,18 +3484,22 @@ export async function bootstrapRuntimeAccessOnClient(
   const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
   const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
   const adminControlRole = quoteIdentifier(context.adminControlRole);
+  const webhookDispatcherRole =
+    context.webhookDispatcherRole === undefined
+      ? undefined
+      : quoteIdentifier(context.webhookDispatcherRole);
   const schema = quoteIdentifier(context.schema);
   await client.query(
     `REVOKE ALL PRIVILEGES ON SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await rebindRoleScopedPolicies(client, context);
   await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
@@ -3471,8 +3508,24 @@ export async function bootstrapRuntimeAccessOnClient(
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
+  const webhookState = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.tenant_webhooks',$1::text)) IS NOT NULL AS present",
+    [context.schema],
+  );
+  if (webhookState.rows[0]?.present) {
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE ${schema}.tenant_webhooks TO ${role}; GRANT SELECT,INSERT ON TABLE ${schema}.webhook_outbox TO ${role}; GRANT UPDATE(secret_ciphertext) ON TABLE ${schema}.webhook_outbox TO ${role}`,
+    );
+  }
+  if (context.webhookDispatcherRole !== undefined && webhookState.rows[0]?.present) {
+    const dispatcher = quoteIdentifier(context.webhookDispatcherRole);
+    await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${dispatcher};
+      GRANT SELECT ON TABLE ${schema}.webhook_outbox TO ${dispatcher};
+      GRANT UPDATE(state,attempts,next_attempt_at,claim_token,claim_expires_at,last_error_code,delivered_at) ON TABLE ${schema}.webhook_outbox TO ${dispatcher};
+      ALTER POLICY webhook_outbox_dispatcher_policy ON ${schema}.webhook_outbox TO ${dispatcher} USING (true) WITH CHECK (true)`);
+  }
   if (await hasApiKeyState(client, context.schema)) {
     await client.query(
       `GRANT SELECT, INSERT ON TABLE ${schema}.api_keys TO ${role};
@@ -4047,6 +4100,50 @@ export async function bootstrapRuntimeAccessOnClient(
   await grantTeamCoordinatorAccess(client, context);
   await grantAdminControlAccess(client, context);
   await assertActiveRuntimeWhitelist(client, context);
+  if (context.webhookDispatcherRole !== undefined && webhookState.rows[0]?.present) {
+    const dispatcher = context.webhookDispatcherRole;
+    const actual = await client.query<{
+      readonly table_name: string;
+      readonly privilege: string;
+      readonly allowed: boolean;
+    }>(
+      `SELECT target.table_name, requested.privilege, has_table_privilege($1,format('%I.%I',$2::text,target.table_name),requested.privilege) AS allowed
+         FROM unnest($3::text[]) target(table_name) CROSS JOIN unnest($4::text[]) requested(privilege)`,
+      [
+        dispatcher,
+        context.schema,
+        [...new Set([...runtimeTablePolicy.keys(), "tenant_webhooks", "webhook_outbox"])],
+        tablePrivileges,
+      ],
+    );
+    for (const row of actual.rows) {
+      const expected = row.table_name === "webhook_outbox" && row.privilege === "SELECT";
+      if (row.allowed !== expected)
+        throw new PersistenceError(
+          "CONSTRAINT_VIOLATION",
+          `Webhook Dispatcher 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+        );
+    }
+    const updates = await client.query<{ readonly column_name: string; readonly allowed: boolean }>(
+      `SELECT column_state.column_name,has_column_privilege($1,format('%I.webhook_outbox',$2::text),column_state.column_name,'UPDATE') AS allowed FROM information_schema.columns column_state WHERE column_state.table_schema=$2 AND column_state.table_name='webhook_outbox' ORDER BY column_state.ordinal_position`,
+      [dispatcher, context.schema],
+    );
+    const allowedColumns = new Set([
+      "state",
+      "attempts",
+      "next_attempt_at",
+      "claim_token",
+      "claim_expires_at",
+      "last_error_code",
+      "delivered_at",
+    ]);
+    for (const row of updates.rows)
+      if (row.allowed !== allowedColumns.has(row.column_name))
+        throw new PersistenceError(
+          "CONSTRAINT_VIOLATION",
+          `Webhook Dispatcher 列权限偏离白名单：webhook_outbox.${row.column_name}`,
+        );
+  }
 }
 
 /** 独立、可重复的 ACL bootstrap；角色与 Schema preflight 始终先于任何 ACL 变更。 */
@@ -4071,18 +4168,22 @@ export async function teardownRuntimeSchemaAccessOnClient(
   const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
   const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
   const adminControlRole = quoteIdentifier(context.adminControlRole);
+  const webhookDispatcherRole =
+    context.webhookDispatcherRole === undefined
+      ? undefined
+      : quoteIdentifier(context.webhookDispatcherRole);
   const schema = quoteIdentifier(context.schema);
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await assertRuntimeAccessRemoved(client, context);
 }

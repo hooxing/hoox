@@ -29,8 +29,9 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 | 角色 | 使用者 | 边界 |
 | --- | --- | --- |
 | Migrator | 迁移命令 | 拥有 Schema 和受限视图；不被常驻进程使用 |
-| Runtime | API、Worker、Scheduler | 表与列白名单 ACL；业务 Schema 不含 routine。API Key 吊销只授予 Runtime 所需列级 UPDATE，并由 Runtime 专属 RESTRICTIVE RLS 策略限制集成 Membership 状态转换和 Key 吊销行；API Key 认证只按哈希命中受 RLS 限制的凭据行 |
+| Runtime | API、Worker、Scheduler | 表与列白名单 ACL；业务 Schema 不含 routine。Tenant Webhook 订阅由 Runtime 按 Tenant RLS 管理，事件 Outbox 与业务状态在同一事务写入；Runtime 不能结算 Outbox。API Key 吊销只授予 Runtime 所需列级 UPDATE，并由 Runtime 专属 RESTRICTIVE RLS 策略限制集成 Membership 状态转换和 Key 吊销行；API Key 认证只按哈希命中受 RLS 限制的凭据行 |
 | Worker Coordinator | Worker 的 Tenant 发现 | 只能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表 |
+| Webhook Dispatcher | Scheduler 的 Webhook Outbox 消费 | 只读 Outbox 并更新其投递/租约列；不读取 Run、Thread、Membership、Tenant 或订阅表；地址与加密密钥只从 Outbox 快照消费 |
 | Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Worker 不持有 |
 | Admin Control | 统一 Admin API 控制面 | 控制面配置、AgentDefinition 发布与撤销、Run 浏览器受限视图及正文访问审计、外部工具版本发布与撤销、审计及统计投影；AgentDefinition 写入仅允许当前有效的 `operator` 或 `admin` 身份；工具凭据仅 INSERT，管理投影不读取密文 |
 | Skill Publisher | 统一 Admin API Skill 路由 | Skill 发布状态机与对应对象存储权限 |

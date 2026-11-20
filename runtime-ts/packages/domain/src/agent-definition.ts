@@ -21,7 +21,8 @@ export interface AgentRevisionContent {
     | { readonly mode: "platform_default" }
     | {
         readonly mode: "pinned";
-        readonly providerRevisionId: string;
+        readonly providerKey: string;
+        readonly providerRevision: number;
         readonly modelId: string;
       };
   readonly tools:
@@ -44,7 +45,9 @@ export interface AgentRevisionContent {
   readonly includeTenantSkills: boolean;
   readonly sandboxTemplateId?: string;
   readonly sandboxIdleAction: "pause" | "kill";
-  readonly longTermMemoryEnabled: boolean;
+  readonly memory:
+    | { readonly mode: "platform_default" }
+    | { readonly mode: "configured"; readonly longTermEnabled: boolean };
 }
 
 export interface AgentDefinitionData {
@@ -106,7 +109,7 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
       "includeTenantSkills",
       "sandboxTemplateId",
       "sandboxIdleAction",
-      "longTermMemoryEnabled",
+      "memory",
     ],
     "AgentRevision",
   );
@@ -117,8 +120,20 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
   );
   exactKeys(
     value.model,
-    value.model.mode === "platform_default" ? ["mode"] : ["mode", "providerRevisionId", "modelId"],
+    value.model.mode === "platform_default"
+      ? ["mode"]
+      : ["mode", "providerKey", "providerRevision", "modelId"],
     "AgentRevision model",
+  );
+  domainInvariant(
+    value.memory.mode === "platform_default" || value.memory.mode === "configured",
+    "INVALID_ARGUMENT",
+    "Agent 记忆模式无效",
+  );
+  exactKeys(
+    value.memory,
+    value.memory.mode === "platform_default" ? ["mode"] : ["mode", "longTermEnabled"],
+    "AgentRevision memory",
   );
   domainInvariant(
     value.tools.mode === "platform_default" || value.tools.mode === "configured",
@@ -174,7 +189,11 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
   );
   domainInvariant(
     value.model.mode === "platform_default" ||
-      (value.model.providerRevisionId.length > 0 && value.model.modelId.length > 0),
+      (/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(value.model.providerKey) &&
+        Number.isSafeInteger(value.model.providerRevision) &&
+        value.model.providerRevision > 0 &&
+        value.model.modelId.trim().length > 0 &&
+        Buffer.byteLength(value.model.modelId, "utf8") <= 200),
     "INVALID_ARGUMENT",
     "模型引用无效",
   );

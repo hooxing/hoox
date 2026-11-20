@@ -1,4 +1,5 @@
 export type PersistenceErrorCode =
+  | "AGENT_REVISION_UNAVAILABLE"
   | "CONFLICT"
   | "CONSTRAINT_VIOLATION"
   | "MIGRATION_MISMATCH"

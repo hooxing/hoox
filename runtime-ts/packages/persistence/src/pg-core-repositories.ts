@@ -28,6 +28,7 @@ import type {
   VersionedUpdateResult,
   WorkspaceRepository,
 } from "./ports.js";
+import { createRunConfigurationSnapshots } from "./pg-run-agent-snapshot.js";
 import { withTenantTransaction } from "./postgres.js";
 import { mapRun, mapTenant, mapTenantBundle, mapThread, mapWorkspace } from "./row-mappers.js";
 import {
@@ -355,9 +356,14 @@ export class PgRunRepository implements RunRepository {
           [scope.tenantId, run.id, run.threadId, run.status, run.createdAt, run.updatedAt],
         );
         const version = result.rows[0]?.version;
-        return version === undefined
-          ? { outcome: "conflict" }
-          : { outcome: "created", version: BigInt(version) };
+        if (version === undefined) return { outcome: "conflict" };
+        await createRunConfigurationSnapshots(client, {
+          tenantId: scope.tenantId,
+          userId: scope.userId,
+          threadId: run.threadId,
+          runId: run.id,
+        });
+        return { outcome: "created", version: BigInt(version) };
       });
     } catch (error) {
       throw mapPersistenceError(error, "创建运行");

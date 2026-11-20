@@ -1111,6 +1111,25 @@ async function hasAdminUserOperationsState(client: PoolClient, schema: string): 
   return result.rows[0]?.present === true;
 }
 
+/** 后台 Run 浏览器的审计表与受限视图；只有它们齐备时才授予 Admin Control 访问。 */
+async function hasAdminRunExplorerState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.admin_run_content_access_audits',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_directory',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_event_outline',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_event_content',$1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+const adminRunExplorerViews = [
+  "admin_run_directory",
+  "admin_run_event_outline",
+  "admin_run_event_content",
+] as const;
+
 async function hasRunCompactionSettingsState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.run_compaction_settings_snapshots',$1::text)) IS NOT NULL AS present",
@@ -1296,6 +1315,10 @@ async function activeTablePolicy(
   }
   if (!(await hasRunCompactionSettingsState(client, schema))) {
     policy.delete("run_compaction_settings_snapshots");
+  }
+  // 正文访问审计只属于 Admin Control；Runtime 与 Team Coordinator 保持零 ACL。
+  if (await hasAdminRunExplorerState(client, schema)) {
+    policy.set("admin_run_content_access_audits", new Set());
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -2201,6 +2224,7 @@ async function assertAdminControlBoundary(
 ): Promise<void> {
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
+  const runExplorerEnabled = enabled && (await hasAdminRunExplorerState(client, context.schema));
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
   const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
@@ -2224,6 +2248,9 @@ async function assertAdminControlBoundary(
   if (userOperationsEnabled) {
     allowed.set("admin_user_account_audits", new Set(["SELECT", "INSERT"]));
     allowed.set("user_sessions", new Set(["DELETE"]));
+  }
+  if (runExplorerEnabled) {
+    allowed.set("admin_run_content_access_audits", new Set(["SELECT", "INSERT"]));
   }
   if (identityEnabled) {
     allowed.set("identity_auth_configuration", new Set(["SELECT", "INSERT", "UPDATE"]));
@@ -2352,11 +2379,16 @@ async function assertAdminControlBoundary(
     [
       context.adminControlRole,
       context.schema,
-      ["admin_runtime_statistics", "admin_user_directory"],
+      ["admin_runtime_statistics", "admin_user_directory", ...adminRunExplorerViews],
     ],
   );
   for (const row of viewPrivileges.rows) {
-    const expected = row.view_name === "admin_runtime_statistics" ? enabled : userOperationsEnabled;
+    const expected =
+      row.view_name === "admin_runtime_statistics"
+        ? enabled
+        : row.view_name === "admin_user_directory"
+          ? userOperationsEnabled
+          : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError("CONSTRAINT_VIOLATION", "Admin Control 受限视图权限偏离白名单");
     }
@@ -2892,6 +2924,26 @@ const adminUserOperationsPolicyBindings = Object.freeze([
   ["user_sessions", "user_sessions_admin_control_delete_policy", "control"],
 ] as const);
 
+const adminRunExplorerPolicyBindings = Object.freeze([
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_migrator_policy",
+    "migrator",
+  ],
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_control_read_policy",
+    "control",
+  ],
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_control_insert_policy",
+    "control",
+  ],
+  ["execution_attempts", "execution_attempts_admin_projection_read", "migrator"],
+  ["run_events", "run_events_admin_projection_read", "migrator"],
+] as const);
+
 async function rebindRoleScopedPolicies(
   client: PoolClient,
   context: MigrationSecurityContext,
@@ -3006,6 +3058,14 @@ async function rebindRoleScopedPolicies(
         );
       }
     }
+    if (await hasAdminRunExplorerState(client, context.schema)) {
+      for (const [table, policy, target] of adminRunExplorerPolicyBindings) {
+        const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
+        await client.query(
+          `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+        );
+      }
+    }
   }
 }
 
@@ -3111,6 +3171,13 @@ async function grantAdminControlAccess(
        GRANT UPDATE(status,updated_at) ON TABLE ${schema}.user_accounts TO ${control};
        GRANT DELETE ON TABLE ${schema}.user_sessions TO ${control};
        GRANT SELECT ON TABLE ${schema}.admin_user_directory TO ${control}`,
+    );
+  }
+  if (await hasAdminRunExplorerState(client, context.schema)) {
+    // 只授予视图读取与审计写入；Run、Attempt、事件与指标底表仍对 Admin Control 零 ACL。
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
+       GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
     );
   }
   if (await hasEmbeddedIdentityState(client, context.schema)) {

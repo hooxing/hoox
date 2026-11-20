@@ -1,6 +1,7 @@
 // 后台控制面：模型与 Sandbox 配置、身份配置、凭据加密与 Skill 发布。
 export * from "../model-provider-credential.js";
 export * from "../pg-admin-control.js";
+export * from "../pg-admin-run-explorer.js";
 export * from "../pg-identity-configuration.js";
 export * from "../pg-sandbox-configuration.js";
 export * from "../pg-skill-publication.js";

@@ -15,8 +15,6 @@ import type {
 import type { Pool, PoolClient } from "./postgres.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
 
-export const DEFAULT_AGENT_OPERATOR_INSTRUCTIONS_PLACEHOLDER =
-  "由 A2 提供的默认 Operator 指令接管；此处为迁移占位。";
 interface DefinitionRow extends QueryResultRow {
   id: string;
   status: StoredAgentDefinition["status"];

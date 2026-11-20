@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +39,7 @@ import type {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
+import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "../../runtime-ts/packages/prompt-builder/src/index.js";
 import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import {
   loadMigrations,
@@ -147,6 +148,20 @@ interface Fixture {
   readonly thread: Thread;
   readonly run: Run;
   readonly workspace: Workspace;
+}
+
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
+    .join(",")}}`;
+}
+
+async function readDefaultAgentRevision() {
+  const repository = new PgAgentDefinitionRepository(runtimePool);
+  return repository.readRevisionById(tenantId("tenant_seed_contract"), "agent_default_revision_1");
 }
 
 function timestamp(second: number): ReturnType<typeof isoTimestamp> {
@@ -420,6 +435,22 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await target.close();
     }
   });
+  it("默认 Agent Revision 使用 Prompt Builder 指令且内容摘要可校验", async () => {
+    const revision = await readDefaultAgentRevision();
+    expect(revision).toBeDefined();
+    if (revision === undefined) throw new Error("默认 Agent Revision 不可见");
+
+    expect(revision.content.operatorInstructions).toBe(DEFAULT_AGENT_OPERATOR_INSTRUCTIONS);
+    expect(createHash("sha256").update(canonical(revision.content)).digest("hex")).toBe(
+      revision.digest,
+    );
+  });
+
+  it("默认 Agent Revision 的工具配置跟随平台运行设置", async () => {
+    const revision = await readDefaultAgentRevision();
+    expect(revision?.content.tools).toEqual({ mode: "platform_default" });
+  });
+
   it("AgentDefinition 发布、可用范围、撤销与 Thread 绑定 ACL", async () => {
     const manager = await createFixture("agent_manager");
     const other = await createFixture("agent_other_tenant");
@@ -436,10 +467,13 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       operatorInstructions: "仅用于隔离 PostgreSQL 测试。",
       replyLanguage: "zh-CN",
       model: { mode: "platform_default" as const },
-      builtinTools: [],
-      externalTools: [],
-      clientTools: [],
-      toolCallingMode: "native" as const,
+      tools: {
+        mode: "configured" as const,
+        builtinTools: [],
+        externalTools: [],
+        clientTools: [],
+        toolCallingMode: "native" as const,
+      },
       skillVersions: [],
       includeTenantSkills: true,
       sandboxIdleAction: "pause" as const,

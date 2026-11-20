@@ -57,13 +57,13 @@ CREATE TABLE agent_definition_audits (
 );
 CREATE INDEX agent_definition_audits_definition_idx ON agent_definition_audits(definition_id,audit_id DESC);
 
--- 默认指令暂存占位内容；A2 接管后以等价 Operator 指令更新默认 Agent 的后续 Revision。
+-- 默认 Agent 指令与 Prompt Builder 的 DEFAULT_AGENT_OPERATOR_INSTRUCTIONS 保持等价。
 INSERT INTO agent_definitions(id,status,generation,availability_mode,is_builtin)
 VALUES ('agent_default','published',1,'all_tenants',true);
 INSERT INTO agent_revisions(id,definition_id,revision,status,content,content_digest,created_by)
 VALUES ('agent_default_revision_1','agent_default',1,'published',
-  '{"displayName":"Hoox 默认助手","description":"Hoox 默认 Agent","suggestedQuestions":[],"operatorInstructions":"由 A2 提供的默认 Operator 指令接管；此处为迁移占位。","replyLanguage":"zh-CN","model":{"mode":"platform_default"},"builtinTools":["exec_command","read","edit","write","skill","todo_write","deliver_file","automation_update","spawn_agent","send_message","followup_task","wait_agent","interrupt_agent","list_agents"],"externalTools":[],"clientTools":[],"toolCallingMode":"native","skillVersions":[],"includeTenantSkills":true,"sandboxIdleAction":"pause","longTermMemoryEnabled":false}'::jsonb,
-  'cb610b056329ca20c1d93085c80e1f07cc5a0fe4712f9fff1de62a3230a78622','system');
+  '{"displayName":"Hoox 默认助手","description":"Hoox 默认 Agent","suggestedQuestions":[],"operatorInstructions":"你是 Hoox，由 Hoox 平台托管的受控 Agent。\n使用中文进行回答，除非用户明确要求使用其他语言。","replyLanguage":"zh-CN","model":{"mode":"platform_default"},"skillVersions":[],"includeTenantSkills":true,"sandboxIdleAction":"pause","longTermMemoryEnabled":false,"tools":{"mode":"platform_default"}}'::jsonb,
+  '2797a0554a1733f1c0f48634fd0908b5e2e13bc66e480e15c61b21732547f302','system');
 UPDATE agent_definitions SET current_revision_id='agent_default_revision_1' WHERE id='agent_default';
 ALTER TABLE threads ADD COLUMN agent_definition_id text NOT NULL DEFAULT 'agent_default';
 ALTER TABLE threads ADD CONSTRAINT threads_agent_definition_fk FOREIGN KEY(agent_definition_id) REFERENCES agent_definitions(id) ON DELETE RESTRICT;

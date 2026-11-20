@@ -16,16 +16,29 @@ const content: AgentRevisionContent = {
   operatorInstructions: "用中文回答",
   replyLanguage: "zh-CN",
   model: { mode: "platform_default" },
-  builtinTools: ["read"],
-  externalTools: [],
-  clientTools: [],
-  toolCallingMode: "native",
+  tools: {
+    mode: "configured",
+    builtinTools: ["read"],
+    externalTools: [],
+    clientTools: [],
+    toolCallingMode: "native",
+  },
   skillVersions: [],
   includeTenantSkills: true,
   sandboxIdleAction: "pause",
   longTermMemoryEnabled: false,
 };
 describe("AgentDefinition 领域约束", () => {
+  it("允许默认 Agent 跟随平台工具设置，也保留显式工具配置", () => {
+    expect(
+      validateAgentRevisionContent({ ...content, tools: { mode: "platform_default" } }).tools,
+    ).toEqual({ mode: "platform_default" });
+    expect(validateAgentRevisionContent(content).tools).toMatchObject({
+      mode: "configured",
+      builtinTools: ["read"],
+      toolCallingMode: "native",
+    });
+  });
   it("拒绝请求级模板值并验证指令 UTF-8 字节上限", () => {
     expect(() =>
       validateAgentRevisionContent({ ...content, operatorInstructions: "你好 {{user.name}}" }),

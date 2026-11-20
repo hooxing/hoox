@@ -12,10 +12,13 @@ const content = {
   operatorInstructions: "使用中文回答",
   replyLanguage: "zh-CN",
   model: { mode: "platform_default" },
-  builtinTools: ["read"],
-  externalTools: [],
-  clientTools: [],
-  toolCallingMode: "native",
+  tools: {
+    mode: "configured",
+    builtinTools: ["read"],
+    externalTools: [],
+    clientTools: [],
+    toolCallingMode: "native",
+  },
   skillVersions: [],
   includeTenantSkills: true,
   sandboxIdleAction: "pause",
@@ -34,6 +37,15 @@ describe("AgentDefinition 协议 Schema", () => {
         expectedGeneration: 0,
       }),
     ).toBe(true);
+  });
+  it("接受跟随平台工具设置及显式工具配置", () => {
+    expect(
+      Value.Check(AgentRevisionContentSchema, {
+        ...content,
+        tools: { mode: "platform_default" },
+      }),
+    ).toBe(true);
+    expect(Value.Check(AgentRevisionContentSchema, content)).toBe(true);
   });
   it("拒绝未声明的 Revision 和请求字段", () => {
     expect(Value.Check(AgentRevisionContentSchema, { ...content, credential: "secret" })).toBe(

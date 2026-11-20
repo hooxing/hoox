@@ -441,6 +441,8 @@ export interface CreateSafePiSessionOptions {
    * 避免未来漏传 Agent 快照时静默套用错误身份。它进入字节稳定的 system 前缀，不得含请求级数据。
    */
   operatorInstructions: string;
+  /** 只进入审计与恢复摘要，不进入模型可见前缀。 */
+  agentRevisionDigest?: string;
   /** Tenant/Skill/User 只能进入低信任数据分区，不能直接替换系统 Harness。 */
   untrustedPromptContent?: RuntimePromptInput["untrusted"];
   /** 团队与个人长期偏好作为 user/custom 上下文注入，不能替换稳定系统 Harness。 */
@@ -602,7 +604,13 @@ export async function createSafePiSession(
       promptSchemaVersion: builtPrompt.schemaVersion,
       promptVersion: builtPrompt.version,
       capabilityManifestDigest: builtPrompt.manifest.digest,
-      promptDigest: builtPrompt.promptDigest,
+      promptDigest:
+        options.agentRevisionDigest === undefined
+          ? builtPrompt.promptDigest
+          : digestProtocolValue({
+              promptDigest: builtPrompt.promptDigest,
+              agentRevisionDigest: options.agentRevisionDigest,
+            }),
       compactionEnabled: false,
       activeAgentMessageCount: agent.state.messages.length,
       hasPendingMessages: agent.hasQueuedMessages(),
@@ -650,6 +658,9 @@ export function deriveSafePiSessionCompatibility(
       schemaVersion: builtPrompt.schemaVersion,
       version: builtPrompt.version,
       systemPrompt: builtPrompt.systemPrompt,
+      ...(options.agentRevisionDigest === undefined
+        ? {}
+        : { agentRevisionDigest: options.agentRevisionDigest }),
       contextBudgetPolicyHash: budget.policy.policyHash,
     }),
     toolSchemaHash: digestProtocolValue(builtPrompt.manifest),

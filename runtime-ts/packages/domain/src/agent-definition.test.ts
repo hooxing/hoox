@@ -26,7 +26,7 @@ const content: AgentRevisionContent = {
   skillVersions: [],
   includeTenantSkills: true,
   sandboxIdleAction: "pause",
-  longTermMemoryEnabled: false,
+  memory: { mode: "configured", longTermEnabled: false },
 };
 describe("AgentDefinition 领域约束", () => {
   it("允许默认 Agent 跟随平台工具设置，也保留显式工具配置", () => {
@@ -38,6 +38,34 @@ describe("AgentDefinition 领域约束", () => {
       builtinTools: ["read"],
       toolCallingMode: "native",
     });
+  });
+  it("校验精确模型 Revision 引用与平台记忆模式", () => {
+    expect(
+      validateAgentRevisionContent({
+        ...content,
+        model: {
+          mode: "pinned",
+          providerKey: "provider_saved",
+          providerRevision: 4,
+          modelId: "model_saved",
+        },
+        memory: { mode: "platform_default" },
+      }),
+    ).toMatchObject({
+      model: { providerKey: "provider_saved", providerRevision: 4, modelId: "model_saved" },
+      memory: { mode: "platform_default" },
+    });
+    expect(() =>
+      validateAgentRevisionContent({
+        ...content,
+        model: {
+          mode: "pinned",
+          providerKey: "provider_saved",
+          providerRevision: 0,
+          modelId: "model_saved",
+        },
+      }),
+    ).toThrow("模型引用无效");
   });
   it("拒绝请求级模板值并验证指令 UTF-8 字节上限", () => {
     expect(() =>

@@ -3748,6 +3748,74 @@ describe("Fastify API 契约", () => {
     });
   });
 
+  it("Thread 与 Run 创建遇到不可用 Agent Revision 时返回专用 409 错误信封", async () => {
+    const unavailable = () =>
+      new PersistenceError("AGENT_REVISION_UNAVAILABLE", "内部 Revision 诊断不得泄漏");
+    const expectedError = {
+      code: "AGENT_REVISION_UNAVAILABLE",
+      message: "所选 Agent 当前不可用，请联系管理员或选择其他 Agent",
+      retryable: false,
+    };
+
+    const threadFixture = fixture();
+    const threadApp = createApiApp(
+      {
+        ...threadFixture.dependencies,
+        createCapability: createApiCreateCapability({
+          threadCreation: {
+            createThread: async () => {
+              throw unavailable();
+            },
+          },
+          enqueueOutbox: threadFixture.state,
+        }),
+      },
+      { logger: false },
+    );
+    openApps.push(threadApp);
+    const threadResponse = await threadApp.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "agent-unavailable-thread" },
+      payload: { title: "不可用 Agent" },
+    });
+    expect(threadResponse.statusCode).toBe(409);
+    expect(threadResponse.json().error).toEqual(expectedError);
+
+    const runFixture = fixture();
+    const runApp = createApiApp(
+      {
+        ...runFixture.dependencies,
+        createCapability: createApiCreateCapability({
+          threadCreation: runFixture.state,
+          enqueueOutbox: {
+            replayQueuedRun: runFixture.state.replayQueuedRun.bind(runFixture.state),
+            createQueuedRun: async () => {
+              throw unavailable();
+            },
+          },
+        }),
+      },
+      { logger: false },
+    );
+    openApps.push(runApp);
+    const createdThread = await runApp.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "agent-available-thread" },
+      payload: { title: "Run 不可用 Agent" },
+    });
+    expect(createdThread.statusCode).toBe(200);
+    const runResponse = await runApp.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "agent-unavailable-run" },
+      payload: { input: "启动 Run" },
+    });
+    expect(runResponse.statusCode).toBe(409);
+    expect(runResponse.json().error).toEqual(expectedError);
+  });
+
   it("创建能力必须显式签发，缺失时服务仍就绪且创建路由不存在", async () => {
     const { app, dependencies } = fixture({ enableCreate: false });
     openApps.push(app);

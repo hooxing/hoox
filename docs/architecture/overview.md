@@ -161,4 +161,5 @@ vendor
 - [开发 API 契约](../reference/development-api.md)
 - [生产就绪说明](../operations/production-readiness.md)
 - [Run 执行与恢复](run-execution-and-recovery.md)
+- [Agent 定义、版本与 Run 快照](agent-definition.md)：查找 Agent 对后续 Run 的生效规则，以及版本停用、撤销与恢复边界。
 - [持久化与数据库边界](persistence-and-database.md)

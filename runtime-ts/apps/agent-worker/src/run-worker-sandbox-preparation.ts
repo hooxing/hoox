@@ -148,7 +148,12 @@ export class RunSandboxPreparation<Result> {
       throw new Error("Sandbox acquire 未返回 Session");
     }
     const postAcquire = await operations.stopPoint();
-    if (postAcquire !== undefined && postAcquire !== "cancelled" && postAcquire !== "timeout") {
+    if (
+      postAcquire !== undefined &&
+      postAcquire !== "cancelled" &&
+      postAcquire !== "timeout" &&
+      postAcquire !== "agent_revision_revoked"
+    ) {
       await this.#discardAcquired(acquired, postAcquire);
       throw new Error("Sandbox acquire 后运行已停止");
     }
@@ -167,7 +172,7 @@ export class RunSandboxPreparation<Result> {
       this.#failureResult = await operations.handleMutationFailure(intent);
       throw new Error("Sandbox cleanup intent 未能持久化");
     }
-    // 取消与超时仍需先固化 cleanup intent，才能由终态收敛路径回收 Sandbox。
+    // 取消、撤销与超时仍需先固化 cleanup intent，才能由终态收敛路径回收 Sandbox。
     if (postAcquire) throw new Error("Sandbox acquire 后运行已停止");
 
     const preMaterialize = await operations.stopPoint();

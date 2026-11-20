@@ -20,6 +20,7 @@ import type {
 import type { RunSkillSnapshot } from "@hoox/skill";
 import type { WorkspaceManifest } from "@hoox/workspace";
 import type { ControlledRolloutProjection } from "./rollout-projection.js";
+import type { RunAgentSnapshot, RunAgentStopCode } from "./run-agent-snapshot.js";
 import type { RuntimeAgentEvent } from "./runtime-agent-event.js";
 import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "./sandbox-port.js";
 import type { ThreadActiveHistoryV1 } from "./thread-history.js";
@@ -285,6 +286,7 @@ export interface ExecutionAttemptSnapshot {
 }
 
 export interface ClaimedExecutionSnapshot {
+  readonly agent: RunAgentSnapshot | RunAgentStopCode;
   readonly run: Run;
   /** 由领取事务从可信 Tenant 事实投影；旧快照缺失时必须按未启用历史目录处理。 */
   readonly tenantKind?: "personal" | "team";
@@ -426,6 +428,8 @@ export type ClaimExecutionResult =
     };
 
 export type StableWorkerErrorCode =
+  | RunAgentStopCode
+  | "AGENT_CONFIGURATION_UNSUPPORTED"
   | "CANCELLED"
   | "CONTEXT_TOO_LARGE"
   | "TIMEOUT"
@@ -705,6 +709,7 @@ export type FenceInspectionResult =
       readonly databaseNow: IsoTimestamp;
       readonly run: Run;
       readonly workspace: Workspace;
+      readonly agentRevisionRevoked?: true;
     }
   | { readonly outcome: "fence_lost" | "cancelled" | "unavailable" | "scope_mismatch" };
 
@@ -735,6 +740,7 @@ export interface ExecutionPersistencePort {
     | {
         readonly outcome:
           | "cancelled"
+          | "agent_revision_revoked"
           | "fence_lost"
           | "conflict"
           | "unavailable"
@@ -752,6 +758,7 @@ export interface ExecutionPersistencePort {
           | "already_consumed"
           | "expired"
           | "cancelled"
+          | "agent_revision_revoked"
           | "fence_lost"
           | "conflict"
           | "unavailable"
@@ -1098,6 +1105,7 @@ export interface AgentSessionFactoryPort {
     /** Session 创建前已知的首轮文本，只用于把即将追加的 user turn 计入自动压缩触发。 */
     readonly initialInputText?: string;
     readonly skillSnapshot?: RunSkillSnapshot;
+    readonly agentSnapshot: RunAgentSnapshot;
     /** Worker 在领取 Run 后读取一次；Root 与所有子 Agent 共用该不可变快照。 */
     readonly personalizationSnapshot?: RunPersonalizationSnapshot;
     readonly contextThroughSequence?: number;

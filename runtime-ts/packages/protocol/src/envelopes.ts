@@ -9,6 +9,7 @@ export const publicErrorCodes = [
   "FORBIDDEN",
   "NOT_FOUND",
   "CONFLICT",
+  "AGENT_REVISION_UNAVAILABLE",
   "INVALID_STATE",
   "RATE_LIMITED",
   "DEPENDENCY_UNAVAILABLE",
@@ -42,6 +43,7 @@ export type PublicFailure =
   | { readonly kind: "forbidden" }
   | { readonly kind: "not_found" }
   | { readonly kind: "conflict" }
+  | { readonly kind: "agent_revision_unavailable" }
   | { readonly kind: "invalid_state" }
   | { readonly kind: "rate_limited" }
   | { readonly kind: "dependency_unavailable" }
@@ -62,6 +64,11 @@ const fixedErrors: Readonly<Record<PublicFailure["kind"], ErrorEnvelope["error"]
   forbidden: Object.freeze({ code: "FORBIDDEN", message: "凭据无权执行此操作", retryable: false }),
   not_found: Object.freeze({ code: "NOT_FOUND", message: "请求的资源不存在", retryable: false }),
   conflict: Object.freeze({ code: "CONFLICT", message: "资源状态已经变化", retryable: true }),
+  agent_revision_unavailable: Object.freeze({
+    code: "AGENT_REVISION_UNAVAILABLE",
+    message: "所选 Agent 当前不可用，请联系管理员或选择其他 Agent",
+    retryable: false,
+  }),
   invalid_state: Object.freeze({
     code: "INVALID_STATE",
     message: "当前状态不允许该操作",

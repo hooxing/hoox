@@ -1,9 +1,18 @@
 import { readFile } from "node:fs/promises";
 import type { PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { activeColumnUpdatePolicy, activeTablePolicy } from "./role-bootstrap.js";
+import {
+  activeColumnUpdatePolicy,
+  activeTablePolicy,
+  formatTableSetDifference,
+} from "./role-bootstrap.js";
 
 const migrationUrl = new URL("../migrations/0005_external_tools.up.sql", import.meta.url);
+const baselineMigrationUrl = new URL("../migrations/0001_baseline.up.sql", import.meta.url);
+const secondMigrationUrl = new URL(
+  "../migrations/0002_inline_tool_receipts.up.sql",
+  import.meta.url,
+);
 const bootstrapUrl = new URL("./role-bootstrap.ts", import.meta.url);
 
 describe("外部工具 Admin Control ACL", () => {
@@ -39,10 +48,10 @@ describe("外部工具 Admin Control ACL", () => {
       /if \(externalToolsEnabled\) \{\s*allowed\.set\("external_tool_versions"/u,
     );
     expect(bootstrap).toMatch(
-      /async function activeTablePolicy\([\s\S]*?if \(!\(await hasExternalToolState\(client, schema\)\)\) \{\s*for \(const table of \[/u,
+      /async function activeTablePolicy\([\s\S]*?if \(await hasExternalToolState\(client, schema\)\) \{\s*for \(const table of \[/u,
     );
     expect(bootstrap).toMatch(
-      /export async function activeColumnUpdatePolicy\([\s\S]*?if \(!\(await hasExternalToolState\(client, schema\)\)\) \{\s*for \(const table of \[/u,
+      /export async function activeColumnUpdatePolicy\([\s\S]*?if \(await hasExternalToolState\(client, schema\)\) \{\s*for \(const table of \[/u,
     );
     expect(bootstrap).toMatch(
       /allowed\.set\("external_tool_versions", new Set\(\["SELECT", "INSERT"\]\)\)/u,
@@ -53,6 +62,53 @@ describe("外部工具 Admin Control ACL", () => {
     expect(bootstrap).toMatch(
       /allowed\.set\("external_tool_revocations", new Set\(\["SELECT", "INSERT"\]\)\)/u,
     );
+  });
+
+  it("表集合诊断按排序结果列出缺少和多出的表名", () => {
+    expect(formatTableSetDifference(["threads", "runs"], ["runs", "external_tool_versions"])).toBe(
+      "缺少 [threads]，多出 [external_tool_versions]",
+    );
+    expect(formatTableSetDifference(["runs"], ["runs"])).toBe("缺少 []，多出 []");
+  });
+
+  it("0001+0002 实际建表集合与 A1/D1/B1 不存在时的 Runtime 表键完全一致", async () => {
+    const migrationSql = await Promise.all([
+      readFile(baselineMigrationUrl, "utf8"),
+      readFile(secondMigrationUrl, "utf8"),
+    ]);
+    const actualTables = new Set(
+      migrationSql.flatMap((sql) =>
+        [
+          ...sql.matchAll(
+            /CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s*\(/giu,
+          ),
+        ].map((match) => match[1] as string),
+      ),
+    );
+    // migrateUp 自身创建此基础表；它同样属于 Runtime ACL 表集合检查范围。
+    actualTables.add("runtime_schema_migrations");
+
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        const referencedTables = [...sql.matchAll(/format\('%I\.([a-z_][a-z0-9_]*)'/giu)].map(
+          (match) => match[1] as string,
+        );
+        const relationName = /relation\.relname='([a-z_][a-z0-9_]*)'/iu.exec(sql)?.[1];
+        if (relationName !== undefined) referencedTables.push(relationName);
+        return {
+          rows: [
+            {
+              present:
+                referencedTables.length > 0 &&
+                referencedTables.every((table) => actualTables.has(table)),
+            },
+          ],
+        };
+      }),
+    } as unknown as PoolClient;
+
+    const policy = await activeTablePolicy(client, "it_partial_migration");
+    expect([...policy.keys()].sort()).toEqual([...actualTables].sort());
   });
 
   it("Runtime 表键仅在外部工具三表齐备时纳入白名单", async () => {

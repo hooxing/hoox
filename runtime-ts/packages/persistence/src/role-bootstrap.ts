@@ -324,10 +324,6 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["admin_control_commands", new Set()],
   ["admin_control_audits", new Set()],
   ["admin_control_generation", new Set(["SELECT"])],
-  ["admin_run_content_access_audits", new Set()],
-  ["external_tool_versions", new Set()],
-  ["external_tool_credentials", new Set()],
-  ["external_tool_revocations", new Set()],
   ["better_auth_users", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["better_auth_sessions", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["better_auth_accounts", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
@@ -344,16 +340,6 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   // Agent 定义、Run 浏览器审计和外部工具版本均不得由 Runtime 执行列级更新。
-  ["agent_definitions", new Set()],
-  ["agent_definition_tenants", new Set()],
-  ["agent_revisions", new Set()],
-  ["agent_revision_revocations", new Set()],
-  ["agent_definition_commands", new Set()],
-  ["agent_definition_audits", new Set()],
-  ["admin_run_content_access_audits", new Set()],
-  ["external_tool_versions", new Set()],
-  ["external_tool_credentials", new Set()],
-  ["external_tool_revocations", new Set()],
   [
     "threads",
     new Set([
@@ -1247,6 +1233,18 @@ async function hasManagedSandboxState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
+export function formatTableSetDifference(
+  expectedTables: readonly string[],
+  actualTables: readonly string[],
+): string {
+  const expected = new Set(expectedTables);
+  const actual = new Set(actualTables);
+  const missing = [...expected].filter((table) => !actual.has(table)).sort();
+  const extra = [...actual].filter((table) => !expected.has(table)).sort();
+  const format = (tables: readonly string[]): string => `[${tables.join(",")}]`;
+  return `缺少 ${format(missing)}，多出 ${format(extra)}`;
+}
+
 export async function activeTablePolicy(
   client: PoolClient,
   schema: string,
@@ -1367,13 +1365,13 @@ export async function activeTablePolicy(
   if (!(await hasEmbeddedIdentityState(client, schema))) {
     for (const table of embeddedIdentityTables) policy.delete(table);
   }
-  if (!(await hasExternalToolState(client, schema))) {
+  if (await hasExternalToolState(client, schema)) {
     for (const table of [
       "external_tool_versions",
       "external_tool_credentials",
       "external_tool_revocations",
     ])
-      policy.delete(table);
+      policy.set(table, new Set());
   }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
@@ -1429,13 +1427,27 @@ export async function activeColumnUpdatePolicy(
   if (await hasEmbeddedIdentityState(client, schema)) {
     policy.set("user_accounts", new Set(["better_auth_user_id", "display_name", "updated_at"]));
   }
-  if (!(await hasExternalToolState(client, schema))) {
+  if (await hasAgentDefinitionState(client, schema)) {
+    for (const table of [
+      "agent_definitions",
+      "agent_definition_tenants",
+      "agent_revisions",
+      "agent_revision_revocations",
+      "agent_definition_commands",
+      "agent_definition_audits",
+    ])
+      policy.set(table, new Set());
+  }
+  if (await hasAdminRunExplorerState(client, schema)) {
+    policy.set("admin_run_content_access_audits", new Set());
+  }
+  if (await hasExternalToolState(client, schema)) {
     for (const table of [
       "external_tool_versions",
       "external_tool_credentials",
       "external_tool_revocations",
     ])
-      policy.delete(table);
+      policy.set(table, new Set());
   }
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
@@ -2254,7 +2266,10 @@ async function assertTeamCoordinatorBoundary(
   );
   for (const row of privileges.rows) {
     if (row.allowed !== (tablePolicy.get(row.table_name)?.has(row.privilege) ?? false)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Team Coordinator 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Team Coordinator 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2281,7 +2296,7 @@ async function assertTeamCoordinatorBoundary(
       if (row.allowed !== columnPolicy.get(row.table_name)?.has(row.column_name)) {
         throw new PersistenceError(
           "CONSTRAINT_VIOLATION",
-          "Team Coordinator 列级 UPDATE 权限偏离白名单",
+          `Team Coordinator 列级 UPDATE 权限偏离白名单：${row.table_name}.${row.column_name}`,
         );
       }
     }
@@ -2297,8 +2312,12 @@ async function assertTeamCoordinatorBoundary(
       WHERE relation.relnamespace=current_schema()::regnamespace AND relation.relkind='S'`,
     [context.teamCoordinatorRole, context.schema, sequencePrivileges],
   );
-  if (sequences.rows.some((row) => row.allowed)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "Team Coordinator 不得持有 sequence 权限");
+  const grantedSequences = sequences.rows.filter((row) => row.allowed).map((row) => row.table_name);
+  if (grantedSequences.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `Team Coordinator 不得持有 sequence 权限：${grantedSequences.sort().join(",")}`,
+    );
   }
   await assertDatabaseAndSchemaBoundary(
     client,
@@ -2384,7 +2403,10 @@ async function assertAdminControlBoundary(
   );
   for (const row of privileges.rows) {
     if (row.allowed !== (allowed.get(row.table_name)?.has(row.privilege) ?? false)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Admin Control 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Admin Control 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2438,7 +2460,7 @@ async function assertAdminControlBoundary(
       if (row.allowed !== updatePolicy.get(row.table_name)?.has(row.column_name)) {
         throw new PersistenceError(
           "CONSTRAINT_VIOLATION",
-          "Admin Control 列级 UPDATE 权限偏离白名单",
+          `Admin Control 列级 UPDATE 权限偏离白名单：${row.table_name}.${row.column_name}`,
         );
       }
     }
@@ -2472,7 +2494,7 @@ async function assertAdminControlBoundary(
       if (row.allowed !== selectPolicy.get(row.table_name)?.has(row.column_name)) {
         throw new PersistenceError(
           "CONSTRAINT_VIOLATION",
-          "Admin Control 列级 SELECT 权限偏离白名单",
+          `Admin Control 列级 SELECT 权限偏离白名单：${row.table_name}.${row.column_name}`,
         );
       }
     }
@@ -2503,7 +2525,10 @@ async function assertAdminControlBoundary(
           ? userOperationsEnabled
           : runExplorerEnabled;
     if (row.allowed !== expected) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Admin Control 受限视图权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Admin Control 受限视图权限偏离白名单：${row.view_name}.SELECT`,
+      );
     }
   }
   await assertDatabaseAndSchemaBoundary(
@@ -2639,7 +2664,10 @@ async function assertSkillPublisherBoundary(
   );
   for (const row of privileges.rows) {
     if (row.allowed !== (allowed.get(row.table_name)?.has(row.privilege) ?? false)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Skill Publisher 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Skill Publisher 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2679,7 +2707,7 @@ async function assertSkillPublisherBoundary(
     if (row.allowed !== (updateColumns.get(row.table_name)?.has(row.column_name) ?? false)) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
-        "Skill Publisher 列级 UPDATE 权限偏离白名单",
+        `Skill Publisher 列级 UPDATE 权限偏离白名单：${row.table_name}.${row.column_name}`,
       );
     }
   }
@@ -2740,7 +2768,10 @@ async function assertWorkerCoordinatorBoundary(
     const expected =
       enabled && row.table_name === "worker_tenant_assignments" && row.privilege === "SELECT";
     if (row.allowed !== expected) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Worker Coordinator 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Worker Coordinator 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2832,7 +2863,10 @@ async function assertActiveRuntimeWhitelist(
   const actualTables = relationResult.rows.map((row) => row.table_name);
   const expectedTables = [...tablePolicy.keys()].sort();
   if (JSON.stringify(actualTables) !== JSON.stringify(expectedTables)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "业务表集合与 Runtime 权限策略不一致");
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `业务表集合与 Runtime 权限策略不一致：${formatTableSetDifference(expectedTables, actualTables)}`,
+    );
   }
 
   const privileges = await client.query<PrivilegeRow>(
@@ -2846,7 +2880,10 @@ async function assertActiveRuntimeWhitelist(
   );
   for (const row of privileges.rows) {
     if (row.allowed !== tablePolicy.get(row.table_name)?.has(row.privilege)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 表权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Runtime 表权限偏离白名单：${row.table_name}.${row.privilege}`,
+      );
     }
   }
 
@@ -2870,7 +2907,10 @@ async function assertActiveRuntimeWhitelist(
   );
   for (const row of columnUpdates.rows) {
     if (row.allowed !== columnUpdatePolicy.get(row.table_name)?.has(row.column_name)) {
-      throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 列级 UPDATE 权限偏离白名单");
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `Runtime 列级 UPDATE 权限偏离白名单：${row.table_name}.${row.column_name}`,
+      );
     }
   }
 
@@ -2884,8 +2924,12 @@ async function assertActiveRuntimeWhitelist(
       WHERE relation.relnamespace = current_schema()::regnamespace AND relation.relkind = 'S'`,
     [context.runtimeRole, context.schema, sequencePrivileges],
   );
-  if (sequences.rows.some((row) => row.allowed)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 不得持有 sequence 权限");
+  const grantedSequences = sequences.rows.filter((row) => row.allowed).map((row) => row.table_name);
+  if (grantedSequences.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `Runtime 不得持有 sequence 权限：${grantedSequences.sort().join(",")}`,
+    );
   }
   await assertDatabaseAndSchemaBoundary(client, context, true);
   await assertNoPublicRelationPrivileges(client);
@@ -2923,10 +2967,12 @@ async function assertRuntimeAccessRemoved(
       WHERE relnamespace = current_schema()::regnamespace AND relkind IN ('r', 'p')
       ORDER BY relname`,
   );
-  if (
-    JSON.stringify(relations.rows.map((row) => row.table_name)) !== JSON.stringify([migrationTable])
-  ) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "down 后仍残留业务表");
+  const actualTables = relations.rows.map((row) => row.table_name);
+  if (JSON.stringify(actualTables) !== JSON.stringify([migrationTable])) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `down 后业务表集合不符：${formatTableSetDifference([migrationTable], actualTables)}`,
+    );
   }
   const privileges = await client.query<PrivilegeRow>(
     `SELECT relation.relname AS table_name, requested.privilege,
@@ -2939,8 +2985,15 @@ async function assertRuntimeAccessRemoved(
         AND relation.relkind IN ('r', 'p')`,
     [context.runtimeRole, context.schema, tablePrivileges],
   );
-  if (privileges.rows.some((row) => row.allowed)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "down 后 Runtime 仍持有表权限");
+  const grantedTablePrivileges = privileges.rows
+    .filter((row) => row.allowed)
+    .map((row) => `${row.table_name}.${row.privilege}`)
+    .sort();
+  if (grantedTablePrivileges.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `down 后 Runtime 仍持有表权限：${grantedTablePrivileges.join(",")}`,
+    );
   }
   const sequences = await client.query<PrivilegeRow>(
     `SELECT relation.relname AS table_name, requested.privilege,
@@ -2952,8 +3005,15 @@ async function assertRuntimeAccessRemoved(
       WHERE relation.relnamespace = current_schema()::regnamespace AND relation.relkind = 'S'`,
     [context.runtimeRole, context.schema, sequencePrivileges],
   );
-  if (sequences.rows.some((row) => row.allowed)) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "down 后 Runtime 仍持有 sequence 权限");
+  const remainingSequences = sequences.rows
+    .filter((row) => row.allowed)
+    .map((row) => row.table_name)
+    .sort();
+  if (remainingSequences.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `down 后 Runtime 仍持有 sequence 权限：${remainingSequences.join(",")}`,
+    );
   }
   await assertDatabaseAndSchemaBoundary(client, context, false);
   await assertNoPublicRelationPrivileges(client);

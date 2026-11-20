@@ -1115,6 +1115,16 @@ async function hasScheduledTaskState(client: PoolClient, schema: string): Promis
   return result.rows[0]?.present === true;
 }
 
+async function hasExternalToolState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.external_tool_versions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_credentials',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_revocations',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasEmbeddedIdentityState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.better_auth_users',$1::text)) IS NOT NULL
@@ -3281,6 +3291,12 @@ async function grantAdminControlAccess(
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
        GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
+    );
+  }
+  if (await hasExternalToolState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_versions,${schema}.external_tool_revocations TO ${control};
+       GRANT INSERT ON TABLE ${schema}.external_tool_credentials TO ${control}`,
     );
   }
   if (await hasEmbeddedIdentityState(client, context.schema)) {

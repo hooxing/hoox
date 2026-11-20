@@ -165,16 +165,17 @@ export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
   async revoke(scope: TenantScope, id: string, now: string): Promise<ApiKeyRecord | undefined> {
     return transaction(this.pool, async (client) => {
       await setTenant(client, scope);
+      const revoked = await client.query<{ readonly revoked: boolean }>(
+        "SELECT revoke_api_key($1, $2) AS revoked",
+        [id, now],
+      );
+      if (revoked.rows[0]?.revoked !== true) return undefined;
       const result = await client.query<ApiKeyRow>(
-        `UPDATE api_keys SET revoked_at = $3 WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL RETURNING ${columns}`,
-        [scope.tenantId, id, now],
+        `SELECT ${columns} FROM api_keys WHERE tenant_id = $1 AND id = $2`,
+        [scope.tenantId, id],
       );
       const row = result.rows[0];
-      if (row === undefined) return undefined;
-      await client.query(
-        "UPDATE memberships SET status = 'revoked' WHERE tenant_id = $1 AND user_id = $2",
-        [scope.tenantId, row.integration_user_id],
-      );
+      if (row === undefined) throw new Error("REVOKED_API_KEY_NOT_READABLE");
       return mapKey(row);
     });
   }

@@ -23,7 +23,7 @@
 | 角色 | 使用者 | 边界 |
 | --- | --- | --- |
 | Migrator | 迁移命令 | 拥有 Schema 和受限视图；不被常驻进程使用 |
-| Runtime | API、Worker、Scheduler | 表与列白名单 ACL，无 routine 权限；API Key 认证仅按哈希命中受 RLS 限制的凭据行，最近使用/吊销字段与集成 Membership 状态只有列级更新权限 |
+| Runtime | API、Worker、Scheduler | 表与列白名单 ACL；唯一 routine 例外是 Migrator 持有、固定 `search_path` 的 `revoke_api_key`，Runtime 不能直接更新 Membership 状态或 Key 吊销时间。API Key 认证只按哈希命中受 RLS 限制的凭据行，最近使用时间仅有列级更新权限 |
 | Worker Coordinator | Worker 的 Tenant 发现 | 只能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表 |
 | Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Worker 不持有 |
 | Admin Control | 统一 Admin API 控制面 | 控制面配置、审计与统计投影 |
@@ -52,7 +52,7 @@
 
 ## Routine 与迁移
 
-- 迁移 manifest 不允许遗留自定义函数、过程或聚合；runner 在迁移 SQL 执行后、提交前断言目标 routine 集合为空，否则整体回滚。约束优先使用内建 immutable 表达式或内联 CHECK。未来引入 routine 前必须单独审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 与调用权限。
+- 迁移 SQL 默认不得遗留自定义函数、过程或聚合；唯一当前例外是 API Key 的 `revoke_api_key`：Migrator 持有、`SECURITY DEFINER`、固定为目标 Schema 的 `search_path`，只校验并撤销 API Key 及其 `integration` Membership；Runtime 只有该函数的 EXECUTE，PUBLIC 与其他常驻角色没有权限。Runtime 不能直接恢复 `revoked_at` 或修改 Membership 状态。runner 在迁移 SQL 执行后、提交前核验 routine 名称、签名、所有者、安全属性、固定路径和权限，其他 routine 一律失败关闭。新增例外必须单独审查。
 - 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。2026-11 起全部历史迁移已合并为 `0001_baseline`；基线及之后的迁移一经提交不可修改，新变化只能追加 `0002` 起的递增版本。压缩前建立的数据库会因迁移记录不一致而失败关闭，必须清空 Schema 后重建，见[开发环境准备](../development.md#迁移基线重置)。
 - 基线 down 删除基线创建的全部表、视图与函数，不按数据内容阻止回退；新增迁移的 down 若可能丢失不可恢复事实，应自行失败关闭。
 - `pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作。
@@ -78,4 +78,4 @@
 2. 更新 `role-bootstrap.ts` 中各角色的精确 ACL 白名单，并补真实 PostgreSQL 测试。
 3. 写入路径具备幂等键、摘要冲突语义和 COMMIT 未知读回。
 4. 需要远端动作时使用同事务 Outbox，并定义 UNKNOWN 收敛。
-5. 不新增 routine，不在迁移中依赖会话外的动态角色名。
+5. 除已审查的 `revoke_api_key` 外不新增 routine；新例外须扩充严格 manifest 与 PostgreSQL 权限测试，不在迁移中依赖会话外的动态角色名。

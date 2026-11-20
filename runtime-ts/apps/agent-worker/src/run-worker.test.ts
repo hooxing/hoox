@@ -1,3 +1,4 @@
+import { PinnedRunModelUnavailableError } from "@hoox/admin-control";
 import type { RunPhaseTimingDiagnosticsPort } from "./run-phase-diagnostics.js";
 import {
   type RunPersonalizationSnapshot,
@@ -660,17 +661,33 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     },
   );
 
-  it("快照要求未接入的固定 Provider 时不回退到平台模型", async () => {
-    const h = harness([], {
-      ...fakeSeed("agent-model-unavailable"),
-      agent: fakeAgentSnapshot({
-        model: {
-          mode: "pinned",
-          providerKey: "model-provider-test",
-          providerRevision: 3,
-          modelId: "model-test",
-        },
+  it("快照固定模型不可用时在模型调用前失败，不回退到平台模型", async () => {
+    const agent = fakeAgentSnapshot({
+      model: {
+        mode: "pinned",
+        providerKey: "model-provider-test",
+        providerRevision: 3,
+        modelId: "model-test",
+      },
+    });
+    const h = harness([], { ...fakeSeed("agent-model-unavailable"), agent });
+    const create = vi
+      .spyOn(h.factory, "create")
+      .mockRejectedValue(new PinnedRunModelUnavailableError());
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ agentSnapshot: agent }));
+    expect(h.persistence.record(h.scope).events).toContainEqual(
+      expect.objectContaining({
+        kind: "attempt_state_changed",
+        payload: expect.objectContaining({ code: "PROVIDER" }),
       }),
+    );
+  });
+
+  it("快照要求未接入的 Sandbox 模板时仍失败关闭", async () => {
+    const h = harness([], {
+      ...fakeSeed("agent-sandbox-template-unavailable"),
+      agent: fakeAgentSnapshot({ sandboxTemplateId: "sandbox-template-test" }),
     });
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
     expect(h.factory.createCount).toBe(0);

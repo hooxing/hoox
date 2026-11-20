@@ -31,6 +31,7 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+import { AgentDefinitionsPage } from "./agent-definitions.js";
 import { readAdminAccessToken } from "./admin-session.js";
 import {
   AdminApiError,
@@ -40,7 +41,11 @@ import {
   type SkillAdminApiContract,
 } from "./api.js";
 import { HOOX_APP_ICON_PATH } from "./brand.js";
-import type { AdminControlApiContract } from "./control-api.js";
+import {
+  type AdminControlApiContract,
+  AdminControlApi,
+  type AgentDefinitionApiContract,
+} from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
 import { InstallationProgress } from "./installation-progress.js";
 import { RunExplorerDetail, RunExplorerList } from "./run-explorer.js";
@@ -50,6 +55,7 @@ import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadat
 
 const defaultApi = new SkillAdminApi();
 const defaultRunApi = new RunExplorerApi();
+const defaultAgentApi = new AdminControlApi();
 const maxSubmissionFiles = 256;
 
 export function browserRouterBasename(baseUrl: string): string | undefined {
@@ -947,6 +953,11 @@ const navigation: NonNullable<MenuProps["items"]> = [
   },
   {
     type: "group",
+    label: "Agent",
+    children: [{ key: "/agent-definitions", icon: <RobotOutlined />, label: "Agent 管理" }],
+  },
+  {
+    type: "group",
     label: "AI 能力",
     children: [
       { key: "/models", icon: <RobotOutlined />, label: "模型服务" },
@@ -976,6 +987,10 @@ const pageMetadata: Readonly<
   "/analytics": {
     title: "数据运营",
     description: "用户、对话与运行可靠性指标",
+  },
+  "/agent-definitions": {
+    title: "Agent 管理",
+    description: "维护草稿、发布版本和 Tenant 可用范围",
   },
   "/runs": {
     title: "运行记录",
@@ -1016,7 +1031,9 @@ const defaultPageMetadata = {
 
 /** 菜单与页头按一级路径匹配；Run 详情等子路由归属其列表菜单项。 */
 function navigationKey(pathname: string): string {
-  return pathname.startsWith("/runs/") ? "/runs" : pathname;
+  if (pathname.startsWith("/runs/")) return "/runs";
+  if (pathname.startsWith("/agent-definitions/")) return "/agent-definitions";
+  return pathname;
 }
 
 function RunExplorerListRoute({ api }: { readonly api: RunExplorerApiContract }) {
@@ -1046,14 +1063,39 @@ function RunExplorerDetailRoute({ api }: { readonly api: RunExplorerApiContract 
   );
 }
 
+function AgentDefinitionsRoute({
+  api,
+  kind,
+}: {
+  readonly api: AgentDefinitionApiContract;
+  readonly kind: "list" | "create" | "detail";
+}) {
+  const navigate = useNavigate();
+  const { definitionId } = useParams();
+  const base = "/agent-definitions";
+  if (kind === "detail" && definitionId === undefined) return <Navigate to={base} replace />;
+  return (
+    <AgentDefinitionsPage
+      api={api}
+      destination={kind === "detail" ? { kind, id: definitionId ?? "" } : { kind }}
+      onBack={() => navigate(base)}
+      onOpen={(id) =>
+        navigate(id === undefined ? `${base}/draft/new` : `${base}/${encodeURIComponent(id)}`)
+      }
+    />
+  );
+}
+
 function AdminPlatform({
   apiClient,
   controlApi,
   runApi,
+  agentApi,
 }: {
   readonly apiClient: SkillAdminApiContract;
   readonly controlApi?: AdminControlApiContract;
   readonly runApi: RunExplorerApiContract;
+  readonly agentApi: AgentDefinitionApiContract;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -1189,6 +1231,18 @@ function AdminPlatform({
                 />
               }
             />
+            <Route
+              path="/agent-definitions"
+              element={<AgentDefinitionsRoute api={agentApi} kind="list" />}
+            />
+            <Route
+              path="/agent-definitions/draft/new"
+              element={<AgentDefinitionsRoute api={agentApi} kind="create" />}
+            />
+            <Route
+              path="/agent-definitions/:definitionId"
+              element={<AgentDefinitionsRoute api={agentApi} kind="detail" />}
+            />
             <Route path="/runs" element={<RunExplorerListRoute api={runApi} />} />
             <Route
               path="/runs/:tenantId/:runId"
@@ -1227,11 +1281,13 @@ export function App({
   apiClient,
   controlApi,
   runApi,
+  agentApi,
   initialPath,
 }: {
   readonly apiClient?: SkillAdminApiContract;
   readonly controlApi?: AdminControlApiContract;
   readonly runApi?: RunExplorerApiContract;
+  readonly agentApi?: AgentDefinitionApiContract;
   /** 仅用于注入客户端的内存路由（测试与嵌入）；真实管理台以浏览器地址为准。 */
   readonly initialPath?: string;
 }) {
@@ -1312,6 +1368,7 @@ export function App({
             apiClient={apiClient ?? defaultApi}
             {...(controlApi === undefined ? {} : { controlApi })}
             runApi={runApi ?? defaultRunApi}
+            agentApi={agentApi ?? defaultAgentApi}
           />
         </QueryClientProvider>
       </AntApp>

@@ -1900,6 +1900,45 @@ h2 {
 .empty.primary p {
   max-width: 360px;
 }
+.new-thread-agent-welcome {
+  display: flex;
+  max-width: 520px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.agent-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+.agent-picker select {
+  max-width: 256px;
+  padding: 8px 32px 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  background: var(--surface-raised);
+}
+.suggested-question {
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+}
+.suggested-question:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+.thread small {
+  max-width: 96px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+}
 .empty.compact {
   padding: 18px 8px;
   font-size: 12px;

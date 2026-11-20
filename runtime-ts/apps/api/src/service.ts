@@ -2,11 +2,13 @@ import { createHash } from "node:crypto";
 import {
   createRun,
   createThread,
+  DEFAULT_AGENT_DEFINITION_ID,
   createWorkspace,
   DomainError,
   type ApiKeyScope,
   resourceId,
   resourceVersionId,
+  rehydrateThread,
   runId,
   tenantId,
   threadId,
@@ -14,11 +16,13 @@ import {
 } from "@hoox/domain";
 import type {
   CoreRepositories,
+  AgentDefinitionRepositoryPort,
   TenantBundle,
   TenantScope,
   ThreadListCursor,
 } from "@hoox/persistence/postgres";
 import type {
+  AvailableAgentDto,
   CreateThreadInputRequest,
   RunDto,
   ThreadDto,
@@ -31,7 +35,7 @@ import {
   validFileSelection,
   type FileReference,
 } from "@hoox/protocol/file-references";
-import type { RunExperienceReadPort } from "@hoox/persistence/postgres";
+import { PersistenceError, type RunExperienceReadPort } from "@hoox/persistence/postgres";
 import { toRunDto, toThreadDto } from "@hoox/protocol-mapper";
 import {
   appendAttachmentsToLatestUserPrompt,
@@ -86,6 +90,10 @@ interface ServiceDependencies {
   readonly auth: AuthContextResolver;
   readonly apiKeys?: ApiKeyAuthenticationPort;
   readonly repositories: CoreRepositories;
+  readonly agentDefinitions?: Pick<
+    AgentDefinitionRepositoryPort,
+    "listAvailable" | "readVisibleCurrent"
+  >;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
   readonly renamePersonalThread: RenamePersonalThreadCommandPort;
@@ -172,12 +180,52 @@ export class ApiService {
     };
   }
 
-  async createThread(auth: AuthContext, title: string, idempotencyKey: string): Promise<ThreadDto> {
+  async listAvailableAgents(auth: AuthContext): Promise<readonly AvailableAgentDto[]> {
+    const repository = this.dependencies.agentDefinitions;
+    if (repository === undefined) throw new ApiFailure("dependency_unavailable");
+    const available = await repository.listAvailable(auth.scope.tenantId);
+    return available.map(({ definition, revision }) => ({
+      id: definition.id,
+      displayName: revision.content.displayName,
+      description: revision.content.description,
+      ...(revision.content.avatarRef === undefined
+        ? {}
+        : { avatarRef: revision.content.avatarRef }),
+      ...(revision.content.welcomeMessage === undefined
+        ? {}
+        : { welcomeMessage: revision.content.welcomeMessage }),
+      suggestedQuestions: [...revision.content.suggestedQuestions],
+    }));
+  }
+
+  async createThread(
+    auth: AuthContext,
+    title: string,
+    idempotencyKey: string,
+    requestedAgentDefinitionId?: string,
+  ): Promise<ThreadDto> {
     try {
       const capability = this.dependencies.createCapability;
       if (capability === undefined) throw new ApiFailure("not_found");
+      const agentDefinitionId = requestedAgentDefinitionId ?? DEFAULT_AGENT_DEFINITION_ID;
+      // 省略选择器时保留升级前的内建默认 Agent 路径；只有显式选择才经过目录可见性校验。
+      if (requestedAgentDefinitionId !== undefined) {
+        const agentRepository = this.dependencies.agentDefinitions;
+        if (agentRepository === undefined) throw new ApiFailure("dependency_unavailable");
+        const selection = await agentRepository.readVisibleCurrent(
+          auth.scope.tenantId,
+          agentDefinitionId,
+        );
+        if (selection === undefined) throw new ApiFailure("not_found");
+        if (selection.revision === undefined) {
+          throw new PersistenceError(
+            "AGENT_REVISION_UNAVAILABLE",
+            "Agent 当前没有可用的已发布 Revision",
+          );
+        }
+      }
       const now = this.dependencies.clock.now();
-      const thread = createThread({
+      const defaultThread = createThread({
         id: this.dependencies.ids.thread(),
         tenant: auth.tenant.tenant,
         user: auth.tenant.user,
@@ -185,6 +233,12 @@ export class ApiService {
         title,
         now,
       });
+      const thread = rehydrateThread(
+        { ...defaultThread, agentDefinitionId },
+        auth.tenant.tenant,
+        auth.tenant.user,
+        auth.tenant.membership,
+      );
       const workspace = createWorkspace({
         id: this.dependencies.ids.workspace(),
         thread,
@@ -199,7 +253,12 @@ export class ApiService {
         workspace,
         idempotency: {
           key: idempotencyKey,
-          requestHash: commandHash("thread.create", { title: thread.title }),
+          requestHash: commandHash(
+            "thread.create",
+            agentDefinitionId === DEFAULT_AGENT_DEFINITION_ID
+              ? { title: thread.title }
+              : { title: thread.title, agentDefinitionId },
+          ),
         },
       });
       if (result.outcome === "key_conflict") throw new ApiFailure("conflict");

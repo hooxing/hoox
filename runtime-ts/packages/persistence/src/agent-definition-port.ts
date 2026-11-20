@@ -57,6 +57,13 @@ export interface AgentDefinitionRepositoryPort {
   publish(input: PublishAgentRevisionInput): Promise<StoredAgentDefinition>;
   deactivate(input: AgentDefinitionCommandInput): Promise<StoredAgentDefinition>;
   revoke(input: RevokeAgentRevisionInput): Promise<StoredAgentDefinition>;
+  readVisibleCurrent(
+    tenantId: string,
+    definitionId: string,
+  ): Promise<
+    | { readonly definition: StoredAgentDefinition; readonly revision?: StoredAgentRevision }
+    | undefined
+  >;
   listAvailable(tenantId: string): Promise<
     readonly {
       readonly definition: StoredAgentDefinition;

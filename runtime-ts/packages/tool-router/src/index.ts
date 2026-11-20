@@ -10,3 +10,4 @@ export * from "./todo-write-tool.js";
 export * from "./tool-failure.js";
 export * from "./tool-parameter-schemas.js";
 export * from "./tools.js";
+export * from "./external-tools.js";

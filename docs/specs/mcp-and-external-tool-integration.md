@@ -89,14 +89,14 @@ Run 创建时按与 `RunSkillSnapshot` 同级的方式固定：启用 Server 的
 
 ## 7. 管理面
 
-管理面需要提供：Server 草稿与凭据写入、发布前探测、发布、查看版本与工具清单、撤销与重新发布、在 Agent 编辑页挑选已发布的工具版本，以及调用量、失败率与结果未知率的可观测入口。管理面不返回凭据明文，不允许用户自行修改 transport 或绕过发布流程。
+管理面目标包括：Server 草稿与凭据写入、逐工具发布前探测报告、原子发布、查看版本与工具清单、撤销与重新发布、Agent 白名单选择，以及调用量、失败率和结果未知率的可观测入口。当前可用的是受限 Agent 选择视图及 Revision 引用复核；草稿/发布 API 与页面尚未接通。HTTP 端点声明和 OpenAPI 导入目标为预览；HTTP 版本发布必须等持久化契约包含 HTTP 方法后开放。选择视图只返回版本 ID、模型工具名、描述、来源和批次名，不返回 Schema 或凭据。
 
 ## 8. 实施切片与实现状态
 
 | 切片 | 状态 | 主要位置 | 验收 |
 | --- | --- | --- | --- |
 | 领域与持久化 | 未开始 | `@hoox/domain`、`@hoox/persistence` 迁移与 RLS | Server 版本、工具描述、Run 快照的不可变性与 Tenant 隔离测试 |
-| 管理面 | 未开始 | `@hoox/protocol`、`@hoox/admin-control`、`admin-control-api`、`admin-web` | 发布原子性、凭据不回显、撤销失败关闭 |
+| 管理面 | 部分实现 | `@hoox/protocol`、`@hoox/admin-control`、`admin-control-api`、`admin-web`、`@hoox/persistence` | 受限 Agent 选择视图及 Revision 引用复核；草稿和发布 API、页面、端到端审计待接通 |
 | Run 快照 | 未开始 | `apps/api` Run 创建、`@hoox/run-contracts`、`@hoox/persistence` | 跨恢复 `toolSchemaHash` 一致、后续发布不影响已有 Run |
 | Pi 工具协议 | 未开始 | `@hoox/pi-adapter` 新工具工厂、`pi-session.ts` 注册 | schema 固定、manifest 派生、非法参数回执 |
 | 执行路由 | 未开始 | `@hoox/tool-router`、`apps/agent-worker/src/pi-session-factory.ts` | 许可绑定、参数摘要、结果未知不重放 |

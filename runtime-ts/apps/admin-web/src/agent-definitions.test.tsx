@@ -62,6 +62,7 @@ function fixture(canManage: boolean) {
       canManage,
       builtinToolLimit: ["read"],
       pinnedModelOptions: [],
+      externalToolOptions: [],
       items: [{ definition, revision: summary(current) }],
     })),
     listAgentRevisions: vi.fn(async () => ({
@@ -237,6 +238,32 @@ describe("后台 Agent 管理", () => {
       }),
       undefined,
     );
+  });
+
+  it("Agent 工具选择只呈现传入的已发布外部工具最小信息", () => {
+    const container = render(
+      <AgentDefinitionEditor
+        initial={current.content}
+        builtinToolLimit={[]}
+        pinnedModelOptions={[]}
+        externalToolOptions={[
+          {
+            toolVersionId: "published-tool-v1",
+            source: "mcp",
+            modelToolName: "mcp__docs__search",
+            description: "搜索文档",
+            batchName: "文档 MCP",
+          },
+        ]}
+        saving={false}
+        onSave={vi.fn(async () => undefined)}
+        onCancel={vi.fn()}
+      />,
+    );
+    select(field<HTMLSelectElement>(container, "工具配置"), "configured");
+    expect(container.textContent).toContain("mcp__docs__search · 文档 MCP");
+    expect(container.textContent).not.toContain("inputSchema");
+    expect(container.textContent).not.toContain("凭据");
   });
 
   it("保存所选已配置模型的完整固定引用，并可改回平台默认", async () => {

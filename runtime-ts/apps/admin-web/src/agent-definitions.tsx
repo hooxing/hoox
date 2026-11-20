@@ -64,13 +64,15 @@ export function AgentDefinitionsPage({
       />
     );
   if (!query.data) return <Spin aria-label="正在读取 Agent 列表" />;
-  const { items, canManage, builtinToolLimit, pinnedModelOptions } = query.data;
+  const { items, canManage, builtinToolLimit, pinnedModelOptions, externalToolOptions } =
+    query.data;
   if (destination.kind === "create") {
     return canManage ? (
       <CreateAgent
         api={api}
         builtinToolLimit={builtinToolLimit}
         pinnedModelOptions={pinnedModelOptions}
+        externalToolOptions={externalToolOptions}
         onOpen={onOpen}
         onBack={onBack}
       />
@@ -87,6 +89,7 @@ export function AgentDefinitionsPage({
         canManage={canManage}
         builtinToolLimit={builtinToolLimit}
         pinnedModelOptions={pinnedModelOptions}
+        externalToolOptions={externalToolOptions}
         onBack={onBack}
       />
     );
@@ -140,12 +143,20 @@ function CreateAgent({
   api,
   builtinToolLimit,
   pinnedModelOptions,
+  externalToolOptions,
   onOpen,
   onBack,
 }: {
   readonly api: AgentDefinitionApiContract;
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
+  readonly externalToolOptions: readonly {
+    toolVersionId: string;
+    source: "mcp" | "http";
+    modelToolName: string;
+    description: string;
+    batchName: string;
+  }[];
   readonly onOpen: (id: string) => void;
   readonly onBack: () => void;
 }) {
@@ -163,6 +174,7 @@ function CreateAgent({
       <AgentDefinitionEditor
         builtinToolLimit={builtinToolLimit}
         pinnedModelOptions={pinnedModelOptions}
+        externalToolOptions={externalToolOptions}
         saving={create.isPending}
         onCancel={onBack}
         onSave={async (content, availability = allTenants) => {
@@ -203,6 +215,7 @@ function AgentHistory({
   canManage,
   builtinToolLimit,
   pinnedModelOptions,
+  externalToolOptions,
   onBack,
 }: {
   readonly api: AgentDefinitionApiContract;
@@ -210,6 +223,13 @@ function AgentHistory({
   readonly canManage: boolean;
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
+  readonly externalToolOptions: readonly {
+    toolVersionId: string;
+    source: "mcp" | "http";
+    modelToolName: string;
+    description: string;
+    batchName: string;
+  }[];
   readonly onBack: () => void;
 }) {
   const client = useQueryClient();
@@ -388,6 +408,7 @@ function AgentHistory({
               initial={active.data.content}
               builtinToolLimit={builtinToolLimit}
               pinnedModelOptions={pinnedModelOptions}
+              externalToolOptions={externalToolOptions}
               saving={busy}
               onCancel={() => setWork(undefined)}
               onSave={(content) =>

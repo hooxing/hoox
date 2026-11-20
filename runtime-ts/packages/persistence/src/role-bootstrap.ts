@@ -1113,6 +1113,15 @@ async function hasExternalToolState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasExternalToolAdminState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.external_tool_registration_drafts',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_selectable_versions',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasEmbeddedIdentityState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.better_auth_users',$1::text)) IS NOT NULL
@@ -3449,6 +3458,17 @@ async function grantAdminControlAccess(
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
        GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
+    );
+  }
+  if (await hasExternalToolAdminState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
+       GRANT INSERT ON TABLE ${schema}.external_tool_draft_credentials TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_publish_batches,
+         ${schema}.external_tool_publish_batch_versions,${schema}.external_tool_admin_commands,
+         ${schema}.external_tool_admin_audits TO ${control};
+       GRANT USAGE ON SEQUENCE ${schema}.external_tool_admin_audits_audit_id_seq TO ${control};
+       GRANT SELECT ON TABLE ${schema}.external_tool_selectable_versions TO ${control}`,
     );
   }
   if (await hasExternalToolState(client, context.schema)) {

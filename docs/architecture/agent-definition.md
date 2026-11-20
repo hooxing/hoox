@@ -18,4 +18,4 @@
 - `platform_default` 模型和工具仍由平台配置控制。显式固定模型使用 `providerKey + providerRevision + modelId` 精确引用；解析必须命中对应已保存 Revision 和模型条目，否则失败关闭，绝不退回 active 或平台默认模型。显式内置工具清单只保留平台允许且实际存在的工具；子 Agent 还受父 Agent 的委派边界约束。Operator 指令来自快照，Revision 摘要只进入 Prompt 审计和恢复身份，不进入模型可见前缀。
 - Skill 自带版本引用随 Agent 快照固定。Tenant Skill 开关控制创建 `RunSkillSnapshot` 时是否读取 Tenant 安装；Agent 自带 Skill 版本尚不加入可调用目录。长期记忆支持显式开关或跟随平台设置；默认 Agent 的新 Revision 跟随平台，兼容改造前的平台记忆行为。Sandbox 的 `kill` 不允许暂停或交接，但 `pause` 不扩大平台的保留权限。
 - `sandboxTemplateId` 当前没有执行装配；快照出现非默认模板引用时以 `AGENT_CONFIGURATION_UNSUPPORTED` 失败关闭，不静默使用默认模板。外部工具与客户端工具也未接入，本工作包不授予外部工具底表权限、不注册工具；外部工具按 Run 快照授权读取、凭据解析与 Session 装配由 B5 完成，避免半接入路径。
-- 固定模型引用契约已明确，但 Worker 的精确已保存 Revision 解析依赖后台运行配置端口提供只读解析能力；该端口由 A4 所有。端口合并前固定模型仍以 `AGENT_CONFIGURATION_UNSUPPORTED` 失败关闭，不回退平台默认；A3 后续在 A4 合入后接通并验证该解析路径。
+- Worker 只在当前 Tenant/Run 的 Agent 快照作用域内读取额外的模型配置版本；端口不写运行快照，不读取其他未发布配置。模型条目必须已启用，且凭据必须能用 Worker 的平台密钥解密。引用缺失、不匹配或凭据不可用时，Worker 在创建模型 Session 前以 `PROVIDER` 失败，不使用 active 或部署模型。

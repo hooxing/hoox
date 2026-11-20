@@ -4,7 +4,7 @@ export function useLandingClock(durationMs: number, tickMs = 80) {
   const targetRef = useRef<HTMLElement>(null);
   const [elapsed, setElapsed] = useState(durationMs);
   const [visible, setVisible] = useState(false);
-  const [pageVisible, setPageVisible] = useState(!document.hidden);
+  const [pageVisible, setPageVisible] = useState(true);
   const [paused, setPaused] = useState(false);
   const [canAnimate, setCanAnimate] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -27,6 +27,7 @@ export function useLandingClock(durationMs: number, tickMs = 80) {
     );
     if (targetRef.current !== null) observer.observe(targetRef.current);
     const updateVisibility = () => setPageVisible(!document.hidden);
+    updateVisibility();
     document.addEventListener("visibilitychange", updateVisibility);
     return () => {
       observer.disconnect();

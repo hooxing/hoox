@@ -41,7 +41,6 @@ import {
 import type {
   AgentSessionFactoryPort,
   AgentTurnOutcome,
-  ArtifactPublicationPort,
   CancellationPort,
   ClaimExecutionResult,
   ClockPort,
@@ -1412,16 +1411,6 @@ export class FakeClock implements ClockPort {
         task.callback();
       }
     }
-  }
-}
-
-export class FakeArtifactPublication implements ArtifactPublicationPort {
-  calls = 0;
-  beforeReturn?: () => void | Promise<void>;
-
-  async assertReadyForCompletion(): Promise<void> {
-    this.calls += 1;
-    await this.beforeReturn?.();
   }
 }
 

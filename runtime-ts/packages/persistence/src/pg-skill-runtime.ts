@@ -1,6 +1,7 @@
 import type {
   ExplicitSkillInvocation,
   RunSkillSnapshot,
+  RunSkillSnapshotItem,
   SkillContentStore,
   SkillExecutionBinding,
   SkillInvocationFailureCode,
@@ -10,10 +11,12 @@ import type {
 } from "@hoox/skill";
 import { assertRunSkillSnapshot, digestRunSkillSnapshot, SkillRuntimeError } from "@hoox/skill";
 import type { Pool, PoolClient } from "pg";
-import type { BlobStore, StableBlobRef } from "./blob-store.js";
+import { assertBlobRef, type BlobStore, type StableBlobRef } from "./blob-store.js";
+import { PersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";
 
 interface SnapshotRow {
+  readonly source: RunSkillSnapshotItem["source"];
   readonly invocation_name: string;
   readonly canonical_key: string;
   readonly skill_id: string;
@@ -21,9 +24,11 @@ interface SnapshotRow {
   readonly description: string;
   readonly entrypoint_digest: string;
   readonly package_digest: string;
+  readonly package_blob_ref: string;
   readonly skill_status: string;
   readonly version_status: string;
   readonly entrypoint_file_digest: string | null;
+  readonly entrypoint_media_type: string | null;
   readonly entrypoint_size_bytes: string | null;
   readonly entrypoint_blob_ref: string | null;
 }
@@ -32,6 +37,12 @@ export class SkillSnapshotUnavailableError extends Error {
   constructor() {
     super("SKILL_NOT_AVAILABLE");
     this.name = "SkillSnapshotUnavailableError";
+  }
+}
+
+class AgentSkillSnapshotUnavailableError extends PersistenceError {
+  constructor() {
+    super("AGENT_REVISION_UNAVAILABLE", "Agent 自带的精确 Skill 版本不可用");
   }
 }
 
@@ -59,6 +70,7 @@ export async function readRunSkillSnapshot(
     });
   }
   const items = await client.query<{
+    readonly source: RunSkillSnapshotItem["source"];
     readonly invocation_name: string;
     readonly canonical_key: string;
     readonly skill_version: string;
@@ -66,7 +78,7 @@ export async function readRunSkillSnapshot(
     readonly entrypoint_digest: string;
     readonly package_digest: string;
   }>(
-    `SELECT invocation_name,canonical_key,skill_version,description,entrypoint_digest,package_digest
+    `SELECT source,invocation_name,canonical_key,skill_version,description,entrypoint_digest,package_digest
        FROM run_skill_snapshot_items
       WHERE tenant_id=$1 AND run_id=$2 ORDER BY ordinal`,
     [tenantId, runId],
@@ -77,6 +89,7 @@ export async function readRunSkillSnapshot(
     items: Object.freeze(
       items.rows.map((item) =>
         Object.freeze({
+          source: item.source,
           invocationName: item.invocation_name,
           canonicalKey: item.canonical_key,
           skillVersion: item.skill_version,
@@ -106,75 +119,63 @@ export async function createRunSkillSnapshot(
     readonly userId: string;
     readonly explicitInvocation?: ExplicitSkillInvocation;
     readonly includeTenantSkills?: boolean;
+    readonly agentSkillVersions?: readonly { readonly skillId: string; readonly version: string }[];
   },
 ): Promise<void> {
-  const rows = await client.query<SnapshotRow>(
-    `SELECT installation.invocation_name,skill.canonical_key,skill.id AS skill_id,
-            installation.skill_version,version.description,version.entrypoint_digest,
-            version.package_digest,skill.status AS skill_status,version.status AS version_status,
+  const agentVersions = input.agentSkillVersions ?? [];
+  // 在同一个读视图按调用名排除被覆盖的安装，再校验实际生效的目录。
+  const { rows } = await client.query<SnapshotRow>(
+    `WITH agent_skills AS (
+       SELECT skill.id AS skill_id,ref.skill_version,skill.canonical_key AS invocation_name
+         FROM unnest($2::text[],$3::text[]) AS ref(skill_id,skill_version)
+         JOIN skills skill ON skill.id=ref.skill_id
+     ), candidates AS (
+       SELECT skill_id,skill_version,invocation_name,'agent' AS source FROM agent_skills
+       UNION ALL
+       SELECT installation.skill_id,installation.skill_version,installation.invocation_name,'tenant'
+         FROM tenant_skill_installations installation
+        WHERE installation.tenant_id=$1 AND installation.status='enabled' AND $4::boolean
+          AND NOT EXISTS (
+            SELECT 1 FROM agent_skills WHERE invocation_name=installation.invocation_name
+          )
+     )
+     SELECT candidate.source,candidate.invocation_name,skill.canonical_key,skill.id AS skill_id,
+            candidate.skill_version,version.description,version.entrypoint_digest,
+            version.package_digest,version.package_blob_ref,
+            skill.status AS skill_status,version.status AS version_status,
             entrypoint.content_digest AS entrypoint_file_digest,
+            entrypoint.media_type AS entrypoint_media_type,
             entrypoint.size_bytes::text AS entrypoint_size_bytes,
             entrypoint.blob_ref AS entrypoint_blob_ref
-       FROM tenant_skill_installations installation
-       JOIN skills skill ON skill.id=installation.skill_id
+       FROM candidates candidate
+       JOIN skills skill ON skill.id=candidate.skill_id
        JOIN skill_versions version
-         ON version.skill_id=installation.skill_id
-        AND version.version=installation.skill_version
+         ON version.skill_id=candidate.skill_id AND version.version=candidate.skill_version
        LEFT JOIN skill_version_files entrypoint
          ON entrypoint.skill_id=version.skill_id
         AND entrypoint.skill_version=version.version
         AND entrypoint.normalized_path=version.entrypoint_path
-      WHERE installation.tenant_id=$1 AND installation.status='enabled' AND $2::boolean
-      ORDER BY installation.invocation_name COLLATE "C"`,
-    [input.tenantId, input.includeTenantSkills !== false],
+      ORDER BY candidate.invocation_name COLLATE "C"`,
+    [
+      input.tenantId,
+      agentVersions.map((ref) => ref.skillId),
+      agentVersions.map((ref) => ref.version),
+      input.includeTenantSkills !== false,
+    ],
   );
-  if (
-    rows.rows.length > 64 ||
-    rows.rows.some(
-      (row) =>
-        row.skill_status !== "active" ||
-        row.version_status !== "available" ||
-        row.entrypoint_file_digest !== row.entrypoint_digest ||
-        row.entrypoint_blob_ref === null ||
-        !Number.isSafeInteger(Number(row.entrypoint_size_bytes)) ||
-        Number(row.entrypoint_size_bytes) < 1 ||
-        Number(row.entrypoint_size_bytes) > 64 * 1024,
-    )
-  ) {
-    throw new SkillSnapshotUnavailableError();
-  }
-  if (
-    input.explicitInvocation !== undefined &&
-    !rows.rows.some((row) => row.invocation_name === input.explicitInvocation?.invocationName)
-  ) {
-    throw new SkillSnapshotUnavailableError();
-  }
-  const snapshotItems = rows.rows.map((row) => ({
-    invocationName: row.invocation_name,
-    canonicalKey: row.canonical_key,
-    skillVersion: row.skill_version,
-    description: row.description,
-    entrypointDigest: row.entrypoint_digest,
-    packageDigest: row.package_digest,
-  }));
-  const snapshotDigest = digestRunSkillSnapshot({
-    items: snapshotItems,
-    ...(input.explicitInvocation === undefined
-      ? {}
-      : { explicitInvocation: input.explicitInvocation }),
-  });
+  const agentRows = rows.filter((row) => row.source === "agent");
+  if (agentRows.length !== agentVersions.length) throw new AgentSkillSnapshotUnavailableError();
   try {
-    assertRunSkillSnapshot({
-      schemaVersion: 1,
-      digest: snapshotDigest,
-      items: snapshotItems,
-      ...(input.explicitInvocation === undefined
-        ? {}
-        : { explicitInvocation: input.explicitInvocation }),
-    });
-  } catch {
-    throw new SkillSnapshotUnavailableError();
+    if (agentRows.length > 0) {
+      // 重复自带调用名没有裁决顺序，不允许静默选择某个精确引用。
+      snapshotDigestFor(agentRows);
+    }
+  } catch (error) {
+    if (error instanceof SkillSnapshotUnavailableError)
+      throw new AgentSkillSnapshotUnavailableError();
+    throw error;
   }
+  const snapshotDigest = snapshotDigestFor(rows, input.explicitInvocation);
   const inserted = await client.query(
     `INSERT INTO run_skill_snapshots(
        tenant_id,run_id,user_id,schema_version,snapshot_digest,
@@ -212,12 +213,12 @@ export async function createRunSkillSnapshot(
     }
     return;
   }
-  for (const [index, row] of rows.rows.entries()) {
+  for (const [index, row] of rows.entries()) {
     await client.query(
       `INSERT INTO run_skill_snapshot_items(
          tenant_id,run_id,ordinal,invocation_name,canonical_key,skill_id,skill_version,
-         description,entrypoint_digest,package_digest
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+         description,entrypoint_digest,package_digest,source
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         input.tenantId,
         input.runId,
@@ -229,8 +230,60 @@ export async function createRunSkillSnapshot(
         row.description,
         row.entrypoint_digest,
         row.package_digest,
+        row.source,
       ],
     );
+  }
+}
+
+function snapshotDigestFor(
+  rows: readonly SnapshotRow[],
+  explicitInvocation?: ExplicitSkillInvocation,
+): string {
+  const items = rows.map((row): RunSkillSnapshotItem => {
+    const entrypointSize = Number(row.entrypoint_size_bytes);
+    if (
+      row.skill_status !== "active" ||
+      row.version_status !== "available" ||
+      row.entrypoint_file_digest !== row.entrypoint_digest ||
+      row.entrypoint_blob_ref === null ||
+      !Number.isSafeInteger(entrypointSize) ||
+      entrypointSize < 1 ||
+      entrypointSize > 64 * 1024 ||
+      (row.source === "agent" &&
+        (row.entrypoint_media_type?.split(";", 1)[0]?.trim().toLowerCase() !== "text/markdown" ||
+          !matchesSkillBlobRef(row.entrypoint_blob_ref, row.entrypoint_digest, entrypointSize) ||
+          !matchesSkillBlobRef(row.package_blob_ref, row.package_digest)))
+    ) {
+      throw new SkillSnapshotUnavailableError();
+    }
+    return {
+      source: row.source,
+      invocationName: row.invocation_name,
+      canonicalKey: row.canonical_key,
+      skillVersion: row.skill_version,
+      description: row.description,
+      entrypointDigest: row.entrypoint_digest,
+      packageDigest: row.package_digest,
+    };
+  });
+  const content = { items, ...(explicitInvocation === undefined ? {} : { explicitInvocation }) };
+  const digest = digestRunSkillSnapshot(content);
+  try {
+    assertRunSkillSnapshot({ schemaVersion: 1, digest, ...content });
+  } catch {
+    throw new SkillSnapshotUnavailableError();
+  }
+  return digest;
+}
+
+function matchesSkillBlobRef(value: string, digest: string, size?: number): boolean {
+  try {
+    const ref = parseStableSkillBlobRef(value);
+    assertBlobRef({ tenantId: ref.tenantId }, ref);
+    return ref.sha256 === digest && (size === undefined ? ref.size > 0 : ref.size === size);
+  } catch {
+    return false;
   }
 }
 

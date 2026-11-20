@@ -13,3 +13,4 @@ export * from "./skill-admin.js";
 export * from "./team.js";
 export * from "./tool-configuration.js";
 export * from "./external-tool.js";
+export * from "./agent-definition.js";

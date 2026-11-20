@@ -208,18 +208,21 @@ export class ApiService {
       const capability = this.dependencies.createCapability;
       if (capability === undefined) throw new ApiFailure("not_found");
       const agentDefinitionId = requestedAgentDefinitionId ?? DEFAULT_AGENT_DEFINITION_ID;
-      const agentRepository = this.dependencies.agentDefinitions;
-      if (agentRepository === undefined) throw new ApiFailure("dependency_unavailable");
-      const selection = await agentRepository.readVisibleCurrent(
-        auth.scope.tenantId,
-        agentDefinitionId,
-      );
-      if (selection === undefined) throw new ApiFailure("not_found");
-      if (selection.revision === undefined) {
-        throw new PersistenceError(
-          "AGENT_REVISION_UNAVAILABLE",
-          "Agent 当前没有可用的已发布 Revision",
+      // 省略选择器时保留升级前的内建默认 Agent 路径；只有显式选择才经过目录可见性校验。
+      if (requestedAgentDefinitionId !== undefined) {
+        const agentRepository = this.dependencies.agentDefinitions;
+        if (agentRepository === undefined) throw new ApiFailure("dependency_unavailable");
+        const selection = await agentRepository.readVisibleCurrent(
+          auth.scope.tenantId,
+          agentDefinitionId,
         );
+        if (selection === undefined) throw new ApiFailure("not_found");
+        if (selection.revision === undefined) {
+          throw new PersistenceError(
+            "AGENT_REVISION_UNAVAILABLE",
+            "Agent 当前没有可用的已发布 Revision",
+          );
+        }
       }
       const now = this.dependencies.clock.now();
       const defaultThread = createThread({

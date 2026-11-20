@@ -2,6 +2,7 @@
 CREATE TABLE external_tool_versions (
   tool_version_id text PRIMARY KEY CHECK (tool_version_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
   source text NOT NULL CHECK (source IN ('mcp','http')),
+  endpoint text NOT NULL CHECK (endpoint ~ '^https://[^/@]+(/|$)' AND octet_length(endpoint)<=2048),
   model_tool_name text NOT NULL CHECK (model_tool_name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' AND ((source='http' AND left(model_tool_name,6)='http__') OR (source='mcp' AND left(model_tool_name,5)='mcp__'))),
   description text NOT NULL CHECK (octet_length(description) <= 2048),
   input_schema jsonb NOT NULL CHECK (jsonb_typeof(input_schema)='object' AND octet_length(input_schema::text)<=32768),
@@ -18,9 +19,9 @@ CREATE TABLE external_tool_versions (
 CREATE TABLE external_tool_credentials (
   tool_version_id text PRIMARY KEY REFERENCES external_tool_versions(tool_version_id) ON DELETE RESTRICT,
   cipher_version smallint NOT NULL CHECK(cipher_version=1),
-  nonce text NOT NULL CHECK(octet_length(nonce)<=32),
+  nonce text NOT NULL CHECK(nonce ~ '^[A-Za-z0-9_-]{16}$'),
   ciphertext text NOT NULL CHECK(octet_length(ciphertext)<=10924),
-  auth_tag text NOT NULL CHECK(octet_length(auth_tag)<=32),
+  auth_tag text NOT NULL CHECK(auth_tag ~ '^[A-Za-z0-9_-]{22}$'),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE TABLE external_tool_revocations (
@@ -39,7 +40,7 @@ BEGIN
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', table_name);
     EXECUTE format('CREATE POLICY %I ON %I FOR ALL TO %I USING (true) WITH CHECK (true)', table_name || '_migrator_policy', table_name, current_user);
     IF table_name = 'external_tool_credentials' THEN
-      EXECUTE format('CREATE POLICY %I ON %I FOR INSERT TO %I WITH CHECK (EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND actor.status=''active'' AND actor.role=''admin''))', table_name || '_admin_policy', table_name, control_role);
+      EXECUTE format('CREATE POLICY %I ON %I FOR INSERT TO %I WITH CHECK (EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND actor.status=''active'' AND actor.role=''admin'') AND EXISTS (SELECT 1 FROM external_tool_versions v WHERE v.tool_version_id=external_tool_credentials.tool_version_id AND v.credential_configured AND v.credential_ref IS NOT NULL AND NOT EXISTS (SELECT 1 FROM external_tool_revocations r WHERE r.tool_version_id=v.tool_version_id)))', table_name || '_admin_policy', table_name, control_role);
     ELSIF table_name = 'external_tool_versions' THEN
       EXECUTE format('CREATE POLICY %I ON %I FOR ALL TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND actor.status=''active'' AND actor.role=''admin'')) WITH CHECK (published_by=NULLIF(current_setting(''app.user_id'',true),'''') AND EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=published_by AND actor.status=''active'' AND actor.role=''admin''))', table_name || '_admin_policy', table_name, control_role);
     ELSE

@@ -21,10 +21,35 @@ describe("外部工具 Admin Control ACL", () => {
     expect(bootstrap).toMatch(
       /GRANT INSERT ON TABLE \$\{schema\}\.external_tool_credentials TO \$\{control\}/u,
     );
-    expect(bootstrap).toMatch(/\["external_tool_versions", new Set\(\["SELECT", "INSERT"\]\)\]/u);
-    expect(bootstrap).toMatch(/\["external_tool_credentials", new Set\(\["INSERT"\]\)\]/u);
     expect(bootstrap).toMatch(
-      /\["external_tool_revocations", new Set\(\["SELECT", "INSERT"\]\)\]/u,
+      /async function hasExternalToolState\([\s\S]*?to_regclass\(format\('%I\.external_tool_versions'[\s\S]*?AND to_regclass\(format\('%I\.external_tool_credentials'[\s\S]*?AND to_regclass\(format\('%I\.external_tool_revocations'/u,
+    );
+    expect(bootstrap).toMatch(
+      /if \(await hasExternalToolState\(client, context\.schema\)\) \{\s*await client\.query\(/u,
+    );
+    expect(bootstrap).toMatch(
+      /if \(await hasExternalToolState\(client, context\.schema\)\) \{\s*for \(const \[table, policy, target\] of externalToolPolicyBindings\)/u,
+    );
+    expect(bootstrap).toMatch(
+      /const externalToolsEnabled = enabled && \(await hasExternalToolState\(client, context\.schema\)\);\s*const sandboxEnabled/u,
+    );
+    expect(bootstrap).toMatch(
+      /if \(externalToolsEnabled\) \{\s*allowed\.set\("external_tool_versions"/u,
+    );
+    expect(bootstrap).toMatch(
+      /async function activeTablePolicy\([\s\S]*?if \(!\(await hasExternalToolState\(client, schema\)\)\) \{\s*for \(const table of \[/u,
+    );
+    expect(bootstrap).toMatch(
+      /async function activeColumnUpdatePolicy\([\s\S]*?if \(!\(await hasExternalToolState\(client, schema\)\)\) \{\s*for \(const table of \[/u,
+    );
+    expect(bootstrap).toMatch(
+      /allowed\.set\("external_tool_versions", new Set\(\["SELECT", "INSERT"\]\)\)/u,
+    );
+    expect(bootstrap).toMatch(
+      /allowed\.set\("external_tool_credentials", new Set\(\["INSERT"\]\)\)/u,
+    );
+    expect(bootstrap).toMatch(
+      /allowed\.set\("external_tool_revocations", new Set\(\["SELECT", "INSERT"\]\)\)/u,
     );
   });
 });

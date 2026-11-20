@@ -665,3 +665,4 @@ export function createEmbeddedBetterAuth(
 export type EmbeddedBetterAuth = ReturnType<typeof createEmbeddedBetterAuth>;
 
 export * from "./installation.js";
+export * from "./api-key.js";

@@ -33,6 +33,10 @@
 
 路径中的 `/me` 表示以当前认证用户发起操作，不必然表示数据属于全局个人空间；最终作用域仍由该路由的 `TenantScope` 和业务校验决定。
 
+## 后台 Agent 固定模型
+
+`GET /v1/admin/control/agent-definitions` 为可管理 Agent 的 `operator` 和 `admin` 返回 `pinnedModelOptions`；`viewer` 得到空数组。选项只包含 `mode: "pinned"`、`providerKey`、`providerRevision` 和 `modelId`，不包含凭据。创建 Agent 或保存 Revision 时，把该选项作为 `content.model` 提交；跟随平台默认时提交 `{ "mode": "platform_default" }`。不存在、未启用或未绑定托管凭据的引用返回 400。发布时会重新校验。角色及版本语义见 [后台控制面](../architecture/admin-control-plane.md#agent-定义与版本管理)。
+
 ## 健康端点
 
 | 方法 | 路径 | 语义 |

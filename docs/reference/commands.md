@@ -52,6 +52,7 @@
 
 | 命令 | 进程 |
 | --- | --- |
+| `corepack pnpm dev:up` | 预检并启动 API、Worker、Scheduler、Web 和默认 Admin 服务；支持 `-- --skip-build`、`-- --core-only`、`-- --include-skill`、`-- --no-browser` |
 | `corepack pnpm dev:api` | API，默认 `127.0.0.1:3001` |
 | `corepack pnpm dev:worker:check` | 只读探测 PostgreSQL、S3、Sandbox 和模型后退出 |
 | `corepack pnpm dev:worker` | Agent Worker |
@@ -61,19 +62,16 @@
 | `corepack pnpm dev:admin:web` | Admin Web，`127.0.0.1:4174` |
 | `corepack pnpm dev:trajectory` | 内部轨迹查看器 |
 
-Windows 已完成首次配置后推荐使用：
+跨平台一键启动推荐使用 `corepack pnpm dev:up`。Windows 兼容入口为 `./scripts/start-development.ps1`。
 
-```powershell
-.\scripts\start-development.ps1 -CoreOnly
-```
+PowerShell 兼容入口参数对应跨平台选项：
 
-可选参数：
+- `-- --include-skill`：启动统一 Admin API 和 Admin Web（默认已包含）。
+- `-- --core-only`：省略管理服务。
+- `-- --skip-build`：跳过工作区构建，只适用于已有最新 `dist`。
+- `-- --no-browser`：服务就绪后不打开浏览器。
 
-- `-IncludeSkill`：同时启动统一 Admin API 和 Admin Web。
-- `-SkipBuild`：跳过工作区构建，只适用于已有最新 `dist`。
-- `-NoBrowser`：服务就绪后不打开浏览器。
-
-脚本不会启动或修改 PostgreSQL、CubeSandbox、模型服务和代理，只会复用健康进程并为缺失的应用打开 PowerShell 窗口。
+启动器不会启动或修改 PostgreSQL、MinIO、CubeSandbox、模型服务和代理，只会复用已有服务并启动缺失的应用进程。
 
 ## 真实集成与冒烟
 

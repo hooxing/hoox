@@ -1,6 +1,25 @@
 name: hoox-dev
 
 services:
+  postgres:
+    profiles: ["local-postgres"]
+    image: postgres:17.12-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agent_runtime_dev
+      POSTGRES_USER: ${POSTGRES_BOOTSTRAP_USER:-database_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"
@@ -39,5 +58,7 @@ services:
         mc anonymous set none "runtime/$${S3_BUCKET}"
 
 volumes:
+  postgres_data:
+    name: hoox-postgres-data
   minio_data:
     name: hoox-minio-data

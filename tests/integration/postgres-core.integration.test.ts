@@ -72,6 +72,20 @@ import {
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
 
+function sqlStateFromCause(error: unknown): string | undefined {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { readonly code?: unknown; readonly cause?: unknown };
+    if (typeof candidate.code === "string" && /^[0-9A-Z]{5}$/.test(candidate.code)) {
+      return candidate.code;
+    }
+    current = candidate.cause;
+  }
+  return undefined;
+}
+
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
   if (value === undefined || value.length === 0) {
@@ -418,7 +432,12 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           [tenant, user],
         );
       });
-      await migrateUp(target.pool, target.context);
+      try {
+        await migrateUp(target.pool, target.context);
+      } catch (error) {
+        const sqlState = sqlStateFromCause(error) ?? "unknown";
+        throw new Error(`升级迁移前 Thread 时失败，SQLSTATE=${sqlState}`);
+      }
       const binding = await withTenantTransaction(
         seedPool,
         { tenantId: tenant, userId: user },
@@ -1695,6 +1714,48 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       { version: 4, name: "agent_definitions" },
     ]);
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(migrationContract.count);
+  });
+
+  it("外部工具密文仅允许 Admin Control 写入，Runtime 零权限", async () => {
+    const rows = await migratorPool.query<{
+      readonly table_name: string;
+      readonly runtime_select: boolean;
+      readonly runtime_insert: boolean;
+      readonly control_select: boolean;
+      readonly control_insert: boolean;
+    }>(
+      `SELECT table_name,
+              has_table_privilege($1,format('%I.%I',$3::text,table_name),'SELECT') AS runtime_select,
+              has_table_privilege($1,format('%I.%I',$3::text,table_name),'INSERT') AS runtime_insert,
+              has_table_privilege($2,format('%I.%I',$3::text,table_name),'SELECT') AS control_select,
+              has_table_privilege($2,format('%I.%I',$3::text,table_name),'INSERT') AS control_insert
+         FROM unnest(ARRAY['external_tool_versions','external_tool_credentials','external_tool_revocations']::text[]) AS target(table_name)
+        ORDER BY table_name`,
+      [runtimeRole, adminControlRole, schema],
+    );
+    expect(rows.rows).toEqual([
+      {
+        table_name: "external_tool_credentials",
+        runtime_select: false,
+        runtime_insert: false,
+        control_select: false,
+        control_insert: true,
+      },
+      {
+        table_name: "external_tool_revocations",
+        runtime_select: false,
+        runtime_insert: false,
+        control_select: true,
+        control_insert: true,
+      },
+      {
+        table_name: "external_tool_versions",
+        runtime_select: false,
+        runtime_insert: false,
+        control_select: true,
+        control_insert: true,
+      },
+    ]);
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {

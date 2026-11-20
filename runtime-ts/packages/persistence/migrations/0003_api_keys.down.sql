@@ -6,5 +6,6 @@ BEGIN
   END IF;
 END
 $$;
+DROP FUNCTION revoke_api_key(text, timestamptz);
 DROP TABLE api_keys;
 ALTER TABLE app_users DROP COLUMN kind;

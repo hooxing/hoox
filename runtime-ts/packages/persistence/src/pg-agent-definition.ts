@@ -228,13 +228,26 @@ async function validateDraft(client: PoolClient, value: AgentRevisionContent) {
     )
       throw new AgentDefinitionValidationError("请选择已保存、已启用且绑定托管凭据的模型");
   }
-  if (content.tools.mode === "configured") {
+  const selectedTools = content.tools;
+  if (selectedTools.mode === "configured") {
+    const externalIds = selectedTools.externalTools.map((tool) => tool.versionId);
+    if (externalIds.length > 0) {
+      const selectable = await client.query<{ tool_version_id: string; source: string }>(
+        "SELECT tool_version_id,source FROM external_tool_selectable_versions WHERE tool_version_id=ANY($1::text[])",
+        [externalIds],
+      );
+      const byId = new Map(selectable.rows.map((row) => [row.tool_version_id, row.source]));
+      if (
+        externalIds.some((id, index) => byId.get(id) !== selectedTools.externalTools[index]?.kind)
+      )
+        throw new AgentDefinitionValidationError("只能选择已发布且未撤销的匹配类型外部工具版本");
+    }
     // 平台运行设置使用同一行的排他锁激活，避免校验通过后按过期名单提交。
     await client.query(
       "SELECT generation FROM admin_control_generation WHERE singleton='global' FOR SHARE",
     );
     const allowed = await builtinToolLimit(client);
-    const requested = content.tools.builtinTools;
+    const requested = selectedTools.builtinTools;
     if (
       new Set(requested).size !== requested.length ||
       requested.some((name) => !allowed.includes(name))
@@ -384,6 +397,25 @@ export class PgAgentDefinitionRepository
         canManage,
         builtinToolLimit: canManage ? await builtinToolLimit(client) : [],
         pinnedModelOptions: canManage ? await listPinnedModelOptions(client) : [],
+        externalToolOptions: canManage
+          ? (
+              await client.query<{
+                tool_version_id: string;
+                source: "mcp" | "http";
+                model_tool_name: string;
+                description: string;
+                batch_name: string;
+              }>(
+                "SELECT tool_version_id,source,model_tool_name,description,batch_name FROM external_tool_selectable_versions ORDER BY batch_name,model_tool_name",
+              )
+            ).rows.map((row) => ({
+              toolVersionId: row.tool_version_id,
+              source: row.source,
+              modelToolName: row.model_tool_name,
+              description: row.description,
+              batchName: row.batch_name,
+            }))
+          : [],
         items: result.rows.map((row) => ({
           definition: mapDefinition(row, row.tenant_ids),
           ...(row.summary === null ? {} : { revision: mapRevisionSummary(row.summary) }),

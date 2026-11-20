@@ -1,0 +1,4 @@
+DROP VIEW external_tool_selectable_versions;
+DROP TABLE external_tool_admin_audits, external_tool_admin_commands,
+  external_tool_publish_batch_versions, external_tool_publish_batches,
+  external_tool_draft_credentials, external_tool_registration_drafts;

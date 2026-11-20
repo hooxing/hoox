@@ -120,6 +120,7 @@ export function AgentDefinitionEditor({
   initial,
   builtinToolLimit,
   pinnedModelOptions,
+  externalToolOptions = [],
   saving,
   onSave,
   onCancel,
@@ -127,6 +128,13 @@ export function AgentDefinitionEditor({
   readonly initial?: AgentRevisionContentDto;
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
+  readonly externalToolOptions?: readonly {
+    toolVersionId: string;
+    source: "mcp" | "http";
+    modelToolName: string;
+    description: string;
+    batchName: string;
+  }[];
   readonly saving: boolean;
   readonly onSave: (
     content: AgentRevisionContentDto,
@@ -161,6 +169,10 @@ export function AgentDefinitionEditor({
   const configured = content.tools.mode === "configured" ? content.tools : undefined;
   const unavailableTools =
     configured?.builtinTools.filter((tool) => !builtinToolLimit.includes(tool)) ?? [];
+  const unavailableExternalTools =
+    configured?.externalTools.filter(
+      (tool) => !externalToolOptions.some((option) => option.toolVersionId === tool.versionId),
+    ) ?? [];
 
   function change<K extends keyof AgentRevisionContentDto>(
     field: K,
@@ -377,8 +389,60 @@ export function AgentDefinitionEditor({
               </label>
             </>
           )}
+          {configured && (
+            <fieldset className="agent-tool-list">
+              <legend>已发布外部工具</legend>
+              {externalToolOptions.map((tool) => {
+                const selected = configured.externalTools.some(
+                  (item) => item.versionId === tool.toolVersionId,
+                );
+                return (
+                  <label key={tool.toolVersionId}>
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={(event) =>
+                        change("tools", {
+                          ...configured,
+                          externalTools: event.target.checked
+                            ? [
+                                ...configured.externalTools,
+                                { kind: tool.source, versionId: tool.toolVersionId },
+                              ]
+                            : configured.externalTools.filter(
+                                (item) => item.versionId !== tool.toolVersionId,
+                              ),
+                        })
+                      }
+                    />
+                    {tool.modelToolName} · {tool.batchName}
+                  </label>
+                );
+              })}
+              {unavailableExternalTools.map((tool) => (
+                <label key={tool.versionId}>
+                  <input
+                    type="checkbox"
+                    checked
+                    onChange={() =>
+                      change("tools", {
+                        ...configured,
+                        externalTools: configured.externalTools.filter(
+                          (selected) => selected.versionId !== tool.versionId,
+                        ),
+                      })
+                    }
+                  />
+                  已不可选版本：{tool.versionId}（可能已撤销）
+                </label>
+              ))}
+              {externalToolOptions.length === 0 && unavailableExternalTools.length === 0 && (
+                <Typography.Text type="secondary">暂无可选的已发布外部工具。</Typography.Text>
+              )}
+            </fieldset>
+          )}
           <Typography.Text type="secondary">
-            外部工具暂不能在这里选择。切换为跟随平台会移除这一版本的显式工具配置。
+            HTTP 端点声明与 OpenAPI 导入预览即将支持；版本发布须待 HTTP 方法字段接入。
           </Typography.Text>
           <label className="agent-field" htmlFor={`${formId}-skills`}>
             <span>自带 Skill（每行填写 Skill ID 和版本）</span>

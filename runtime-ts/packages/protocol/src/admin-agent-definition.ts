@@ -52,6 +52,18 @@ export const AdminAgentDefinitionListSchema = Type.Object(
     canManage: Type.Boolean(),
     builtinToolLimit: Type.Array(Type.String()),
     pinnedModelOptions: Type.Array(AgentPinnedModelReferenceSchema),
+    externalToolOptions: Type.Array(
+      Type.Object(
+        {
+          toolVersionId: IdSchema,
+          source: Type.Union([Type.Literal("mcp"), Type.Literal("http")]),
+          modelToolName: Type.String({ maxLength: 128 }),
+          description: Type.String({ maxLength: 2048 }),
+          batchName: Type.String({ maxLength: 200 }),
+        },
+        strict,
+      ),
+    ),
     items: Type.Array(
       Type.Object(
         {

@@ -6,6 +6,7 @@ import {
   McpExternalToolTransport,
   McpStreamableHttpClient,
   probeMcpServer,
+  probeMcpServerReport,
   type McpExchange,
 } from "./mcp-client.js";
 
@@ -271,6 +272,64 @@ describe("MCP Streamable HTTP transport", () => {
         maxResponseBytes: 1024,
       }),
     ).rejects.toThrow("MCP_SCHEMA_REJECTED");
+  });
+
+  it("逐工具报告合规结果与受控 Schema 拒绝原因", async () => {
+    const { target, exchange } = await fakeMcp((rpc) =>
+      rpc.method === "initialize"
+        ? {
+            body: {
+              jsonrpc: "2.0",
+              id: rpc.id,
+              result: { protocolVersion: "2025-06-18", capabilities: {} },
+            },
+          }
+        : rpc.method === "notifications/initialized"
+          ? { body: {} }
+          : {
+              body: {
+                jsonrpc: "2.0",
+                id: rpc.id,
+                result: {
+                  tools: [
+                    {
+                      name: "ok",
+                      description: "可用",
+                      inputSchema: {
+                        type: "object",
+                        properties: {},
+                        required: [],
+                        additionalProperties: false,
+                      },
+                    },
+                    {
+                      name: "bad",
+                      description: "不合规",
+                      inputSchema: {
+                        type: "object",
+                        properties: {},
+                        required: [],
+                        additionalProperties: false,
+                        $ref: "secret-schema",
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+    );
+    const report = await probeMcpServerReport({
+      client: new McpStreamableHttpClient(exchange),
+      target,
+      serverName: "srv",
+      timeoutMs: 1000,
+      maxResponseBytes: 1024,
+    });
+    expect(report.map(({ accepted }) => accepted)).toEqual([true, false]);
+    const rejected = report[1];
+    if (!rejected || rejected.accepted) throw new Error("预期第二个工具被拒绝");
+    expect(rejected.reasonMessage).toContain("Schema");
+    expect(JSON.stringify(report)).not.toContain("secret-schema");
   });
 
   it("以受控错误拒绝协议错误、重定向和响应超限", async () => {

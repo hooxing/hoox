@@ -426,6 +426,92 @@ export class McpExternalToolTransport implements ExternalToolTransport {
   }
 }
 
+export type McpProbeToolReport =
+  | Readonly<{
+      accepted: true;
+      remoteToolName: string;
+      modelToolName: string;
+      description: string;
+      inputSchema: Readonly<Record<string, unknown>>;
+      inputSchemaDigest: string;
+    }>
+  | Readonly<{
+      accepted: false;
+      reason: string;
+      reasonMessage: string;
+    }>;
+
+const probeReasons: Readonly<Record<string, string>> = Object.freeze({
+  MCP_TOOL_INVALID: "工具名称或描述格式不受支持",
+  MCP_SCHEMA_REJECTED: "工具参数 Schema 不符合平台支持的安全子集",
+  MCP_TOOL_DESCRIPTION_INVALID: "工具描述超过允许长度",
+  MCP_TOOL_NAME_INVALID: "工具名称无法安全转换为平台名称",
+  MCP_TOOL_NAME_COLLISION: "多个工具转换后名称冲突",
+});
+
+/** 返回逐工具受控报告；Schema、工具描述和服务端原始异常不会作为拒绝原因透出。 */
+export async function probeMcpServerReport(input: {
+  client?: McpStreamableHttpClient;
+  target: ValidatedExternalTarget;
+  serverName: string;
+  timeoutMs: number;
+  maxResponseBytes: number;
+  credential?: string;
+}): Promise<readonly McpProbeToolReport[]> {
+  const client = input.client ?? new McpStreamableHttpClient();
+  const options = {
+    timeoutMs: input.timeoutMs,
+    maxResponseBytes: input.maxResponseBytes,
+    ...(input.credential === undefined ? {} : { credential: input.credential }),
+  };
+  await client.initialize(input.target, options);
+  const tools = await client.listTools(input.target, options);
+  const modelNames = new Set<string>();
+  return tools.map((tool) => {
+    try {
+      if (
+        typeof tool.name !== "string" ||
+        !tool.name ||
+        (tool.description !== undefined && typeof tool.description !== "string")
+      )
+        throw new Error("MCP_TOOL_INVALID");
+      let normalized: ReturnType<typeof normalizeExternalToolSchema>;
+      try {
+        normalized = normalizeExternalToolSchema(tool.inputSchema);
+      } catch (error) {
+        const reason =
+          error instanceof TypeError && /^EXTERNAL_TOOL_[A-Z_]+$/u.test(error.message)
+            ? `MCP_SCHEMA_REJECTED:${error.message}`
+            : "MCP_SCHEMA_REJECTED:EXTERNAL_TOOL_SCHEMA_INVALID";
+        throw new Error(reason);
+      }
+      const description = (tool.description as string | undefined) ?? "";
+      if (Buffer.byteLength(description) > 2048) throw new Error("MCP_TOOL_DESCRIPTION_INVALID");
+      const modelToolName = normalizeExternalToolName("mcp", input.serverName, tool.name);
+      if (modelNames.has(modelToolName)) throw new Error("MCP_TOOL_NAME_COLLISION");
+      modelNames.add(modelToolName);
+      return Object.freeze({
+        remoteToolName: tool.name,
+        modelToolName,
+        description,
+        inputSchema: normalized.schema,
+        inputSchemaDigest: normalized.digest,
+        accepted: true,
+      });
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : "";
+      const reason = raw === "EXTERNAL_TOOL_NAME_INVALID" ? "MCP_TOOL_NAME_INVALID" : raw;
+      return Object.freeze({
+        accepted: false,
+        reason,
+        reasonMessage: raw.startsWith("MCP_SCHEMA_REJECTED:")
+          ? "工具参数 Schema 不符合平台支持的安全子集"
+          : (probeReasons[reason] ?? "工具定义不符合平台要求"),
+      });
+    }
+  });
+}
+
 export async function probeMcpServer(input: {
   client?: McpStreamableHttpClient;
   target: ValidatedExternalTarget;
@@ -442,49 +528,20 @@ export async function probeMcpServer(input: {
     inputSchemaDigest: string;
   }[]
 > {
-  const client = input.client ?? new McpStreamableHttpClient();
-  const options = {
-    timeoutMs: input.timeoutMs,
-    maxResponseBytes: input.maxResponseBytes,
-    ...(input.credential === undefined ? {} : { credential: input.credential }),
-  };
-  await client.initialize(input.target, options);
-  const tools = await client.listTools(input.target, options);
-  if (tools.length > 64) throw new Error("MCP_TOOL_LIMIT");
-  const modelNames = new Set<string>();
-  return tools.map((tool) => {
-    if (
-      typeof tool.name !== "string" ||
-      !tool.name ||
-      (tool.description !== undefined && typeof tool.description !== "string")
-    )
-      throw new Error("MCP_TOOL_INVALID");
-    let normalized: ReturnType<typeof normalizeExternalToolSchema>;
-    try {
-      normalized = normalizeExternalToolSchema(tool.inputSchema);
-    } catch (error) {
-      const reason =
-        error instanceof TypeError && /^EXTERNAL_TOOL_[A-Z_]+$/u.test(error.message)
-          ? error.message
-          : "EXTERNAL_TOOL_SCHEMA_INVALID";
-      throw new Error(`MCP_SCHEMA_REJECTED:${reason}`);
-    }
-    const description = (tool.description as string | undefined) ?? "";
-    if (Buffer.byteLength(description) > 2048) throw new Error("MCP_TOOL_DESCRIPTION_INVALID");
-    let modelToolName: string;
-    try {
-      modelToolName = normalizeExternalToolName("mcp", input.serverName, tool.name);
-    } catch {
-      throw new Error("MCP_TOOL_NAME_INVALID");
-    }
-    if (modelNames.has(modelToolName)) throw new Error("MCP_TOOL_NAME_COLLISION");
-    modelNames.add(modelToolName);
+  const report = await probeMcpServerReport(input);
+  const rejected = report.find((tool) => !tool.accepted);
+  if (rejected) {
+    if (rejected.reason?.startsWith("MCP_SCHEMA_REJECTED:")) throw new Error(rejected.reason);
+    throw new Error(rejected.reason ?? "MCP_TOOL_INVALID");
+  }
+  return report.map((tool) => {
+    if (!tool.accepted) throw new Error(tool.reason);
     return {
-      remoteToolName: tool.name,
-      modelToolName,
-      description,
-      inputSchema: normalized.schema,
-      inputSchemaDigest: normalized.digest,
+      remoteToolName: tool.remoteToolName,
+      modelToolName: tool.modelToolName,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      inputSchemaDigest: tool.inputSchemaDigest,
     };
   });
 }

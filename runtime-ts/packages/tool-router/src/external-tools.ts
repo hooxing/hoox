@@ -12,6 +12,7 @@ import {
 } from "@hoox/domain";
 import {
   ExternalToolTransportError,
+  type ExternalToolCallContext,
   type ValidatedExternalTarget,
   type ExternalToolReconciliationPort,
   type ExternalToolTransport,
@@ -266,6 +267,8 @@ export interface ExternalToolExecutionPorts {
     readonly argsDigest: Sha256Digest;
   }) => Promise<void>;
   readonly transport: ExternalToolTransport;
+  readonly getCallContext: (callId: string) => ExternalToolCallContext;
+  readonly httpMethodForVersion?: (toolVersionId: string) => "GET" | "POST";
   readonly reconciliation?: ExternalToolReconciliationPort;
   readonly recordReceipt: (input: {
     readonly callId: string;
@@ -348,6 +351,10 @@ export function createExternalToolAgentTool(
           tool,
           target,
           arguments: args,
+          callContext: ports.getCallContext(callId),
+          ...(tool.source === "http"
+            ? { method: ports.httpMethodForVersion?.(tool.toolVersionId) ?? ("POST" as const) }
+            : {}),
           ...(credential === undefined ? {} : { credential }),
           idempotencyKey: callId,
           timeoutMs: tool.timeoutMs,
@@ -376,8 +383,16 @@ export function createExternalToolAgentTool(
           details: { truncated: bytes.byteLength > cap },
         };
       } catch (error) {
-        if (error instanceof ExternalToolTransportError && error.phase === "preflight")
-          wrote = false;
+        if (
+          error instanceof ExternalToolTransportError &&
+          (error.disposition === "not_sent" || error.disposition === "responded_failure")
+        ) {
+          await ports.recordReceipt({ callId, receipt: receipt("failed") });
+          return {
+            content: [{ type: "text", text: "外部工具调用未完成。" }],
+            details: { error: error.safeCode },
+          };
+        }
         if (wrote) {
           recoveryRequired = true;
           try {

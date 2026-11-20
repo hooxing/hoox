@@ -104,4 +104,6 @@ Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回
 
 外部工具请求写出后发生超时、断连或进程中断时，结果属于 UNKNOWN，Attempt 进入恢复且普通 Worker 再投递不得重放。只有独立显式对账入口核对持久化的工具版本、canonical 参数摘要与原幂等键完全一致后，才可授权声明幂等工具复用同一幂等键重试；Transport 自身不得重放。外部工具版本与凭据读取必须受 Run 快照限定，接入 Agent 快照前 Worker 不获得相应数据库读取授权。
 
-外部工具 Transport 将失败明确分为两类可安全结束的结果：`not_sent` 表示可证明请求未写出（例如目标预检、DNS 或连接阶段失败）；`responded_failure` 表示收到可归一化的失败响应。两类都写入失败回执，不进入 UNKNOWN 恢复。HTTP 4xx（包括 408、429）属于 `responded_failure`；HTTP 5xx、写出后超时、断连或响应中断仍属于 UNKNOWN 并转入恢复。MCP 协议错误响应和工具错误映射为 `responded_failure`。Transport 不重试；未明确分类的异常一律按 UNKNOWN 处理。
+外部工具 Transport 将失败明确分为两类可安全结束的结果：`not_sent` 表示可证明请求未写出（例如目标预检、DNS、缺少方法绑定或 TLS 握手完成前的失败）；`responded_failure` 表示收到可归一化的失败响应。两类都写入失败回执，不进入 UNKNOWN 恢复。HTTP 3xx（拒绝跟随）与 4xx（包括 408、429）属于 `responded_failure`；HTTP 5xx、写出后超时或取消、断连、2xx 正文中途中断、超限以及无法解释的 2xx 正文仍属于 UNKNOWN 并转入恢复。合法空成功响应（204、205 或声明长度为 0 的 2xx）按成功结算。MCP 协议错误响应和工具错误映射为 `responded_failure`。Transport 不重试；未明确分类的异常一律按 UNKNOWN 处理，且每次调用只结算一次。
+
+整次外部调用共享一个从 DNS 预检开始计算的绝对截止时间；预检耗尽预算时按 `not_sent` 结束，Transport 不得在截止时间后继续等待或排空不使用的响应正文。HTTP Transport 每次调用新建连接并直接拨号到本次预检校验通过的 IP，不使用共享连接池，证书与 SNI 按原主机名校验。

@@ -1,3 +1,4 @@
+import { McpResponseFailure } from "./mcp-errors.js";
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -376,7 +377,10 @@ export function createExternalToolAgentTool(
           details: { truncated: bytes.byteLength > cap },
         };
       } catch (error) {
-        if (error instanceof ExternalToolTransportError && error.phase === "preflight")
+        if (
+          (error instanceof ExternalToolTransportError && error.phase === "preflight") ||
+          error instanceof McpResponseFailure
+        )
           wrote = false;
         if (wrote) {
           recoveryRequired = true;
@@ -389,8 +393,16 @@ export function createExternalToolAgentTool(
         }
         await ports.recordReceipt({ callId, receipt: receipt("failed") });
         return {
-          content: [{ type: "text", text: "外部工具调用未完成。" }],
-          details: { error: "EXTERNAL_TOOL_FAILED" },
+          content: [
+            {
+              type: "text",
+              text:
+                error instanceof McpResponseFailure ? error.safeMessage : "外部工具调用未完成。",
+            },
+          ],
+          details: {
+            error: error instanceof McpResponseFailure ? error.safeCode : "EXTERNAL_TOOL_FAILED",
+          },
         };
       }
     },

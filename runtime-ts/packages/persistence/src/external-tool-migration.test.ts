@@ -19,3 +19,16 @@ describe("外部工具迁移契约", () => {
     expect(migration?.downSql).toContain("DROP TABLE external_tool_revocations");
   });
 });
+
+describe("外部工具远程名称迁移契约", () => {
+  it("以追加迁移为 MCP 版本固定原始工具名并约束 HTTP 为空", async () => {
+    const migrations = await loadMigrations();
+    const migration = migrations.find((item) => item.name === "external_tool_remote_name");
+    expect(migration).toBeDefined();
+    expect(migration?.upSql).toContain("ADD COLUMN remote_tool_name text");
+    expect(migration?.upSql).toContain("source = 'mcp' AND remote_tool_name IS NOT NULL");
+    expect(migration?.upSql).toContain("source = 'http' AND remote_tool_name IS NULL");
+    expect(migration?.upSql).toContain(") NOT VALID;");
+    expect(migration?.downSql).toContain("DROP COLUMN remote_tool_name");
+  });
+});

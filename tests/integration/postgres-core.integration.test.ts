@@ -47,6 +47,7 @@ import {
   migrateUp,
 } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
+import { getPostgreSqlDiagnosticCause } from "../../runtime-ts/packages/persistence/src/errors.js";
 import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
 import {
   PgAdminControlRepository,
@@ -350,10 +351,19 @@ beforeAll(async () => {
     schema,
     maxConnections: 4,
   });
-  const concurrent = await Promise.all([
-    migrateUp(migratorPool, migrationSecurity),
-    migrateUp(migratorPool, migrationSecurity),
-  ]);
+  let concurrent: Awaited<ReturnType<typeof migrateUp>>[];
+  try {
+    concurrent = await Promise.all([
+      migrateUp(migratorPool, migrationSecurity),
+      migrateUp(migratorPool, migrationSecurity),
+    ]);
+  } catch (error) {
+    const diagnostic = getPostgreSqlDiagnosticCause(error);
+    if (diagnostic !== undefined) {
+      console.error(`PostgreSQL 集成迁移失败 ${diagnostic.code}: ${diagnostic.message}`);
+    }
+    throw error;
+  }
   concurrentMigrationVersions = concurrent.flatMap((records) =>
     records.map((record) => record.version),
   );
@@ -1680,10 +1690,17 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
-  it("并发迁移串行化且重复执行结果一致", async () => {
+  it("并发迁移串行化且 D1 与 A1 均落入受限 Schema", async () => {
     expect(concurrentMigrationVersions).toEqual([
       ...migrationContract.versions,
       ...migrationContract.versions,
+    ]);
+    const applied = await migratorPool.query<{ version: number; name: string }>(
+      "SELECT version,name FROM runtime_schema_migrations WHERE version IN (3,4) ORDER BY version",
+    );
+    expect(applied.rows).toEqual([
+      { version: 3, name: "admin_run_explorer" },
+      { version: 4, name: "agent_definitions" },
     ]);
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(migrationContract.count);
   });

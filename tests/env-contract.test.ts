@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import { validateComposePostgresBootstrap } from "../scripts/validate-env-example.mjs";
 import {
   expectedEnvironmentKeys,
   optionalEnvironmentKeys,
@@ -68,6 +70,13 @@ describe("环境变量示例契约", () => {
       expect(optionalEnvironmentKeys).toContain(key);
     }
     expect(expectedEnvironmentKeys).toContain("MODEL_CREDENTIAL_ENCRYPTION_KEY");
+    expect(optionalEnvironmentKeys).toEqual(
+      expect.arrayContaining([
+        "POSTGRES_HOST_PORT",
+        "POSTGRES_BOOTSTRAP_USER",
+        "POSTGRES_BOOTSTRAP_PASSWORD",
+      ]),
+    );
   });
 
   it("AGS 示例凭据必须使用占位值且诊断不回显密钥", () => {
@@ -191,5 +200,27 @@ describe("环境变量示例契约", () => {
         ),
       ),
     ).toContain("示例配置疑似包含真实凭据：CUBESANDBOX_API_KEY");
+  });
+  it("Compose PostgreSQL 仅由本地 profile 启动且缺少密码不会阻断其他服务", async () => {
+    const compose = await readFile(new URL("../docker-compose.dev.yml", import.meta.url), "utf8");
+    const postgres = compose.split("  minio:", 1)[0];
+    expect(postgres).toContain('profiles: ["local-postgres"]');
+    expect(postgres).not.toMatch(/\$\{[^}]+:\?[^}]+\}/u);
+  });
+
+  it("Compose PostgreSQL bootstrap 凭据与迁移连接保持一致", () => {
+    const source = `${validExample().replace(
+      "DATABASE_BOOTSTRAP_URL=postgresql://user:replace-me@localhost/db",
+      "DATABASE_BOOTSTRAP_URL=postgresql://database_admin:replace-me@localhost/db",
+    )}\nPOSTGRES_BOOTSTRAP_USER=database_admin\nPOSTGRES_BOOTSTRAP_PASSWORD=replace-me`;
+    expect(validateComposePostgresBootstrap(source)).toEqual([]);
+    expect(
+      validateComposePostgresBootstrap(
+        source.replace(
+          "POSTGRES_BOOTSTRAP_PASSWORD=replace-me",
+          "POSTGRES_BOOTSTRAP_PASSWORD=other",
+        ),
+      ),
+    ).toEqual(["DATABASE_BOOTSTRAP_URL 与 Compose PostgreSQL bootstrap 用户配置不一致"]);
   });
 });

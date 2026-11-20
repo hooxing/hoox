@@ -61,40 +61,39 @@ flowchart LR
 
 ### 环境要求
 
-- Node.js `24.18.0`
-- Corepack 与 pnpm `10.15.1`
+- Node.js `24.18.0`、Corepack 与 pnpm `10.15.1`
 - Docker Compose v2
-- 专用 PostgreSQL 17 开发数据库
-- 至少一个可用的 Sandbox Provider
-- OpenAI-compatible 模型端点
+- E2B Sandbox（也可在后台选择 CubeSandbox 或腾讯云 AGS）
+- 任意 OpenAI 兼容模型端点；模型和 E2B 密钥均在后台配置
 
-当前 Compose 只管理本地 MinIO；PostgreSQL、Sandbox 和模型服务需要单独准备。首次启动不是纯单容器体验，开始前请阅读[开发环境准备](docs/development.md)。
+Compose 默认提供 MinIO；启用 `local-postgres` profile 后另提供本地 PostgreSQL 17。也可改用外部专用 PostgreSQL。完整准备说明见[开发环境准备](docs/development.md)。
 
-### 首次配置
+### 首次配置（macOS、Linux、Windows）
 
-```powershell
-Copy-Item .env.example .env
+本地 PostgreSQL 由 `local-postgres` profile 显式启用。启用前必须将 `.env` 中的 `POSTGRES_BOOTSTRAP_PASSWORD` 设为非空本地密码，并与 `DATABASE_BOOTSTRAP_URL` 密码一致；替换其余占位配置。
+
+```sh
+cp .env.example .env
 corepack pnpm install --frozen-lockfile
-docker compose -f docker-compose.dev.yml --env-file .env up -d
+docker compose --profile local-postgres -f docker-compose.dev.yml --env-file .env up -d
 corepack pnpm db:setup
-corepack pnpm dev:identity:provision
 ```
 
-`.env` 只保存在本机。配置分组、必填范围和服务秘密边界见[配置参考](docs/reference/configuration.md)。
+Windows PowerShell 使用 `Copy-Item .env.example .env` 完成复制。
+
+`.env` 只保存在本机。若使用外部 PostgreSQL，保留原命令 `docker compose -f docker-compose.dev.yml --env-file .env up -d`，只启动 MinIO。配置范围见[配置参考](docs/reference/configuration.md)。
 
 ### 启动开发工作台
 
-完成首次配置后，在 Windows PowerShell 中运行：
-
-```powershell
-.\scripts\start-development.ps1 -CoreOnly
+```sh
+corepack pnpm dev:up
 ```
 
-脚本会预检外部依赖，启动 API、Agent Worker、Scheduler 和 Web，并打开 `http://127.0.0.1:4173/app`。Skill 管理面可通过 `-IncludeSkill` 显式启用。
+首次打开 `http://127.0.0.1:4173/admin/` 创建管理员，再在后台配置 E2B 与任意 OpenAI 兼容模型，即可执行第一个任务。CubeSandbox、腾讯云 AGS 是可选方案。Windows 也可使用 `./scripts/start-development.ps1`。
 
 ### 验证工程基线
 
-```powershell
+```sh
 corepack pnpm check:clean-workspace
 ```
 

@@ -72,6 +72,20 @@ import {
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
 
+function sqlStateFromCause(error: unknown): string | undefined {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { readonly code?: unknown; readonly cause?: unknown };
+    if (typeof candidate.code === "string" && /^[0-9A-Z]{5}$/.test(candidate.code)) {
+      return candidate.code;
+    }
+    current = candidate.cause;
+  }
+  return undefined;
+}
+
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
   if (value === undefined || value.length === 0) {
@@ -418,7 +432,12 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           [tenant, user],
         );
       });
-      await migrateUp(target.pool, target.context);
+      try {
+        await migrateUp(target.pool, target.context);
+      } catch (error) {
+        const sqlState = sqlStateFromCause(error) ?? "unknown";
+        throw new Error(`升级迁移前 Thread 时失败，SQLSTATE=${sqlState}`);
+      }
       const binding = await withTenantTransaction(
         seedPool,
         { tenantId: tenant, userId: user },

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "node build.mjs",
     "clean": "tsc -b tsconfig.json --clean",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:built": "tsc -p tsconfig.json --noEmit",

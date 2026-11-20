@@ -1,12 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { SiteSurface } from "./site-route.js";
 
-const Landing = lazy(() =>
-  import("./landing-page.js").then((module) => ({ default: module.LandingPage })),
-);
 const Workspace = lazy(() => import("./main.js").then((module) => ({ default: module.App })));
 
-export function SiteRoot({ surface }: { readonly surface: SiteSurface }) {
+export function SiteRoot() {
   const [checked, setChecked] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -20,15 +16,12 @@ export function SiteRoot({ surface }: { readonly surface: SiteSurface }) {
         else setChecked(true);
       })
       .catch(() => {
-        if (active) {
-          if (surface === "landing") setChecked(true);
-          else setFailed(true);
-        }
+        if (active) setFailed(true);
       });
     return () => {
       active = false;
     };
-  }, [surface]);
+  }, []);
   if (failed)
     return (
       <main>
@@ -41,7 +34,7 @@ export function SiteRoot({ surface }: { readonly surface: SiteSurface }) {
   if (!checked) return <p role="status">正在检查 Hoox 安装状态…</p>;
   return (
     <Suspense fallback={<p role="status">正在加载 Hoox…</p>}>
-      {surface === "landing" ? <Landing /> : <Workspace />}
+      <Workspace />
     </Suspense>
   );
 }

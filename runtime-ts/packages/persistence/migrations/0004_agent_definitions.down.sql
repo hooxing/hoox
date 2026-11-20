@@ -8,6 +8,8 @@ ALTER TABLE threads DROP CONSTRAINT threads_agent_definition_fk;
 ALTER TABLE threads DROP COLUMN agent_definition_id;
 ALTER TABLE agent_definitions DROP CONSTRAINT agent_definitions_current_revision_fk;
 DROP TABLE agent_revision_revocations;
+DROP POLICY agent_definitions_runtime_read ON agent_definitions;
+DROP POLICY agent_revisions_runtime_read ON agent_revisions;
 DROP TABLE agent_definition_audits;
 DROP TABLE agent_definition_commands;
 DROP TABLE agent_revisions;

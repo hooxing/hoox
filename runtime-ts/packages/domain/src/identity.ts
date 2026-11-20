@@ -12,8 +12,11 @@ import {
 } from "./ids.js";
 import { enumValue, recordValue, stringValue } from "./validation.js";
 
+export type UserKind = "human" | "integration";
+
 interface UserData {
   readonly id: UserId;
+  readonly kind: UserKind;
   readonly createdAt: IsoTimestamp;
 }
 export type User = Entity<"User", UserData>;
@@ -48,13 +51,19 @@ interface MembershipData {
 }
 export type Membership = Entity<"Membership", MembershipData>;
 
-export function createUser(id: UserId, createdAt: IsoTimestamp): User {
-  return sealEntity("User", { id, createdAt });
+export function createUser(id: UserId, createdAt: IsoTimestamp, kind: UserKind = "human"): User {
+  return sealEntity("User", { id, kind, createdAt });
 }
 
 export function rehydrateUser(snapshot: unknown): User {
   const raw = recordValue(snapshot, "User");
-  return createUser(userId(stringValue(raw, "id")), isoTimestamp(stringValue(raw, "createdAt")));
+  const kind =
+    raw.kind === undefined ? "human" : enumValue(raw, "kind", ["human", "integration"] as const);
+  return createUser(
+    userId(stringValue(raw, "id")),
+    isoTimestamp(stringValue(raw, "createdAt")),
+    kind,
+  );
 }
 
 export function createPersonalTenant(input: {
@@ -139,7 +148,10 @@ export function createMembership(input: {
   readonly role: MembershipRole;
   readonly createdAt: IsoTimestamp;
 }): Membership {
-  if (input.tenant.kind === "personal") {
+  if (input.user.kind === "integration") {
+    domainInvariant(input.role === "member", "NOT_AUTHORIZED", "集成身份只能拥有 Member 权限");
+  }
+  if (input.tenant.kind === "personal" && input.user.kind === "human") {
     domainInvariant(
       input.tenant.ownerUserId === input.user.id && input.role === "owner",
       "NOT_AUTHORIZED",
@@ -164,7 +176,10 @@ export function rehydrateMembership(snapshot: unknown, tenant: Tenant, user: Use
   domainInvariant(restoredUserId === user.id, "OWNERSHIP_MISMATCH", "成员用户关联无效");
   const role = enumValue(raw, "role", ["owner", "admin", "member"] as const);
   const status = enumValue(raw, "status", ["active", "revoked"] as const);
-  if (tenant.kind === "personal") {
+  if (user.kind === "integration") {
+    domainInvariant(role === "member", "NOT_AUTHORIZED", "集成身份只能拥有 Member 权限");
+  }
+  if (tenant.kind === "personal" && user.kind === "human") {
     domainInvariant(
       user.id === tenant.ownerUserId && role === "owner" && status === "active",
       "INVALID_ARGUMENT",

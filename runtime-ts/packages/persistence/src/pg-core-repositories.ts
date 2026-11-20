@@ -39,10 +39,12 @@ import {
 const tenantColumns = `
   t.id AS tenant_id, t.kind AS tenant_kind, t.owner_user_id, t.display_name,
   t.created_by_user_id, t.created_at AS tenant_created_at,
-  tenant_actor.id AS tenant_actor_id, tenant_actor.created_at AS tenant_actor_created_at`;
+  tenant_actor.id AS tenant_actor_id, tenant_actor.kind AS tenant_actor_kind,
+  tenant_actor.created_at AS tenant_actor_created_at`;
 
 const authColumns = `
-  auth_user.id AS auth_user_id, auth_user.created_at AS auth_user_created_at,
+  auth_user.id AS auth_user_id, auth_user.kind AS auth_user_kind,
+  auth_user.created_at AS auth_user_created_at,
   auth.id AS auth_membership_id, auth.role AS auth_membership_role,
   auth.status AS auth_membership_status, auth.created_at AS auth_membership_created_at`;
 
@@ -51,7 +53,7 @@ const threadColumns = `
   th.agent_definition_id AS thread_agent_definition_id,
   th.title AS thread_title, th.status AS thread_status, th.version AS thread_version,
   th.created_at AS thread_created_at, th.updated_at AS thread_updated_at,
-  thread_creator.id AS thread_creator_id,
+  thread_creator.id AS thread_creator_id, thread_creator.kind AS thread_creator_kind,
   thread_creator.created_at AS thread_creator_created_at,
   thread_creator_membership.id AS thread_creator_membership_id,
   thread_creator_membership.role AS thread_creator_membership_role,

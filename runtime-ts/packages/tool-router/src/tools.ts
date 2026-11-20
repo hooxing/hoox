@@ -155,8 +155,8 @@ export function createSandboxTools(
 }
 
 /**
- * Tool 的真实有界结果直接返回 Pi；固定回执仍只承担 durable tool_call/tool_result 配对。
- * TODO(codex-alignment): 将真实结果纳入可恢复的终端 transcript，避免 Session 重建后只剩完成回执。
+ * 有界的真实结果直接返回 Pi，不作为可恢复的工具结果持久化；Session 重建时只恢复受控回执。
+ * 回执格式见[运行与恢复](../../../../docs/architecture/run-execution-and-recovery.md#重试与未知结果)。
  */
 export function createObservedSandboxTools(
   sandbox: SandboxToolTarget,
@@ -266,8 +266,7 @@ function createExecCommandTool(
   rejectModelContinuation: RejectModelContinuation,
   infrastructureCircuit: SandboxInfrastructureCircuit,
 ) {
-  // TODO(codex-alignment): 同步 MVP 暂无 PTY、yield/session、write_stdin、shell/login 参数；
-  // 即使允许最长 1 小时，长任务仍未对齐 Codex 返回 session_id 后 wait/write_stdin 的可恢复会话模式。
+  // 命令同步等待退出或超时，不返回可恢复的会话 ID；不支持 PTY、提前返回、写入 stdin 或指定 shell/login。
   const tool: AgentTool<typeof ExecCommandArgumentsSchema, unknown> = {
     name: "exec_command",
     label: "执行 Sandbox 命令",
@@ -695,8 +694,7 @@ function buildBashCommand(cmd: string, workdir: string): string {
   if (!workdir.startsWith("/") || workdir.includes("\0")) {
     throw new SandboxRuntimeError("INVALID_ARGUMENT", "workdir 必须是 Sandbox Linux 绝对路径");
   }
-  // SDK 暂无 cwd/shell 独立参数，用安全引号把工作目录和命令交给固定 Bash。
-  // TODO(codex-alignment): CubeSandbox SDK 支持 cwd 后改为参数传递，不再由包装命令切换目录。
+  // 命令执行接口不单独接收 cwd 或 shell；包装层分别引用目录和命令，再切换目录并启动固定 Bash。
   return `cd -- ${shellQuote(workdir)} && exec /bin/bash -c ${shellQuote(cmd)}`;
 }
 
@@ -980,7 +978,7 @@ function projectCommandResult(
   const stdoutBytes = Buffer.byteLength(output.stdout, "utf8");
   const stderrBytes = Buffer.byteLength(output.stderr, "utf8");
   const originalOutputBytes = stdoutBytes + stderrBytes;
-  // TODO(codex-alignment): 接入与当前模型一致的 tokenizer；同步 MVP 先按 4 UTF-8 bytes/token 近似。
+  // 输出预算按每 token 4 个 UTF-8 字节近似，不使用当前模型的 tokenizer。
   const byteBudget = maxOutputTokens * APPROX_BYTES_PER_TOKEN;
   const truncated = truncateStreams(output.stdout, output.stderr, byteBudget);
   return Object.freeze({
@@ -1053,7 +1051,7 @@ function projectInfrastructureError(error: unknown, timeoutMs: number): string {
   }
   if (error instanceof SandboxRuntimeError) {
     if (error.code === "TIMEOUT") {
-      // TODO(codex-alignment): 当前 SDK 超时异常不携带可验证的部分 stdout/stderr。
+      // 超时错误没有可验证的部分 stdout/stderr，因此只返回超时状态。
       return JSON.stringify({
         code: "EXEC_TIMEOUT",
         message: `命令执行超过 ${timeoutMs} 毫秒`,

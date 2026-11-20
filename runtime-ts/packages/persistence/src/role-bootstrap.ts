@@ -181,6 +181,13 @@ const adminControlTables = new Set([
   "external_tool_versions",
   "external_tool_credentials",
   "external_tool_revocations",
+  "agent_definitions",
+  "agent_definition_tenants",
+  "agent_revisions",
+  "agent_revision_revocations",
+  "agent_definition_commands",
+  "agent_definition_audits",
+  "admin_run_content_access_audits",
 ]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
@@ -191,7 +198,13 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["memberships", new Set(["SELECT", "INSERT"])],
   ["user_personalization_settings", new Set(["SELECT", "INSERT"])],
   ["team_personalization_settings", new Set(["SELECT"])],
-  ["threads", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["threads", new Set(["SELECT", "INSERT"])],
+  ["agent_definitions", new Set(["SELECT"])],
+  ["agent_definition_tenants", new Set(["SELECT"])],
+  ["agent_revisions", new Set(["SELECT"])],
+  ["agent_revision_revocations", new Set(["SELECT"])],
+  ["agent_definition_commands", new Set()],
+  ["agent_definition_audits", new Set()],
   ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspace_revisions", new Set(["SELECT", "INSERT"])],
@@ -311,6 +324,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["admin_control_commands", new Set()],
   ["admin_control_audits", new Set()],
   ["admin_control_generation", new Set(["SELECT"])],
+  ["admin_run_content_access_audits", new Set()],
   ["external_tool_versions", new Set()],
   ["external_tool_credentials", new Set()],
   ["external_tool_revocations", new Set()],
@@ -329,6 +343,29 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 ]);
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
+  // Agent 定义、Run 浏览器审计和外部工具版本均不得由 Runtime 执行列级更新。
+  ["agent_definitions", new Set()],
+  ["agent_definition_tenants", new Set()],
+  ["agent_revisions", new Set()],
+  ["agent_revision_revocations", new Set()],
+  ["agent_definition_commands", new Set()],
+  ["agent_definition_audits", new Set()],
+  ["admin_run_content_access_audits", new Set()],
+  ["external_tool_versions", new Set()],
+  ["external_tool_credentials", new Set()],
+  ["external_tool_revocations", new Set()],
+  [
+    "threads",
+    new Set([
+      "title",
+      "status",
+      "updated_at",
+      "version",
+      "title_source",
+      "title_generated_at",
+      "title_generation_version",
+    ]),
+  ],
   [
     "runtime_ptc_dispatches",
     new Set([
@@ -1095,6 +1132,16 @@ async function hasInstallationState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasAgentDefinitionState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.agent_definitions',$1::text)) IS NOT NULL
+      AND to_regclass(format('%I.agent_revisions',$1::text)) IS NOT NULL
+      AND to_regclass(format('%I.agent_revision_revocations',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAdminControlState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.platform_control_operators',$1::text)) IS NOT NULL
@@ -1116,6 +1163,25 @@ async function hasAdminUserOperationsState(client: PoolClient, schema: string): 
   );
   return result.rows[0]?.present === true;
 }
+
+/** 后台 Run 浏览器的审计表与受限视图；只有它们齐备时才授予 Admin Control 访问。 */
+async function hasAdminRunExplorerState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.admin_run_content_access_audits',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_directory',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_event_outline',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_run_event_content',$1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+const adminRunExplorerViews = [
+  "admin_run_directory",
+  "admin_run_event_outline",
+  "admin_run_event_content",
+] as const;
 
 async function hasRunCompactionSettingsState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
@@ -1300,8 +1366,23 @@ async function activeTablePolicy(
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
   }
+  if (!(await hasAgentDefinitionState(client, schema))) {
+    for (const table of [
+      "agent_definitions",
+      "agent_definition_tenants",
+      "agent_revisions",
+      "agent_revision_revocations",
+      "agent_definition_commands",
+      "agent_definition_audits",
+    ])
+      policy.delete(table);
+  }
   if (!(await hasRunCompactionSettingsState(client, schema))) {
     policy.delete("run_compaction_settings_snapshots");
+  }
+  // 正文访问审计只属于 Admin Control；Runtime 与 Team Coordinator 保持零 ACL。
+  if (await hasAdminRunExplorerState(client, schema)) {
+    policy.set("admin_run_content_access_audits", new Set());
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -2207,6 +2288,7 @@ async function assertAdminControlBoundary(
 ): Promise<void> {
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
+  const runExplorerEnabled = enabled && (await hasAdminRunExplorerState(client, context.schema));
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
   const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
@@ -2226,6 +2308,16 @@ async function assertAdminControlBoundary(
         ]
       : [],
   );
+  const agentDefinitionsEnabled =
+    enabled && (await hasAgentDefinitionState(client, context.schema));
+  if (agentDefinitionsEnabled) {
+    allowed.set("agent_definitions", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_tenants", new Set(["SELECT", "INSERT", "DELETE"]));
+    allowed.set("agent_revisions", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_revision_revocations", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_commands", new Set(["SELECT", "INSERT"]));
+    allowed.set("agent_definition_audits", new Set(["SELECT", "INSERT"]));
+  }
   if (sandboxEnabled) {
     for (const table of managedSandboxControlTables)
       allowed.set(table, new Set(["SELECT", "INSERT"]));
@@ -2233,6 +2325,9 @@ async function assertAdminControlBoundary(
   if (userOperationsEnabled) {
     allowed.set("admin_user_account_audits", new Set(["SELECT", "INSERT"]));
     allowed.set("user_sessions", new Set(["DELETE"]));
+  }
+  if (runExplorerEnabled) {
+    allowed.set("admin_run_content_access_audits", new Set(["SELECT", "INSERT"]));
   }
   if (identityEnabled) {
     allowed.set("identity_auth_configuration", new Set(["SELECT", "INSERT", "UPDATE"]));
@@ -2284,6 +2379,13 @@ async function assertAdminControlBoundary(
   );
   if (sandboxEnabled)
     updatePolicy.set("sandbox_control_head", new Set(["generation", "routing_revision"]));
+  if (agentDefinitionsEnabled)
+    updatePolicy.set(
+      "agent_definitions",
+      new Set(["status", "generation", "availability_mode", "current_revision_id", "updated_at"]),
+    );
+  if (agentDefinitionsEnabled) updatePolicy.set("agent_definition_tenants", new Set(["available"]));
+  if (agentDefinitionsEnabled) updatePolicy.set("agent_revisions", new Set(["status"]));
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
@@ -2361,11 +2463,16 @@ async function assertAdminControlBoundary(
     [
       context.adminControlRole,
       context.schema,
-      ["admin_runtime_statistics", "admin_user_directory"],
+      ["admin_runtime_statistics", "admin_user_directory", ...adminRunExplorerViews],
     ],
   );
   for (const row of viewPrivileges.rows) {
-    const expected = row.view_name === "admin_runtime_statistics" ? enabled : userOperationsEnabled;
+    const expected =
+      row.view_name === "admin_runtime_statistics"
+        ? enabled
+        : row.view_name === "admin_user_directory"
+          ? userOperationsEnabled
+          : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError("CONSTRAINT_VIOLATION", "Admin Control 受限视图权限偏离白名单");
     }
@@ -2907,6 +3014,26 @@ const adminUserOperationsPolicyBindings = Object.freeze([
   ["user_sessions", "user_sessions_admin_control_delete_policy", "control"],
 ] as const);
 
+const adminRunExplorerPolicyBindings = Object.freeze([
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_migrator_policy",
+    "migrator",
+  ],
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_control_read_policy",
+    "control",
+  ],
+  [
+    "admin_run_content_access_audits",
+    "admin_run_content_access_audits_control_insert_policy",
+    "control",
+  ],
+  ["execution_attempts", "execution_attempts_admin_projection_read", "migrator"],
+  ["run_events", "run_events_admin_projection_read", "migrator"],
+] as const);
+
 async function rebindRoleScopedPolicies(
   client: PoolClient,
   context: MigrationSecurityContext,
@@ -3021,6 +3148,14 @@ async function rebindRoleScopedPolicies(
         );
       }
     }
+    if (await hasAdminRunExplorerState(client, context.schema)) {
+      for (const [table, policy, target] of adminRunExplorerPolicyBindings) {
+        const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
+        await client.query(
+          `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+        );
+      }
+    }
   }
 }
 
@@ -3117,6 +3252,19 @@ async function grantAdminControlAccess(
      GRANT UPDATE(generation,updated_at) ON TABLE ${schema}.admin_control_generation TO ${control};
      GRANT SELECT ON TABLE ${schema}.admin_runtime_statistics TO ${control}`,
   );
+  if (await hasAgentDefinitionState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.agent_definitions TO ${control};
+       GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.agent_definition_tenants TO ${control};
+       GRANT UPDATE(available) ON TABLE ${schema}.agent_definition_tenants TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.agent_revisions,${schema}.agent_revision_revocations,
+         ${schema}.agent_definition_commands,${schema}.agent_definition_audits TO ${control};
+       GRANT UPDATE(status,generation,availability_mode,current_revision_id,updated_at)
+         ON TABLE ${schema}.agent_definitions TO ${control};
+       GRANT UPDATE(status) ON TABLE ${schema}.agent_revisions TO ${control};
+       GRANT USAGE ON SEQUENCE ${schema}.agent_definition_audits_audit_id_seq TO ${control}`,
+    );
+  }
   if (await hasAdminUserOperationsState(client, context.schema)) {
     const identityEnabled = await hasEmbeddedIdentityState(client, context.schema);
     await client.query(
@@ -3126,6 +3274,13 @@ async function grantAdminControlAccess(
        GRANT UPDATE(status,updated_at) ON TABLE ${schema}.user_accounts TO ${control};
        GRANT DELETE ON TABLE ${schema}.user_sessions TO ${control};
        GRANT SELECT ON TABLE ${schema}.admin_user_directory TO ${control}`,
+    );
+  }
+  if (await hasAdminRunExplorerState(client, context.schema)) {
+    // 只授予视图读取与审计写入；Run、Attempt、事件与指标底表仍对 Admin Control 零 ACL。
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
+       GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
     );
   }
   if (await hasEmbeddedIdentityState(client, context.schema)) {
@@ -3212,7 +3367,8 @@ export async function bootstrapRuntimeAccessOnClient(
     );
   }
   await client.query(
-    `GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.threads, ${schema}.runs, ${schema}.workspaces TO ${role}`,
+    `GRANT SELECT, INSERT ON TABLE ${schema}.threads TO ${role};
+     GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.runs, ${schema}.workspaces TO ${role}`,
   );
   await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.workspace_revisions TO ${role}`);
   await client.query(
@@ -3370,6 +3526,11 @@ export async function bootstrapRuntimeAccessOnClient(
         `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
       );
     }
+  }
+  if (await hasAgentDefinitionState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT ON TABLE ${schema}.agent_definitions,${schema}.agent_definition_tenants,${schema}.agent_revisions,${schema}.agent_revision_revocations TO ${role}`,
+    );
   }
   if (await hasAdminControlState(client, context.schema)) {
     await client.query(
@@ -3662,6 +3823,14 @@ export async function bootstrapRuntimeAccessOnClient(
       `GRANT UPDATE(
          state,generation,claim_token,claimed_by,lease_expires_at,next_attempt_at,updated_at
        ) ON TABLE ${schema}.worker_tenant_assignments TO ${role}`,
+    );
+  }
+  const threadUpdateColumns = (await activeColumnUpdatePolicy(client, context.schema)).get(
+    "threads",
+  );
+  if (threadUpdateColumns !== undefined && threadUpdateColumns.size > 0) {
+    await client.query(
+      `GRANT UPDATE(${[...threadUpdateColumns].map(quoteIdentifier).join(",")}) ON TABLE ${schema}.threads TO ${role}`,
     );
   }
   if (await hasThreadHeadState(client, context.schema)) {

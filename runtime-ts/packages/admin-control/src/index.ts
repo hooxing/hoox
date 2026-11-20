@@ -2,6 +2,7 @@ import { normalizeRuntimeToolSelection, type RuntimeToolName } from "@hoox/proto
 import { createHash } from "node:crypto";
 
 export * from "./run-compaction-settings.js";
+export * from "./run-explorer.js";
 export * from "./sandbox-configuration.js";
 
 export type ControlOperatorRole = "viewer" | "operator" | "admin";

@@ -10,3 +10,4 @@ export {
   assertThreadActiveHistory,
   threadActiveHistoryDigest,
 } from "./thread-history.js";
+export * from "./external-tool.js";

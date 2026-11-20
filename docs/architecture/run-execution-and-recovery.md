@@ -86,6 +86,7 @@ Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回
 - Worker 因持久化不可用或停机进入恢复时，在同一终止事务中把普通 Sandbox cleanup 推进为 `started/close` 并释放栅栏，供 Scheduler 领取。
 - Cleanup 的 `pending` 只表示已武装的业务事实。消费者在 Tenant RLS 作用域内领取；活动 Run claim、Workspace 租约与活动 Attempt 同时存在时绝不派发。远端调用前先写入调用开始时间，此后崩溃或响应不确定只能收敛为 `unknown`，不自动重复。
 - 首要业务失败码进入 Sandbox 清理后，清理 UNKNOWN/FAILED 只写入补偿事实，不覆盖首要失败码。
+- Worker OpenTelemetry 是失败隔离的旁路：不等待导出才推进事件、签发许可或提交 Run。队列满、超时及其他导出拒绝均可丢弃；不因遥测发送结果创建恢复记录或重放副作用。Worker 排空在途执行后才有界刷新。
 
 ## 工具失败与用户回复
 

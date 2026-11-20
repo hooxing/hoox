@@ -551,6 +551,7 @@ function fixture(
     readonly apiKeys?: ApiDependencies["apiKeys"];
     readonly installation?: ApiDependencies["installation"];
     readonly demoAdminUserId?: string;
+    readonly agentDefinitions?: ApiDependencies["agentDefinitions"];
     readonly scheduledTasks?: ApiDependencies["scheduledTasks"];
   } = {},
 ) {
@@ -625,6 +626,35 @@ function fixture(
     ...(options.installation === undefined ? {} : { installation: options.installation }),
     ...(options.demoAdminUserId === undefined ? {} : { demoAdminUserId: options.demoAdminUserId }),
     repositories: state.repositories,
+    agentDefinitions:
+      options.agentDefinitions ??
+      ({
+        listAvailable: async () => [
+          {
+            definition: { id: "agent_default" },
+            revision: {
+              content: {
+                displayName: "Hoox 默认助手",
+                description: "Hoox 默认 Agent",
+                suggestedQuestions: [],
+              },
+            },
+          },
+        ],
+        readVisibleCurrent: async (_tenantId: string, definitionId: string) =>
+          definitionId === "agent_default"
+            ? {
+                definition: { id: "agent_default" },
+                revision: {
+                  content: {
+                    displayName: "Hoox 默认助手",
+                    description: "Hoox 默认 Agent",
+                    suggestedQuestions: [],
+                  },
+                },
+              }
+            : undefined,
+      } as unknown as NonNullable<ApiDependencies["agentDefinitions"]>),
     ...(options.enableCreate === false
       ? {}
       : {
@@ -1009,6 +1039,95 @@ afterEach(async () => {
   await Promise.all(openApps.splice(0).map((app) => app.close()));
 });
 
+describe("工作台 Agent 路由", () => {
+  it("仅返回展示字段，并将选中 Agent 固定到新 Thread", async () => {
+    const visible = {
+      id: "agent_sales",
+      displayName: "销售助手",
+      description: "帮助整理销售跟进",
+      welcomeMessage: "今天想跟进哪位客户？",
+      suggestedQuestions: ["整理本周线索"],
+      operatorInstructions: "不得返回此字段",
+    };
+    const agentDefinitions = {
+      listAvailable: vi.fn(async () => [
+        { definition: { id: "agent_sales" }, revision: { content: visible } },
+      ]),
+      readVisibleCurrent: vi.fn(async () => ({
+        definition: { id: "agent_sales" },
+        revision: { content: visible },
+      })),
+    } as unknown as NonNullable<ApiDependencies["agentDefinitions"]>;
+    const { app, state } = fixture({ agentDefinitions });
+    openApps.push(app);
+    const listed = await app.inject({
+      method: "GET",
+      url: "/v1/agents",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().data.items).toEqual([
+      {
+        id: "agent_sales",
+        displayName: visible.displayName,
+        description: visible.description,
+        welcomeMessage: visible.welcomeMessage,
+        suggestedQuestions: visible.suggestedQuestions,
+      },
+    ]);
+    expect(listed.body).not.toContain("operatorInstructions");
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "agent-thread-0001" },
+      payload: { title: "客户跟进", agentDefinitionId: "agent_sales" },
+    });
+    expect(created.statusCode).toBe(200);
+    expect(created.json().data.agentDefinitionId).toBe("agent_sales");
+    expect([...state.threads.values()][0]?.entity.agentDefinitionId).toBe("agent_sales");
+  });
+
+  it("对 RLS 不可见的 Agent 统一返回 404，对仍可见但缺少发布 Revision 的 Agent 返回 409", async () => {
+    let visible = false;
+    let hasRevision = true;
+    const agentDefinitions = {
+      listAvailable: vi.fn(async () => []),
+      readVisibleCurrent: vi.fn(async () =>
+        visible
+          ? {
+              definition: { id: "agent_hidden" },
+              ...(hasRevision
+                ? {
+                    revision: {
+                      content: { displayName: "已发布", description: "", suggestedQuestions: [] },
+                    },
+                  }
+                : {}),
+            }
+          : undefined,
+      ),
+    } as unknown as NonNullable<ApiDependencies["agentDefinitions"]>;
+    const { app } = fixture({ agentDefinitions });
+    openApps.push(app);
+    const request = () =>
+      app.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: { authorization: "Bearer token-a", "idempotency-key": "agent-thread-0002" },
+        payload: { title: "边界验证", agentDefinitionId: "agent_hidden" },
+      });
+    const hidden = await request();
+    expect(hidden.statusCode).toBe(404);
+    expect(hidden.body).not.toContain("agent_hidden");
+    visible = true;
+    hasRevision = false;
+    const unavailable = await request();
+    expect(unavailable.statusCode).toBe(409);
+    expect(unavailable.json().error.code).toBe("AGENT_REVISION_UNAVAILABLE");
+  });
+});
+
 describe("API Key 路由授权", () => {
   it("只允许显式声明且具备作用域的路由，并拒绝访问 Key 管理接口", async () => {
     const token = createApiKeyToken();
@@ -1041,6 +1160,13 @@ describe("API Key 路由授权", () => {
     expect(allowedRead.statusCode).toBe(404);
     expect(allowedRead.body).not.toContain(token);
 
+    const agentsRead = await app.inject({
+      method: "GET",
+      url: "/v1/agents",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(agentsRead.statusCode).toBe(200);
+
     const createWithoutScope = await app.inject({
       method: "POST",
       url: "/v1/threads",
@@ -1070,6 +1196,13 @@ describe("API Key 路由授权", () => {
     });
     expect(missingScope.statusCode).toBe(403);
     expect(missingScope.body).not.toContain(token);
+
+    const missingAgentReadScope = await app.inject({
+      method: "GET",
+      url: "/v1/agents",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(missingAgentReadScope.statusCode).toBe(403);
 
     const management = await app.inject({
       method: "GET",

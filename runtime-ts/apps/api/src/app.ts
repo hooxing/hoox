@@ -8,6 +8,7 @@ import { beijingPinoTimestamp } from "./logging.js";
 import { createRequestAuthentication } from "./request-auth.js";
 import { registerResourceFilesystemHttp } from "./resource-filesystem-http.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
+import { registerAgentRoutes } from "./routes/agents.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerApiKeyRoutes } from "./routes/api-keys.js";
 import { registerAutomationRoutes } from "./routes/automations.js";
@@ -111,6 +112,7 @@ export function createApiApp(
   );
   registerTeamRoutes(app, normalizedDependencies, authenticate);
   registerSkillRoutes(app, normalizedDependencies.skillCenter, authenticate);
+  registerAgentRoutes(app, normalizedDependencies, service, authenticate);
   registerHistoryFileRoutes(app, normalizedDependencies, authenticate, authenticateSelectedTenant);
 
   if (

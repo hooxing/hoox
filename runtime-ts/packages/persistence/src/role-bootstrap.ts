@@ -1130,6 +1130,14 @@ async function hasInstallationState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasRunAgentSnapshotState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.run_agent_snapshots',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAgentDefinitionState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.agent_definitions',$1::text)) IS NOT NULL
@@ -1412,6 +1420,9 @@ export async function activeTablePolicy(
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
   }
+  if (await hasRunAgentSnapshotState(client, schema)) {
+    policy.set("run_agent_snapshots", new Set(["SELECT", "INSERT"]));
+  }
   if (!(await hasAgentDefinitionState(client, schema))) {
     for (const table of [
       "agent_definitions",
@@ -1467,6 +1478,9 @@ export async function activeColumnUpdatePolicy(
   }
   if (await hasEmbeddedIdentityState(client, schema)) {
     policy.set("user_accounts", new Set(["better_auth_user_id", "display_name", "updated_at"]));
+  }
+  if (await hasRunAgentSnapshotState(client, schema)) {
+    policy.set("run_agent_snapshots", new Set());
   }
   if (await hasAgentDefinitionState(client, schema)) {
     for (const table of [
@@ -3675,6 +3689,12 @@ export async function bootstrapRuntimeAccessOnClient(
         `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
       );
     }
+  }
+  if (await hasRunAgentSnapshotState(client, context.schema)) {
+    await client.query(
+      `ALTER POLICY agent_revision_revocations_snapshot_read ON ${schema}.agent_revision_revocations TO ${role};
+       GRANT SELECT,INSERT ON TABLE ${schema}.run_agent_snapshots TO ${role}`,
+    );
   }
   if (await hasAgentDefinitionState(client, context.schema)) {
     await client.query(

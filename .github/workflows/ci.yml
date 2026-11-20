@@ -182,7 +182,7 @@ jobs:
           DATABASE_RUNTIME_ROLE: m4_ci_runtime
           DATABASE_MIGRATOR_ROLE: m4_ci_migrator
         # postgres-core 体量大，只运行 Agent 平台新增的用例；必须在 M4 删除受限角色之前执行。
-        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "默认 Agent|AgentDefinition|外部工具密文|API Key|集成 Membership|Key 无法认证|down 的 DDL 与 ACL 收敛失败|down 只有显式 test 授权"
+        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts -t "默认 Agent|AgentDefinition|RunAgentSnapshot|外部工具密文|API Key|集成 Membership|Key 无法认证|down 的 DDL 与 ACL 收敛失败|down 只有显式 test 授权"
 
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:

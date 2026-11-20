@@ -71,7 +71,7 @@ describe("外部工具 Admin Control ACL", () => {
     expect(formatTableSetDifference(["runs"], ["runs"])).toBe("缺少 []，多出 []");
   });
 
-  it("0001+0002 实际建表集合与 A1/D1/B1 不存在时的 Runtime 表键完全一致", async () => {
+  it("0001+0002 实际建表集合与 Agent、外部工具和 Run 浏览器迁移不存在时的 Runtime 表键完全一致", async () => {
     const migrationSql = await Promise.all([
       readFile(baselineMigrationUrl, "utf8"),
       readFile(secondMigrationUrl, "utf8"),
@@ -109,6 +109,10 @@ describe("外部工具 Admin Control ACL", () => {
 
     const policy = await activeTablePolicy(client, "it_partial_migration");
     expect([...policy.keys()].sort()).toEqual([...actualTables].sort());
+    expect(policy.has("run_agent_snapshots")).toBe(false);
+    expect(
+      (await activeColumnUpdatePolicy(client, "it_partial_migration")).has("run_agent_snapshots"),
+    ).toBe(false);
   });
 
   it("Runtime 表键仅在外部工具三表齐备时纳入白名单", async () => {

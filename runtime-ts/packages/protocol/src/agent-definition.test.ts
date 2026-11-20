@@ -22,7 +22,7 @@ const content = {
   skillVersions: [],
   includeTenantSkills: true,
   sandboxIdleAction: "pause",
-  longTermMemoryEnabled: false,
+  memory: { mode: "configured", longTermEnabled: false },
 };
 
 describe("AgentDefinition 协议 Schema", () => {
@@ -46,6 +46,18 @@ describe("AgentDefinition 协议 Schema", () => {
       }),
     ).toBe(true);
     expect(Value.Check(AgentRevisionContentSchema, content)).toBe(true);
+    expect(
+      Value.Check(AgentRevisionContentSchema, {
+        ...content,
+        model: {
+          mode: "pinned",
+          providerKey: "provider_saved",
+          providerRevision: 2,
+          modelId: "model_saved",
+        },
+        memory: { mode: "platform_default" },
+      }),
+    ).toBe(true);
   });
   it("拒绝未声明的 Revision 和请求字段", () => {
     expect(Value.Check(AgentRevisionContentSchema, { ...content, credential: "secret" })).toBe(

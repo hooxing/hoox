@@ -42,6 +42,7 @@ import {
 import { parseWorkspaceManifest } from "@hoox/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { PersistenceError } from "./errors.js";
+import { isRunAgentRevoked, readRunAgentSnapshot } from "./pg-run-agent-snapshot.js";
 import { RUN_EVENT_WAKE_CHANNEL, runEventWakeKey } from "./pg-run-event-wake.js";
 import { enqueueMemoryIngestion } from "./pg-memory-ingestion.js";
 import {
@@ -1173,6 +1174,9 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             input.scope.threadId,
             input.scope.runId,
           );
+          const agent = await readRunAgentSnapshot(client, input.scope);
+          const agentRevoked =
+            agent !== undefined && (await isRunAgentRevoked(client, input.scope));
           const skills = await readRunSkillSnapshot(
             client,
             input.scope.tenantId,
@@ -1190,6 +1194,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           return {
             outcome: "claimed",
             snapshot: {
+              agent: agentRevoked ? "AGENT_REVISION_REVOKED" : (agent ?? "AGENT_SNAPSHOT_INVALID"),
               run: state.run,
               tenantKind: row.tenant_kind === "personal" ? "personal" : "team",
               memorySubjectUserId: String(row.owner_user_id ?? row.thread_created_by_user_id),
@@ -1358,6 +1363,9 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             databaseNow,
             run: state.run,
             workspace: state.workspace,
+            ...((await isRunAgentRevoked(client, input.fence.scope))
+              ? { agentRevisionRevoked: true }
+              : {}),
           } as const;
         },
       );
@@ -1389,6 +1397,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           const row = await this.lockFenceState(client, input.fence.scope);
           const fenceOutcome = await this.validateLockedFence(client, row, input.fence);
           if (fenceOutcome !== "active") return { outcome: fenceOutcome } as const;
+          if (await isRunAgentRevoked(client, input.fence.scope))
+            return { outcome: "agent_revision_revoked" } as const;
           if (Number(row?.attempt_version) !== input.expectedAttemptVersion) {
             return { outcome: "conflict" } as const;
           }
@@ -1626,6 +1636,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             const row = await this.lockFenceState(client, input.fence.scope);
             const fenceOutcome = await this.validateLockedFence(client, row, input.fence);
             if (fenceOutcome !== "active") return { outcome: fenceOutcome } as const;
+            if (await isRunAgentRevoked(client, input.fence.scope))
+              return { outcome: "agent_revision_revoked" } as const;
             if (Number(row?.attempt_version) !== input.expectedAttemptVersion) {
               return { outcome: "conflict" } as const;
             }
@@ -2427,7 +2439,18 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       if (updated.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
     }
 
-    if (this.options.memoryIngestionEnabled === true && command.nextRunStatus === "succeeded") {
+    const succeededWithMemory =
+      this.options.memoryIngestionEnabled === true && command.nextRunStatus === "succeeded";
+    const terminalAgent =
+      succeededWithMemory || command.threadSandboxTerminal !== undefined
+        ? await readRunAgentSnapshot(client, command.fence.scope)
+        : undefined;
+    if (
+      succeededWithMemory &&
+      terminalAgent !== undefined &&
+      (terminalAgent.content.memory.mode === "platform_default" ||
+        terminalAgent.content.memory.longTermEnabled)
+    ) {
       if (threadContextReceipt === undefined) {
         throw new RuntimeWriteAbort("protocol_invalid");
       }
@@ -2564,6 +2587,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             scope: command.fence.scope,
             attemptId: String(row.attempt_id),
             command: command.threadSandboxTerminal,
+            forceClose:
+              terminalAgent?.content.sandboxIdleAction !== "pause" ||
+              (command.nextRunStatus === "failed" &&
+                (await isRunAgentRevoked(client, command.fence.scope))),
             ...(command.workspaceChange?.revisionId === undefined && row.current_revision_id == null
               ? {}
               : {

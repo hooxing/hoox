@@ -23,10 +23,12 @@
 
 ## Run 快照
 
+Agent 版本在受理 Run 时固定，见 [Agent 定义、版本与 Run 快照](agent-definition.md)。平台运行配置仍在 Worker 首次解析时固定；Agent 的显式内置工具清单受平台快照的 `enabledTools` 约束。Agent 记忆策略可显式开关或跟随平台设置，任何 Agent 配置都不能启用平台未配置的记忆。固定模型的解析需要按 `providerKey + providerRevision + modelId` 精确定位已保存配置，不能复用“当前 active”解析结果。
+
 新配置不改变已经开始执行的 Run，进程重启后也恢复同一配置：
 
 - Worker 首次为 Run 解析配置时写入运行配置快照，固定模型 Revision 与密钥、记忆选择（包括“未配置”）、工具调用模式与启用名单；压缩参数另存独立快照。
-- 同一 Run 的重试、恢复 Attempt 和子 Agent 只读取快照，不反查当前 active 配置。排队但尚未建立快照的 Run 采用当时的 active 配置。
+- 同一 Run 的重试、恢复 Attempt 和子 Agent 只读取快照，不反查当前 active 配置。排队但尚未建立平台运行配置快照的 Run 采用首次解析时的 active 配置，不影响已固定的 Agent 版本。
 - 并发上限在调度时热读取，读取失败保留最后有效值；降低上限不取消在途 Run。
 - 部署回退模型的具体参数不持久化，修改对应环境变量前应排空在途 Run。
 

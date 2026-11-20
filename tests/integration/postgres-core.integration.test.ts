@@ -15,6 +15,7 @@ import {
   type Membership,
   membershipId,
   prepareWorkspaceRevision,
+  rehydrateThread,
   type Run,
   releaseWorkspaceLease,
   renewWorkspaceLease,
@@ -40,7 +41,18 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
-import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "../../runtime-ts/packages/prompt-builder/src/index.js";
+import {
+  buildRuntimeSystemPrompt,
+  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
+} from "../../runtime-ts/packages/prompt-builder/src/index.js";
+import { runtimeMutationDigest } from "@hoox/run-contracts/mutation-protocol";
+import type { RuntimeMutation } from "@hoox/run-contracts";
+import { PgRunDispatchCreation } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
+import {
+  PgExecutionPersistence,
+  PgRunExecutionSetup,
+} from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
+import { readRunAgentSnapshot } from "../../runtime-ts/packages/persistence/src/pg-run-agent-snapshot.js";
 import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import {
   loadMigrations,
@@ -177,7 +189,10 @@ function canonical(value: unknown): string {
 
 async function readDefaultAgentRevision() {
   const repository = new PgAgentDefinitionRepository(runtimePool);
-  return repository.readRevisionById(tenantId("tenant_seed_contract"), "agent_default_revision_1");
+  return repository.readRevisionById(
+    tenantId("tenant_seed_contract"),
+    "agent_default_revision_platform_memory",
+  );
 }
 
 function timestamp(second: number): ReturnType<typeof isoTimestamp> {
@@ -470,6 +485,12 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   it("默认 Agent Revision 的工具配置跟随平台运行设置", async () => {
     const revision = await readDefaultAgentRevision();
     expect(revision?.content.tools).toEqual({ mode: "platform_default" });
+    expect(revision?.content.memory).toEqual({ mode: "platform_default" });
+    const seed = await administrativePool.query<{ readonly content: Record<string, unknown> }>(
+      `SELECT content FROM "${schema}".agent_revisions WHERE id='agent_default_revision_1'`,
+    );
+    expect(seed.rows[0]?.content).toMatchObject({ longTermMemoryEnabled: false });
+    expect(seed.rows[0]?.content).not.toHaveProperty("memory");
   });
 
   it("AgentDefinition 发布、可用范围、撤销与 Thread 绑定 ACL", async () => {
@@ -498,7 +519,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       skillVersions: [],
       includeTenantSkills: true,
       sandboxIdleAction: "pause" as const,
-      longTermMemoryEnabled: false,
+      memory: { mode: "configured" as const, longTermEnabled: false },
     };
     await expect(
       repository.createDraft({
@@ -649,6 +670,349 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(
       await repository.readCurrentPublished(manager.tenant.id, "agent_revoke_test"),
     ).toBeUndefined();
+  });
+
+  it("RunAgentSnapshot 固定创建时的 Revision，发布、停用与重启恢复不改写，撤销阻断安全点和许可", async () => {
+    const manager = await createFixture("run_agent_snapshot");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [manager.user.id],
+    );
+    const repository = new PgAgentDefinitionRepository(adminControlPool);
+    const defaults = await readDefaultAgentRevision();
+    if (defaults === undefined) throw new Error("默认 Agent Revision 不可见");
+    const draft = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_run_snapshot",
+      availability: { mode: "selected_tenants", tenantIds: [manager.tenant.id] },
+      content: {
+        ...defaults.content,
+        operatorInstructions: "固定指令一",
+        includeTenantSkills: false,
+      },
+      revisionId: "agent_run_snapshot_v1",
+      idempotencyKey: "run-agent-snapshot-draft",
+      expectedGeneration: 0,
+    });
+    const revision = draft.revision;
+    const firstPublish = await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: revision.id,
+      idempotencyKey: "run-agent-snapshot-publish",
+      expectedGeneration: draft.definition.generation,
+    });
+    const thread = rehydrateThread(
+      {
+        ...manager.thread,
+        id: "thread_run_agent_snapshot_bound",
+        agentDefinitionId: draft.definition.id,
+      },
+      manager.tenant,
+      manager.user,
+      manager.membership,
+    );
+    expect(await repositories.threads.create(manager.scope, thread)).toMatchObject({
+      outcome: "created",
+    });
+    const workspace = createWorkspace({
+      id: workspaceId("workspace_run_agent_snapshot_bound"),
+      thread,
+      now: timestamp(4),
+    });
+    expect(await repositories.workspaces.create(manager.scope, workspace)).toEqual({
+      outcome: "created",
+    });
+    const creation = new PgRunDispatchCreation(runtimePool);
+    const enqueue = (
+      id: string,
+      skillInvocation?: { readonly invocationName: string; readonly args: string },
+    ) =>
+      creation.createQueuedRun({
+        scope: manager.scope,
+        thread,
+        run: createRun({ id: runId(id), thread, now: timestamp(5) }),
+        inputText: "执行",
+        ...(skillInvocation === undefined ? {} : { skillInvocation }),
+        idempotency: { key: id, requestHash: sha256Digest("0".repeat(64)) },
+      });
+    const rejectedRunId = "run_agent_snapshot_skill_rejected";
+    await expect(
+      enqueue(rejectedRunId, { invocationName: "not-installed", args: "" }),
+    ).resolves.toEqual({ outcome: "skill_not_available" });
+    const rejectedRun = await withTenantTransaction(runtimePool, manager.scope, (client) =>
+      client.query(
+        `SELECT 1 FROM runs WHERE id=$1
+         UNION ALL SELECT 1 FROM run_agent_snapshots WHERE run_id=$1
+         UNION ALL SELECT 1 FROM run_skill_snapshots WHERE run_id=$1`,
+        [rejectedRunId],
+      ),
+    );
+    expect(rejectedRun.rowCount).toBe(0);
+    const first = await enqueue("run_agent_snapshot_v1");
+    if (first.outcome !== "created") throw new Error(`Run 创建失败：${first.outcome}`);
+    const scope = {
+      tenantId: manager.scope.tenantId,
+      threadId: thread.id,
+      workspaceId: workspace.id,
+      runId: first.entity.id,
+      rootRunId: first.entity.id,
+    };
+    const snap = await withTenantTransaction(runtimePool, manager.scope, (client) =>
+      readRunAgentSnapshot(client, scope),
+    );
+    expect(snap).toEqual({
+      definitionId: draft.definition.id,
+      revisionId: revision.id,
+      revisionDigest: revision.digest,
+      content: revision.content,
+    });
+    expect(await enqueue(first.entity.id)).toMatchObject({ outcome: "replayed" });
+    const stranger = await createFixture("run_agent_snapshot_other");
+    await expect(
+      withTenantTransaction(runtimePool, stranger.scope, (client) =>
+        readRunAgentSnapshot(client, scope),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      withTenantTransaction(runtimePool, manager.scope, (client) =>
+        client.query("UPDATE run_agent_snapshots SET content='{}'::jsonb WHERE run_id=$1", [
+          scope.runId,
+        ]),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      withTenantTransaction(runtimePool, manager.scope, (client) =>
+        client.query("DELETE FROM run_agent_snapshots WHERE run_id=$1", [scope.runId]),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    expect(
+      await withTenantTransaction(runtimePool, manager.scope, (client) =>
+        client.query("SELECT 1 FROM run_skill_snapshots WHERE tenant_id=$1 AND run_id=$2", [
+          scope.tenantId,
+          scope.runId,
+        ]),
+      ),
+    ).toMatchObject({ rowCount: 1 });
+
+    const second = await repository.createDraftRevision({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: "agent_run_snapshot_v2",
+      content: { ...revision.content, operatorInstructions: "固定指令二" },
+      idempotencyKey: "run-agent-snapshot-draft-v2",
+      expectedGeneration: firstPublish.generation,
+    });
+    const secondPublish = await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: second.id,
+      idempotencyKey: "run-agent-snapshot-publish-v2",
+      expectedGeneration: firstPublish.generation + 1,
+    });
+    const secondRun = await enqueue("run_agent_snapshot_v2");
+    expect(secondRun.outcome).toBe("created");
+    expect(
+      await withTenantTransaction(runtimePool, manager.scope, (client) =>
+        readRunAgentSnapshot(client, { ...scope, runId: "run_agent_snapshot_v2" }),
+      ),
+    ).toMatchObject({ revisionId: second.id });
+    const disabled = await repository.deactivate({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      idempotencyKey: "run-agent-snapshot-disable",
+      expectedGeneration: secondPublish.generation,
+    });
+    await expect(enqueue("run_agent_snapshot_denied")).resolves.toEqual({
+      outcome: "agent_revision_unavailable",
+    });
+    await expect(
+      repositories.runs.get(manager.scope, runId("run_agent_snapshot_denied")),
+    ).resolves.toBeUndefined();
+
+    await expect(enqueue(first.entity.id)).resolves.toMatchObject({ outcome: "replayed" });
+
+    const worker = new PgExecutionPersistence(runtimePool);
+    const claim = await worker.claim({
+      scope,
+      workerId: "snapshot-worker-first",
+      leaseDurationMs: 30_000,
+    });
+    if (claim.outcome !== "claimed") throw new Error(`领取失败：${claim.outcome}`);
+    expect(claim.snapshot.agent).toEqual(snap);
+    const mutate = (
+      claimFence: typeof claim.fence,
+      input: Omit<
+        RuntimeMutation,
+        "schemaVersion" | "commandDigest" | "fence" | "events" | "outbox"
+      >,
+    ) => {
+      const unsigned = {
+        schemaVersion: 1 as const,
+        fence: claimFence,
+        events: [],
+        outbox: [],
+        ...input,
+      };
+      return worker.mutate({ ...unsigned, commandDigest: runtimeMutationDigest(unsigned) });
+    };
+    await expect(
+      mutate(claim.fence, {
+        idempotencyKey: "agent-snapshot-running",
+        expectedAttemptVersion: 0,
+        nextAttemptStatus: "running",
+        nextStage: "model_execution_started",
+      }),
+    ).resolves.toMatchObject({ outcome: "applied" });
+    await expect(
+      mutate(claim.fence, {
+        idempotencyKey: "agent-snapshot-waiting",
+        expectedAttemptVersion: 1,
+        nextAttemptStatus: "waiting",
+        nextStage: "finished",
+        nextRunStatus: "waiting",
+        releaseFences: true,
+      }),
+    ).resolves.toMatchObject({ outcome: "applied" });
+    const waiting = await repositories.runs.get(manager.scope, scope.runId);
+    if (waiting === undefined) throw new Error("等待中的 Run 不可见");
+    await expect(
+      new PgRunExecutionSetup(runtimePool).setAnswer({
+        scope,
+        answer: "恢复执行",
+        expectedRunVersion: Number(waiting.version),
+      }),
+    ).resolves.toBe("updated");
+    const restarted = new PgExecutionPersistence(runtimePool);
+    const resumed = await restarted.claim({
+      scope,
+      workerId: "snapshot-worker-restarted",
+      leaseDurationMs: 30_000,
+    });
+    if (resumed.outcome !== "claimed") throw new Error(`恢复领取失败：${resumed.outcome}`);
+    expect(resumed.snapshot.agent).toEqual(snap);
+    expect(resumed.snapshot.attempt.attemptId).not.toBe(claim.snapshot.attempt.attemptId);
+    await expect(
+      mutate(resumed.fence, {
+        idempotencyKey: "agent-snapshot-resumed-running",
+        expectedAttemptVersion: 0,
+        nextAttemptStatus: "running",
+        nextStage: "model_execution_started",
+      }),
+    ).resolves.toMatchObject({ outcome: "applied" });
+    const permit = await restarted.issueExternalEffectPermit({
+      fence: resumed.fence,
+      expectedAttemptVersion: 1,
+      effect: "model_start",
+      call: {
+        callId: "model-before-revocation",
+        toolName: "pi_model",
+        argsDigest: sha256Digest("0".repeat(64)),
+      },
+      permitDurationMs: 15_000,
+    });
+    if (permit.outcome !== "authorized") throw new Error(`签发许可失败：${permit.outcome}`);
+
+    await repository.revoke({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: revision.id,
+      idempotencyKey: "run-agent-snapshot-revoke",
+      reason: "撤销旧 Revision",
+      expectedGeneration: disabled.generation,
+    });
+    const inspected = await restarted.inspectAndRenew({
+      fence: resumed.fence,
+      leaseDurationMs: 30_000,
+    });
+    if (inspected.outcome !== "active") throw new Error(`安全点失败：${inspected.outcome}`);
+    expect(inspected.agentRevisionRevoked).toBe(true);
+    await expect(
+      restarted.consumeExternalEffectPermit({
+        fence: inspected.fence,
+        expectedAttemptVersion: 1,
+        permit: permit.permit,
+      }),
+    ).resolves.toEqual({ outcome: "agent_revision_revoked" });
+    await expect(
+      restarted.issueExternalEffectPermit({
+        fence: inspected.fence,
+        expectedAttemptVersion: resumed.snapshot.attempt.version,
+        effect: "model_start",
+        call: {
+          callId: "revoked-call",
+          toolName: "pi_model",
+          argsDigest: sha256Digest("0".repeat(64)),
+        },
+        permitDurationMs: 3_000,
+      }),
+    ).resolves.toEqual({ outcome: "agent_revision_revoked" });
+  });
+
+  it("RunAgentSnapshot 默认 Agent 保留 Prompt Golden 字节，损坏和缺失快照不回退", async () => {
+    const f = await createFixture("agent_snapshot_golden");
+    const scope = { tenantId: f.scope.tenantId, threadId: f.thread.id, runId: f.run.id };
+    const snapshot = await withTenantTransaction(runtimePool, f.scope, (client) =>
+      readRunAgentSnapshot(client, scope),
+    );
+    if (snapshot === undefined) throw new Error("默认 Agent 快照不可见");
+    const prompt = (operatorInstructions: string) =>
+      buildRuntimeSystemPrompt({
+        schemaVersion: 1,
+        operatorInstructions,
+        capabilities: [],
+        availableSkills: [],
+        untrusted: { tenant: [], skill: [], user: [] },
+      });
+    expect(prompt(snapshot.content.operatorInstructions)).toEqual(
+      prompt(DEFAULT_AGENT_OPERATOR_INSTRUCTIONS),
+    );
+    const fixtures = await Promise.all(
+      ["corrupt", "missing"].map(async (kind) => {
+        const isolated = await createFixture(`agent_snapshot_${kind}`);
+        const run = createRun({
+          id: runId(`run_agent_snapshot_${kind}_queued`),
+          thread: isolated.thread,
+          now: timestamp(5),
+        });
+        expect(
+          await new PgRunDispatchCreation(runtimePool).createQueuedRun({
+            scope: isolated.scope,
+            thread: isolated.thread,
+            run,
+            inputText: "执行",
+            idempotency: { key: run.id, requestHash: sha256Digest("0".repeat(64)) },
+          }),
+        ).toMatchObject({ outcome: "created" });
+        return { kind, run, isolated };
+      }),
+    );
+    for (const { kind, run, isolated } of fixtures) {
+      // 使用隔离 Schema 的管理连接模拟磁盘事实损坏；Runtime 本身不能改写此行。
+      const table = `"${schema}".run_agent_snapshots`;
+      await administrativePool.query(
+        kind === "corrupt"
+          ? `UPDATE ${table} SET revision_digest=repeat('0',64) WHERE run_id=$1`
+          : `DELETE FROM ${table} WHERE run_id=$1`,
+        [run.id],
+      );
+      await expect(
+        new PgExecutionPersistence(runtimePool).claim({
+          scope: {
+            tenantId: isolated.tenant.id,
+            threadId: isolated.thread.id,
+            runId: run.id,
+            rootRunId: run.id,
+            workspaceId: isolated.workspace.id,
+          },
+          workerId: "snapshot-invalid-worker",
+          leaseDurationMs: 30_000,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "claimed",
+        snapshot: { agent: "AGENT_SNAPSHOT_INVALID" },
+      });
+    }
   });
 
   it("托管沙箱配置验证权限、发布门禁、版本并发及实例绑定隔离", async () => {

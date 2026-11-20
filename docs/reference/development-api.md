@@ -114,7 +114,7 @@ GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/content
 - 相同幂等键只接受相同 request hash。
 - COMMIT 响应未知时只按原 scope、幂等键和请求摘要精确读回，禁止再次写入猜测结果。
 
-Schema、超限、畸形 JSON、危险原型键和游标错误统一映射为 400 `INVALID_REQUEST`；不支持的创建请求媒体类型返回 415 `UNSUPPORTED_MEDIA_TYPE`。Fastify、AJV、SQL 和领域内部消息不能直接返回客户端。
+Schema、超限、畸形 JSON、危险原型键和游标错误统一映射为 400 `INVALID_REQUEST`；不支持的创建请求媒体类型返回 415 `UNSUPPORTED_MEDIA_TYPE`。Fastify、AJV、SQL 和领域内部消息不能直接返回客户端。Thread 或 Run 创建所绑定的 Agent 已停用或没有可用的已发布 Revision 时返回 409 `AGENT_REVISION_UNAVAILABLE`；响应使用固定提示，不暴露持久层诊断信息。
 
 ## 对象存储 origin
 

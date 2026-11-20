@@ -103,3 +103,5 @@ Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回
 ## 外部工具结果未知
 
 外部工具请求写出后发生超时、断连或进程中断时，结果属于 UNKNOWN，Attempt 进入恢复且普通 Worker 再投递不得重放。只有独立显式对账入口核对持久化的工具版本、canonical 参数摘要与原幂等键完全一致后，才可授权声明幂等工具复用同一幂等键重试；Transport 自身不得重放。外部工具版本与凭据读取必须受 Run 快照限定，接入 Agent 快照前 Worker 不获得相应数据库读取授权。
+
+外部工具 Transport 将失败明确分为两类可安全结束的结果：`not_sent` 表示可证明请求未写出（例如目标预检、DNS 或连接阶段失败）；`responded_failure` 表示收到可归一化的失败响应。两类都写入失败回执，不进入 UNKNOWN 恢复。HTTP 4xx（包括 408、429）属于 `responded_failure`；HTTP 5xx、写出后超时、断连或响应中断仍属于 UNKNOWN 并转入恢复。MCP 协议错误响应和工具错误映射为 `responded_failure`。Transport 不重试；未明确分类的异常一律按 UNKNOWN 处理。

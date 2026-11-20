@@ -108,6 +108,12 @@ describe("外部工具运行骨架", () => {
     const agentTool = createExternalToolAgentTool(
       { ...toolVersion, endpoint: "https://rebind.example/api" },
       {
+        getCallContext: () => ({
+          tenantId: "tenant-fake",
+          endUserId: "user-fake",
+          threadId: "thread-fake",
+          runId: "run-fake",
+        }),
         persistStarted: async () => {},
         authorizeAndConsume: async () => {},
         resolveAddresses,
@@ -139,6 +145,11 @@ describe("外部工具运行骨架", () => {
     });
     const requireRecovery = vi.fn(async () => undefined);
     const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({
+        tenantId: "tenant-fake",
+        threadId: "thread-fake",
+        runId: "run-fake",
+      }),
       persistStarted,
       authorizeAndConsume,
       transport: { invoke },
@@ -163,6 +174,11 @@ describe("外部工具运行骨架", () => {
       }),
     );
     expect(invoke).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callContext: { tenantId: "tenant-fake", threadId: "thread-fake", runId: "run-fake" },
+      }),
+    );
     await expect(agentTool.execute("call-1", { value: "x" })).rejects.toThrow(
       "EXTERNAL_TOOL_RECOVERY_REQUIRED",
     );
@@ -172,21 +188,75 @@ describe("外部工具运行骨架", () => {
       code: "EXTERNAL_TOOL_RESULT_UNKNOWN",
     });
   });
-  it("Transport 明确证明尚未写出时回可控失败而不进入恢复", async () => {
+  it("Transport 已收到可归一化失败响应时写失败回执且不进入恢复", async () => {
     const requireRecovery = vi.fn(async () => undefined);
     const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({
+        tenantId: "tenant-fake",
+        threadId: "thread-fake",
+        runId: "run-fake",
+      }),
       persistStarted: async () => {},
       authorizeAndConsume: async () => {},
       transport: {
         invoke: async () => {
-          throw new ExternalToolTransportError("preflight", "EXTERNAL_TOOL_REJECTED");
+          throw new ExternalToolTransportError("responded_failure", "EXTERNAL_TOOL_REJECTED");
+        },
+      },
+      recordReceipt: async () => {},
+      requireRecovery,
+    });
+    const result = await agentTool.execute("responded-call", { value: "x" });
+    expect(result.details).toMatchObject({ error: "EXTERNAL_TOOL_REJECTED" });
+    expect(requireRecovery).not.toHaveBeenCalled();
+  });
+  it("未分类的写出后异常继续进入 UNKNOWN 恢复", async () => {
+    const requireRecovery = vi.fn(async () => undefined);
+    const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({
+        tenantId: "tenant-fake",
+        threadId: "thread-fake",
+        runId: "run-fake",
+      }),
+      persistStarted: async () => {},
+      authorizeAndConsume: async () => {},
+      transport: {
+        invoke: async () => {
+          throw new Error("transport disconnected");
+        },
+      },
+      recordReceipt: async () => {},
+      requireRecovery,
+    });
+    await expect(agentTool.execute("unknown-call", { value: "x" })).rejects.toThrow(
+      "EXTERNAL_TOOL_RESULT_UNKNOWN",
+    );
+    expect(requireRecovery).toHaveBeenCalledWith({
+      callId: "unknown-call",
+      code: "EXTERNAL_TOOL_RESULT_UNKNOWN",
+    });
+  });
+  it("Transport 明确证明尚未写出时回可控失败而不进入恢复", async () => {
+    const requireRecovery = vi.fn(async () => undefined);
+    const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({
+        tenantId: "tenant-fake",
+        endUserId: "user-fake",
+        threadId: "thread-fake",
+        runId: "run-fake",
+      }),
+      persistStarted: async () => {},
+      authorizeAndConsume: async () => {},
+      transport: {
+        invoke: async () => {
+          throw new ExternalToolTransportError("not_sent", "EXTERNAL_TOOL_REJECTED");
         },
       },
       recordReceipt: async () => {},
       requireRecovery,
     });
     const result = await agentTool.execute("preflight-call", { value: "x" });
-    expect(result.details).toMatchObject({ error: "EXTERNAL_TOOL_FAILED" });
+    expect(result.details).toMatchObject({ error: "EXTERNAL_TOOL_REJECTED" });
     expect(requireRecovery).not.toHaveBeenCalled();
   });
   it("截断模型可见结果并且不回显传输凭据", async () => {
@@ -198,6 +268,12 @@ describe("外部工具运行骨架", () => {
     const agentTool = createExternalToolAgentTool(
       toolVersion,
       {
+        getCallContext: () => ({
+          tenantId: "tenant-fake",
+          endUserId: "user-fake",
+          threadId: "thread-fake",
+          runId: "run-fake",
+        }),
         persistStarted: async () => {},
         authorizeAndConsume: async () => {},
         transport: { invoke: transportInvoke },
@@ -225,6 +301,12 @@ describe("外部工具运行骨架", () => {
     const agentTool = createExternalToolAgentTool(
       toolVersion,
       {
+        getCallContext: () => ({
+          tenantId: "tenant-fake",
+          endUserId: "user-fake",
+          threadId: "thread-fake",
+          runId: "run-fake",
+        }),
         persistStarted: async () => {},
         authorizeAndConsume: async () => {},
         transport: { invoke },
@@ -244,6 +326,12 @@ describe("外部工具运行骨架", () => {
     const agentTool = createExternalToolAgentTool(
       toolVersion,
       {
+        getCallContext: () => ({
+          tenantId: "tenant-fake",
+          endUserId: "user-fake",
+          threadId: "thread-fake",
+          runId: "run-fake",
+        }),
         persistStarted: async () => {},
         authorizeAndConsume: async () => {},
         transport: {
@@ -269,6 +357,12 @@ describe("外部工具运行骨架", () => {
     }));
     const authorizeRetry = vi.fn(async () => "authorized" as const);
     const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({
+        tenantId: "tenant-fake",
+        endUserId: "user-fake",
+        threadId: "thread-fake",
+        runId: "run-fake",
+      }),
       persistStarted: vi.fn(),
       authorizeAndConsume: vi.fn(),
       transport: { invoke },

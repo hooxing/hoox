@@ -14,7 +14,7 @@ English · [简体中文](README.md)
 Public entry points: [Hoox](https://hoox.aisay.cc/) · [Workbench](https://hoox.aisay.cc/app) (sign-in required). The demo environment is not a production-readiness claim.
 
 > [!NOTE]
-> This repository's collaboration conventions are in Chinese: documentation, maintainer notes, code comments and Git commit messages are written in Chinese, while public identifiers and protocol fields stay in English. This English README is a condensed translation of the Chinese one; if they disagree, the Chinese version wins. Issues and discussions in English are welcome.
+> Issues, discussions, pull requests and commit messages may be written in Chinese or English. The maintainers' own code comments, documentation and commits are mostly in Chinese, so the Chinese documentation is more complete. This English README is a condensed version of the Chinese one.
 
 ## Who it is for and what you get
 

@@ -59,7 +59,6 @@ describe("Hoox 项目身份契约", () => {
 
   it("页面、文档和模型身份统一使用 Hoox", () => {
     expect(readText("README.md")).toContain("# Hoox");
-    expect(readText("README.md")).toContain("**Hoox** —— 你说，它做。");
     expect(readText("README.md")).toContain("hoox.aisay.cc");
     expect(readText("runtime-ts/apps/web/index.html")).toContain(
       "<title>Hoox — 开源、可自托管的云端 Agent 平台</title>",

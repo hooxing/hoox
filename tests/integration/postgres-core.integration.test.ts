@@ -37,10 +37,12 @@ import type {
   TenantScope,
   WorkspaceWriteScope,
 } from "@hoox/persistence/postgres";
+import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AdminControlApiDependencies } from "../../runtime-ts/apps/admin-control-api/src/app.js";
 import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
+import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
 import {
   buildRuntimeSystemPrompt,
@@ -49,11 +51,13 @@ import {
 import { runtimeMutationDigest } from "@hoox/run-contracts/mutation-protocol";
 import type { RuntimeMutation } from "@hoox/run-contracts";
 import { PgRunDispatchCreation } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
+import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import {
   PgExecutionPersistence,
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
 import { readRunAgentSnapshot } from "../../runtime-ts/packages/persistence/src/pg-run-agent-snapshot.js";
+import { readRunSkillSnapshot } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
 import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import {
   loadMigrations,
@@ -86,6 +90,21 @@ import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
+
+function skillSnapshotBlobRef(sha256: string, size: number, mediaType: string): string {
+  const tenantId = "tenant_test_publisher";
+  const incarnationId = "00000000-0000-4000-8000-000000000001";
+  return JSON.stringify({
+    kind: "stable",
+    tenantId,
+    purpose: "skill",
+    sha256,
+    size,
+    mediaType,
+    incarnationId,
+    physicalObjectKey: `test/stable/${tenantId}/skill/sha256/${sha256}/incarnations/${incarnationId}`,
+  });
+}
 
 function sqlStateFromCause(error: unknown): string | undefined {
   const seen = new Set<object>();
@@ -1366,6 +1385,42 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
   it("RunAgentSnapshot 固定创建时的 Revision，发布、停用与重启恢复不改写，撤销阻断安全点和许可", async () => {
     const manager = await createFixture("run_agent_snapshot");
+    const agentSkillId = "skill_agent_snapshot_review";
+    const tenantSkillId = "skill_agent_snapshot_notes";
+    await withTenantTransaction(migratorPool, manager.scope, async (client) => {
+      await client.query(
+        `INSERT INTO skills(id,canonical_key,publisher,display_name,recommended_version,status)
+         VALUES ($1,'review','测试','审阅','2.0.0','active'),
+                ($2,'notes','测试','笔记','1.0.0','active')`,
+        [agentSkillId, tenantSkillId],
+      );
+      await client.query(
+        `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
+             entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
+         VALUES ($1,'1.0.0','Agent 固定审阅','runtime >= 1',repeat('a',64),'SKILL.md',repeat('b',64),$3,'verified','available'),
+                ($1,'2.0.0','Tenant 新版审阅','runtime >= 1',repeat('c',64),'SKILL.md',repeat('d',64),'test/tenant-review-package','verified','available'),
+                ($2,'1.0.0','Tenant 笔记','runtime >= 1',repeat('e',64),'SKILL.md',repeat('f',64),'test/tenant-notes-package','verified','available')`,
+        [
+          agentSkillId,
+          tenantSkillId,
+          skillSnapshotBlobRef("a".repeat(64), 250, "application/json"),
+        ],
+      );
+      await client.query(
+        `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
+         SELECT skill_id,version,entrypoint_path,'text/markdown',20,entrypoint_digest,
+                CASE WHEN skill_id=$1 AND version='1.0.0' THEN $3 ELSE package_blob_ref || '/SKILL.md' END
+           FROM skill_versions WHERE skill_id IN ($1,$2)`,
+        [agentSkillId, tenantSkillId, skillSnapshotBlobRef("b".repeat(64), 20, "text/markdown")],
+      );
+    });
+    await withTenantTransaction(runtimePool, manager.scope, (client) =>
+      client.query(
+        `INSERT INTO tenant_skill_installations(tenant_id,skill_id,skill_version,invocation_name,status)
+         VALUES ($1,$2,'2.0.0','review','enabled'),($1,$3,'1.0.0','notes','enabled')`,
+        [manager.tenant.id, agentSkillId, tenantSkillId],
+      ),
+    );
     await migratorPool.query(
       "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
       [manager.user.id],
@@ -1380,7 +1435,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       content: {
         ...defaults.content,
         operatorInstructions: "固定指令一",
-        includeTenantSkills: false,
+        skillVersions: [{ skillId: agentSkillId, version: "1.0.0" }],
+        includeTenantSkills: true,
       },
       revisionId: "agent_run_snapshot_v1",
       idempotencyKey: "run-agent-snapshot-draft",
@@ -1441,7 +1497,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ),
     );
     expect(rejectedRun.rowCount).toBe(0);
-    const first = await enqueue("run_agent_snapshot_v1");
+    const skillInvocation = { invocationName: "review", args: "审阅本轮更改" };
+    const first = await enqueue("run_agent_snapshot_v1", skillInvocation);
     if (first.outcome !== "created") throw new Error(`Run 创建失败：${first.outcome}`);
     const scope = {
       tenantId: manager.scope.tenantId,
@@ -1453,6 +1510,24 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const snap = await withTenantTransaction(runtimePool, manager.scope, (client) =>
       readRunAgentSnapshot(client, scope),
     );
+    const readSkills = (id: string) =>
+      withTenantTransaction(runtimePool, manager.scope, (client) =>
+        readRunSkillSnapshot(client, scope.tenantId, id),
+      );
+    const skills = await readSkills(scope.runId);
+    expect(() => assertRunSkillSnapshot(skills)).not.toThrow();
+    expect(skills).toMatchObject({
+      items: [
+        { invocationName: "notes", skillVersion: "1.0.0", source: "tenant" },
+        {
+          invocationName: "review",
+          skillVersion: "1.0.0",
+          source: "agent",
+          description: "Agent 固定审阅",
+        },
+      ],
+      explicitInvocation: skillInvocation,
+    });
     expect(snap).toEqual({
       definitionId: draft.definition.id,
       revisionId: revision.id,
@@ -1491,7 +1566,11 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
       revisionId: "agent_run_snapshot_v2",
-      content: { ...revision.content, operatorInstructions: "固定指令二" },
+      content: {
+        ...revision.content,
+        operatorInstructions: "固定指令二",
+        includeTenantSkills: false,
+      },
       idempotencyKey: "run-agent-snapshot-draft-v2",
       expectedGeneration: firstPublish.generation,
     });
@@ -1509,6 +1588,16 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         readRunAgentSnapshot(client, { ...scope, runId: "run_agent_snapshot_v2" }),
       ),
     ).toMatchObject({ revisionId: second.id });
+    const agentOnlySkills = await readSkills("run_agent_snapshot_v2");
+    expect(agentOnlySkills.items).toEqual(skills.items.filter((item) => item.source === "agent"));
+    await expect(
+      enqueue("run_agent_snapshot_tenant_excluded", { invocationName: "notes", args: "" }),
+    ).resolves.toEqual({ outcome: "skill_not_available" });
+    await withTenantTransaction(runtimePool, manager.scope, (client) =>
+      client.query("UPDATE tenant_skill_installations SET status='disabled' WHERE skill_id=$1", [
+        tenantSkillId,
+      ]),
+    );
     const disabled = await repository.deactivate({
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
@@ -1532,6 +1621,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     });
     if (claim.outcome !== "claimed") throw new Error(`领取失败：${claim.outcome}`);
     expect(claim.snapshot.agent).toEqual(snap);
+    expect(claim.snapshot.skills).toEqual(skills);
     const mutate = (
       claimFence: typeof claim.fence,
       input: Omit<
@@ -1583,6 +1673,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     });
     if (resumed.outcome !== "claimed") throw new Error(`恢复领取失败：${resumed.outcome}`);
     expect(resumed.snapshot.agent).toEqual(snap);
+    expect(resumed.snapshot.skills).toEqual(skills);
     expect(resumed.snapshot.attempt.attemptId).not.toBe(claim.snapshot.attempt.attemptId);
     await expect(
       mutate(resumed.fence, {
@@ -1639,6 +1730,164 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         permitDurationMs: 3_000,
       }),
     ).resolves.toEqual({ outcome: "agent_revision_revoked" });
+  });
+
+  it("Agent 自带 Skill 缺失、撤销或摘要不一致时拒绝创建 Run，不回退到 Tenant 版本", async () => {
+    const owner = await createFixture("agent_skill_unavailable");
+    const skillId = "skill_agent_unavailable";
+    const defaults = await readDefaultAgentRevision();
+    if (defaults === undefined) throw new Error("默认 Agent Revision 不可见");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [owner.user.id],
+    );
+    await withTenantTransaction(migratorPool, owner.scope, async (client) => {
+      await client.query(
+        `INSERT INTO skills(id,canonical_key,publisher,display_name,recommended_version,status)
+         VALUES ($1,'agent-unavailable','测试','审阅','2.0.0','active')`,
+        [skillId],
+      );
+      await client.query(
+        `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
+             entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
+         VALUES ($1,'2.0.0','可用的 Tenant 版本','runtime >= 1',repeat('a',64),
+                 'SKILL.md',repeat('b',64),'test/tenant-fallback-package','verified','available')`,
+        [skillId],
+      );
+      await client.query(
+        `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
+         VALUES ($1,'2.0.0','SKILL.md','text/markdown',20,repeat('b',64),'test/tenant-fallback-entrypoint')`,
+        [skillId],
+      );
+    });
+    await withTenantTransaction(runtimePool, owner.scope, (client) =>
+      client.query(
+        `INSERT INTO tenant_skill_installations(tenant_id,skill_id,skill_version,invocation_name,status)
+         VALUES ($1,$2,'2.0.0','agent-unavailable','enabled')`,
+        [owner.tenant.id, skillId],
+      ),
+    );
+    const agents = new PgAgentDefinitionRepository(adminControlPool);
+    const draft = await agents.createDraft({
+      actorUserId: owner.user.id,
+      id: "agent_skill_unavailable",
+      availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+      content: { ...defaults.content, skillVersions: [{ skillId, version: "1.0.0" }] },
+      revisionId: "agent_skill_unavailable_v1",
+      idempotencyKey: "agent-skill-unavailable-draft",
+      expectedGeneration: 0,
+    });
+    await agents.publish({
+      actorUserId: owner.user.id,
+      definitionId: draft.definition.id,
+      revisionId: draft.revision.id,
+      idempotencyKey: "agent-skill-unavailable-publish",
+      expectedGeneration: draft.definition.generation,
+    });
+    const thread = rehydrateThread(
+      {
+        ...owner.thread,
+        id: "thread_agent_skill_unavailable_bound",
+        agentDefinitionId: draft.definition.id,
+      },
+      owner.tenant,
+      owner.user,
+      owner.membership,
+    );
+    expect(await repositories.threads.create(owner.scope, thread)).toMatchObject({
+      outcome: "created",
+    });
+    const creation = new PgRunDispatchCreation(runtimePool);
+    const expectRejected = async (suffix: string) => {
+      const id = runId(`run_agent_skill_unavailable_${suffix}`);
+      await expect(
+        creation.createQueuedRun({
+          scope: owner.scope,
+          thread,
+          run: createRun({ id, thread, now: timestamp(5) }),
+          inputText: "审阅",
+          idempotency: { key: id, requestHash: sha256Digest("0".repeat(64)) },
+        }),
+      ).rejects.toMatchObject({ code: "AGENT_REVISION_UNAVAILABLE" });
+      const rows = await withTenantTransaction(runtimePool, owner.scope, (client) =>
+        client.query(
+          `SELECT 1 FROM runs WHERE id=$1
+           UNION ALL SELECT 1 FROM run_agent_snapshots WHERE run_id=$1
+           UNION ALL SELECT 1 FROM run_skill_snapshots WHERE run_id=$1`,
+          [id],
+        ),
+      );
+      expect(rows.rowCount).toBe(0);
+    };
+    await expectRejected("missing");
+    const app = createApiApp(
+      {
+        auth: { resolve: async () => owner.scope },
+        repositories,
+        createCapability: createApiCreateCapability({
+          threadCreation: new PgThreadCreation(runtimePool),
+          enqueueOutbox: creation,
+        }),
+        archiveThread: new PgArchiveThreadCommand(runtimePool),
+        renamePersonalThread: new PgRenamePersonalThreadCommand(runtimePool),
+        cursorCodec: createThreadCursorCodec({
+          activeKid: "integration-key",
+          keys: [{ kid: "integration-key", secret: Buffer.alloc(32, 11).toString("base64url") }],
+          clock: { now: () => timestamp(20) },
+          ttlMilliseconds: 60_000,
+          maximumTtlMilliseconds: 60_000,
+        }),
+        readiness: { probe: async () => undefined },
+        clock: { now: () => timestamp(20) },
+        ids: {
+          thread: () => thread.id,
+          workspace: () => owner.workspace.id,
+          run: () => runId("run_agent_skill_unavailable_http"),
+        },
+      },
+      { logger: false },
+    );
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/v1/threads/${thread.id}/runs`,
+        headers: { "idempotency-key": "agent-skill-unavailable-http" },
+        payload: { input: "审阅" },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error).toMatchObject({
+        code: "AGENT_REVISION_UNAVAILABLE",
+        retryable: false,
+      });
+    } finally {
+      await app.close();
+    }
+    await migratorPool.query(
+      `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
+           entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
+       SELECT skill_id,'1.0.0','Agent 固定版本',compatibility,package_digest,
+              entrypoint_path,entrypoint_digest,$2,security_status,'revoked'
+         FROM skill_versions WHERE skill_id=$1 AND version='2.0.0'`,
+      [skillId, skillSnapshotBlobRef("a".repeat(64), 250, "application/json")],
+    );
+    await migratorPool.query(
+      `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
+       VALUES ($1,'1.0.0','SKILL.md','text/markdown',20,repeat('b',64),$2)`,
+      [skillId, skillSnapshotBlobRef("b".repeat(64), 20, "text/markdown")],
+    );
+    await expectRejected("revoked");
+    await migratorPool.query(
+      `UPDATE skill_versions SET status='available',entrypoint_digest=repeat('c',64)
+        WHERE skill_id=$1 AND version='1.0.0'`,
+      [skillId],
+    );
+    await expectRejected("corrupt");
+    await migratorPool.query(
+      `UPDATE skill_versions SET entrypoint_digest=repeat('b',64),package_blob_ref=$2
+        WHERE skill_id=$1 AND version='1.0.0'`,
+      [skillId, skillSnapshotBlobRef("d".repeat(64), 250, "application/json")],
+    );
+    await expectRejected("package_ref_mismatch");
   });
 
   it("RunAgentSnapshot 默认 Agent 保留 Prompt Golden 字节，损坏和缺失快照不回退", async () => {

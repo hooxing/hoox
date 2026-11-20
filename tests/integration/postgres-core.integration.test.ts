@@ -46,6 +46,7 @@ import {
   migrateUp,
 } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
+import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
 import {
   PgAdminControlRepository,
   PgRuntimeControlConfigurationRepository,
@@ -365,6 +366,234 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("为迁移前已有 Thread 回填不可变默认 Agent 绑定", async () => {
+    const target = await createIsolatedMigrationTarget("agent_backfill");
+    const oldMigrations = await mkdtemp(join(tmpdir(), "hoox-agent-old-migrations-"));
+    const seedPool = createPostgresPool({
+      connectionString: bootstrapDatabaseUrl,
+      schema: target.context.schema,
+      maxConnections: 2,
+    });
+    try {
+      for (const name of [
+        "0001_baseline.up.sql",
+        "0001_baseline.down.sql",
+        "0002_inline_tool_receipts.up.sql",
+        "0002_inline_tool_receipts.down.sql",
+      ]) {
+        await copyFile(join(sourceMigrationDirectory, name), join(oldMigrations, name));
+      }
+      await migrateUp(target.pool, { ...target.context, directory: oldMigrations });
+      const tenant = "tenant_agent_backfill";
+      const user = "user_agent_backfill";
+      await withTenantTransaction(seedPool, { tenantId: tenant, userId: user }, async (client) => {
+        await client.query("INSERT INTO app_users(id,created_at) VALUES($1,clock_timestamp())", [
+          user,
+        ]);
+        await client.query(
+          "INSERT INTO tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,clock_timestamp())",
+          [tenant, user],
+        );
+        await client.query(
+          "INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at) VALUES($1,'membership_agent_backfill',$2,'owner','active',clock_timestamp())",
+          [tenant, user],
+        );
+        await client.query(
+          "INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at) VALUES($1,'thread_agent_backfill',$2,'既有任务','active',clock_timestamp(),clock_timestamp())",
+          [tenant, user],
+        );
+      });
+      await migrateUp(target.pool, target.context);
+      const binding = await withTenantTransaction(
+        seedPool,
+        { tenantId: tenant, userId: user },
+        (client) =>
+          client.query(
+            "SELECT agent_definition_id FROM threads WHERE tenant_id=$1 AND id='thread_agent_backfill'",
+            [tenant],
+          ),
+      );
+      expect(binding.rows[0]?.agent_definition_id).toBe("agent_default");
+    } finally {
+      await seedPool.end();
+      await rm(oldMigrations, { recursive: true, force: true });
+      await target.close();
+    }
+  });
+  it("AgentDefinition 发布、可用范围、撤销与 Thread 绑定 ACL", async () => {
+    const manager = await createFixture("agent_manager");
+    const other = await createFixture("agent_other_tenant");
+    const viewer = await createFixture("agent_viewer");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active'),($2,'viewer','active')",
+      [manager.user.id, viewer.user.id],
+    );
+    const repository = new PgAgentDefinitionRepository(adminControlPool);
+    const content = {
+      displayName: "测试助手",
+      description: "测试用途",
+      suggestedQuestions: [],
+      operatorInstructions: "仅用于隔离 PostgreSQL 测试。",
+      replyLanguage: "zh-CN",
+      model: { mode: "platform_default" as const },
+      builtinTools: [],
+      externalTools: [],
+      clientTools: [],
+      toolCallingMode: "native" as const,
+      skillVersions: [],
+      includeTenantSkills: true,
+      sandboxIdleAction: "pause" as const,
+      longTermMemoryEnabled: false,
+    };
+    await expect(
+      repository.createDraft({
+        actorUserId: viewer.user.id,
+        id: "agent_viewer_denied",
+        availability: { mode: "all_tenants" },
+        content,
+        revisionId: "agent_viewer_revision",
+        idempotencyKey: "agent-viewer-create",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    const draft = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_scope_test",
+      availability: { mode: "selected_tenants", tenantIds: [manager.tenant.id] },
+      content,
+      revisionId: "agent_scope_revision_1",
+      idempotencyKey: "agent-create-scope-1",
+      expectedGeneration: 0,
+    });
+    expect(draft.definition.status).toBe("draft");
+    const published = await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: draft.revision.id,
+      idempotencyKey: "agent-publish-scope-1",
+      expectedGeneration: 0,
+    });
+    expect(published.currentRevisionId).toBe(draft.revision.id);
+    expect(
+      await repository.publish({
+        actorUserId: manager.user.id,
+        definitionId: draft.definition.id,
+        revisionId: draft.revision.id,
+        idempotencyKey: "agent-publish-scope-1",
+        expectedGeneration: 0,
+      }),
+    ).toEqual(published);
+    const secondRevision = await repository.createDraftRevision({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: "agent_scope_revision_2",
+      content: { ...content, displayName: "测试助手第二版" },
+      idempotencyKey: "agent-revision-create-2",
+      expectedGeneration: 1,
+    });
+    const secondPublish = await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: secondRevision.id,
+      idempotencyKey: "agent-publish-scope-2",
+      expectedGeneration: 2,
+    });
+    expect(secondPublish.currentRevisionId).toBe(secondRevision.id);
+    expect((await repository.readRevisionById(manager.tenant.id, draft.revision.id))?.status).toBe(
+      "published",
+    );
+    expect(
+      (await repository.listAvailable(manager.tenant.id)).map((item) => item.definition.id),
+    ).toContain("agent_scope_test");
+    expect(
+      (await repository.listAvailable(other.tenant.id)).map((item) => item.definition.id),
+    ).not.toContain("agent_scope_test");
+    const hidden = await withTenantTransaction(runtimePool, other.scope, (client) =>
+      client.query("SELECT id FROM agent_definitions WHERE id='agent_scope_test'"),
+    );
+    expect(hidden.rowCount).toBe(0);
+    const hiddenRevision = await withTenantTransaction(runtimePool, other.scope, (client) =>
+      client.query("SELECT id FROM agent_revisions WHERE id=$1", [draft.revision.id]),
+    );
+    expect(hiddenRevision.rowCount).toBe(0);
+    await expect(
+      adminControlPool.query("UPDATE agent_revisions SET content='{}'::jsonb WHERE id=$1", [
+        draft.revision.id,
+      ]),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      adminControlPool.query("DELETE FROM agent_definitions WHERE id='agent_default'"),
+    ).rejects.toMatchObject({ code: "42501" });
+    const defaultAgent = await runtimePool.query(
+      "SELECT id,current_revision_id FROM agent_definitions WHERE id='agent_default'",
+    );
+    expect(defaultAgent.rowCount).toBe(1);
+    const thread = await runtimePool.query(
+      "SELECT agent_definition_id FROM threads WHERE tenant_id=$1 AND id=$2",
+      [manager.tenant.id, manager.thread.id],
+    );
+    expect(thread.rows[0]?.agent_definition_id).toBe("agent_default");
+    await expect(
+      repository.deactivate({
+        actorUserId: manager.user.id,
+        definitionId: published.id,
+        idempotencyKey: "agent-disable-scope-1",
+        expectedGeneration: 3,
+      }),
+    ).resolves.toMatchObject({ status: "disabled", generation: 4 });
+    await expect(
+      repository.revoke({
+        actorUserId: manager.user.id,
+        definitionId: published.id,
+        revisionId: draft.revision.id,
+        reason: "测试撤销",
+        idempotencyKey: "agent-revoke-old-revision",
+        expectedGeneration: 4,
+      }),
+    ).resolves.toMatchObject({ status: "disabled", generation: 5 });
+    expect(
+      (await repository.listAvailable(manager.tenant.id)).map((item) => item.definition.id),
+    ).not.toContain("agent_scope_test");
+    await expect(
+      repository.publish({
+        actorUserId: manager.user.id,
+        definitionId: draft.definition.id,
+        revisionId: draft.revision.id,
+        idempotencyKey: "agent-publish-stale-1",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    const revokeDraft = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_revoke_test",
+      availability: { mode: "all_tenants" },
+      content,
+      revisionId: "agent_revoke_revision_1",
+      idempotencyKey: "agent-revoke-create",
+      expectedGeneration: 0,
+    });
+    const revokePublished = await repository.publish({
+      actorUserId: manager.user.id,
+      definitionId: revokeDraft.definition.id,
+      revisionId: revokeDraft.revision.id,
+      idempotencyKey: "agent-revoke-publish",
+      expectedGeneration: 0,
+    });
+    await expect(
+      repository.revoke({
+        actorUserId: manager.user.id,
+        definitionId: revokePublished.id,
+        revisionId: revokeDraft.revision.id,
+        reason: "紧急撤销测试",
+        idempotencyKey: "agent-revoke-current",
+        expectedGeneration: 1,
+      }),
+    ).resolves.toMatchObject({ status: "revoked", generation: 2 });
+    expect(
+      await repository.readCurrentPublished(manager.tenant.id, "agent_revoke_test"),
+    ).toBeUndefined();
+  });
+
   it("托管沙箱配置验证权限、发布门禁、版本并发及实例绑定隔离", async () => {
     const admin = await createFixture("sandbox_control_admin");
     const viewer = await createFixture("sandbox_control_viewer");
@@ -2109,7 +2338,13 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["app_users", new Set(["SELECT", "INSERT"])],
       ["tenants", new Set(["SELECT", "INSERT"])],
       ["memberships", new Set(["SELECT", "INSERT"])],
-      ["threads", new Set(["SELECT", "INSERT", "UPDATE"])],
+      ["threads", new Set(["SELECT", "INSERT"])],
+      ["agent_definitions", new Set(["SELECT"])],
+      ["agent_definition_tenants", new Set(["SELECT"])],
+      ["agent_revisions", new Set(["SELECT"])],
+      ["agent_revision_revocations", new Set(["SELECT"])],
+      ["agent_definition_commands", new Set()],
+      ["agent_definition_audits", new Set()],
       ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
       ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
       ["workspace_revisions", new Set(["SELECT", "INSERT"])],
@@ -2174,6 +2409,18 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       );
     }
     const expectedColumnUpdates = new Map<string, ReadonlySet<string>>([
+      [
+        "threads",
+        new Set([
+          "title",
+          "status",
+          "updated_at",
+          "version",
+          "title_source",
+          "title_generated_at",
+          "title_generation_version",
+        ]),
+      ],
       ["memberships", new Set(["lock_marker"])],
       [
         "blob_lifecycles",
@@ -2347,6 +2594,14 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ),
     );
     expect(crossTenantLockMarker.rowCount).toBe(0);
+    await expect(
+      withTenantTransaction(runtimePool, left.scope, (client) =>
+        client.query(
+          "UPDATE threads SET agent_definition_id='agent_default' WHERE tenant_id=$1 AND id=$2",
+          [left.scope.tenantId, left.thread.id],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
     await expect(
       withTenantTransaction(runtimePool, left.scope, (client) =>
         client.query(

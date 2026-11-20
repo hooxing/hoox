@@ -16,6 +16,10 @@
 - 跨表引用使用包含 `tenant_id` 的复合外键，阻止跨租户身份拼接。公开错误不泄漏跨 Tenant 实体是否存在。
 - 后台统计只通过 Migrator 拥有的受限视图跨 Tenant 聚合；底表保留 FORCE RLS，专属读取策略只面向 Migrator 并要求有效平台操作者。
 
+## Thread 的 Agent 绑定
+
+Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Thread 回填内置默认 Agent。绑定列只能在 INSERT 时写入：Runtime 对 `threads` 不拥有整表 `UPDATE`，仅获准更新标题、状态、版本、时间戳及标题生成元数据等现有业务列。列级 ACL 同时保护所有 SQL 写入路径，AgentDefinition 绑定不会随 Thread 更新、归档或标题生成改变。新增 Thread 前还必须通过 RLS 校验所选 Agent 已发布且对当前 Tenant 可用。
+
 ## 数据库角色
 
 每个常驻进程只持有完成职责所需的数据库身份：
@@ -26,7 +30,7 @@
 | Runtime | API、Worker、Scheduler | 表与列白名单 ACL，无 routine 权限；对 Membership 只有 SELECT、INSERT 与恒定 `lock_marker` 列更新 |
 | Worker Coordinator | Worker 的 Tenant 发现 | 只能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表 |
 | Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Worker 不持有 |
-| Admin Control | 统一 Admin API 控制面 | 控制面配置、审计与统计投影 |
+| Admin Control | 统一 Admin API 控制面 | 控制面配置、审计与统计投影；AgentDefinition 写入仅允许当前有效的 `operator` 或 `admin` 身份 |
 | Skill Publisher | 统一 Admin API Skill 路由 | Skill 发布状态机与对应对象存储权限 |
 
 角色属于整个 PostgreSQL 集群；同一集群的开发、预览和生产数据库使用不同角色集合。迁移在任何 DDL 前校验全部角色、Schema owner、`search_path` 与跨数据库依赖，并在同一事务中完成 Schema 迁移、迁移记录、策略重绑定和最小 ACL 重建。readiness 探测的是实际连接身份，而不是配置文件中的声明。

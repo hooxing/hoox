@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "@hoox/prompt-builder";
 import { createHash } from "node:crypto";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
 import { type RuntimeRolloutEntry, sha256Digest } from "@hoox/domain";
@@ -442,6 +443,7 @@ async function sessionHarness() {
     faux,
     options: {
       model,
+      operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
       modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
       modelRuntime,
       sandbox: new FakeSandboxHandle("recovery-fake"),

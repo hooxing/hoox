@@ -1,4 +1,7 @@
-import { buildRuntimeSystemPrompt } from "@hoox/prompt-builder";
+import {
+  buildRuntimeSystemPrompt,
+  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
+} from "@hoox/prompt-builder";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import {
   type Context,
@@ -82,6 +85,7 @@ async function sessionFixture(
   }
   const controller = await createSafePiSession({
     model,
+    operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
     modelRuntime,
     modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
     sandbox: new FakeSandboxHandle("pi-kernel-contract"),
@@ -118,6 +122,7 @@ describe("Pi 内核替换的 Provider 可见契约", () => {
       });
       const built = buildRuntimeSystemPrompt({
         schemaVersion: 1,
+        operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
         capabilities: (first.context.tools ?? []).map((tool) => ({
           id: tool.name,
           description: tool.description,

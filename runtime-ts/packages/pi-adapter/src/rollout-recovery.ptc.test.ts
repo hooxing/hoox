@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "@hoox/prompt-builder";
 import {
   createModels,
   fauxAssistantMessage,
@@ -41,6 +42,7 @@ async function harness() {
   }));
   const options: SessionOptions = {
     model,
+    operatorInstructions: DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
     modelRuntime,
     modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
     sandbox,

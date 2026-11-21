@@ -118,6 +118,7 @@ export function assertControlledRolloutProjection(projection: ControlledRolloutP
             trust: "sandbox_untrusted",
             toolName: item.toolName,
             outcome: item.outcome,
+            ...(item.executionMode === undefined ? {} : { executionMode: item.executionMode }),
             message: item.outcome === "succeeded" ? "工具调用已完成。" : "工具调用未完成。",
           }),
         );

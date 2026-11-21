@@ -343,6 +343,45 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
     ).toThrow(new RuntimeRecoveryError("MALFORMED_FACTS"));
   });
 
+  it("Session 从恢复 Rollout 重建 Playground Mock 回执模式", async () => {
+    const harness = await sessionHarness();
+    let restoredText = "";
+    const entryWithMock = [
+      entry(0, "tool_call", { toolName: "http__lookup" }, "mock-call"),
+      controlledResultEntry(1, "mock-call", "http__lookup", "playground_mock"),
+    ];
+    harness.faux.setResponses([
+      (context) => {
+        const messages = context.messages as unknown as readonly {
+          readonly content: readonly { readonly type: string; readonly text?: string }[];
+        }[];
+        restoredText = messages
+          .flatMap((message) => message.content)
+          .filter((item) => item.type === "text")
+          .map((item) => item.text ?? "")
+          .join("\n");
+        return fauxAssistantMessage("恢复完成");
+      },
+    ]);
+    const result = await recoverSafePiSession({
+      ...harness.options,
+      loadRecovery: async (current) => ({
+        ...loaded(entryWithMock),
+        recordedCompatibility: current,
+      }),
+    });
+    expect(result.outcome).toBe("session_created");
+    if (result.outcome !== "session_created") return;
+    try {
+      await result.controller.prompt("继续");
+      expect(restoredText).toContain('"executionMode":"playground_mock"');
+      expect(restoredText).toContain("工具调用由 Playground Mock 完成。");
+      expect(restoredText).not.toContain('"executionMode":"arbitrary"');
+    } finally {
+      result.controller.dispose();
+    }
+  });
+
   it("公开入口用实际 Session 身份调用 loadRecovery，原样返回 rebuild 且不创建 Session", async () => {
     const harness = await sessionHarness();
     let capturedModelId = "";

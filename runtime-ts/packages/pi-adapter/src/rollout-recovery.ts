@@ -271,6 +271,7 @@ function recoverToolObservation(
     toolCallId: entry.toolCallId,
     toolName: predecessorToolName,
     outcome: receipt.outcome,
+    ...(receipt.executionMode === undefined ? {} : { executionMode: receipt.executionMode }),
     // 恢复内容从固定 schema 重建，不信任 Rollout 中可被篡改的任意正文。
     observation: entry.isTruncated
       ? entry.body.observation

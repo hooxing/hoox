@@ -50,10 +50,14 @@ async function fixture(
     beforeToolConsumeReturn?: () => Promise<void>;
     updateScheduledTask?: ConstructorParameters<typeof PiWorkerSessionFactory>[13];
     nativeAutomation?: boolean;
+    origin?: "normal" | "playground" | "evaluation" | "api";
   } = {},
 ) {
   const persistence = new FakeExecutionPersistence();
-  const scope = persistence.addSeed(fakeSeed("pi-ptc-worker"));
+  const scope = persistence.addSeed({
+    ...fakeSeed("pi-ptc-worker"),
+    ...(options.origin === undefined ? {} : { origin: options.origin }),
+  });
   const sandboxes = new FakeSandboxRegistry();
   const operations: string[] = [];
   const events: RuntimeAgentEvent[] = [];
@@ -255,6 +259,27 @@ function toolPermits(test: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("PiWorkerSessionFactory PTC 模式", () => {
+  it.each(["native", "ptc"] as const)(
+    "%s Playground 定时任务调用在执行入口拒绝且不消费许可",
+    async (mode) => {
+      const mutation =
+        vi.fn<NonNullable<ConstructorParameters<typeof PiWorkerSessionFactory>[13]>>();
+      const test = await fixture({
+        constructorMode: mode,
+        origin: "playground",
+        ...(mode === "ptc" ? { code: automationProgram } : { nativeAutomation: true }),
+        updateScheduledTask: mutation,
+      });
+      await test.worker.execute(test.scope);
+      expect(mutation).not.toHaveBeenCalled();
+      expect(toolPermits(test).some(({ permit }) => permit.toolName === "automation_update")).toBe(
+        false,
+      );
+      expect(startedCalls(test).some((call) => call.toolName === "automation_update")).toBe(true);
+    },
+    30_000,
+  );
+
   it.each(["native", "ptc"] as const)(
     "%s 定时任务授权等待中取消，授权收束后不开始 mutation",
     async (mode) => {

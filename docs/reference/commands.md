@@ -42,9 +42,13 @@
 
 | 命令 | 用途 |
 | --- | --- |
+| `corepack pnpm migration:new <名称>` | 取本地 `origin/main` 与工作区的最大迁移号加一，创建只含注释的 up/down 文件；名称只允许小写字母、数字和下划线 |
+| `corepack pnpm migration:renumber [基准引用] [--dry-run]` | 将分支新增迁移顺延到基准之后并更新主干引用；默认基准为本地 `origin/main`，`--dry-run` 只列出变更，不写入工作区或 Git 索引 |
 | `corepack pnpm db:migrate:up` | 执行向前迁移 |
 | `corepack pnpm db:migrate:down` | 显式允许破坏性回退；只用于受控环境 |
 | `corepack pnpm dev:identity:provision` | 幂等初始化两个 development 身份及个人 Tenant |
+
+重编号会暂存已跟踪迁移的改名；引用更新保留在工作区。运行后请检查并暂存所需变更。迁移文件的修改限制见[持久化与数据库](../architecture/persistence-and-database.md#routine-与迁移)。
 
 数据库角色 bootstrap 见[开发指南](../development.md)。不要对共享或生产数据库执行 development 黑盒和破坏性 down。
 

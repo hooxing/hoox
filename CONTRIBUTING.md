@@ -72,6 +72,8 @@ corepack pnpm check:clean-workspace
 2. 没有合适文档时，在 `docs/architecture` 新增主题文档并加入索引。
 3. 在 PR 描述中说明备选方案、选择理由、验证方式和可逆性；历史讨论以 PR 与 Git 历史为准。
 
+新增数据库迁移使用 `corepack pnpm migration:new <名称>`；并行分支合并前按[迁移编号约定](docs/architecture/persistence-and-database.md#routine-与迁移)顺延分支新增且尚未执行的迁移。
+
 ## Pull Request
 
 PR 应包含：

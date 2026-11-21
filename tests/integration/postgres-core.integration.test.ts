@@ -4369,7 +4369,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["agent_revision_revocations", new Set(["SELECT"])],
       ["agent_definition_commands", new Set()],
       ["agent_definition_audits", new Set()],
-      ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
+      ["runs", new Set(["SELECT", "INSERT"])],
       ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
       ["workspace_revisions", new Set(["SELECT", "INSERT"])],
       ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
@@ -4433,6 +4433,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       );
     }
     const expectedColumnUpdates = new Map<string, ReadonlySet<string>>([
+      ["runs", new Set(["status", "version", "updated_at"])],
       [
         "threads",
         new Set([

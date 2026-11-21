@@ -254,6 +254,8 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       snapshot: {
         agent: record.agent ?? "AGENT_SNAPSHOT_INVALID",
         run: record.run,
+        origin: "normal",
+        playgroundMocks: {},
         tenantKind: record.tenantKind,
         memorySubjectUserId: record.memorySubjectUserId,
         requestedByUserId: record.requestedByUserId,

@@ -1156,6 +1156,14 @@ async function hasRunAgentSnapshotState(client: PoolClient, schema: string): Pro
   return result.rows[0]?.present === true;
 }
 
+async function hasRunPlaygroundMockState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.run_playground_mocks',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAgentDefinitionState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.agent_definitions',$1::text)) IS NOT NULL
@@ -1308,6 +1316,7 @@ export async function activeTablePolicy(
   if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
   if (!(await hasWebhookState(client, schema))) {
     policy.delete("tenant_webhooks");
+    if (policy.has("run_playground_mocks")) policy.set("run_playground_mocks", new Set());
     policy.delete("webhook_outbox");
   }
   if (await hasManagedSandboxState(client, schema)) {
@@ -1448,6 +1457,10 @@ export async function activeTablePolicy(
   if (await hasRunAgentSnapshotState(client, schema)) {
     policy.set("run_agent_snapshots", new Set(["SELECT", "INSERT"]));
   }
+  if (await hasRunPlaygroundMockState(client, schema)) {
+    policy.set("run_playground_mocks", new Set(["SELECT", "INSERT"]));
+    policy.set("runs", new Set(["SELECT", "INSERT"]));
+  }
   if (!(await hasAgentDefinitionState(client, schema))) {
     for (const table of [
       "agent_definitions",
@@ -1508,6 +1521,10 @@ export async function activeColumnUpdatePolicy(
   }
   if (await hasRunAgentSnapshotState(client, schema)) {
     policy.set("run_agent_snapshots", new Set());
+  }
+  if (await hasRunPlaygroundMockState(client, schema)) {
+    policy.set("run_playground_mocks", new Set());
+    policy.set("runs", new Set(["version", "status", "updated_at"]));
   }
   if (await hasAgentDefinitionState(client, schema)) {
     for (const table of [
@@ -4149,6 +4166,27 @@ export async function bootstrapRuntimeAccessOnClient(
       `ALTER POLICY agent_revision_revocations_snapshot_read ON ${schema}.agent_revision_revocations TO ${role};
        GRANT SELECT,INSERT ON TABLE ${schema}.run_agent_snapshots TO ${role}`,
     );
+  }
+  if (await hasRunPlaygroundMockState(client, context.schema)) {
+    // Run 来源与父 Thread 在受理后不可改写，Worker 只推进状态、版本与时间。
+    await client.query(`REVOKE UPDATE ON ${schema}.runs FROM ${role};
+      GRANT UPDATE(status, version, updated_at) ON ${schema}.runs TO ${role};
+      GRANT SELECT ON ${schema}.playground_acceptance_scope TO ${role};
+      GRANT SELECT,INSERT ON TABLE ${schema}.run_playground_mocks TO ${role};
+      ALTER POLICY playground_directory_read ON ${schema}.run_agent_snapshots TO ${quoteIdentifier(context.migratorRole)}`);
+    for (const [table, policy] of [
+      ["threads", "read"],
+      ["threads", "insert"],
+      ["runs", "read"],
+      ["runs", "insert"],
+      ["agent_definitions", "read"],
+      ["agent_revisions", "read"],
+      ["run_agent_snapshots", "insert"],
+      ["run_playground_mocks", "read"],
+      ["run_playground_mocks", "insert"],
+    ]) {
+      await client.query(`ALTER POLICY playground_${policy} ON ${schema}.${table} TO ${role}`);
+    }
   }
   if (await hasAgentDefinitionState(client, context.schema)) {
     await client.query(

@@ -14,6 +14,13 @@ ALTER TABLE threads FORCE ROW LEVEL SECURITY;
 ALTER TABLE runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE runs FORCE ROW LEVEL SECURITY;
 
+-- 与来源字段同迁移回退：先拆除 Outbox 外键，再移除其来源快照与复合唯一约束。
+ALTER TABLE webhook_outbox
+  DROP CONSTRAINT webhook_outbox_source_run_fk,
+  DROP CONSTRAINT webhook_outbox_source_run_shape,
+  DROP COLUMN source_run_origin,
+  DROP COLUMN source_run_id;
+
 CREATE OR REPLACE VIEW admin_run_event_outline WITH (security_barrier=true) AS
 SELECT
   attempt.tenant_id,

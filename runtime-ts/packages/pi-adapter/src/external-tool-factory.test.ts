@@ -24,6 +24,13 @@ const make = (name: string): ExternalToolVersion => ({
   idempotent: false,
   credentialRef: null,
 });
+const echoResult = {
+  content: [
+    { type: "text", text: "外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。" },
+  ],
+  details: { withheld: "EXTERNAL_TOOL_CREDENTIAL_ECHO" },
+};
+
 describe("外部工具 Pi 工厂", () => {
   it("按快照名称排序，不接入 Session", () => {
     const create = createExternalToolFactory({
@@ -111,10 +118,7 @@ describe("外部工具 Pi 工厂", () => {
       ]);
       if (!agentTool) throw new Error("测试工具未生成");
       const result = await agentTool.execute("encoded-mcp", {});
-      expect(result).toEqual({
-        content: [{ type: "text", text: "外部工具调用已成功，响应正文未向模型公开。" }],
-        details: { truncated: false },
-      });
+      expect(result).toEqual(echoResult);
       expect(exchange).toHaveBeenCalledOnce();
       expect(exchange.mock.calls[0]?.[0]).toMatchObject({
         credential,
@@ -157,9 +161,7 @@ describe("外部工具 Pi 工厂", () => {
       });
       const [agentTool] = create([{ tool, credential }]);
       if (!agentTool) throw new Error("测试工具未生成");
-      expect((await agentTool.execute("http-bound-method", {})).content).toEqual([
-        { type: "text", text: "外部工具调用已成功，响应正文未向模型公开。" },
-      ]);
+      expect(await agentTool.execute("http-bound-method", {})).toEqual(echoResult);
       expect(invoke).toHaveBeenCalledOnce();
       expect(invoke.mock.calls[0]?.[0]).toMatchObject({ tool, credential, method });
     },

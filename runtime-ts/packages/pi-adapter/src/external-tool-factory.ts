@@ -4,7 +4,7 @@ import { createExternalToolAgentTool, type ExternalToolExecutionPorts } from "@h
 
 /** 按已固定快照生成稳定能力数组；此工厂不负责把能力注册进 Pi Session。 */
 export function createExternalToolFactory(
-  ports: Omit<ExternalToolExecutionPorts, "httpMethodForVersion">,
+  ports: ExternalToolExecutionPorts,
 ): (snapshots: readonly ExternalToolRuntimeSnapshot[]) => readonly AgentTool[] {
   return (snapshots) => {
     const ordered = [...snapshots].sort((a, b) =>
@@ -19,15 +19,7 @@ export function createExternalToolFactory(
     if (ordered.length > 64) throw new TypeError("EXTERNAL_TOOL_CAPACITY_EXCEEDED");
     return Object.freeze(
       ordered.map((snapshot) =>
-        createExternalToolAgentTool(
-          snapshot.tool,
-          {
-            ...ports,
-            // 固定版本的方法不依赖模型参数，也不按工具名称重新查询。
-            httpMethodForVersion: () => snapshot.tool.httpMethod,
-          },
-          snapshot.credential,
-        ),
+        createExternalToolAgentTool(snapshot.tool, ports, snapshot.credential),
       ),
     );
   };

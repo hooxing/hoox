@@ -403,6 +403,10 @@ export function createExternalToolAgentTool(
           details: { error: code },
         };
       };
+      if (ports.runOrigin === "playground") {
+        await ports.persistStarted({ callId, toolName: tool.modelToolName });
+        return failed("PLAYGROUND_MOCK_NOT_CONFIGURED");
+      }
       let invocation: Parameters<ExternalToolTransport["invoke"]>[0];
       try {
         const retry = ports.isExplicitlyReconciledRetry

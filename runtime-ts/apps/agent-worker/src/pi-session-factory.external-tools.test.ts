@@ -381,6 +381,76 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
     ]);
     expect(faux.state.callCount).toBe(1);
   });
+  it("PTC 内部外部工具缺少 Playground Mock 时不触达 Transport 或许可", async () => {
+    const snapshot = version("http", origin, "playground-http-no-mock");
+    const persistence = new FakeExecutionPersistence();
+    const base = seed("playground-ptc-no-mock", [snapshot], [], undefined, "ptc");
+    const scope = persistence.addSeed({ ...base, origin: "playground", playgroundMocks: {} });
+    const { faux, sessions } = await pi(reader([snapshot]), "ptc");
+    faux.setResponses([
+      toolCall(
+        "run_code",
+        { code: `return await tools.${snapshot.tool.modelToolName}({runId: "ptc"});` },
+        "program-no-mock",
+      ),
+      fauxAssistantMessage("没有模拟结果"),
+    ]);
+    await worker(persistence, sessions).execute(scope);
+    expect(requests).toHaveLength(0);
+    expect(
+      persistence.permits.some(
+        ({ permit }) => permit.toolVersionId === snapshot.tool.toolVersionId,
+      ),
+    ).toBe(false);
+  });
+
+  it("PTC 客户端 Mock 复用已验证前驱，不重复写入开始事实", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const base = seed("client-mock-ptc", [], [], undefined, "ptc");
+    const scope = persistence.addSeed({
+      ...base,
+      origin: "playground",
+      playgroundMocks: { client_lookup: { result: "mocked" } },
+      agent: fakeAgentSnapshot({
+        tools: {
+          mode: "configured",
+          builtinTools: [],
+          externalTools: [],
+          clientTools: [
+            {
+              name: "client_lookup",
+              description: "查询客户端数据",
+              inputSchema: {
+                type: "object",
+                properties: { key: { type: "string" } },
+                required: ["key"],
+                additionalProperties: false,
+              },
+            },
+          ],
+          toolCallingMode: "ptc",
+        },
+      }),
+    });
+    const { faux, sessions, starts, receipts } = await pi(reader([]), "ptc");
+    faux.setResponses([
+      toolCall(
+        "run_code",
+        { code: 'return await tools.client_lookup({key: "ptc"});' },
+        "client-program",
+      ),
+      fauxAssistantMessage("完成"),
+    ]);
+    expect(await worker(persistence, sessions).execute(scope)).toEqual({ outcome: "succeeded" });
+    expect(starts.filter((item) => item.toolName === "client_lookup")).toHaveLength(1);
+    expect(
+      receipts.some(({ receipt }) => receipt.includes('"executionMode":"playground_mock"')),
+    ).toBe(true);
+    expect(persistence.permits.some(({ permit }) => permit.toolName === "client_lookup")).toBe(
+      false,
+    );
+  });
+
   it.each(["mcp", "http"] as const)(
     "PTC 的 %s 子调用复用同名 durable 前驱且仅消费一次许可",
     async (source) => {

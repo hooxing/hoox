@@ -217,13 +217,11 @@ function recoverToolObservation(
     entry.body.toolName !== predecessorToolName ||
     typeof entry.body.observation !== "string" ||
     !isRecord(entry.body.receipt) ||
-    !hasExactKeys(entry.body.receipt, [
-      "message",
-      "outcome",
-      "schemaVersion",
-      "toolName",
-      "trust",
-    ]) ||
+    !hasAllowedExactKeys(
+      entry.body.receipt,
+      ["message", "outcome", "schemaVersion", "toolName", "trust"],
+      ["executionMode"],
+    ) ||
     !isRecord(entry.body.truncation) ||
     !hasExactKeys(
       entry.body.truncation,
@@ -243,6 +241,9 @@ function recoverToolObservation(
     trust: entry.body.receipt.trust,
     toolName: entry.body.receipt.toolName,
     outcome: entry.body.receipt.outcome,
+    ...(entry.body.receipt.executionMode === undefined
+      ? {}
+      : { executionMode: entry.body.receipt.executionMode }),
     message: entry.body.receipt.message,
   });
   let receipt: ControlledToolReceipt;
@@ -273,7 +274,7 @@ function recoverToolObservation(
     // 恢复内容从固定 schema 重建，不信任 Rollout 中可被篡改的任意正文。
     observation: entry.isTruncated
       ? entry.body.observation
-      : encodeControlledToolReceipt(receipt.toolName, receipt.outcome),
+      : encodeControlledToolReceipt(receipt.toolName, receipt.outcome, receipt.executionMode),
     isTruncated: entry.isTruncated,
     modelVisibleBytes: entry.body.truncation.modelVisibleBytes,
     ...(typeof entry.body.truncation.reason === "string"
@@ -285,6 +286,18 @@ function recoverToolObservation(
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function hasAllowedExactKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const keys = Object.keys(value);
+  return (
+    required.every((key) => Object.hasOwn(value, key)) &&
+    keys.every((key) => required.includes(key) || optional.includes(key))
+  );
 }
 
 function toolCallName(entry: RuntimeRolloutEntry): string {

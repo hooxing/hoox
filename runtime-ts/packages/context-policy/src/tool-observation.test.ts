@@ -68,8 +68,8 @@ function pipeline(max = 80) {
   };
 }
 let currentOutput = encodeControlledToolReceipt("sandbox_command", "succeeded");
-function input(_output: string) {
-  currentOutput = encodeControlledToolReceipt("sandbox_command", "succeeded");
+function input(_output: string, executionMode?: "playground_mock") {
+  currentOutput = encodeControlledToolReceipt("sandbox_command", "succeeded", executionMode);
   return {
     binding: {
       tenantId,
@@ -112,6 +112,28 @@ describe("Tool Observation Blob 截断切片", () => {
       receiptSha256: digest(traces.calls[0]?.body ?? new Uint8Array()),
       truncation: { reason: "model_utf8_budget_or_rollout_body_budget" },
     });
+  });
+
+  it("Mock 模式进入固定受控回执且未截断断言与编码一致", async () => {
+    const { subject, rollout } = pipeline(400);
+    const result = await subject.record(input("unused", "playground_mock"));
+    expect(result).toMatchObject({ outcome: "recorded", isTruncated: false });
+    expect(rollout.calls[0]?.body).toMatchObject({
+      receipt: { executionMode: "playground_mock" },
+      observation: expect.stringContaining('"executionMode":"playground_mock"'),
+    });
+    expect(() =>
+      assertControlledToolObservation({
+        receipt: parseControlledToolReceipt(
+          encodeControlledToolReceipt("sandbox_command", "succeeded", "playground_mock"),
+        ),
+        observation: encodeControlledToolReceipt("sandbox_command", "succeeded"),
+        isTruncated: false,
+        modelVisibleBytes: Buffer.byteLength(
+          encodeControlledToolReceipt("sandbox_command", "succeeded"),
+        ),
+      }),
+    ).toThrow("未截断 Tool Observation 与固定回执不一致");
   });
 
   it("极小预算也不超字节上限，且不会切开 Unicode", async () => {

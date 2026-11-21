@@ -48,6 +48,38 @@ function deploy(
   for (const directory of ["releases/candidate", "releases/previous", "shared", "tmp"]) {
     mkdirSync(join(root, directory), { recursive: true });
   }
+  const schedulerPackage = join(root, "runtime-ts/apps/scheduler");
+  mkdirSync(join(schedulerPackage, "node_modules/pg"), { recursive: true });
+  writeFileSync(join(schedulerPackage, "package.json"), "{}");
+  writeFileSync(
+    join(schedulerPackage, "node_modules/pg/index.js"),
+    `const { appendFileSync } = require("node:fs");
+exports.Client = class {
+  constructor(options) {
+    this.options = options;
+  }
+  async connect() {
+    appendFileSync(process.env.MOCK_LOG, "dispatcher connect\\n");
+    if (this.options.connectionString !== process.env.WEBHOOK_DISPATCHER_DATABASE_URL ||
+        !this.options.connectionString || !this.options.connectionTimeoutMillis) {
+      throw new Error("探针必须使用 Scheduler DSN 和有限连接超时");
+    }
+    if (process.env.MOCK_MODE === "dispatcher-auth-failure") {
+      throw new Error(this.options.connectionString);
+    }
+  }
+  async query(sql) {
+    appendFileSync(process.env.MOCK_LOG, "dispatcher query " + sql + "\\n");
+    if (sql !== "SELECT 1" || !this.options.query_timeout ||
+        process.env.MOCK_MODE === "dispatcher-query-failure") {
+      throw new Error(this.options.connectionString);
+    }
+  }
+  async end() {
+    appendFileSync(process.env.MOCK_LOG, "dispatcher end\\n");
+  }
+};\n`,
+  );
   for (const file of ["docker-compose.yml", "postgres-init.sh", "nginx.conf.template"]) {
     writeFileSync(join(root, "releases/candidate", file), "");
     writeFileSync(join(root, "releases/previous", file), "");
@@ -108,7 +140,17 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
   });
 
   it.each([
+    ["infra.env", "POSTGRES_DB=test_db\n", "infra.env"],
     ["migration.env", "", "migration.env"],
+    ["migration.env", "DATABASE_WEBHOOK_DISPATCHER_ROLE=other_role\n", "migration.env"],
+    [
+      "scheduler.env",
+      webhookFiles.scheduler.replace(
+        "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher",
+        "DATABASE_WEBHOOK_DISPATCHER_ROLE=other_role",
+      ),
+      "scheduler.env",
+    ],
     [
       "scheduler.env",
       webhookFiles.scheduler.replace(/^WEBHOOK_DISPATCHER_DATABASE_URL=.*$/mu, ""),
@@ -146,6 +188,22 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     expect(result.composeEnv).toBe("HOOX_DEMO_IMAGE=test/previous@sha256:previous\n");
   });
 
+  it.each(["dispatcher-auth-failure", "dispatcher-query-failure"])(
+    "%s 时关闭 Scheduler 探针连接、隐藏凭据并在迁移前停止",
+    (mode) => {
+      const result = deploy(mode);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("数据库认证探针失败，已停止迁移");
+      expect(result.log).toContain("--entrypoint node scheduler --input-type=module -e");
+      expect(result.log).toContain("dispatcher connect");
+      expect(result.log).toContain("dispatcher end");
+      expect(result.log).not.toContain("run --rm migrate");
+      expect(result.stdout + result.stderr + result.log).not.toContain("placeholder-password");
+      expect(result.stdout).not.toContain("Hoox Demo 发布完成");
+      expect(result.composeEnv).toContain("HOOX_DEMO_IMAGE=test/previous@sha256:previous");
+    },
+  );
+
   it("数据库初始化脚本可在已有数据卷上重复执行，并包含 Webhook Dispatcher 角色", () => {
     const script = readFileSync(
       fileURLToPath(new URL("../../deploy/demo/postgres-init.sh", import.meta.url)),
@@ -159,6 +217,23 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     );
     expect(script).toContain("CREATE SCHEMA IF NOT EXISTS");
     expect(script).toContain("(:'webhook_role', :'webhook_password')");
+  });
+
+  it("认证探针复用真实 Scheduler 服务的环境文件和宿主网络，不注入连接覆盖值", () => {
+    const compose = readFileSync(
+      new URL("../../deploy/demo/docker-compose.yml", import.meta.url),
+      "utf8",
+    );
+    const scheduler = compose.match(/^ {2}scheduler:\n([\s\S]*?)(?=^ {2}\w)/mu)?.[1];
+    expect(compose).toMatch(/x-runtime: &runtime\n[\s\S]*?network_mode: host/u);
+    expect(scheduler).toContain("<<: *runtime");
+    expect(scheduler).toContain("/shared/scheduler.env");
+    expect(scheduler).not.toMatch(/network_mode:|WEBHOOK_DISPATCHER_DATABASE_URL:/u);
+    const script = readFileSync(deployScript, "utf8");
+    const command = script.split("\n").find((line) => line.includes("--entrypoint node scheduler"));
+    expect(command).toBe(
+      "compose --profile ops run --rm --no-deps --entrypoint node scheduler --input-type=module -e '",
+    );
   });
 
   it("保留数据卷升级时在迁移前幂等补齐数据库角色", () => {
@@ -177,9 +252,16 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     expect(started).toBeGreaterThanOrEqual(0);
     expect(ready).toBeGreaterThan(started);
     expect(provisioned).toBeGreaterThan(ready);
-    const probe = result.log.indexOf('PGPASSWORD="$DATABASE_WEBHOOK_DISPATCHER_PASSWORD" psql');
+    const probe = result.log.indexOf(
+      "--no-deps --entrypoint node scheduler --input-type=module -e",
+    );
     expect(probe).toBeGreaterThan(provisioned);
     expect(probe).toBeLessThan(result.log.indexOf("run --rm migrate"));
+    expect(result.log).toContain("WEBHOOK_DISPATCHER_DATABASE_URL");
+    expect(result.log.indexOf("dispatcher query SELECT 1")).toBeGreaterThan(probe);
+    expect(result.log.indexOf("dispatcher end")).toBeLessThan(
+      result.log.indexOf("run --rm migrate"),
+    );
   });
 
   it.each([

@@ -231,8 +231,28 @@ fi
 # 保留数据卷时初始化脚本不会自动执行；发布前幂等补齐新增的受限角色（如 Webhook Dispatcher），
 # 角色与密码只来自容器内 infra.env，不经宿主机命令行。
 compose exec -T postgres sh /docker-entrypoint-initdb.d/10-hoox-demo.sh
-# 已有角色不改密码；升级配置与实际凭据不同则在迁移之前停止。
-compose exec -T postgres sh -ec 'PGPASSWORD="$DATABASE_WEBHOOK_DISPATCHER_PASSWORD" psql -Xqw -h 127.0.0.1 -U "$DATABASE_WEBHOOK_DISPATCHER_ROLE" -d "$POSTGRES_DB" -c "SELECT 1" >/dev/null'
+# 已有角色不改密码；复用 Scheduler 服务的环境文件、网络与 DSN 做真实认证，失败时禁止迁移。
+# pg 仅声明在 Scheduler 包中，必须从该包解析，且不得把底层连接错误中的凭据写入日志。
+compose --profile ops run --rm --no-deps --entrypoint node scheduler --input-type=module -e '
+  import { createRequire } from "node:module";
+  let client;
+  try {
+    if (!process.env.WEBHOOK_DISPATCHER_DATABASE_URL) throw new Error();
+    const { Client } = createRequire(`${process.cwd()}/runtime-ts/apps/scheduler/package.json`)("pg");
+    client = new Client({
+      connectionString: process.env.WEBHOOK_DISPATCHER_DATABASE_URL,
+      connectionTimeoutMillis: 10000,
+      query_timeout: 10000,
+    });
+    await client.connect();
+    await client.query("SELECT 1");
+  } catch {
+    console.error("Demo Scheduler 的 Webhook Dispatcher 数据库认证探针失败，已停止迁移");
+    process.exitCode = 1;
+  } finally {
+    await client?.end().catch(() => {});
+  }
+'
 compose --profile ops run --rm minio-init
 compose --profile ops run --rm migrate
 restore_runtime_config

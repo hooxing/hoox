@@ -19,7 +19,7 @@ import {
 } from "./agent-definition-editor.js";
 import type { AgentDefinitionApiContract } from "./control-api.js";
 
-const statuses = {
+export const agentStatusLabels = {
   draft: "草稿",
   published: "已发布",
   disabled: "已停用",
@@ -28,10 +28,29 @@ const statuses = {
 const listKey = ["admin-agent-definitions"] as const;
 const historyKey = (id: string) => ["admin-agent-history", id] as const;
 
-function RevisionStatus({ status }: { readonly status: keyof typeof statuses }) {
+export function useAgentDefinitions(api: AgentDefinitionApiContract) {
+  return useQuery({
+    queryKey: listKey,
+    queryFn: () => api.listAgentDefinitions(),
+    gcTime: 0,
+    staleTime: 0,
+  });
+}
+
+export function useAgentHistory(api: AgentDefinitionApiContract, id: string) {
+  return useQuery({
+    queryKey: historyKey(id),
+    queryFn: () => api.listAgentRevisions(id),
+    enabled: id !== "",
+    gcTime: 0,
+    staleTime: 0,
+  });
+}
+
+function RevisionStatus({ status }: { readonly status: keyof typeof agentStatusLabels }) {
   return (
     <Tag color={status === "published" ? "success" : status === "revoked" ? "error" : "default"}>
-      {statuses[status]}
+      {agentStatusLabels[status]}
     </Tag>
   );
 }
@@ -49,12 +68,7 @@ export function AgentDefinitionsPage({
   readonly onOpen: (id?: string) => void;
   readonly onBack: () => void;
 }) {
-  const query = useQuery({
-    queryKey: listKey,
-    queryFn: () => api.listAgentDefinitions(),
-    gcTime: 0,
-    staleTime: 0,
-  });
+  const query = useAgentDefinitions(api);
   if (query.isError)
     return (
       <Alert
@@ -222,12 +236,7 @@ function AgentHistory({
   readonly onBack: () => void;
 }) {
   const client = useQueryClient();
-  const history = useQuery({
-    queryKey: historyKey(id),
-    queryFn: () => api.listAgentRevisions(id),
-    gcTime: 0,
-    staleTime: 0,
-  });
+  const history = useAgentHistory(api, id);
   const [work, setWork] = useState<Work>();
   const [selected, setSelected] = useState<string>();
   const [comparison, setComparison] = useState("");
@@ -647,7 +656,7 @@ function CompareSelect({
           .filter((item) => item.id !== activeId)
           .map((item) => (
             <option key={item.id} value={item.id}>
-              版本 {item.revision} · {statuses[item.status]}
+              版本 {item.revision} · {agentStatusLabels[item.status]}
             </option>
           ))}
       </select>

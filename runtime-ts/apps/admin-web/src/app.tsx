@@ -4,6 +4,7 @@ import {
   BarChartOutlined,
   BulbOutlined,
   DatabaseOutlined,
+  ExperimentOutlined,
   HistoryOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -50,6 +51,7 @@ import {
 import { AdminControlConsole } from "./control-console.js";
 import { ExternalToolsPage } from "./external-tools.js";
 import { InstallationProgress } from "./installation-progress.js";
+import { PlaygroundPage } from "./playground.js";
 import { RunExplorerDetail, RunExplorerList } from "./run-explorer.js";
 import { RunExplorerApi, type RunExplorerApiContract } from "./run-explorer-api.js";
 import { SandboxConfigurationPanel } from "./sandbox-configuration-panel.js";
@@ -958,6 +960,7 @@ const navigation: NonNullable<MenuProps["items"]> = [
     label: "Agent",
     children: [
       { key: "/agent-definitions", icon: <RobotOutlined />, label: "Agent 管理" },
+      { key: "/playground", icon: <ExperimentOutlined />, label: "Playground" },
       { key: "/external-tools", icon: <ToolOutlined />, label: "外部工具" },
     ],
   },
@@ -994,6 +997,7 @@ const pageMetadata: Readonly<
     description: "用户、对话与运行可靠性指标",
   },
   "/external-tools": { title: "外部工具", description: "管理 MCP 草稿、发布批次和 HTTP 工具预览" },
+  "/playground": { title: "Playground", description: "测试 Agent 草稿与已发布版本，查看执行轨迹" },
   "/agent-definitions": {
     title: "Agent 管理",
     description: "维护草稿、发布版本和 Tenant 可用范围",
@@ -1257,6 +1261,10 @@ function AdminPlatform({
             <Route
               path="/agent-definitions/:definitionId"
               element={<AgentDefinitionsRoute api={agentApi} kind="detail" />}
+            />
+            <Route
+              path="/playground"
+              element={<PlaygroundPage agentApi={agentApi} runApi={runApi} />}
             />
             <Route path="/runs" element={<RunExplorerListRoute api={runApi} />} />
             <Route

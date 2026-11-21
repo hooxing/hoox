@@ -79,6 +79,7 @@ import {
   type Pool,
   type PoolClient,
   withTenantTransaction,
+  withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
 import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
@@ -799,6 +800,100 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     } finally {
       await webhook.close();
       await target.close();
+    }
+  });
+
+  it("Webhook 并发逻辑删除与 Run 取消不会回滚业务状态", async () => {
+    const fixture = await createFixture(`webhook_delete_race_${process.pid}`);
+    const repository = new PgWebhookRepository(runtimePool);
+    const webhook = await repository.create({
+      scope: fixture.scope,
+      name: "delete-race",
+      endpointUrl: "https://hooks.example.invalid/delete-race",
+      eventTypes: ["run.cancelled"],
+      secret: webhookSecret("race"),
+    });
+    const current = await repositories.runs.get(fixture.scope, fixture.run.id);
+    if (!current) throw new Error("Run 缺失");
+    const cancelled = transitionRun(current.entity, "cancelled", timestamp(35));
+    const barrier = await administrativePool.connect();
+    let cancellation: Promise<unknown> | undefined;
+    try {
+      const blocker = await barrier.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid,pg_advisory_lock(hashtext($1))",
+        [fixture.scope.tenantId],
+      );
+      // BEFORE INSERT 在订阅快照已选中、外键检查之前暂停，强制覆盖原物理删除会失败的交错。
+      await administrativePool.query(`
+        CREATE FUNCTION "${schema}".webhook_delete_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id));
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER webhook_delete_barrier BEFORE INSERT ON "${schema}".webhook_outbox
+          FOR EACH ROW EXECUTE FUNCTION "${schema}".webhook_delete_barrier();
+      `);
+      cancellation = repositories.runs.update(fixture.scope, cancelled, current.version);
+      const completed = cancellation.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      await expect
+        .poll(async () => {
+          const waiting = await administrativePool.query<{ waiting: boolean }>(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS waiting",
+            [blocker.rows[0]?.pid],
+          );
+          return waiting.rows[0]?.waiting;
+        })
+        .toBe(true);
+      // 两个业务事务使用独立连接；删除必须在取消事务恢复外键检查之前完成。
+      expect(await repository.remove(fixture.scope, webhook.id)).toBe(true);
+      await barrier.query("SELECT pg_advisory_unlock(hashtext($1))", [fixture.scope.tenantId]);
+      expect(await completed).toMatchObject({ value: { outcome: "updated" } });
+    } finally {
+      await barrier.query("SELECT pg_advisory_unlock_all()");
+      await cancellation?.catch(() => undefined);
+      barrier.release();
+      await administrativePool.query(
+        `DROP TRIGGER IF EXISTS webhook_delete_barrier ON "${schema}".webhook_outbox; DROP FUNCTION IF EXISTS "${schema}".webhook_delete_barrier()`,
+      );
+    }
+    expect((await repositories.runs.get(fixture.scope, fixture.run.id))?.entity.status).toBe(
+      "cancelled",
+    );
+    expect(await repository.list(fixture.scope)).toEqual([]);
+    expect(await repository.remove(fixture.scope, webhook.id)).toBe(false);
+    expect(await repository.disable(fixture.scope, webhook.id)).toBeUndefined();
+    expect(await repository.rotate(fixture.scope, webhook.id, webhookSecret("after_delete"))).toBe(
+      false,
+    );
+  });
+
+  it("Webhook 数据库客户端截止时间淘汰悬挂连接后可继续使用连接池", async () => {
+    const pool = createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema,
+      maxConnections: 1,
+    });
+    try {
+      let previousPid: number | undefined;
+      await expect(
+        withTransaction(
+          pool,
+          async (client) => {
+            const result = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+            previousPid = result.rows[0]?.pid;
+            await client.query("SELECT pg_sleep(10)");
+          },
+          { deadlineMs: 100 },
+        ),
+      ).rejects.toThrow("POSTGRES_TRANSACTION_DEADLINE_EXCEEDED");
+      const next = await pool.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      expect(next.rows[0]?.pid).not.toBe(previousPid);
+      expect(next.rows[0]?.pid).toEqual(expect.any(Number));
+    } finally {
+      await pool.end();
     }
   });
 

@@ -65,7 +65,7 @@ export class PgWebhookRepository {
     return scoped(this.pool, scope, async (c) => {
       const r = await c.query<WebhookRow>(
         `SELECT ${selectColumns} FROM tenant_webhooks
-          WHERE tenant_id=$1 ORDER BY created_at DESC,id`,
+          WHERE tenant_id=$1 AND disabled_reason IS DISTINCT FROM 'deleted_by_owner' ORDER BY created_at DESC,id`,
         [scope.tenantId],
       );
       return Object.freeze(r.rows.map(mapRow));
@@ -101,12 +101,12 @@ export class PgWebhookRepository {
   /**
    * 订阅级停用：提交后 Dispatcher 不再领取该订阅的任何投递（含积压），新事件也不再入队。
    * 停用前已领取的投递在发送前复核时会被结算为 `webhook_disabled`；已通过复核、正在发送的
-   * 那一次请求可能仍会到达接收端。停用不可撤销，恢复需删除后重新注册。
+   * 那一次请求可能仍会到达接收端。删除是逻辑删除，保留记录以满足 Outbox 外键并隔离并发；不可恢复。
    */
   async disable(scope: TenantScope, id: string): Promise<TenantWebhook | undefined> {
     return scoped(this.pool, scope, async (c) => {
       const r = await c.query<WebhookRow>(
-        `UPDATE tenant_webhooks SET disabled_at=COALESCE(disabled_at,clock_timestamp()),disabled_reason=COALESCE(disabled_reason,$3) WHERE tenant_id=$1 AND id=$2 RETURNING ${selectColumns}`,
+        `UPDATE tenant_webhooks SET disabled_at=COALESCE(disabled_at,clock_timestamp()),disabled_reason=COALESCE(disabled_reason,$3) WHERE tenant_id=$1 AND id=$2 AND disabled_reason IS DISTINCT FROM 'deleted_by_owner' RETURNING ${selectColumns}`,
         [scope.tenantId, id, WEBHOOK_DISABLED_BY_OWNER],
       );
       return r.rows[0] ? mapRow(r.rows[0]) : undefined;
@@ -114,10 +114,12 @@ export class PgWebhookRepository {
   }
   async remove(scope: TenantScope, id: string): Promise<boolean> {
     return scoped(this.pool, scope, async (c) => {
-      const r = await c.query(`DELETE FROM tenant_webhooks WHERE tenant_id=$1 AND id=$2`, [
-        scope.tenantId,
-        id,
-      ]);
+      // 逻辑删除保留外键目标，避免与业务事务的 Outbox 入队竞争并回滚 Run 状态。
+      const r = await c.query(
+        `UPDATE tenant_webhooks SET disabled_at=COALESCE(disabled_at,clock_timestamp()),disabled_reason='deleted_by_owner'
+          WHERE tenant_id=$1 AND id=$2 AND disabled_reason IS DISTINCT FROM 'deleted_by_owner'`,
+        [scope.tenantId, id],
+      );
       return r.rowCount === 1;
     });
   }
@@ -128,7 +130,7 @@ export class PgWebhookRepository {
   async rotate(scope: TenantScope, id: string, secret: EncryptedWebhookSecret): Promise<boolean> {
     return scoped(this.pool, scope, async (c) => {
       const r = await c.query(
-        `UPDATE tenant_webhooks SET secret_ciphertext=$3::jsonb WHERE tenant_id=$1 AND id=$2`,
+        `UPDATE tenant_webhooks SET secret_ciphertext=$3::jsonb WHERE tenant_id=$1 AND id=$2 AND disabled_reason IS DISTINCT FROM 'deleted_by_owner'`,
         [scope.tenantId, id, JSON.stringify(secret)],
       );
       return r.rowCount === 1;
@@ -301,9 +303,11 @@ export class PgWebhookOutboxStore {
     readonly owner: string;
     readonly excludedTenantIds?: readonly string[];
   }): Promise<ClaimedWebhookDelivery | undefined> {
-    return withTransaction(this.pool, async (client) => {
-      await client.query(
-        `WITH exhausted AS (
+    return withTransaction(
+      this.pool,
+      async (client) => {
+        await client.query(
+          `WITH exhausted AS (
            SELECT tenant_id,id FROM webhook_outbox
             WHERE state IN ('pending','claimed') AND attempts >= $1
               AND (state='pending' OR claim_expires_at < clock_timestamp())
@@ -318,10 +322,10 @@ export class PgWebhookOutboxStore {
          UPDATE tenant_webhooks w SET disabled_at=clock_timestamp(),disabled_reason=$2
            FROM (SELECT DISTINCT tenant_id,webhook_id FROM settled) s
           WHERE w.tenant_id=s.tenant_id AND w.id=s.webhook_id AND w.disabled_at IS NULL`,
-        [this.#maxAttempts, WEBHOOK_DISABLED_ATTEMPTS_EXHAUSTED],
-      );
-      const result = await client.query<ClaimRow>(
-        `WITH candidate AS (
+          [this.#maxAttempts, WEBHOOK_DISABLED_ATTEMPTS_EXHAUSTED],
+        );
+        const result = await client.query<ClaimRow>(
+          `WITH candidate AS (
            SELECT o.tenant_id,o.id,w.endpoint_url FROM webhook_outbox o
              JOIN tenant_webhooks w ON w.tenant_id=o.tenant_id AND w.id=o.webhook_id
             WHERE o.state IN ('pending','claimed') AND o.next_attempt_at<=clock_timestamp()
@@ -337,26 +341,28 @@ export class PgWebhookOutboxStore {
                 attempts=o.attempts+1
            FROM candidate c WHERE o.tenant_id=c.tenant_id AND o.id=c.id
          RETURNING o.tenant_id,o.id,o.webhook_id,o.event_id,c.endpoint_url,o.payload,o.attempts,o.claim_token`,
-        [
-          `${input.owner}:${randomUUID()}`,
-          this.#maxAttempts,
-          [...(input.excludedTenantIds ?? [])],
-          this.#leaseMs,
-        ],
-      );
-      const row = result.rows[0];
-      if (row === undefined) return undefined;
-      return Object.freeze({
-        tenantId: row.tenant_id,
-        id: row.id,
-        webhookId: row.webhook_id,
-        eventId: row.event_id,
-        endpointUrl: row.endpoint_url,
-        payload: row.payload,
-        attempts: row.attempts,
-        claimToken: row.claim_token,
-      });
-    });
+          [
+            `${input.owner}:${randomUUID()}`,
+            this.#maxAttempts,
+            [...(input.excludedTenantIds ?? [])],
+            this.#leaseMs,
+          ],
+        );
+        const row = result.rows[0];
+        if (row === undefined) return undefined;
+        return Object.freeze({
+          tenantId: row.tenant_id,
+          id: row.id,
+          webhookId: row.webhook_id,
+          eventId: row.event_id,
+          endpointUrl: row.endpoint_url,
+          payload: row.payload,
+          attempts: row.attempts,
+          claimToken: row.claim_token,
+        });
+      },
+      { deadlineMs: 5_000 },
+    );
   }
 
   /**
@@ -368,70 +374,78 @@ export class PgWebhookOutboxStore {
     delivery: ClaimedWebhookDelivery,
     sendBudgetMs: number,
   ): Promise<WebhookSendPermit> {
-    return withTransaction(this.pool, async (client) => {
-      const current = await client.query<{
-        secret_ciphertext: EncryptedWebhookSecret;
-        disabled: boolean;
-      }>(
-        `SELECT w.secret_ciphertext,w.disabled_at IS NOT NULL AS disabled
+    return withTransaction(
+      this.pool,
+      async (client) => {
+        const current = await client.query<{
+          secret_ciphertext: EncryptedWebhookSecret;
+          disabled: boolean;
+        }>(
+          `SELECT w.secret_ciphertext,w.disabled_at IS NOT NULL AS disabled
            FROM webhook_outbox o
            JOIN tenant_webhooks w ON w.tenant_id=o.tenant_id AND w.id=o.webhook_id
           WHERE o.tenant_id=$1 AND o.id=$2 AND o.state='claimed' AND o.claim_token=$3
             AND o.claim_expires_at > clock_timestamp()+($4::text||' milliseconds')::interval
           FOR UPDATE OF o`,
-        [delivery.tenantId, delivery.id, delivery.claimToken, Math.max(0, sendBudgetMs)],
-      );
-      const row = current.rows[0];
-      if (row === undefined) return { outcome: "skip" } as const;
-      if (row.disabled) {
-        await client.query(
-          `UPDATE webhook_outbox
+          [delivery.tenantId, delivery.id, delivery.claimToken, Math.max(0, sendBudgetMs)],
+        );
+        const row = current.rows[0];
+        if (row === undefined) return { outcome: "skip" } as const;
+        if (row.disabled) {
+          await client.query(
+            `UPDATE webhook_outbox
               SET state='disabled',last_error_code='webhook_disabled',claim_token=NULL,claim_expires_at=NULL
             WHERE tenant_id=$1 AND id=$2 AND state='claimed' AND claim_token=$3`,
-          [delivery.tenantId, delivery.id, delivery.claimToken],
-        );
-        return { outcome: "skip" } as const;
-      }
-      return { outcome: "send", secretCiphertext: row.secret_ciphertext } as const;
-    });
+            [delivery.tenantId, delivery.id, delivery.claimToken],
+          );
+          return { outcome: "skip" } as const;
+        }
+        return { outcome: "send", secretCiphertext: row.secret_ciphertext } as const;
+      },
+      { deadlineMs: 5_000 },
+    );
   }
 
   /** 以领取令牌结算一次；令牌已被租约恢复替换时为 no-op。次数耗尽同时停用整个订阅。 */
   async settle(delivery: ClaimedWebhookDelivery, settlement: WebhookSettlement): Promise<void> {
-    await withTransaction(this.pool, async (client) => {
-      const key = [delivery.tenantId, delivery.id, delivery.claimToken];
-      if (settlement.kind === "delivered") {
-        await client.query(
-          `UPDATE webhook_outbox
+    await withTransaction(
+      this.pool,
+      async (client) => {
+        const key = [delivery.tenantId, delivery.id, delivery.claimToken];
+        if (settlement.kind === "delivered") {
+          await client.query(
+            `UPDATE webhook_outbox
               SET state='delivered',delivered_at=clock_timestamp(),last_error_code=NULL,
                   claim_token=NULL,claim_expires_at=NULL
             WHERE tenant_id=$1 AND id=$2 AND state='claimed' AND claim_token=$3`,
-          key,
-        );
-        return;
-      }
-      if (settlement.kind === "retry") {
-        await client.query(
-          `UPDATE webhook_outbox
+            key,
+          );
+          return;
+        }
+        if (settlement.kind === "retry") {
+          await client.query(
+            `UPDATE webhook_outbox
               SET state='pending',last_error_code=$4,claim_token=NULL,claim_expires_at=NULL,
                   next_attempt_at=clock_timestamp()+($5::text||' milliseconds')::interval
             WHERE tenant_id=$1 AND id=$2 AND state='claimed' AND claim_token=$3`,
-          [...key, settlement.errorCode, Math.max(0, Math.trunc(settlement.delayMs))],
-        );
-        return;
-      }
-      const updated = await client.query(
-        `UPDATE webhook_outbox
+            [...key, settlement.errorCode, Math.max(0, Math.trunc(settlement.delayMs))],
+          );
+          return;
+        }
+        const updated = await client.query(
+          `UPDATE webhook_outbox
             SET state='disabled',last_error_code=$4,claim_token=NULL,claim_expires_at=NULL
           WHERE tenant_id=$1 AND id=$2 AND state='claimed' AND claim_token=$3`,
-        [...key, settlement.errorCode],
-      );
-      if (updated.rowCount === 1)
-        await client.query(
-          `UPDATE tenant_webhooks SET disabled_at=clock_timestamp(),disabled_reason=$3
-            WHERE tenant_id=$1 AND id=$2 AND disabled_at IS NULL`,
-          [delivery.tenantId, delivery.webhookId, WEBHOOK_DISABLED_ATTEMPTS_EXHAUSTED],
+          [...key, settlement.errorCode],
         );
-    });
+        if (updated.rowCount === 1)
+          await client.query(
+            `UPDATE tenant_webhooks SET disabled_at=clock_timestamp(),disabled_reason=$3
+            WHERE tenant_id=$1 AND id=$2 AND disabled_at IS NULL`,
+            [delivery.tenantId, delivery.webhookId, WEBHOOK_DISABLED_ATTEMPTS_EXHAUSTED],
+          );
+      },
+      { deadlineMs: 5_000 },
+    );
   }
 }

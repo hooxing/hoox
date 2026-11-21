@@ -756,6 +756,18 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     );
     const webhookStorePool = createPostgresPool({ connectionString: adminUrl, schema });
     const store = new PgWebhookOutboxStore(webhookStorePool);
+    await admin.query(
+      `INSERT INTO "${schema}".webhook_outbox(
+         tenant_id,id,webhook_id,event_id,event_type,payload,source_run_origin
+       ) VALUES($1,$2,$3,$4,'run.failed',$5::jsonb,'unknown')`,
+      [
+        f.scope.tenantId,
+        `delivery-unknown-${suffixId}`,
+        subscription.id,
+        `event-unknown-${suffixId}`,
+        JSON.stringify({ type: "run.failed", data: { runId: "unresolved" } }),
+      ],
+    );
     expect(await store.claim({ owner: `claim-${suffixId}` })).toBeUndefined();
     const settled = await admin.query<{ readonly state: string; readonly last_error_code: string }>(
       `SELECT state,last_error_code FROM "${schema}".webhook_outbox
@@ -763,6 +775,55 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [f.scope.tenantId, `delivery-${suffixId}`],
     );
     expect(settled.rows[0]).toEqual({ state: "disabled", last_error_code: "playground_source" });
+    const unresolved = await admin.query<{
+      readonly state: string;
+      readonly last_error_code: string | null;
+    }>(
+      `SELECT state,last_error_code FROM "${schema}".webhook_outbox
+        WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, `delivery-unknown-${suffixId}`],
+    );
+    expect(unresolved.rows[0]).toEqual({ state: "pending", last_error_code: null });
+
+    const unknownPermitId = `delivery-unknown-permit-${suffixId}`;
+    const unknownToken = `unknown-claim-${suffixId}`;
+    await admin.query(
+      `INSERT INTO "${schema}".webhook_outbox(
+         tenant_id,id,webhook_id,event_id,event_type,payload,state,claim_token,claim_expires_at,source_run_origin
+       ) VALUES($1,$2,$3,$4,'run.failed',$5::jsonb,'claimed',$6,clock_timestamp()+interval '1 minute','unknown')`,
+      [
+        f.scope.tenantId,
+        unknownPermitId,
+        subscription.id,
+        `event-unknown-permit-${suffixId}`,
+        JSON.stringify({ type: "run.failed", data: { runId: "unresolved" } }),
+        unknownToken,
+      ],
+    );
+    expect(
+      await store.permitSend(
+        {
+          tenantId: f.scope.tenantId,
+          id: unknownPermitId,
+          webhookId: subscription.id,
+          eventId: `event-unknown-permit-${suffixId}`,
+          endpointUrl: "https://hooks.example.invalid/playground",
+          payload: {},
+          attempts: 1,
+          claimToken: unknownToken,
+        },
+        100,
+      ),
+    ).toEqual({ outcome: "skip" });
+    const unresolvedPermit = await admin.query<{
+      readonly state: string;
+      readonly last_error_code: string | null;
+    }>(
+      `SELECT state,last_error_code FROM "${schema}".webhook_outbox
+        WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, unknownPermitId],
+    );
+    expect(unresolvedPermit.rows[0]).toEqual({ state: "claimed", last_error_code: null });
 
     const permitId = `delivery-permit-${suffixId}`;
     const token = `legacy-claim-${suffixId}`;

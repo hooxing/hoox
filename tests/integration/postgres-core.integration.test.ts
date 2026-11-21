@@ -776,6 +776,85 @@ async function seedWebhookRun(
 }
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("14→15 升级以真实 Migrator 回填正常 Webhook，并允许 Dispatcher 投递且可回退", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_v15_backfill");
+    const webhook = await webhookIsolatedPools(target);
+    try {
+      await migrateUp(target.pool, target.context);
+      expect(
+        (await target.pool.query<{ readonly current_user: string }>("SELECT current_user")).rows[0]
+          ?.current_user,
+      ).toBe(target.context.migratorRole);
+      const { tenant, user } = await seedWebhookTenant(target, "v15_backfill");
+      const runId = `run_webhook_v15_${process.pid}`;
+      await seedWebhookRun(target, tenant, user, runId);
+      const repository = new PgWebhookRepository(webhook.runtime);
+      const subscription = await repository.create({
+        scope: { tenantId: tenant, userId: user },
+        name: "migration backfill",
+        endpointUrl: "https://hooks.example.invalid/migration-backfill",
+        eventTypes: ["run.succeeded"],
+        secret: webhookSecret("v15_backfill"),
+      });
+      await asTenant(webhook.runtime, tenant, user, async (client) => {
+        await enqueueRunStatusWebhook(client, {
+          tenantId: tenant,
+          runId,
+          status: "succeeded",
+          runVersion: 1,
+          occurredAt: "2026-11-20T00:00:00.000Z",
+        });
+      });
+
+      await migrateDown(target.pool, {
+        ...target.context,
+        runtimeRole,
+        targetVersion: 14,
+        allowDestructive: true,
+        environment: "test",
+      });
+      const atVersion14 = await administrativePool.query<{ readonly present: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+          WHERE table_schema=$1 AND table_name='webhook_outbox' AND column_name='source_run_origin') AS present`,
+        [target.context.schema],
+      );
+      expect(atVersion14.rows[0]?.present).toBe(false);
+
+      // migrateUp 的连接身份是真实、无 BYPASSRLS 的 Migrator；正常 Outbox 必须可见并回填。
+      await migrateUp(target.pool, target.context);
+      const migrated = await administrativePool.query<{
+        readonly event_id: string;
+        readonly source_run_id: string;
+        readonly source_run_origin: string;
+        readonly state: string;
+      }>(
+        `SELECT event_id,source_run_id,source_run_origin,state FROM "${target.context.schema}".webhook_outbox
+          WHERE tenant_id=$1 AND payload->'data'->>'runId'=$2`,
+        [tenant, runId],
+      );
+      expect(migrated.rows).toHaveLength(1);
+      expect(migrated.rows[0]).toMatchObject({
+        source_run_id: runId,
+        source_run_origin: "normal",
+        state: "pending",
+      });
+      const store = new PgWebhookOutboxStore(webhook.dispatcher);
+      const delivery = await store.claim({ owner: "migration-backfill" });
+      expect(delivery).toMatchObject({
+        webhookId: subscription.id,
+        eventId: migrated.rows[0]?.event_id,
+      });
+      if (delivery === undefined) throw new Error("升级后正常投递不可领取");
+      await expect(store.permitSend(delivery, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("v15_backfill"),
+      });
+    } finally {
+      await webhook.close();
+      await target.close();
+    }
+  });
+
   it("Webhook 角色边界：Dispatcher 只读投递列，Runtime 与 Team Coordinator 不能改写密文或 Outbox", async () => {
     const target = await createIsolatedMigrationTarget("webhook_acl");
     const webhook = await webhookIsolatedPools(target);

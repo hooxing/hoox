@@ -149,6 +149,86 @@ describe("Run 固定运行配置", () => {
     expect(configured.create).toHaveBeenCalledTimes(3);
   });
 
+  function pinnedInput(runId: string, modelId: string) {
+    return {
+      ...createInput(runId),
+      agentSnapshot: fakeAgentSnapshot({
+        model: { mode: "pinned", providerKey: "main", providerRevision: 2, modelId },
+      }),
+    };
+  }
+
+  it("同一 Provider Revision 的不同固定模型不会共用 Session 工厂", async () => {
+    const original = snapshot(2).model;
+    const modelA = original?.configuration.models[0];
+    if (!original || !modelA) throw new Error("测试缺少模型配置");
+    const configuration = {
+      ...original.configuration,
+      models: [modelA, { ...modelA, id: "other" }],
+    };
+    const forModel = (modelId: string) => ({
+      ...snapshot(2),
+      model: { ...original, configuration: { ...configuration, defaultModelId: modelId } },
+    });
+    const resolveForRun = vi
+      .fn()
+      .mockResolvedValueOnce(forModel(modelA.id))
+      .mockResolvedValueOnce(forModel("other"))
+      .mockResolvedValueOnce(forModel(modelA.id));
+    const build = vi.fn(async () => ({
+      create: vi.fn(async () => ({}) as Awaited<ReturnType<AgentSessionFactoryPort["create"]>>),
+    }));
+    const factory = new RuntimeConfiguredSessionFactory(
+      { resolveForRun },
+      { resolveForRun: async () => deploymentSettings },
+      deploymentSettings,
+      8192,
+      build,
+    );
+    await factory.create(pinnedInput("run-a", modelA.id));
+    await factory.create(pinnedInput("run-b", "other"));
+    await factory.create(pinnedInput("run-a", modelA.id));
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(build.mock.calls).toMatchObject([
+      [
+        { model: { configuration: { defaultModelId: modelA.id } } },
+        deploymentSettings,
+        { toolCallingMode: "native" },
+      ],
+      [
+        { model: { configuration: { defaultModelId: "other" } } },
+        deploymentSettings,
+        { toolCallingMode: "native" },
+      ],
+    ]);
+  });
+
+  it.each([
+    { name: "部署模型", value: undefined },
+    { name: "不同 Revision", value: snapshot(1) },
+    { name: "相同 Revision 的其他模型", value: snapshot(2) },
+    {
+      name: "没有凭据",
+      value: { ...snapshot(2), modelApiKey: "" },
+    },
+  ])("固定模型不回退到$name", async ({ value }) => {
+    const build = vi.fn();
+    const resolveCompaction = vi.fn();
+    const factory = new RuntimeConfiguredSessionFactory(
+      { resolveForRun: async () => value },
+      { resolveForRun: resolveCompaction },
+      deploymentSettings,
+      8192,
+      build,
+    );
+    const modelId = value?.modelApiKey === "" ? "model-2" : "requested";
+    await expect(factory.create(pinnedInput("run-missing", modelId))).rejects.toThrow(
+      "PINNED_MODEL_CONFIGURATION_UNAVAILABLE",
+    );
+    expect(resolveCompaction).not.toHaveBeenCalled();
+    expect(build).not.toHaveBeenCalled();
+  });
+
   it("同一模型恢复不同压缩快照时不复用错误的 Session 工厂", async () => {
     const session = { dispose() {} } as Awaited<ReturnType<AgentSessionFactoryPort["create"]>>;
     const first = { ...deploymentSettings, maxOutputTokens: 2048 };

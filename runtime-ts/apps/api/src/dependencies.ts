@@ -3,6 +3,7 @@ import type { InstallationRepository } from "@hoox/identity";
 import type { BlobStore } from "@hoox/persistence/blob";
 import type {
   CoreRepositories,
+  AgentDefinitionRepositoryPort,
   PgApiKeyRepository,
   PgWebhookRepository,
   PersonalizationSettingsPort,
@@ -52,6 +53,10 @@ export interface ApiDependencies {
     setupToken?: string;
   }>;
   readonly repositories: CoreRepositories;
+  readonly agentDefinitions?: Pick<
+    AgentDefinitionRepositoryPort,
+    "listAvailable" | "readVisibleCurrent"
+  >;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
   readonly renamePersonalThread: RenamePersonalThreadCommandPort;

@@ -156,6 +156,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
             ? {}
             : { demoAdminUserId: configuration.demoAdminUserId }),
           repositories: persistence.repositories,
+          agentDefinitions: persistence.agentDefinitions,
           apiKeys: persistence.apiKeys,
           webhooks: persistence.webhooks,
           ...(configuration.webhookSecretEncryptionKey === undefined

@@ -58,6 +58,7 @@ export const toThreadDto = (entity: Thread): ThreadDto => ({
   id: entity.id,
   tenantId: entity.tenantId,
   createdByUserId: entity.createdByUserId,
+  agentDefinitionId: entity.agentDefinitionId,
   title: entity.title,
   status: entity.status,
   createdAt: entity.createdAt,

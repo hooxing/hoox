@@ -1116,6 +1116,21 @@ async function hasExternalToolState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasExternalToolAdminState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.external_tool_registration_drafts',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_draft_credentials',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_publish_batches',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_publish_batch_versions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_publish_claims',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_commands',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_audits',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_selectable_versions',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasEmbeddedIdentityState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.better_auth_users',$1::text)) IS NOT NULL
@@ -1418,6 +1433,9 @@ export async function activeTablePolicy(
     ])
       policy.set(table, new Set());
   }
+  if (await hasExternalToolAdminState(client, schema)) {
+    for (const table of externalToolAdminTables) policy.set(table, new Set());
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -1512,6 +1530,9 @@ export async function activeColumnUpdatePolicy(
       "external_tool_revocations",
     ])
       policy.set(table, new Set());
+  }
+  if (await hasExternalToolAdminState(client, schema)) {
+    for (const table of externalToolAdminTables) policy.set(table, new Set());
   }
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
@@ -2437,6 +2458,20 @@ async function assertAdminControlBoundary(
     allowed.set("external_tool_credentials", new Set(["INSERT"]));
     allowed.set("external_tool_revocations", new Set(["SELECT", "INSERT"]));
   }
+  const externalToolAdminEnabled =
+    enabled && (await hasExternalToolAdminState(client, context.schema));
+  if (externalToolAdminEnabled) {
+    allowed.set("external_tool_registration_drafts", new Set(["SELECT", "INSERT"]));
+    allowed.set("external_tool_draft_credentials", new Set(["SELECT", "INSERT", "DELETE"]));
+    for (const table of [
+      "external_tool_publish_batches",
+      "external_tool_publish_batch_versions",
+      "external_tool_admin_publish_claims",
+      "external_tool_admin_commands",
+      "external_tool_admin_audits",
+    ])
+      allowed.set(table, new Set(["SELECT", "INSERT"]));
+  }
   const agentDefinitionsEnabled =
     enabled && (await hasAgentDefinitionState(client, context.schema));
   if (agentDefinitionsEnabled) {
@@ -2518,6 +2553,13 @@ async function assertAdminControlBoundary(
     );
   if (agentDefinitionsEnabled) updatePolicy.set("agent_definition_tenants", new Set(["available"]));
   if (agentDefinitionsEnabled) updatePolicy.set("agent_revisions", new Set(["status"]));
+  if (externalToolAdminEnabled)
+    updatePolicy.set("external_tool_registration_drafts", new Set(externalToolDraftUpdateColumns));
+  if (externalToolAdminEnabled)
+    updatePolicy.set(
+      "external_tool_admin_publish_claims",
+      new Set(["lease_owner", "lease_expires_at"]),
+    );
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
@@ -2595,7 +2637,12 @@ async function assertAdminControlBoundary(
     [
       context.adminControlRole,
       context.schema,
-      ["admin_runtime_statistics", "admin_user_directory", ...adminRunExplorerViews],
+      [
+        "admin_runtime_statistics",
+        "admin_user_directory",
+        "external_tool_selectable_versions",
+        ...adminRunExplorerViews,
+      ],
     ],
   );
   for (const row of viewPrivileges.rows) {
@@ -2604,7 +2651,9 @@ async function assertAdminControlBoundary(
         ? enabled
         : row.view_name === "admin_user_directory"
           ? userOperationsEnabled
-          : runExplorerEnabled;
+          : row.view_name === "external_tool_selectable_versions"
+            ? externalToolAdminEnabled
+            : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3103,6 +3152,31 @@ const skillPublisherPolicyBindings = Object.freeze([
   ["skill_version_files", "skill_version_files_admin_publisher_policy", "publisher"],
 ] as const);
 
+const externalToolDraftUpdateColumns = Object.freeze([
+  "display_name",
+  "server_name",
+  "endpoint",
+  "timeout_ms",
+  "max_response_bytes",
+  "side_effect",
+  "idempotent",
+  "credential_configured",
+  "generation",
+  "updated_by",
+  "updated_at",
+] as const);
+
+// 外部工具管理面表：Runtime 零 ACL，仅 Admin Control 按白名单持有权限。
+const externalToolAdminTables = Object.freeze([
+  "external_tool_registration_drafts",
+  "external_tool_draft_credentials",
+  "external_tool_publish_batches",
+  "external_tool_publish_batch_versions",
+  "external_tool_admin_publish_claims",
+  "external_tool_admin_commands",
+  "external_tool_admin_audits",
+] as const);
+
 const adminControlPolicyBindings = Object.freeze([
   ["platform_control_operators", "platform_control_operators_migrator_policy", "migrator"],
   ["admin_control_config_revisions", "admin_control_config_revisions_migrator_policy", "migrator"],
@@ -3320,11 +3394,46 @@ async function rebindRoleScopedPolicies(
       }
     }
   }
+  const pinnedModelPolicy = await client.query<{ present: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1
+      AND tablename='admin_control_config_revisions' AND policyname='runtime_agent_pinned_model_read') AS present`,
+    [context.schema],
+  );
+  if (pinnedModelPolicy.rows[0]?.present) {
+    await client.query(`ALTER POLICY runtime_agent_pinned_model_read
+      ON ${schema}.admin_control_config_revisions TO ${quoteIdentifier(context.runtimeRole)}`);
+  }
+  const agentControlPolicies = await client.query<{ tablename: string; policyname: string }>(
+    `SELECT tablename,policyname FROM pg_policies p WHERE schemaname=$1
+      AND (p.tablename,p.policyname) IN (
+        ('agent_definitions','agent_control_read'), ('agent_definitions','agent_definitions_admin_manage'),
+        ('agent_definition_tenants','agent_control_read'), ('agent_definition_tenants','agent_control_manage'),
+        ('agent_revisions','agent_control_read'), ('agent_revisions','agent_revisions_admin_manage'),
+        ('agent_revision_revocations','agent_control_read'), ('agent_revision_revocations','agent_revision_revocations_admin'),
+        ('agent_definition_commands','agent_commands_admin'), ('agent_definition_audits','agent_audits_admin')
+      )
+      AND EXISTS (SELECT 1 FROM pg_policies gate WHERE gate.schemaname=$1
+        AND gate.tablename='agent_definition_tenants' AND gate.policyname='agent_control_manage')`,
+    [context.schema],
+  );
+  for (const { tablename, policyname } of agentControlPolicies.rows) {
+    await client.query(
+      `ALTER POLICY ${quoteIdentifier(policyname)} ON ${schema}.${quoteIdentifier(tablename)} TO ${quoteIdentifier(context.adminControlRole)}`,
+    );
+  }
   if (await hasExternalToolState(client, context.schema)) {
     for (const [table, policy, target] of externalToolPolicyBindings) {
       const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
       await client.query(
         `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+      );
+    }
+  }
+  if (await hasExternalToolAdminState(client, context.schema)) {
+    for (const table of externalToolAdminTables) {
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(`${table}_migrator_policy`)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.migratorRole)};
+         ALTER POLICY ${quoteIdentifier(`${table}_admin_policy`)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.adminControlRole)}`,
       );
     }
   }
@@ -3452,6 +3561,21 @@ async function grantAdminControlAccess(
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
        GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
+    );
+  }
+  if (await hasExternalToolAdminState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
+       GRANT UPDATE(${externalToolDraftUpdateColumns.join(",")})
+         ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
+       GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.external_tool_draft_credentials TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_admin_publish_claims TO ${control};
+       GRANT UPDATE(lease_owner,lease_expires_at) ON TABLE ${schema}.external_tool_admin_publish_claims TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_publish_batches,
+         ${schema}.external_tool_publish_batch_versions,${schema}.external_tool_admin_commands,
+         ${schema}.external_tool_admin_audits TO ${control};
+       GRANT USAGE ON SEQUENCE ${schema}.external_tool_admin_audits_audit_id_seq TO ${control};
+       GRANT SELECT ON TABLE ${schema}.external_tool_selectable_versions TO ${control}`,
     );
   }
   if (await hasExternalToolState(client, context.schema)) {

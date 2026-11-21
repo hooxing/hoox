@@ -22,18 +22,23 @@
 
 ## Run 快照
 
-创建 Run 时，Persistence 在事务边界内读取当前 Tenant 已启用且可用的安装，并写入不可变 `RunSkillSnapshot`。Worker 只读取该快照，不在执行或恢复时反查最新安装状态。
+受理 Run 或预留 follow-up 候选时，Persistence 根据同一事务写入的 [Agent Revision 快照](agent-definition.md) 解析自带的精确 `(skillId, version)`，不要求 Tenant 先安装，也不跟随推荐版本。自带 Skill 用 `canonicalKey` 作为调用名。只有 `includeTenantSkills` 为真时才叠加当前 Tenant 已启用的安装；按精确调用名冲突时自带版本优先，Tenant 别名不受不同调用名的覆盖。两个自带引用若产生相同调用名，则配置不可用。
+
+合并结果写入不可变 `RunSkillSnapshot`，条目来源为 `agent` 或 `tenant`。已有快照只含 Tenant 安装，补记 `tenant` 不改变原摘要。Worker 在执行、恢复和启动子 Agent 时使用该 Run 的同一份快照，不反查最新安装或 Revision。
 
 因此：
 
 - Run 创建后升级、停用或卸载 Skill，不改变该 Run 的名称、版本、摘要或恢复结果；
-- 无法形成完整快照时，Run 创建失败关闭，不能创建目录不确定的 Run；
+- Agent 自带版本缺失、已撤销或入口与包的持久元数据校验失败时，Run 受理回滚，API 返回 `409 AGENT_REVISION_UNAVAILABLE`；即使存在同名的可用 Tenant 安装，也不回退。受理事务不读取对象存储，Skill 加载时仍校验实际读取的内容；
+- 目录超过 64 项、保留的 Tenant 安装不可用或显式调用名称不在合并目录中时，不创建 Run；
 - 仍被 Run 快照、Invocation 或审计引用的版本内容不能因卸载而删除；
 - 被硬撤销或完整性校验失败的版本不能静默替换为其他版本。
 
+降级到不识别 Skill 来源的版本前，应排空含 Agent 自带 Skill 的 Run；旧 Runtime 无法验证这类快照的摘要。
+
 ## 模型可见目录与加载路径
 
-System Prompt 契约由 `@hoox/prompt-builder` 的 `RUNTIME_PROMPT_VERSION` 和 Golden Test 管理。仅当快照非空时，末尾才包含 `AVAILABLE_SKILLS`，每项只暴露经过校验的调用名称和一句描述；完整 `SKILL.md`、Blob 引用、数据库 ID、Tenant ID、Run ID 和内部摘要都不进入该目录。
+System Prompt 契约由 `@hoox/prompt-builder` 的 `RUNTIME_PROMPT_VERSION` 和 Golden Test 管理。仅当快照非空时，末尾才包含 `AVAILABLE_SKILLS`，每项只暴露经过校验的调用名称和一句描述；来源、完整 `SKILL.md`、Blob 引用、数据库 ID、Tenant ID、Run ID 和内部摘要都不进入模型可见目录；仅改变来源不改变 Prompt 字节。
 
 完整指令有两条加载路径：
 
@@ -44,7 +49,7 @@ System Prompt 契约由 `@hoox/prompt-builder` 的 `RUNTIME_PROMPT_VERSION` 和 
 
 ## 公开市场与 Sandbox
 
-公开目录通过只读 ResourceFS 投影到 `/resources/skills`。模型可以在已安装目录没有合适项且任务确有需要时浏览市场文件，但浏览不建立安装关系，未安装名称不能传给 `skill` 工具。
+公开目录通过只读 ResourceFS 投影到 `/resources/skills`。模型可以在已安装目录没有合适项且任务确有需要时浏览市场文件，但浏览不建立安装关系，未列入 Run 快照的名称不能传给 `skill` 工具。
 
 只有后续任务实际调用 Sandbox 文件或命令工具时，Runtime 才按既有延迟获取规则创建或复用 Thread Sandbox，并物化所需只读资源。Skill 包中的脚本不是受信平台代码，是否执行仍由普通工具授权、路径边界和副作用规则决定。
 

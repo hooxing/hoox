@@ -522,6 +522,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       const seed = fakeSeed("explicit-skill-no-sandbox");
       const skillItems = [
         {
+          source: "agent" as const,
           invocationName: "review",
           canonicalKey: "code-review",
           skillVersion: "1.0.0",
@@ -543,11 +544,17 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       const faux = fauxProvider();
       faux.setResponses([
         (context) => {
+          expect(context.systemPrompt).not.toContain('source="agent"');
+          expect(JSON.stringify(context.messages)).not.toContain('"source":"agent"');
           if (!skillEnabled) {
+            expect(context.systemPrompt).not.toContain("<AVAILABLE_SKILLS");
             expect(JSON.stringify(context.messages)).not.toContain("RUNTIME_SKILL_INSTRUCTION");
             expect(JSON.stringify(context.messages)).not.toContain("按检查清单处理");
             return fauxAssistantMessage("未加载技能");
           }
+          expect(context.systemPrompt).toContain(
+            '- name="review" description="按检查清单审阅修改"\n</AVAILABLE_SKILLS>',
+          );
           expect(JSON.stringify(context.messages)).toContain("RUNTIME_SKILL_INSTRUCTION");
           expect(JSON.stringify(context.messages)).toContain("按检查清单处理");
           return fauxAssistantMessage("已完成检查");
@@ -670,6 +677,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const seed = fakeSeed("tool-skill-lazy-materialization");
     const skillItems = [
       {
+        source: "agent" as const,
         invocationName: "review",
         canonicalKey: "code-review",
         skillVersion: "1.0.0",

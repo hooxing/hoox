@@ -71,6 +71,18 @@ describe("外部工具 Admin Control ACL", () => {
     expect(formatTableSetDifference(["runs"], ["runs"])).toBe("缺少 []，多出 []");
   });
 
+  it("双视图按存在性门控，密文仅向 Worker Coordinator 授权", async () => {
+    const bootstrap = await readFile(bootstrapUrl, "utf8");
+    expect(bootstrap).toMatch(
+      /async function hasRunExternalToolSnapshotView\([\s\S]*?to_regclass\(format\('%I\.worker_run_external_tool_snapshots'[\s\S]*?AND to_regclass\(format\('%I\.runtime_external_tool_permit_gate'/u,
+    );
+    expect(bootstrap).toMatch(
+      /if \(await hasRunExternalToolSnapshotView\(client, context\.schema\)\) \{\s*await client\.query\(\s*`GRANT SELECT ON TABLE \$\{schema\}\.worker_run_external_tool_snapshots TO \$\{coordinatorRole\};\s*GRANT SELECT ON TABLE \$\{schema\}\.runtime_external_tool_permit_gate TO \$\{role\}/u,
+    );
+    expect(bootstrap).toContain("NOT has_any_column_privilege");
+    expect(bootstrap).not.toContain("runtime_run_external_tool_snapshots");
+  });
+
   it("0001+0002 实际建表集合与 Agent、外部工具和 Run 浏览器迁移不存在时的 Runtime 表键完全一致", async () => {
     const migrationSql = await Promise.all([
       readFile(baselineMigrationUrl, "utf8"),

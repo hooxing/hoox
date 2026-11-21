@@ -475,6 +475,14 @@ export interface CreateSafePiSessionOptions {
   agentControlToolExecutor?: AgentControlPiToolExecutorPort;
   /** 子 Session 的实际工具白名单；省略时保持 root 的完整现有工具集合。 */
   enabledToolNames?: readonly DelegablePiToolName[];
+  /** 由 Worker 从 Run 快照建立，使用与内置工具相同的 manifest、Schema 与预算路径。 */
+  externalTools?: (ports: {
+    readonly recordControlledReceipt: (
+      callId: string,
+      toolName: string,
+      outcome: "succeeded" | "failed",
+    ) => Promise<unknown>;
+  }) => readonly AgentTool[];
   rolloutProjection?: ControlledRolloutProjection;
   /** Thread 级历史只接受 Runtime 从持久事实重建的窄协议，不接受客户端 messages。 */
   threadActiveHistory?: ThreadActiveHistoryV1;
@@ -923,7 +931,14 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       // 展示机制不是管理员业务开关；未来新增工具必须先进入共享目录才能曝光。
       tool.name === "collapse_process_for_final_answer" ||
       isPlatformEnabled(tool.name as RuntimeToolName),
-  );
+  ) as unknown as AgentTool[];
+  if (options.externalTools !== undefined) {
+    nativeTools.push(
+      ...(options.externalTools({
+        recordControlledReceipt: observedSandboxTools.recordControlledReceipt,
+      }) as AgentTool[]),
+    );
+  }
   const preparePtcProgram = options.preparePtcProgram;
   const preparePtcTool = options.preparePtcTool;
   if (

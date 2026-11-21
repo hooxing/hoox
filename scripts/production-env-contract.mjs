@@ -1,4 +1,7 @@
-import { validateOtelEnvironmentExample } from "./env-contract.mjs";
+import {
+  validateExternalToolsPrivateAddressesExample,
+  validateOtelEnvironmentExample,
+} from "./env-contract.mjs";
 
 export const expectedProductionEnvironmentKeys = Object.freeze([
   "RUNTIME_ENV",
@@ -81,6 +84,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "INSTALLATION_SETUP_TOKEN",
   "ADMIN_CONTROL_IDENTITY_API_URL",
   "MODEL_CREDENTIAL_ENCRYPTION_KEY",
+  "EXTERNAL_TOOL_IDENTITY_ROOT_KEY",
   "WEBHOOK_SECRET_ENCRYPTION_KEY",
   "MODEL_WIRE_TRACE_ENABLED",
   "MODEL_WIRE_TRACE_RETENTION_DAYS",
@@ -137,6 +141,7 @@ export const optionalProductionEnvironmentKeys = Object.freeze([
   "MODEL_SUPPORTS_IMAGES",
   "MODEL_CONTEXT_WINDOW",
   "MODEL_MAX_OUTPUT_TOKENS",
+  "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES",
 ]);
 
 const secretKeys = new Set([
@@ -163,12 +168,12 @@ const secretKeys = new Set([
   "HISTORY_TITLE_MODEL_ID",
   "MODEL_API_KEY",
   "MODEL_CREDENTIAL_ENCRYPTION_KEY",
+  "EXTERNAL_TOOL_IDENTITY_ROOT_KEY",
   "WEBHOOK_SECRET_ENCRYPTION_KEY",
   "MEM0_API_KEY",
   "MEM0_SCOPE_HMAC_KEY",
   "MODEL_ID",
   "RESOURCE_FILESYSTEM_SIGNING_KEY",
-  "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES",
 ]);
 
 function parseLines(source) {
@@ -247,6 +252,7 @@ export function validateProductionEnvironmentExample(source) {
     if (values.get(key) !== "true") issues.push(`生产样例 ${key} 必须为 true`);
   }
   issues.push(...validateOtelEnvironmentExample(values));
+  issues.push(...validateExternalToolsPrivateAddressesExample(values));
   for (const key of secretKeys) {
     const value = values.get(key);
     if (

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assembleModelWireTraceIfEnabled,
@@ -34,6 +35,7 @@ function productionEnvironment(): Record<string, string> {
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "opaque-model-value",
     MODEL_CREDENTIAL_ENCRYPTION_KEY: "production-model-credential-root-at-least-32-bytes",
+    EXTERNAL_TOOL_IDENTITY_ROOT_KEY: "production-external-tool-identity-root-at-least-32-bytes",
     MODEL_ID: "test-model",
     MODEL_SUPPORTS_IMAGES: "false",
     MODEL_CONTEXT_WINDOW: "128000",
@@ -87,6 +89,64 @@ describe("Agent Worker 进程入口", () => {
         ?.contentEnabled,
     ).toBe(true);
   });
+
+  it("外部工具身份根以 UTF-8 字节计数，不截断也不回显", () => {
+    const env = productionEnvironment();
+    const root = `${"测".repeat(10)}ab`;
+    expect(
+      parseWorkerProcessEnvironment({ ...env, EXTERNAL_TOOL_IDENTITY_ROOT_KEY: root })
+        .externalToolIdentityRootKey,
+    ).toBe(root);
+    expect(() =>
+      parseWorkerProcessEnvironment({ ...env, EXTERNAL_TOOL_IDENTITY_ROOT_KEY: root.slice(0, -1) }),
+    ).toThrow(/^环境配置无效：INVALID:EXTERNAL_TOOL_IDENTITY_ROOT_KEY$/u);
+  });
+
+  it("外部工具身份根生产必填，开发可省略且不回退到其他密钥", () => {
+    const env = productionEnvironment();
+    delete env.EXTERNAL_TOOL_IDENTITY_ROOT_KEY;
+    expect(() => parseWorkerProcessEnvironment(env)).toThrow(
+      /^环境配置无效：MISSING:EXTERNAL_TOOL_IDENTITY_ROOT_KEY$/u,
+    );
+    expect(
+      parseWorkerProcessEnvironment({
+        ...env,
+        RUNTIME_ENV: "development",
+        DEV_AUTH_ENABLED: "true",
+        DEV_AUTH_USER_A_TENANT_ID: env.AGENT_WORKER_TENANT_ID,
+      }).externalToolIdentityRootKey,
+    ).toBeUndefined();
+  });
+
+  it("身份根拒绝示例占位值及与模型凭据或加密根相同的值，只报告变量名", () => {
+    const env = productionEnvironment();
+    env.MODEL_API_KEY = "test-only-provider-key-with-at-least-32-bytes";
+    for (const root of [
+      "replace-with-test-only-external-tool-identity-root",
+      "<test-only-external-tool-identity-root>",
+      env.MODEL_API_KEY,
+      env.MODEL_CREDENTIAL_ENCRYPTION_KEY,
+    ]) {
+      expect(() =>
+        parseWorkerProcessEnvironment({ ...env, EXTERNAL_TOOL_IDENTITY_ROOT_KEY: root }),
+      ).toThrow(/^环境配置无效：INVALID:EXTERNAL_TOOL_IDENTITY_ROOT_KEY$/u);
+    }
+  });
+
+  it.each(["../../../../.env.example", "../../../../deploy/production.env.example"])(
+    "生产 Worker 拒绝原样复制 %s 中的公开身份根",
+    (examplePath) => {
+      const source = readFileSync(new URL(examplePath, import.meta.url), "utf8");
+      const identityRootKey = /^EXTERNAL_TOOL_IDENTITY_ROOT_KEY=(.+)$/mu.exec(source)?.[1];
+      expect(Buffer.byteLength(identityRootKey ?? "", "utf8") >= 32).toBe(true);
+      expect(() =>
+        parseWorkerProcessEnvironment({
+          ...productionEnvironment(),
+          EXTERNAL_TOOL_IDENTITY_ROOT_KEY: identityRootKey,
+        }),
+      ).toThrow(/^环境配置无效：INVALID:EXTERNAL_TOOL_IDENTITY_ROOT_KEY$/u);
+    },
+  );
 
   it("私有出站目标默认关闭且只能通过显式布尔配置放行", () => {
     const env = productionEnvironment();

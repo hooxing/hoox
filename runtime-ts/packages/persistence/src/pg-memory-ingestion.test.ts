@@ -13,28 +13,36 @@ class ScriptedMemoryClient {
   readonly statements: Statement[] = [];
   releasedWith: unknown;
 
+  constructor(private readonly runOrigin: "normal" | "playground" = "normal") {}
+
   async query(sql: string, values?: readonly unknown[]) {
     this.statements.push({ sql, ...(values === undefined ? {} : { values }) });
     if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK") {
       return { rows: [], rowCount: 0 };
     }
     if (sql.includes("set_config('app.tenant_id'")) return { rows: [], rowCount: 1 };
-    if (sql.includes("SELECT run_id,thread_id,attempt_id")) {
+    if (sql.includes("SELECT origin FROM runs")) {
+      return { rows: [{ origin: this.runOrigin }], rowCount: 1 };
+    }
+    if (sql.includes("SELECT memory.run_id,memory.thread_id,memory.attempt_id")) {
       return {
-        rows: [
-          {
-            run_id: "run-memory",
-            thread_id: "thread-memory",
-            attempt_id: "attempt-memory",
-            subject_user_id: "user-memory",
-            tenant_kind: "personal",
-            source_through_sequence: "2",
-            provider_event_id: null,
-            claim_generation: "0",
-            attempt_count: 0,
-          },
-        ],
-        rowCount: 1,
+        rows:
+          this.runOrigin === "playground"
+            ? []
+            : [
+                {
+                  run_id: "run-memory",
+                  thread_id: "thread-memory",
+                  attempt_id: "attempt-memory",
+                  subject_user_id: "user-memory",
+                  tenant_kind: "personal",
+                  source_through_sequence: "2",
+                  provider_event_id: null,
+                  claim_generation: "0",
+                  attempt_count: 0,
+                },
+              ],
+        rowCount: this.runOrigin === "playground" ? 0 : 1,
       };
     }
     if (sql.includes("RETURNING claim_generation::text")) {
@@ -63,7 +71,7 @@ class ScriptedMemoryClient {
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes("INSERT INTO memory_ingestion_outbox")) {
-      return { rows: [], rowCount: 1 };
+      return { rows: [], rowCount: this.runOrigin === "playground" ? 0 : 1 };
     }
     if (sql.includes("INSERT INTO worker_tenant_assignments")) {
       return { rows: [], rowCount: 1 };
@@ -116,6 +124,43 @@ describe("PostgreSQL 记忆 Outbox", () => {
     ]);
     expect(outbox?.sql).not.toContain("input_text");
     expect(wake?.values).toEqual(["tenant-memory", expect.any(Date)]);
+  });
+
+  it("Playground 来源不新建长期记忆任务，且旧待消费任务不会被领取", async () => {
+    const client = new ScriptedMemoryClient("playground");
+    await enqueueMemoryIngestion(client as unknown as PoolClient, {
+      tenantId: "tenant-memory",
+      threadId: "thread-memory",
+      runId: "run-memory",
+      attemptId: "attempt-memory",
+      sourceThroughSequence: 2,
+    });
+    expect(
+      client.statements.some((statement) =>
+        statement.sql.includes("INSERT INTO worker_tenant_assignments"),
+      ),
+    ).toBe(false);
+    expect(
+      client.statements.find((statement) =>
+        statement.sql.includes("INSERT INTO memory_ingestion_outbox"),
+      )?.sql,
+    ).toContain("run.origin<>'playground'");
+
+    const store = new PgMemoryIngestionStore(poolFor(client), noBlobReads);
+    await expect(
+      store.claimNext({
+        tenantId: "tenant-memory",
+        workerId: "worker-memory",
+        leaseMs: 30_000,
+      }),
+    ).resolves.toBeUndefined();
+    const claimQuery = client.statements.find((statement) =>
+      statement.sql.includes("SELECT memory.run_id"),
+    );
+    expect(claimQuery?.sql).toContain("source_run.origin<>'playground'");
+    expect(
+      client.statements.some((statement) => statement.sql.includes("FROM thread_context_entries")),
+    ).toBe(false);
   });
 
   it("领取任务后仅从 Context 恢复 user 与 assistant 文本并保持 claim 栅栏", async () => {

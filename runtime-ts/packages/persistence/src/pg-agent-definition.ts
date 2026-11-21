@@ -22,6 +22,7 @@ import type {
   StoredAgentRevisionSummary,
 } from "./agent-definition-port.js";
 import { mapSavedModelProviderConfiguration } from "./pg-admin-control.js";
+import { EXTERNAL_TOOL_REVOCATION_LOCK } from "./external-tool-version-write.js";
 import type { Pool, PoolClient } from "./postgres.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
 
@@ -232,15 +233,30 @@ async function validateDraft(client: PoolClient, value: AgentRevisionContent) {
   if (selectedTools.mode === "configured") {
     const externalIds = selectedTools.externalTools.map((tool) => tool.versionId);
     if (externalIds.length > 0) {
-      const selectable = await client.query<{ tool_version_id: string; source: string }>(
-        "SELECT tool_version_id,source FROM external_tool_selectable_versions WHERE tool_version_id=ANY($1::text[])",
+      // 与外部工具撤销的排他锁互斥：校验通过后到提交前，所选版本不会被并发撤销。
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text,0))", [
+        EXTERNAL_TOOL_REVOCATION_LOCK,
+      ]);
+      const selectable = await client.query<{
+        tool_version_id: string;
+        source: string;
+        model_tool_name: string;
+      }>(
+        "SELECT tool_version_id,source,model_tool_name FROM external_tool_selectable_versions WHERE tool_version_id=ANY($1::text[])",
         [externalIds],
       );
-      const byId = new Map(selectable.rows.map((row) => [row.tool_version_id, row.source]));
+      const byId = new Map(selectable.rows.map((row) => [row.tool_version_id, row]));
       if (
-        externalIds.some((id, index) => byId.get(id) !== selectedTools.externalTools[index]?.kind)
+        externalIds.some(
+          (id, index) => byId.get(id)?.source !== selectedTools.externalTools[index]?.kind,
+        )
       )
         throw new AgentDefinitionValidationError("只能选择已发布且未撤销的匹配类型外部工具版本");
+      const modelNames = externalIds.map((id) => byId.get(id)?.model_tool_name);
+      if (new Set(modelNames).size !== modelNames.length)
+        throw new AgentDefinitionValidationError(
+          "所选外部工具的模型工具名重复，请为每个工具只选一个版本",
+        );
     }
     // 平台运行设置使用同一行的排他锁激活，避免校验通过后按过期名单提交。
     await client.query(

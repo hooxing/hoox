@@ -1116,6 +1116,11 @@ async function hasExternalToolState(client: PoolClient, schema: string): Promise
 async function hasExternalToolAdminState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.external_tool_registration_drafts',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_draft_credentials',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_publish_batches',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_publish_batch_versions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_commands',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_audits',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.external_tool_selectable_versions',$1::text)) IS NOT NULL AS present`,
     [schema],
   );
@@ -1420,6 +1425,9 @@ export async function activeTablePolicy(
     ])
       policy.set(table, new Set());
   }
+  if (await hasExternalToolAdminState(client, schema)) {
+    for (const table of externalToolAdminTables) policy.set(table, new Set());
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -1512,6 +1520,9 @@ export async function activeColumnUpdatePolicy(
       "external_tool_revocations",
     ])
       policy.set(table, new Set());
+  }
+  if (await hasExternalToolAdminState(client, schema)) {
+    for (const table of externalToolAdminTables) policy.set(table, new Set());
   }
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
@@ -2416,6 +2427,19 @@ async function assertAdminControlBoundary(
     allowed.set("external_tool_credentials", new Set(["INSERT"]));
     allowed.set("external_tool_revocations", new Set(["SELECT", "INSERT"]));
   }
+  const externalToolAdminEnabled =
+    enabled && (await hasExternalToolAdminState(client, context.schema));
+  if (externalToolAdminEnabled) {
+    allowed.set("external_tool_registration_drafts", new Set(["SELECT", "INSERT"]));
+    allowed.set("external_tool_draft_credentials", new Set(["SELECT", "INSERT", "DELETE"]));
+    for (const table of [
+      "external_tool_publish_batches",
+      "external_tool_publish_batch_versions",
+      "external_tool_admin_commands",
+      "external_tool_admin_audits",
+    ])
+      allowed.set(table, new Set(["SELECT", "INSERT"]));
+  }
   const agentDefinitionsEnabled =
     enabled && (await hasAgentDefinitionState(client, context.schema));
   if (agentDefinitionsEnabled) {
@@ -2497,6 +2521,8 @@ async function assertAdminControlBoundary(
     );
   if (agentDefinitionsEnabled) updatePolicy.set("agent_definition_tenants", new Set(["available"]));
   if (agentDefinitionsEnabled) updatePolicy.set("agent_revisions", new Set(["status"]));
+  if (externalToolAdminEnabled)
+    updatePolicy.set("external_tool_registration_drafts", new Set(externalToolDraftUpdateColumns));
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
@@ -2574,7 +2600,12 @@ async function assertAdminControlBoundary(
     [
       context.adminControlRole,
       context.schema,
-      ["admin_runtime_statistics", "admin_user_directory", ...adminRunExplorerViews],
+      [
+        "admin_runtime_statistics",
+        "admin_user_directory",
+        "external_tool_selectable_versions",
+        ...adminRunExplorerViews,
+      ],
     ],
   );
   for (const row of viewPrivileges.rows) {
@@ -2583,7 +2614,9 @@ async function assertAdminControlBoundary(
         ? enabled
         : row.view_name === "admin_user_directory"
           ? userOperationsEnabled
-          : runExplorerEnabled;
+          : row.view_name === "external_tool_selectable_versions"
+            ? externalToolAdminEnabled
+            : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3082,6 +3115,30 @@ const skillPublisherPolicyBindings = Object.freeze([
   ["skill_version_files", "skill_version_files_admin_publisher_policy", "publisher"],
 ] as const);
 
+const externalToolDraftUpdateColumns = Object.freeze([
+  "display_name",
+  "server_name",
+  "endpoint",
+  "timeout_ms",
+  "max_response_bytes",
+  "side_effect",
+  "idempotent",
+  "credential_configured",
+  "generation",
+  "updated_by",
+  "updated_at",
+] as const);
+
+// 外部工具管理面表：Runtime 零 ACL，仅 Admin Control 按白名单持有权限。
+const externalToolAdminTables = Object.freeze([
+  "external_tool_registration_drafts",
+  "external_tool_draft_credentials",
+  "external_tool_publish_batches",
+  "external_tool_publish_batch_versions",
+  "external_tool_admin_commands",
+  "external_tool_admin_audits",
+] as const);
+
 const adminControlPolicyBindings = Object.freeze([
   ["platform_control_operators", "platform_control_operators_migrator_policy", "migrator"],
   ["admin_control_config_revisions", "admin_control_config_revisions_migrator_policy", "migrator"],
@@ -3334,6 +3391,14 @@ async function rebindRoleScopedPolicies(
       );
     }
   }
+  if (await hasExternalToolAdminState(client, context.schema)) {
+    for (const table of externalToolAdminTables) {
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(`${table}_migrator_policy`)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.migratorRole)};
+         ALTER POLICY ${quoteIdentifier(`${table}_admin_policy`)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.adminControlRole)}`,
+      );
+    }
+  }
 }
 
 async function grantSkillPublisherAccess(
@@ -3462,8 +3527,10 @@ async function grantAdminControlAccess(
   }
   if (await hasExternalToolAdminState(client, context.schema)) {
     await client.query(
-      `GRANT SELECT,INSERT,UPDATE ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
-       GRANT INSERT ON TABLE ${schema}.external_tool_draft_credentials TO ${control};
+      `GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
+       GRANT UPDATE(${externalToolDraftUpdateColumns.join(",")})
+         ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
+       GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.external_tool_draft_credentials TO ${control};
        GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_publish_batches,
          ${schema}.external_tool_publish_batch_versions,${schema}.external_tool_admin_commands,
          ${schema}.external_tool_admin_audits TO ${control};

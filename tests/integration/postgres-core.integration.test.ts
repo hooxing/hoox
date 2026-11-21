@@ -90,6 +90,7 @@ import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
+import { externalToolRegistryTests } from "./postgres-external-tool-registry.js";
 
 function skillSnapshotBlobRef(sha256: string, size: number, mediaType: string): string {
   const tenantId = "tenant_test_publisher";
@@ -3056,8 +3057,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       runtime_select: boolean;
       control_select: boolean;
     }>(
-      `SELECT has_table_privilege($1,format('%I.external_tool_selectable_versions',$3),'SELECT') AS runtime_select,
-              has_table_privilege($2,format('%I.external_tool_selectable_versions',$3),'SELECT') AS control_select`,
+      `SELECT has_table_privilege($1,format('%I.external_tool_selectable_versions',$3::text),'SELECT') AS runtime_select,
+              has_table_privilege($2,format('%I.external_tool_selectable_versions',$3::text),'SELECT') AS control_select`,
       [runtimeRole, adminControlRole, schema],
     );
     expect(privileges.rows[0]).toEqual({ runtime_select: false, control_select: true });
@@ -5155,3 +5156,5 @@ describe("PostgreSQL Runtime 模型与模式快照", () => {
     }
   });
 });
+
+externalToolRegistryTests(() => ({ control: adminControlPool, db: migratorPool }));

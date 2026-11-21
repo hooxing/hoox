@@ -6,6 +6,7 @@ import {
   McpExternalToolTransport,
   McpStreamableHttpClient,
   probeMcpServer,
+  probeMcpEndpoint,
   probeMcpServerReport,
   type McpExchange,
 } from "./mcp-client.js";
@@ -329,6 +330,7 @@ describe("MCP Streamable HTTP transport", () => {
     const rejected = report[1];
     if (!rejected || rejected.accepted) throw new Error("预期第二个工具被拒绝");
     expect(rejected.reasonMessage).toContain("Schema");
+    expect(rejected.remoteToolName).toBe("bad");
     expect(JSON.stringify(report)).not.toContain("secret-schema");
   });
 
@@ -548,4 +550,92 @@ describe("MCP Streamable HTTP transport", () => {
     expect((failure as Error).message).toBe("EXTERNAL_TOOL_RESULT_UNKNOWN");
     expect((failure as Error).message).not.toContain("never-log");
   });
+});
+
+it("发现重复游标立即停止，不允许空页无限探测", async () => {
+  const target = {
+    url: new URL("https://example.invalid/"),
+    hostname: "example.invalid",
+    servername: "example.invalid",
+    hostHeader: "example.invalid",
+    address: "8.8.8.8",
+    addresses: ["8.8.8.8"],
+  };
+  let calls = 0;
+  const client = new McpStreamableHttpClient(async ({ body }) => {
+    calls++;
+    if (calls > 2) throw new Error("意外的额外请求");
+    const { id } = JSON.parse(new TextDecoder().decode(body));
+    return {
+      status: 200,
+      contentType: "application/json",
+      body: new TextEncoder().encode(
+        JSON.stringify({ jsonrpc: "2.0", id, result: { tools: [], nextCursor: "same" } }),
+      ),
+    };
+  });
+  await expect(
+    client.listTools(target, { timeoutMs: 1000, maxResponseBytes: 4096 }),
+  ).rejects.toBeInstanceOf(ExternalToolTransportError);
+  expect(calls).toBe(2);
+});
+
+it("默认策略在管理探测建连前拒绝私网及回环目标", async () => {
+  for (const endpoint of ["https://127.0.0.1/", "https://[::1]/", "https://10.0.0.4/"]) {
+    await expect(
+      probeMcpEndpoint({
+        endpoint,
+        serverName: "srv",
+        timeoutMs: 100,
+        maxResponseBytes: 1024,
+      }),
+    ).rejects.toThrow("EXTERNAL_TARGET_REJECTED");
+  }
+});
+
+it("逐工具检查原始声明：被丢弃的字段也不能反射凭据，拒绝过长或含控制字符的原名", async () => {
+  const credential = 'test-only-"marker';
+  const target = {
+    url: new URL("https://example.invalid/"),
+    hostname: "example.invalid",
+    servername: "example.invalid",
+    hostHeader: "example.invalid",
+    address: "8.8.8.8",
+    addresses: ["8.8.8.8"],
+  };
+  const deadlines = new Set<number>();
+  const client = new McpStreamableHttpClient(async ({ body, deadlineAt }) => {
+    deadlines.add(deadlineAt);
+    const { id, method } = JSON.parse(new TextDecoder().decode(body));
+    const result =
+      method === "initialize"
+        ? { protocolVersion: "2025-06-18", capabilities: {} }
+        : {
+            tools: [
+              { name: "lookup", inputSchema: { $ref: credential } },
+              { name: "x".repeat(513) },
+              { name: "line\nfeed" },
+            ],
+          };
+    return {
+      status: 200,
+      contentType: "application/json",
+      body: new TextEncoder().encode(JSON.stringify({ jsonrpc: "2.0", id, result })),
+    };
+  });
+  const report = await probeMcpServerReport({
+    client,
+    target,
+    credential,
+    serverName: "srv",
+    timeoutMs: 1000,
+    maxResponseBytes: 4096,
+  });
+  expect(report.map((tool) => (tool.accepted ? null : tool.reason))).toEqual([
+    "MCP_UNSAFE_METADATA",
+    "MCP_TOOL_INVALID",
+    "MCP_TOOL_INVALID",
+  ]);
+  for (const tool of report) expect(tool).not.toHaveProperty("remoteToolName");
+  expect(deadlines.size).toBe(1);
 });

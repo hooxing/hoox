@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ExternalToolCredentialCipher } from "./external-tool-credential.js";
+import {
+  ExternalToolCredentialCipher,
+  ExternalToolDraftCredentialCipher,
+} from "./external-tool-credential.js";
 import { ExternalToolCredentialDecryptor } from "./external-tool-credential-reader.js";
 
 describe("外部工具凭据托管", () => {
@@ -19,6 +22,19 @@ describe("外部工具凭据托管", () => {
     expect(() => decryptor.decrypt("tool-v1", { ...first, authTag: "AA" })).toThrow(
       "EXTERNAL_TOOL_CREDENTIAL_CIPHERTEXT_INVALID",
     );
+  });
+  it("草稿密文和幂等指纹绑定草稿身份且不能搬用为版本凭据", () => {
+    const root = "placeholder-root".repeat(4);
+    const draft = new ExternalToolDraftCredentialCipher(root);
+    const value = "test-credential-placeholder";
+    const sealed = draft.encrypt("draft-a", value);
+    expect(draft.decrypt("draft-a", sealed) === value).toBe(true);
+    expect(() => draft.decrypt("draft-b", sealed)).toThrow();
+    expect(() => new ExternalToolCredentialDecryptor(root).decrypt("draft-a", sealed)).toThrow();
+    const digest = draft.fingerprint("draft-a", value);
+    expect(draft.fingerprint("draft-a", value)).toBe(digest);
+    expect(draft.fingerprint("draft-b", value)).not.toBe(digest);
+    expect(draft.fingerprint("draft-a", `${value}-changed`)).not.toBe(digest);
   });
   it("拒绝过短根密钥", () => expect(() => new ExternalToolCredentialCipher("short")).toThrow());
 });

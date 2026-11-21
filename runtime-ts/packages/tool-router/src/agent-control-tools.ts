@@ -230,6 +230,9 @@ export function createAgentControlPiTools(
             callId,
             task: args.task,
             tools: [...new Set(args.tools)],
+            ...(args.external_tool_version_ids === undefined
+              ? {}
+              : { externalToolVersionIds: args.external_tool_version_ids }),
             forkTurns: forkTurns(args.fork_turns),
           });
         }),

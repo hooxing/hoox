@@ -41,7 +41,7 @@ describe("SubAgent Pi 协作工具", () => {
         tools().created.map((tool) => [tool.name, Object.keys(tool.parameters.properties)]),
       ),
     ).toEqual({
-      spawn_agent: ["task", "tools", "fork_turns"],
+      spawn_agent: ["task", "tools", "external_tool_version_ids", "fork_turns"],
       send_message: ["target", "message"],
       followup_task: ["target", "task"],
       wait_agent: ["after_sequence", "timeout_ms"],
@@ -106,6 +106,7 @@ describe("SubAgent Pi 协作工具", () => {
     const result = await spawn.execute("call_spawn", {
       task: "分析模块",
       tools: ["read", "read", "exec_command"],
+      external_tool_version_ids: ["http-v1"],
       fork_turns: "3",
     });
 
@@ -113,6 +114,7 @@ describe("SubAgent Pi 协作工具", () => {
       callId: "call_spawn",
       task: "分析模块",
       tools: ["read", "exec_command"],
+      externalToolVersionIds: ["http-v1"],
       forkTurns: 3,
     });
     expect(JSON.stringify(result)).toContain("/root/agent_1");

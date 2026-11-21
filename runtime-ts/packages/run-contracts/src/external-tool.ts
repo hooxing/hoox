@@ -72,13 +72,14 @@ export interface ExternalToolRuntimeSnapshot {
 }
 
 export class ExternalToolSnapshotError extends Error {
-  constructor(
-    readonly code:
-      | "EXTERNAL_TOOL_REVOKED"
-      | "EXTERNAL_TOOL_SNAPSHOT_INVALID"
-      | "EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE",
-  ) {
+  readonly code:
+    | "EXTERNAL_TOOL_REVOKED"
+    | "EXTERNAL_TOOL_SNAPSHOT_INVALID"
+    | "EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE";
+
+  constructor(code: ExternalToolSnapshotError["code"]) {
     super(code);
+    this.code = code;
   }
 }
 

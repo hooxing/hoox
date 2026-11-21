@@ -24,7 +24,25 @@ afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function deploy(mode: string, prepare?: (root: string) => void) {
+const webhookKey = "webhook-root-placeholder-at-least-32-bytes";
+const webhookFiles = {
+  infra:
+    "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\nDATABASE_WEBHOOK_DISPATCHER_PASSWORD=placeholder-password\n",
+  migration: "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\n",
+  api: `WEBHOOK_SECRET_ENCRYPTION_KEY=${webhookKey}\n`,
+  scheduler: [
+    `WEBHOOK_SECRET_ENCRYPTION_KEY=${webhookKey}`,
+    "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher",
+    "WEBHOOK_DISPATCHER_DATABASE_URL=postgresql://hoox_demo_webhook_dispatcher:placeholder-password@127.0.0.1:15432/test_db",
+    "",
+  ].join("\n"),
+};
+
+function deploy(
+  mode: string,
+  prepare?: (root: string) => void,
+  overrides: Readonly<Record<string, string>> = {},
+) {
   const root = mkdtempSync(join(tmpdir(), "hoox-demo-deploy-test-"));
   temporaryRoots.push(root);
   for (const directory of ["releases/candidate", "releases/previous", "shared", "tmp"]) {
@@ -40,15 +58,16 @@ function deploy(mode: string, prepare?: (root: string) => void) {
     process.platform === "win32" ? "junction" : "dir",
   );
   const files: Record<string, string> = {
-    "infra.env": "POSTGRES_USER=test_user\nPOSTGRES_DB=test_db\nDATABASE_SCHEMA=test_schema\n",
-    "migration.env": "",
-    "api.env": "",
+    "infra.env": `POSTGRES_USER=test_user\nPOSTGRES_DB=test_db\nDATABASE_SCHEMA=test_schema\n${webhookFiles.infra}`,
+    "migration.env": webhookFiles.migration,
+    "api.env": webhookFiles.api,
     "admin-control.env":
       "DEV_ADMIN_CONTROL_TOKEN=test-placeholder-token-with-at-least-32-characters\n",
-    "scheduler.env": "",
+    "scheduler.env": webhookFiles.scheduler,
     "worker.env": "",
     "demo-account.env": "DEMO_ACCOUNT_EMAIL=demo@example.invalid\n",
     "compose.env": "HOOX_DEMO_IMAGE=test/previous@sha256:previous\n",
+    ...overrides,
   };
   for (const [file, value] of Object.entries(files)) {
     if (mode !== "missing-config" || file !== "api.env") {
@@ -86,6 +105,81 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     expect(result.status, result.stderr).toBe(2);
     expect(result.log).toBe("");
     expect(result.composeEnv).toBe("HOOX_DEMO_IMAGE=test/previous@sha256:previous\n");
+  });
+
+  it.each([
+    ["migration.env", "", "migration.env"],
+    [
+      "scheduler.env",
+      webhookFiles.scheduler.replace(/^WEBHOOK_DISPATCHER_DATABASE_URL=.*$/mu, ""),
+      "scheduler.env",
+    ],
+    [
+      "scheduler.env",
+      webhookFiles.scheduler.replace(
+        "postgresql://hoox_demo_webhook_dispatcher:",
+        "postgresql://other_role:",
+      ),
+      "scheduler.env",
+    ],
+    [
+      "scheduler.env",
+      webhookFiles.scheduler.replace("127.0.0.1:15432", "other.example.invalid"),
+      "scheduler.env",
+    ],
+    [
+      "scheduler.env",
+      webhookFiles.scheduler.replace("placeholder-password@", "wrong-placeholder@"),
+      "scheduler.env",
+    ],
+    ["scheduler.env", webhookFiles.scheduler.replace("/test_db", "/other_db"), "scheduler.env"],
+    [
+      "api.env",
+      "WEBHOOK_SECRET_ENCRYPTION_KEY=different-key-placeholder-at-least-32-bytes\n",
+      "api.env",
+    ],
+  ])("Webhook 配置 %s 缺失或不一致时在任何发布动作前失败", (file, value, message) => {
+    const result = deploy("success", undefined, { [file]: value });
+    expect(result.status, result.stderr).toBe(2);
+    expect(result.stderr).toContain(message);
+    expect(result.log).toBe("");
+    expect(result.composeEnv).toBe("HOOX_DEMO_IMAGE=test/previous@sha256:previous\n");
+  });
+
+  it("数据库初始化脚本可在已有数据卷上重复执行，并包含 Webhook Dispatcher 角色", () => {
+    const script = readFileSync(
+      fileURLToPath(new URL("../../deploy/demo/postgres-init.sh", import.meta.url)),
+      "utf8",
+    );
+    // 已有角色或 Schema 时不能报错，也不得改写已有角色的密码。
+    expect(script).not.toMatch(/^CREATE ROLE /mu);
+    expect(script).not.toMatch(/ALTER ROLE/u);
+    expect(script).toContain(
+      "WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = wanted.role_name)",
+    );
+    expect(script).toContain("CREATE SCHEMA IF NOT EXISTS");
+    expect(script).toContain("(:'webhook_role', :'webhook_password')");
+  });
+
+  it("保留数据卷升级时在迁移前幂等补齐数据库角色", () => {
+    const result = deploy("success", undefined, {
+      "scheduler.env": webhookFiles.scheduler.replace(
+        "placeholder-password@",
+        "placeholder%2Dpassword@",
+      ),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const started = result.log.indexOf("up -d --force-recreate postgres minio");
+    const ready = result.log.indexOf("exec -T postgres sh -c pg_isready");
+    const provisioned = result.log.indexOf(
+      "exec -T postgres sh /docker-entrypoint-initdb.d/10-hoox-demo.sh",
+    );
+    expect(started).toBeGreaterThanOrEqual(0);
+    expect(ready).toBeGreaterThan(started);
+    expect(provisioned).toBeGreaterThan(ready);
+    const probe = result.log.indexOf('PGPASSWORD="$DATABASE_WEBHOOK_DISPATCHER_PASSWORD" psql');
+    expect(probe).toBeGreaterThan(provisioned);
+    expect(probe).toBeLessThan(result.log.indexOf("run --rm migrate"));
   });
 
   it.each([

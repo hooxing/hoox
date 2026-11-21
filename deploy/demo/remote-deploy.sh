@@ -27,6 +27,55 @@ for file in infra.env migration.env api.env admin-control.env scheduler.env work
     exit 2
   fi
 done
+
+shared_value() {
+  sed -n "s/^$2=//p" "$shared_dir/$1" | tail -n 1
+}
+
+# Webhook Dispatcher 跨 infra、migration、scheduler 与 api 四份配置；任一缺失或不一致都会让
+# 迁移或投递失败，必须在改动任何发布状态前失败关闭。只比较值，不输出任何秘密。
+verify_webhook_configuration() {
+  local LC_ALL=C role scheduler_url scheduler_key encoded decoded database
+  database="$(shared_value infra.env POSTGRES_DB)"
+  role="$(shared_value infra.env DATABASE_WEBHOOK_DISPATCHER_ROLE)"
+  if [[ ! "$role" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] ||
+    [[ -z "$(shared_value infra.env DATABASE_WEBHOOK_DISPATCHER_PASSWORD)" ]]; then
+    echo "Demo infra.env 缺少有效的 Webhook Dispatcher 数据库角色或密码" >&2
+    return 1
+  fi
+  if [[ "$(shared_value migration.env DATABASE_WEBHOOK_DISPATCHER_ROLE)" != "$role" ]]; then
+    echo "Demo migration.env 的 Webhook Dispatcher 角色与 infra.env 不一致" >&2
+    return 1
+  fi
+  scheduler_url="$(shared_value scheduler.env WEBHOOK_DISPATCHER_DATABASE_URL)"
+  if [[ "$(shared_value scheduler.env DATABASE_WEBHOOK_DISPATCHER_ROLE)" != "$role" ]] ||
+    [[ ! "$scheduler_url" =~ ^postgres(ql)?://([^:@/]+):([^@/?#]+)@127\.0\.0\.1:15432/([^/?#]+)$ ]] ||
+    [[ "${BASH_REMATCH[2]}" != "$role" || "${BASH_REMATCH[4]}" != "$database" ]]; then
+    echo "Demo scheduler.env 的 Webhook Dispatcher 角色或连接与 infra.env 不一致" >&2
+    return 1
+  fi
+  encoded="${BASH_REMATCH[3]}"
+  # 按 URL 百分号编码比较密码；不能把反斜杠直接交给 printf %b，也不允许 NUL。
+  if [[ "$encoded" == *'\'* || "$encoded" == *'%00'* || "${encoded//%[[:xdigit:]][[:xdigit:]]/}" == *'%'* ]]; then
+    echo "Demo scheduler.env 的 Webhook Dispatcher 密码编码无效" >&2
+    return 1
+  fi
+  printf -v decoded '%b' "${encoded//%/\\x}"
+  if [[ "$decoded" != "$(shared_value infra.env DATABASE_WEBHOOK_DISPATCHER_PASSWORD)" ]]; then
+    echo "Demo scheduler.env 的 Webhook Dispatcher 凭据与 infra.env 不一致" >&2
+    return 1
+  fi
+  scheduler_key="$(shared_value scheduler.env WEBHOOK_SECRET_ENCRYPTION_KEY)"
+  if (( ${#scheduler_key} < 32 )) ||
+    [[ "$(shared_value api.env WEBHOOK_SECRET_ENCRYPTION_KEY)" != "$scheduler_key" ]]; then
+    echo "Demo api.env 与 scheduler.env 必须配置相同且不少于 32 字节的 WEBHOOK_SECRET_ENCRYPTION_KEY" >&2
+    return 1
+  fi
+}
+if ! verify_webhook_configuration; then
+  exit 2
+fi
+
 if [[ -L "$root/current" ]]; then
   previous_release="$(readlink -f "$root/current")"
 fi
@@ -166,6 +215,24 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
 # 重建前仍连着上一 epoch 的数据库；切换数据卷时这是保住配置的最后时机。
 export_runtime_config before-deploy
 compose up -d --force-recreate postgres minio
+# 只经 TCP 判定就绪：首次初始化期间的临时服务器只监听 Unix socket，避免与初始化脚本并发。
+postgres_ready=false
+for ((attempt = 1; attempt <= 60; attempt += 1)); do
+  if compose exec -T postgres sh -c 'pg_isready -q -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; then
+    postgres_ready=true
+    break
+  fi
+  sleep 2
+done
+if [[ "$postgres_ready" != "true" ]]; then
+  echo "Demo PostgreSQL 未在期限内就绪" >&2
+  exit 1
+fi
+# 保留数据卷时初始化脚本不会自动执行；发布前幂等补齐新增的受限角色（如 Webhook Dispatcher），
+# 角色与密码只来自容器内 infra.env，不经宿主机命令行。
+compose exec -T postgres sh /docker-entrypoint-initdb.d/10-hoox-demo.sh
+# 已有角色不改密码；升级配置与实际凭据不同则在迁移之前停止。
+compose exec -T postgres sh -ec 'PGPASSWORD="$DATABASE_WEBHOOK_DISPATCHER_PASSWORD" psql -Xqw -h 127.0.0.1 -U "$DATABASE_WEBHOOK_DISPATCHER_ROLE" -d "$POSTGRES_DB" -c "SELECT 1" >/dev/null'
 compose --profile ops run --rm minio-init
 compose --profile ops run --rm migrate
 restore_runtime_config

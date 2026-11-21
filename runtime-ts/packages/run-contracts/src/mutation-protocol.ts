@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { assertControlledToolObservation, parseControlledToolReceipt } from "@hoox/context-policy";
+import {
+  assertControlledToolObservation,
+  encodeControlledToolReceipt,
+  parseControlledToolReceipt,
+} from "@hoox/context-policy";
 import { type IsoTimestamp, type Sha256Digest, sha256Digest } from "@hoox/domain";
 import type { ControlledRolloutProjection } from "./rollout-projection.js";
 import type { RuntimeMutation, RuntimeOutboxV1, ValidatedWorkspaceChange } from "./ports.js";
@@ -113,14 +117,7 @@ export function assertControlledRolloutProjection(projection: ControlledRolloutP
     if (item.kind === "tool_receipt") {
       try {
         const receipt = parseControlledToolReceipt(
-          JSON.stringify({
-            schemaVersion: 1,
-            trust: "sandbox_untrusted",
-            toolName: item.toolName,
-            outcome: item.outcome,
-            ...(item.executionMode === undefined ? {} : { executionMode: item.executionMode }),
-            message: item.outcome === "succeeded" ? "工具调用已完成。" : "工具调用未完成。",
-          }),
+          encodeControlledToolReceipt(item.toolName, item.outcome, item.executionMode),
         );
         assertControlledToolObservation({
           receipt,

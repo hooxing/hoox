@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { normalizeExternalToolSchema, type ExternalToolVersion } from "@hoox/domain";
 import { ExternalToolTransportError } from "@hoox/run-contracts";
-import { encodeControlledToolReceipt } from "@hoox/context-policy";
+import { encodeControlledToolReceipt, parseControlledToolReceipt } from "@hoox/context-policy";
 import {
   createExternalToolAgentTool,
   externalTargetConnection,
@@ -36,6 +36,64 @@ const consumePermit = async ({ toolVersionId }: { readonly toolVersionId: string
 });
 
 describe("外部工具运行骨架", () => {
+  it("只有领取快照标记为 Playground 才短路外部请求并写入 Mock 回执", async () => {
+    const invoke = vi.fn(async () => ({
+      body: new TextEncoder().encode("real"),
+      contentType: "text/plain",
+    }));
+    const authorizeAndConsume = vi.fn(consumePermit);
+    const receipts: string[] = [];
+    const persistStarted = vi.fn(async () => undefined);
+    const tool = createExternalToolAgentTool(toolVersion, {
+      runOrigin: "playground",
+      playgroundMocks: { tv1: { answer: "simulated" } },
+      getCallContext: () => ({ tenantId: "tenant", threadId: "thread", runId: "run" }),
+      persistStarted,
+      authorizeAndConsume,
+      transport: { invoke },
+      recordReceipt: async ({ receipt }) => {
+        receipts.push(receipt);
+      },
+      requireRecovery: async () => undefined,
+    });
+    const result = await tool.execute("mock-call", { value: "q" });
+    expect(result.details).toEqual({ executionMode: "mock", mockResult: { answer: "simulated" } });
+    expect(result.content).toEqual([
+      { type: "text", text: '[Playground Mock] {"answer":"simulated"}' },
+    ]);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(authorizeAndConsume).not.toHaveBeenCalled();
+    expect(persistStarted).toHaveBeenCalledWith({ callId: "mock-call", toolName: "http__lookup" });
+    expect(parseControlledToolReceipt(receipts[0] ?? "")).toMatchObject({
+      outcome: "succeeded",
+      executionMode: "playground_mock",
+    });
+  });
+
+  it.each(["normal", "evaluation", "api"] as const)(
+    "%s Run 忽略同名持久 Mock 并走真实外部调用边界",
+    async (runOrigin) => {
+      const invoke = vi.fn(async () => ({
+        body: new TextEncoder().encode("real"),
+        contentType: "text/plain",
+      }));
+      const authorizeAndConsume = vi.fn(consumePermit);
+      const tool = createExternalToolAgentTool(toolVersion, {
+        runOrigin,
+        playgroundMocks: { tv1: { answer: "must-not-appear" } },
+        getCallContext: () => ({ tenantId: "tenant", threadId: "thread", runId: "run" }),
+        persistStarted: async () => undefined,
+        authorizeAndConsume,
+        transport: { invoke },
+        recordReceipt: async () => undefined,
+        requireRecovery: async () => undefined,
+      });
+      await tool.execute(`real-${runOrigin}`, { value: "q" });
+      expect(invoke).toHaveBeenCalledOnce();
+      expect(authorizeAndConsume).toHaveBeenCalledOnce();
+    },
+  );
+
   it("拒绝私网 IP 和 DNS 解析到私网的目标，并允许部署开关", async () => {
     await expect(validateExternalHttpsTarget("https://127.0.0.1/a")).rejects.toThrow(
       "EXTERNAL_TARGET_REJECTED",

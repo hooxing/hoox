@@ -239,6 +239,16 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
        VALUES('tenant_a','run_a1','{"lookup":{"ok":true}}'::jsonb,'test-mock-key',repeat('a',64))`,
       ),
     ).rejects.toMatchObject({ code: "23503" });
+
+    for (const origin of ["api", "evaluation"] as const) {
+      await expect(
+        administrator.query(
+          `INSERT INTO "${schema}".run_playground_mocks(tenant_id,run_id,origin,mock_results,idempotency_key,request_digest)
+           VALUES('tenant_a','run_a1',$1,'{"lookup":{"ok":true}}'::jsonb,$2,repeat('b',64))`,
+          [origin, `test-mock-${origin}`],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+    }
   });
 
   it("跨 Tenant 列表按 Tenant、状态与时间筛选，并汇总耗时、调用与 Token", async () => {

@@ -84,11 +84,16 @@ function outlineRecord(record: TrajectoryRecord): TrajectoryRecord {
       const action = nestedString(detail, "presentation", "action");
       const failureCode = nestedString(detail, "failure", "code");
       const safe = {
-        ...pick(detail, ["callId", "parentCallId", "isError"]),
+        ...pick(detail, ["callId", "parentCallId", "isError", "executionMode"]),
         ...(action === undefined ? {} : { action }),
         ...(failureCode === undefined ? {} : { failureCode }),
       };
-      return withDetail(record, record.event, Object.keys(safe).length === 0 ? undefined : safe);
+      const mocked = detail?.executionMode === "playground_mock";
+      return withDetail(
+        record,
+        mocked ? `${record.event} · Playground Mock` : record.event,
+        Object.keys(safe).length === 0 ? undefined : safe,
+      );
     }
     case "waiting":
       return withDetail(record, "等待用户回答", pick(detail, ["checkpointId"]));

@@ -1127,6 +1127,9 @@ export interface AgentSessionFactoryPort {
     readonly initialInputText?: string;
     readonly skillSnapshot?: RunSkillSnapshot;
     readonly agentSnapshot: RunAgentSnapshot;
+    /** 仅由已持久化领取快照提供；子工具适配器不得从请求正文推导来源。 */
+    readonly origin: ClaimedExecutionSnapshot["origin"];
+    readonly playgroundMocks: ClaimedExecutionSnapshot["playgroundMocks"];
     /** Worker 在领取 Run 后读取一次；Root 与所有子 Agent 共用该不可变快照。 */
     readonly personalizationSnapshot?: RunPersonalizationSnapshot;
     readonly contextThroughSequence?: number;

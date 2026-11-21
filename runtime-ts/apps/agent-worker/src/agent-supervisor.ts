@@ -50,6 +50,7 @@ interface AgentSupervisorDependencies {
   readonly maxThreads?: number;
   readonly maxConcurrentAgents?: number;
   readonly allowedExternalToolVersionIds?: readonly string[];
+  readonly onExternalToolResultUnknown?: () => Promise<void>;
   readonly now?: () => number;
   readonly createSession: (input: {
     readonly identity: AgentExecutionIdentity;
@@ -476,6 +477,7 @@ export class AgentSupervisor implements AgentControlPort {
     let completedHistory = child.history;
     let completedTurnCount = 0;
     let toolFailure: Error | undefined;
+    let externalToolResultUnknown = false;
     const pendingToolEvents = new Set<Promise<void>>();
     try {
       const started = await this.dependencies.persistence.startTurn({
@@ -529,6 +531,15 @@ export class AgentSupervisor implements AgentControlPort {
         const prepared = await session.prepareInput({ text: prompt, attachments: [] });
         const authorization = await this.dependencies.authorizeModelStart({ identity, prompt });
         const outcome = await session.runPrompt(prepared, authorization);
+        if (
+          outcome.kind === "recovery_required" &&
+          outcome.code === "EXTERNAL_TOOL_RESULT_UNKNOWN"
+        ) {
+          externalToolResultUnknown = true;
+          child.status = "failed";
+          await this.dependencies.onExternalToolResultUnknown?.();
+          return;
+        }
         while (pendingToolEvents.size > 0) await Promise.all([...pendingToolEvents]);
         if (toolFailure !== undefined) throw toolFailure;
         // Pi 在工具取消后仍可能以 completed 收敛；主动中断优先于模型流终态，禁止发布部分答案。
@@ -563,6 +574,7 @@ export class AgentSupervisor implements AgentControlPort {
         payload: answer,
       });
     } catch (error) {
+      if (externalToolResultUnknown) return;
       const interrupted = child.interruptRequested || this.#stopping;
       child.status = interrupted ? "interrupted" : "failed";
       const message = boundedText(

@@ -17,8 +17,9 @@ import {
 } from "@earendil-works/pi-ai";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
 import { normalizeExternalToolSchema, runId } from "@hoox/domain";
+import { ExternalToolSnapshotError } from "@hoox/run-contracts";
 import { deriveHttpToolSigningKey, verifyHttpToolSignature } from "@hoox/tool-router";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import type {
   AgentControlPersistencePort,
@@ -76,6 +77,7 @@ function seed(
   versions: readonly ExternalToolRuntimeSnapshot[],
   builtinTools: string[] = [],
   id = runId(`run-${name}`),
+  toolCallingMode: "native" | "ptc" = "native",
 ) {
   return {
     ...fakeSeed(name, id),
@@ -88,7 +90,7 @@ function seed(
           versionId: tool.toolVersionId,
         })),
         clientTools: [],
-        toolCallingMode: "native",
+        toolCallingMode,
       },
     }),
   };
@@ -99,7 +101,10 @@ function reader(versions: readonly ExternalToolRuntimeSnapshot[]): ExternalToolS
       versions.filter(({ tool }) => toolVersionIds.includes(tool.toolVersionId)),
   };
 }
-async function pi(snapshots: ExternalToolSnapshotReader) {
+async function pi(
+  snapshots: ExternalToolSnapshotReader,
+  toolCallingMode: "native" | "ptc" = "native",
+) {
   const faux = fauxProvider({ api: "faux-b5", provider: "faux-b5", tokensPerSecond: 100_000 });
   const credentials = new InMemoryCredentialStore();
   await credentials.modify(faux.provider.id, async () => ({
@@ -109,12 +114,16 @@ async function pi(snapshots: ExternalToolSnapshotReader) {
   const runtime = createModels({ credentials });
   runtime.setProvider(faux.provider);
   const receipts: { callId: string; receipt: string }[] = [];
+  const starts: { toolCallId: string; toolName: string }[] = [];
   const manifestHashes = new Map<string, string>();
   const sessions = new PiWorkerSessionFactory(
     faux.getModel(),
     runtime,
     (_input, outputs) => ({
-      recordStarted: async () => "recorded",
+      recordStarted: async (call) => {
+        starts.push(call);
+        return "recorded";
+      },
       record: async (call) => {
         const receipt = await outputs.readControlledReceipt(call);
         if (receipt === undefined) return { outcome: "conflict" };
@@ -137,12 +146,12 @@ async function pi(snapshots: ExternalToolSnapshotReader) {
     undefined,
     undefined,
     undefined,
-    "native",
+    toolCallingMode,
     undefined,
     undefined,
     { snapshots, allowPrivateAddresses: true, httpIdentityRootKey: rootKey },
   );
-  return { faux, sessions, receipts, manifestHashes };
+  return { faux, sessions, receipts, starts, manifestHashes };
 }
 function worker(
   persistence: FakeExecutionPersistence,
@@ -175,6 +184,7 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
   const requests: { method: string; path: string; body: Buffer; headers: IncomingHttpHeaders }[] =
     [];
   let onRequest: () => void;
+  let disconnect = false;
   const server = createServer();
   const previousCAs = getCACertificates("default");
   beforeAll(async () => {
@@ -231,6 +241,10 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
       const body = Buffer.concat(chunks);
       requests.push({ method: req.method ?? "", path: req.url ?? "", body, headers: req.headers });
       onRequest();
+      if (disconnect) {
+        res.destroy();
+        return;
+      }
       res.setHeader("content-type", "application/json");
       res.end(
         JSON.stringify(
@@ -257,7 +271,12 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
       await new Promise((resolve) => server.close(resolve));
     }
   });
-  it("MCP 与 HTTP 返回脱敏正文并写入独立受控回执，签名身份来自 ExecutionScope", async () => {
+  beforeEach(() => {
+    requests.length = 0;
+    onRequest = () => {};
+    disconnect = false;
+  });
+  it("MCP 与 HTTP 隐藏不可信正文并写入独立受控回执，签名身份来自 ExecutionScope", async () => {
     requests.length = 0;
     onRequest = () => {};
     const versions = [version("mcp", origin), version("http", origin)];
@@ -306,14 +325,12 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
       {
         toolCallId: "call-mcp",
         isError: false,
-        content: [{ type: "text", text: "MCP 找到 [凭据已隐藏]" }],
+        content: [{ type: "text", text: "外部工具调用已成功，响应正文未向模型公开。" }],
       },
       {
         toolCallId: "call-http",
         isError: false,
-        content: [
-          { type: "text", text: JSON.stringify({ answer: "HTTP 找到", echo: "[凭据已隐藏]" }) },
-        ],
+        content: [{ type: "text", text: "外部工具调用已成功，响应正文未向模型公开。" }],
       },
     ]);
     expect(receipts).toEqual([
@@ -327,12 +344,18 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
   it("首个调用执行期间撤销版本，在 turn 安全点终止而不再调用外部服务", async () => {
     requests.length = 0;
     const available = [version("mcp", origin)];
+    let revoked = false;
     const persistence = new FakeExecutionPersistence();
     const scope = persistence.addSeed(seed("external-revoked", available));
     onRequest = () => {
-      available.length = 0;
+      revoked = true;
     };
-    const { faux, sessions, receipts } = await pi(reader(available));
+    const { faux, sessions, receipts } = await pi({
+      read: async (input) => {
+        if (revoked) throw new ExternalToolSnapshotError("EXTERNAL_TOOL_REVOKED");
+        return reader(available).read(input);
+      },
+    });
     faux.setResponses([
       toolCall("mcp__catalog__lookup", { runId: "first" }, "call-first"),
       toolCall("mcp__catalog__lookup", { runId: "second" }, "call-second"),
@@ -350,6 +373,197 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
         callId: "call-first",
         receipt: encodeControlledToolReceipt("mcp__catalog__lookup", "succeeded"),
       },
+    ]);
+    expect(faux.state.callCount).toBe(1);
+  });
+  it.each(["mcp", "http"] as const)(
+    "PTC 的 %s 子调用复用同名 durable 前驱且仅消费一次许可",
+    async (source) => {
+      const snapshot = version(source, origin);
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(seed("external-ptc", [snapshot], [], undefined, "ptc"));
+      const { faux, sessions, starts, receipts } = await pi(reader([snapshot]), "ptc");
+      faux.setResponses([
+        toolCall(
+          "run_code",
+          { code: `return await tools.${snapshot.tool.modelToolName}({runId: "ptc"});` },
+          "program",
+        ),
+        fauxAssistantMessage("完成"),
+      ]);
+      expect(await worker(persistence, sessions).execute(scope)).toEqual({ outcome: "succeeded" });
+      expect(requests).toHaveLength(1);
+      const predecessors = starts.filter((call) => call.toolName === snapshot.tool.modelToolName);
+      expect(predecessors).toHaveLength(1);
+      const [predecessor] = predecessors;
+      const permits = persistence.permits.filter(
+        ({ permit }) => permit.toolVersionId === snapshot.tool.toolVersionId,
+      );
+      expect(permits).toHaveLength(1);
+      expect(permits[0]).toMatchObject({
+        consumed: true,
+        permit: { callId: predecessor?.toolCallId },
+      });
+      expect(receipts.filter((call) => call.callId === predecessor?.toolCallId)).toHaveLength(1);
+    },
+  );
+  it("根 Agent 断连后立即撤销仍持久保留 UNKNOWN，且不再发起副作用", async () => {
+    disconnect = true;
+    let revoked = false;
+    const published = version("http", origin);
+    const snapshot = {
+      ...published,
+      tool: { ...published.tool, sideEffect: "write" as const, idempotent: false },
+    };
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(seed("external-unknown-revoked", [snapshot]));
+    const { faux, sessions, receipts } = await pi({
+      read: async () => {
+        if (revoked) throw new ExternalToolSnapshotError("EXTERNAL_TOOL_REVOKED");
+        return [snapshot];
+      },
+    });
+    onRequest = () => {
+      revoked = true;
+    };
+    faux.setResponses([
+      toolCall("http__lookup", { runId: "first" }, "unknown-call"),
+      toolCall("http__lookup", { runId: "forbidden" }, "forbidden-call"),
+    ]);
+    expect(await worker(persistence, sessions).execute(scope)).toEqual({
+      outcome: "recovery_required",
+      code: "EXTERNAL_TOOL_RESULT_UNKNOWN",
+    });
+    expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
+    expect(
+      persistence
+        .record(scope)
+        .events.filter((event) => event.kind === "attempt_state_changed")
+        .at(-1),
+    ).toMatchObject({
+      payload: { status: "recovery_required", code: "EXTERNAL_TOOL_RESULT_UNKNOWN" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(receipts).toEqual([]);
+    expect(faux.state.callCount).toBe(1);
+  });
+  it("子 Agent 断连使根 Attempt 待对账，不发布普通子任务失败或继续父 Agent 副作用", async () => {
+    disconnect = true;
+    const published = version("http", origin);
+    const snapshot = {
+      ...published,
+      tool: { ...published.tool, sideEffect: "write" as const, idempotent: false },
+    };
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(
+      seed("external-child-unknown", [snapshot], ["spawn_agent", "wait_agent"]),
+    );
+    const control = childConversations();
+    const settle = vi.spyOn(control.port, "settleTurn");
+    const mailbox = vi.spyOn(control.port, "appendMailbox");
+    const { faux, sessions } = await pi(reader([snapshot]));
+    const next = (ctx: Context) =>
+      ctx.tools?.some((tool) => tool.name === "spawn_agent")
+        ? toolCall("wait_agent", { after_sequence: 0, timeout_ms: 1000 }, "wait-child")
+        : toolCall("http__lookup", { runId: "child" }, "child-unknown");
+    faux.setResponses([
+      toolCall(
+        "spawn_agent",
+        {
+          task: "执行写入",
+          tools: [],
+          fork_turns: "none",
+          external_tool_version_ids: [snapshot.tool.toolVersionId],
+        },
+        "spawn-child",
+      ),
+      next,
+      next,
+      toolCall("http__lookup", { runId: "forbidden" }, "forbidden-root-call"),
+    ]);
+    expect(await worker(persistence, sessions, control.port).execute(scope)).toEqual({
+      outcome: "recovery_required",
+      code: "EXTERNAL_TOOL_RESULT_UNKNOWN",
+    });
+    expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
+    expect(requests).toHaveLength(1);
+    expect(settle).not.toHaveBeenCalled();
+    expect(mailbox.mock.calls.some(([call]) => call.kind === "error")).toBe(false);
+    expect(persistence.permits.some(({ permit }) => permit.callId === "forbidden-root-call")).toBe(
+      false,
+    );
+  });
+  it.each(["initial", "turn"] as const)(
+    "%s 快照读取不可用进入持久恢复而不标记撤销",
+    async (point) => {
+      const snapshot = version("mcp", origin);
+      let reads = 0;
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(seed("external-unavailable", [snapshot]));
+      const { faux, sessions } = await pi({
+        read: async () => {
+          reads += 1;
+          if (point === "initial" || reads > 1) throw new Error("临时连接失败");
+          return [snapshot];
+        },
+      });
+      faux.setResponses([
+        toolCall("mcp__catalog__lookup", { runId: "first" }, "first"),
+        fauxAssistantMessage("不能继续"),
+      ]);
+      expect(await worker(persistence, sessions).execute(scope)).toEqual({
+        outcome: "recovery_required",
+        code: "PERSISTENCE_UNAVAILABLE",
+      });
+      expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
+      expect(
+        persistence
+          .record(scope)
+          .events.filter((event) => event.kind === "attempt_state_changed")
+          .at(-1),
+      ).toMatchObject({ payload: { code: "PERSISTENCE_UNAVAILABLE" } });
+      expect(requests).toHaveLength(point === "initial" ? 0 : 1);
+    },
+  );
+  it("快照缺失不是撤销证据，以无效快照终止且不发包", async () => {
+    const snapshot = version("mcp", origin);
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(seed("external-missing", [snapshot]));
+    const { sessions } = await pi(reader([]));
+    expect(await worker(persistence, sessions).execute(scope)).toEqual({ outcome: "failed" });
+    expect(
+      persistence
+        .record(scope)
+        .events.filter((event) => event.kind === "attempt_state_changed")
+        .at(-1),
+    ).toMatchObject({ payload: { status: "failed", code: "EXTERNAL_TOOL_SNAPSHOT_INVALID" } });
+    expect(requests).toHaveLength(0);
+  });
+  it("发包前最终消费确认已撤销时，只保留失败回执且不发包", async () => {
+    const snapshot = version("http", origin);
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(seed("external-revoke-before-consume", [snapshot]));
+    const consume = persistence.consumeExternalEffectPermit.bind(persistence);
+    vi.spyOn(persistence, "consumeExternalEffectPermit").mockImplementation(async (input) =>
+      input.permit.toolVersionId === snapshot.tool.toolVersionId
+        ? { outcome: "external_tool_revoked" }
+        : consume(input),
+    );
+    const { faux, sessions, receipts } = await pi(reader([snapshot]));
+    faux.setResponses([
+      toolCall("http__lookup", { runId: "not-sent" }, "revoked-call"),
+      fauxAssistantMessage("不应采样"),
+    ]);
+    expect(await worker(persistence, sessions).execute(scope)).toEqual({ outcome: "failed" });
+    expect(
+      persistence
+        .record(scope)
+        .events.filter((event) => event.kind === "attempt_state_changed")
+        .at(-1),
+    ).toMatchObject({ payload: { code: "EXTERNAL_TOOL_REVOKED" } });
+    expect(requests).toHaveLength(0);
+    expect(receipts).toEqual([
+      { callId: "revoked-call", receipt: encodeControlledToolReceipt("http__lookup", "failed") },
     ]);
     expect(faux.state.callCount).toBe(1);
   });

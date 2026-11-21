@@ -14,6 +14,7 @@ import {
   isoTimestamp,
   type Membership,
   membershipId,
+  normalizeExternalToolSchema,
   prepareWorkspaceRevision,
   rehydrateThread,
   type Run,
@@ -49,7 +50,11 @@ import {
   DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
 } from "../../runtime-ts/packages/prompt-builder/src/index.js";
 import { runtimeMutationDigest } from "@hoox/run-contracts/mutation-protocol";
-import type { RuntimeMutation } from "@hoox/run-contracts";
+import type { ExecutionFence, RuntimeMutation } from "@hoox/run-contracts";
+import { ExternalToolCredentialCipher } from "../../runtime-ts/packages/persistence/src/external-tool-credential.js";
+import { ExternalToolCredentialDecryptor } from "../../runtime-ts/packages/persistence/src/external-tool-credential-reader.js";
+import { PgExternalToolSnapshotReader } from "../../runtime-ts/packages/persistence/src/pg-external-tool-snapshot-reader.js";
+import { PgExternalToolRegistry } from "../../runtime-ts/packages/persistence/src/pg-external-tools.js";
 import { PgRunDispatchCreation } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import {
@@ -82,6 +87,7 @@ import {
 import {
   createPostgresPool,
   type Pool,
+  type PoolClient,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
@@ -148,6 +154,7 @@ const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const teamCoordinatorPassword = randomBytes(24).toString("hex");
 const adminControlPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationDatabaseUrl);
+const workerCoordinatorDatabaseUrl = new URL(migrationDatabaseUrl);
 const teamCoordinatorDatabaseUrl = new URL(migrationDatabaseUrl);
 const adminControlDatabaseUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
@@ -155,6 +162,8 @@ if (testMigrationUrl.username !== configuredMigratorRole) {
 }
 testMigrationUrl.username = migratorRole;
 testMigrationUrl.password = migratorPassword;
+workerCoordinatorDatabaseUrl.username = workerCoordinatorRole;
+workerCoordinatorDatabaseUrl.password = workerCoordinatorPassword;
 teamCoordinatorDatabaseUrl.username = teamCoordinatorRole;
 teamCoordinatorDatabaseUrl.password = teamCoordinatorPassword;
 adminControlDatabaseUrl.username = adminControlRole;
@@ -178,6 +187,7 @@ const sourceMigrationDirectory = fileURLToPath(
 let administrativePool!: Pool;
 let migratorPool!: Pool;
 let runtimePool!: Pool;
+let workerCoordinatorPool!: Pool;
 let teamCoordinatorPool!: Pool;
 let adminControlPool!: Pool;
 let repositories!: CoreRepositories;
@@ -280,6 +290,187 @@ async function acquireLease(fixture: Fixture): Promise<Workspace> {
     await repositories.workspaces.compareAndSetLease(fixture.writeScope, fixture.workspace, leased),
   ).toEqual({ outcome: "committed" });
   return leased;
+}
+
+async function createExternalToolFixture(suffix: string) {
+  const manager = await createFixture(`external_${suffix}`);
+  await migratorPool.query(
+    "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+    [manager.user.id],
+  );
+  const credentialKey = "b5-placeholder-credential-key".repeat(2);
+  const registry = new PgExternalToolRegistry(
+    adminControlPool,
+    new ExternalToolCredentialCipher(credentialKey),
+  );
+  const inputSchema = normalizeExternalToolSchema({
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+  });
+  const versionId = `external-${suffix}-v1`;
+  const outsideVersionId = `external-${suffix}-v2`;
+  const toolName = "http__b5_lookup";
+  for (const toolVersionId of [versionId, outsideVersionId]) {
+    await registry.publish({
+      actorUserId: manager.user.id,
+      tool: {
+        toolVersionId,
+        source: "http",
+        endpoint: "https://tools.example.invalid/lookup",
+        modelToolName: toolName,
+        remoteToolName: null,
+        httpMethod: "POST",
+        description: "测试外部工具",
+        inputSchema: inputSchema.schema,
+        inputSchemaDigest: inputSchema.digest,
+        timeoutMs: 1000,
+        maxResponseBytes: 512,
+        sideEffect: "write",
+        idempotent: false,
+        credentialRef: "b5-placeholder-reference",
+      },
+      credential: "b5-placeholder-credential",
+    });
+  }
+  const defaults = await readDefaultAgentRevision();
+  if (defaults === undefined) throw new Error("默认 Agent Revision 不可见");
+  const agents = new PgAgentDefinitionRepository(adminControlPool);
+  const draft = await agents.createDraft({
+    actorUserId: manager.user.id,
+    id: `agent_external_${suffix}`,
+    availability: { mode: "selected_tenants", tenantIds: [manager.tenant.id] },
+    content: {
+      ...defaults.content,
+      tools: {
+        mode: "configured",
+        builtinTools: [],
+        externalTools: [{ kind: "http", versionId }],
+        clientTools: [],
+        toolCallingMode: "native",
+      },
+    },
+    revisionId: `agent_external_${suffix}_v1`,
+    idempotencyKey: `external-${suffix}-draft`,
+    expectedGeneration: 0,
+  });
+  await agents.publish({
+    actorUserId: manager.user.id,
+    definitionId: draft.definition.id,
+    revisionId: draft.revision.id,
+    idempotencyKey: `external-${suffix}-publish`,
+    expectedGeneration: draft.definition.generation,
+  });
+  const thread = rehydrateThread(
+    {
+      ...manager.thread,
+      id: threadId(`thread_external_${suffix}_bound`),
+      agentDefinitionId: draft.definition.id,
+    },
+    manager.tenant,
+    manager.user,
+    manager.membership,
+  );
+  expect(await repositories.threads.create(manager.scope, thread)).toMatchObject({
+    outcome: "created",
+  });
+  const workspace = createWorkspace({
+    id: workspaceId(`workspace_external_${suffix}_bound`),
+    thread,
+    now: timestamp(4),
+  });
+  expect(await repositories.workspaces.create(manager.scope, workspace)).toEqual({
+    outcome: "created",
+  });
+  const run = createRun({ id: runId(`run_external_${suffix}_bound`), thread, now: timestamp(5) });
+  expect(
+    await new PgRunDispatchCreation(runtimePool).createQueuedRun({
+      scope: manager.scope,
+      thread,
+      run,
+      inputText: "执行外部工具",
+      idempotency: { key: `external-${suffix}-run`, requestHash: sha256Digest("0".repeat(64)) },
+    }),
+  ).toMatchObject({ outcome: "created" });
+  const scope = {
+    tenantId: manager.scope.tenantId,
+    threadId: thread.id,
+    runId: run.id,
+    rootRunId: run.id,
+    workspaceId: workspace.id,
+  };
+  const worker = new PgExecutionPersistence(runtimePool);
+  const claimed = await worker.claim({
+    scope,
+    workerId: `external-${suffix}`,
+    leaseDurationMs: 120_000,
+  });
+  if (claimed.outcome !== "claimed") throw new Error(`外部工具测试领取失败：${claimed.outcome}`);
+  const reader = new PgExternalToolSnapshotReader(
+    workerCoordinatorPool,
+    new ExternalToolCredentialDecryptor(credentialKey),
+  );
+  const call = {
+    callId: `external-${suffix}-call`,
+    toolName,
+    toolVersionId: versionId,
+    argsDigest: sha256Digest("a".repeat(64)),
+  };
+  const issue = async (toolVersionId = versionId) => {
+    const unsigned = {
+      schemaVersion: 1 as const,
+      idempotencyKey: `external-${suffix}-started`,
+      fence: claimed.fence,
+      expectedAttemptVersion: 0,
+      events: [
+        {
+          schemaVersion: 1 as const,
+          kind: "agent_event" as const,
+          sequence: 0,
+          payload: { type: "tool.started" as const, callId: call.callId, name: toolName },
+        },
+      ],
+      outbox: [],
+      effectInvocation: { callId: call.callId, toolName },
+    };
+    expect(
+      await worker.mutate({ ...unsigned, commandDigest: runtimeMutationDigest(unsigned) }),
+    ).toMatchObject({ outcome: "applied" });
+    const authorized = await worker.issueExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 1,
+      effect: "tool_execution",
+      call: { ...call, toolVersionId },
+      permitDurationMs: 60_000,
+    });
+    if (authorized.outcome !== "authorized")
+      throw new Error(`外部工具测试许可失败：${authorized.outcome}`);
+    return authorized.permit;
+  };
+  return {
+    manager,
+    versionId,
+    outsideVersionId,
+    toolName,
+    registry,
+    worker,
+    reader,
+    fence: claimed.fence,
+    issue,
+  };
+}
+
+async function waitForDatabaseBlocker(blockerPid: number): Promise<void> {
+  for (let retry = 0; retry < 200; retry += 1) {
+    const result = await administrativePool.query<{ waiting: boolean }>(
+      "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS waiting",
+      [blockerPid],
+    );
+    if (result.rows[0]?.waiting) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("未观察到预期的 PostgreSQL 行锁等待");
 }
 
 interface IsolatedMigrationTarget {
@@ -391,6 +582,11 @@ beforeAll(async () => {
     schema,
     maxConnections: 8,
   });
+  workerCoordinatorPool = createPostgresPool({
+    connectionString: workerCoordinatorDatabaseUrl.toString(),
+    schema,
+    maxConnections: 4,
+  });
   teamCoordinatorPool = createPostgresPool({
     connectionString: teamCoordinatorDatabaseUrl.toString(),
     schema,
@@ -413,6 +609,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (runtimePool !== undefined) await runtimePool.end();
+  if (workerCoordinatorPool !== undefined) await workerCoordinatorPool.end();
   if (teamCoordinatorPool !== undefined) await teamCoordinatorPool.end();
   if (adminControlPool !== undefined) await adminControlPool.end();
   if (migratorPool !== undefined) await migratorPool.end();
@@ -3038,32 +3235,40 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(result.rows[0]?.constraint_definition).toContain("remote_tool_name IS NULL");
   });
 
-  it("外部工具快照视图仅向 Runtime 开放按 Run 授权读取", async () => {
+  it("外部工具快照视图仅向 Worker Coordinator 开放双栅栏读取，Runtime 只能读许可门", async () => {
     const privileges = await migratorPool.query<{
       readonly view_select: boolean;
       readonly version_select: boolean;
       readonly credential_select: boolean;
       readonly revocation_select: boolean;
+      readonly worker_select: boolean;
+      readonly permit_select: boolean;
     }>(
-      `SELECT has_table_privilege($1,format('%I.%I',$2::text,'runtime_run_external_tool_snapshots'),'SELECT') AS view_select,
+      `SELECT has_table_privilege($1,format('%I.%I',$2::text,'worker_run_external_tool_snapshots'),'SELECT') AS view_select,
+              has_table_privilege($3,format('%I.%I',$2::text,'worker_run_external_tool_snapshots'),'SELECT') AS worker_select,
+              has_table_privilege($1,format('%I.%I',$2::text,'runtime_external_tool_permit_gate'),'SELECT') AS permit_select,
               has_table_privilege($1,format('%I.%I',$2::text,'external_tool_versions'),'SELECT') AS version_select,
               has_table_privilege($1,format('%I.%I',$2::text,'external_tool_credentials'),'SELECT') AS credential_select,
               has_table_privilege($1,format('%I.%I',$2::text,'external_tool_revocations'),'SELECT') AS revocation_select`,
-      [runtimeRole, schema],
+      [runtimeRole, schema, workerCoordinatorRole],
     );
     expect(privileges.rows).toEqual([
       {
-        view_select: true,
+        view_select: false,
+        worker_select: true,
+        permit_select: true,
         version_select: false,
         credential_select: false,
         revocation_select: false,
       },
     ]);
     const view = await migratorPool.query<{ readonly definition: string }>(
-      `SELECT pg_get_viewdef(format('%I.%I',$1::text,'runtime_run_external_tool_snapshots')::regclass,true) AS definition`,
+      `SELECT pg_get_viewdef(format('%I.%I',$1::text,'worker_run_external_tool_snapshots')::regclass,true) AS definition`,
       [schema],
     );
-    expect(view.rows[0]?.definition).toContain("app.external_tool_run_id");
+    expect(view.rows[0]?.definition).toContain("app.external_claim_token");
+    expect(view.rows[0]?.definition).toContain("execution_workspace_fences");
+    expect(view.rows[0]?.definition).toContain("workspace_write_leases");
     expect(view.rows[0]?.definition).toContain("external_tool_revocations");
     expect(view.rows[0]?.definition).toContain("externalTools");
     const method = await migratorPool.query<{ readonly data_type: string }>(
@@ -3071,6 +3276,301 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       [schema],
     );
     expect(method.rows).toEqual([{ data_type: "text" }]);
+  });
+
+  it("外部工具快照视图真实 Runtime 即使持有正确证明并切换 Tenant/Run 也不可读密文", async () => {
+    const first = await createExternalToolFixture("runtime_first");
+    const second = await createExternalToolFixture("runtime_second");
+    for (const fence of [
+      first.fence,
+      { ...first.fence, scope: { ...first.fence.scope, runId: first.manager.run.id } },
+      second.fence,
+    ]) {
+      await expect(
+        withTenantTransaction(runtimePool, fence.scope, async (client) => {
+          await client.query(
+            `SELECT set_config('app.external_tool_run_id',$1,true),
+                  set_config('app.external_claim_token',$2,true),
+                  set_config('app.external_claim_epoch',$3,true),
+                  set_config('app.external_lease_epoch',$4,true)`,
+            [
+              fence.scope.runId,
+              fence.runClaim.token,
+              String(fence.runClaim.epoch),
+              String(fence.workspaceLease.epoch),
+            ],
+          );
+          return client.query("SELECT ciphertext FROM worker_run_external_tool_snapshots");
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+    }
+    const snapshots = await first.reader.read({
+      fence: first.fence,
+      toolVersionIds: [first.versionId],
+    });
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.credential === "b5-placeholder-credential").toBe(true);
+    await expect(
+      first.reader.read({
+        fence: first.fence,
+        toolVersionIds: [first.outsideVersionId],
+      }),
+    ).rejects.toMatchObject({ code: "EXTERNAL_TOOL_SNAPSHOT_INVALID" });
+    await expect(
+      first.reader.read({
+        fence: { ...first.fence, scope: second.fence.scope },
+        toolVersionIds: [second.versionId],
+      }),
+    ).rejects.toMatchObject({ code: "EXTERNAL_TOOL_SNAPSHOT_INVALID" });
+    await expect(
+      first.reader.read({
+        fence: { ...first.fence, scope: { ...first.fence.scope, runId: first.manager.run.id } },
+        toolVersionIds: [first.versionId],
+      }),
+    ).rejects.toMatchObject({ code: "EXTERNAL_TOOL_SNAPSHOT_INVALID" });
+    const gate = await withTenantTransaction(runtimePool, first.fence.scope, (client) =>
+      client.query("SELECT * FROM runtime_external_tool_permit_gate WHERE run_id=$1", [
+        first.fence.scope.runId,
+      ]),
+    );
+    expect(gate.rows).toEqual([
+      {
+        tenant_id: first.fence.scope.tenantId,
+        run_id: first.fence.scope.runId,
+        tool_version_id: first.versionId,
+        model_tool_name: first.toolName,
+        revoked: false,
+      },
+    ]);
+  });
+
+  it("外部工具快照视图拒绝 stale claim、workspace fence 与错配 scope", async () => {
+    const fixture = await createExternalToolFixture("stale");
+    const { fence, reader, versionId } = fixture;
+    const staleFences: readonly ExecutionFence[] = [
+      { ...fence, runClaim: { ...fence.runClaim, token: "stale-placeholder-token" } },
+      { ...fence, runClaim: { ...fence.runClaim, epoch: fence.runClaim.epoch + 1 } },
+      {
+        ...fence,
+        workspaceLease: { ...fence.workspaceLease, epoch: fence.workspaceLease.epoch + 1 },
+      },
+      { ...fence, scope: { ...fence.scope, workspaceId: fixture.manager.workspace.id } },
+      { ...fence, scope: { ...fence.scope, threadId: fixture.manager.thread.id } },
+      {
+        ...fence,
+        scope: { ...fence.scope, baseRevisionId: workspaceRevisionId("stale-revision") },
+      },
+    ];
+    for (const staleFence of staleFences) {
+      await expect(
+        reader.read({ fence: staleFence, toolVersionIds: [versionId] }),
+      ).rejects.toMatchObject({ code: "EXTERNAL_TOOL_SNAPSHOT_INVALID" });
+    }
+    const released = await withTenantTransaction(migratorPool, fence.scope, (client) =>
+      client.query(
+        "UPDATE run_claims SET released_at=clock_timestamp() WHERE tenant_id=$1 AND claim_token=$2",
+        [fence.scope.tenantId, fence.runClaim.token],
+      ),
+    );
+    expect(released.rowCount).toBe(1);
+    await expect(reader.read({ fence, toolVersionIds: [versionId] })).rejects.toMatchObject({
+      code: "EXTERNAL_TOOL_SNAPSHOT_INVALID",
+    });
+  });
+
+  it.each(["claim", "lease"])(
+    "外部工具快照视图拒绝数据库已过期的 %s，调用者未来时间无效",
+    async (expired) => {
+      const { fence, reader, versionId } = await createExternalToolFixture(`expired_${expired}`);
+      const target = expired === "claim" ? "run_claims" : "workspace_write_leases";
+      const acquiredClock =
+        expired === "claim" ? ",acquired_at=clock_timestamp()-interval '2 seconds'" : "";
+      const updated = await withTenantTransaction(migratorPool, fence.scope, (client) =>
+        client.query(
+          `UPDATE ${target} SET expires_at=clock_timestamp()-interval '1 second'${acquiredClock} WHERE tenant_id=$1`,
+          [fence.scope.tenantId],
+        ),
+      );
+      expect(updated.rowCount).toBe(1);
+      await expect(reader.read({ fence, toolVersionIds: [versionId] })).rejects.toMatchObject({
+        code: "EXTERNAL_TOOL_SNAPSHOT_INVALID",
+      });
+    },
+  );
+
+  it("外部工具快照视图已撤销许可不可消费，读取错误保留明确撤销分类", async () => {
+    const fixture = await createExternalToolFixture("revoked");
+    const permit = await fixture.issue();
+    await fixture.registry.revoke({
+      actorUserId: fixture.manager.user.id,
+      toolVersionId: fixture.versionId,
+      reason: "测试撤销",
+    });
+    await expect(
+      fixture.reader.read({ fence: fixture.fence, toolVersionIds: [fixture.versionId] }),
+    ).rejects.toMatchObject({ code: "EXTERNAL_TOOL_REVOKED" });
+    await expect(
+      fixture.worker.consumeExternalEffectPermit({
+        fence: fixture.fence,
+        expectedAttemptVersion: 1,
+        permit,
+      }),
+    ).resolves.toEqual({ outcome: "external_tool_revoked" });
+    const stored = await withTenantTransaction(runtimePool, fixture.fence.scope, (client) =>
+      client.query("SELECT consumed_at FROM external_effect_permits WHERE permit_id=$1", [
+        permit.permitId,
+      ]),
+    );
+    expect(stored.rows).toEqual([{ consumed_at: null }]);
+    const ciphertext = await withTenantTransaction(
+      workerCoordinatorPool,
+      fixture.fence.scope,
+      async (client) => {
+        await client.query(
+          `SELECT set_config('app.external_claim_token',$1,true),set_config('app.external_claim_epoch',$2,true),set_config('app.external_lease_epoch',$3,true)`,
+          [
+            fixture.fence.runClaim.token,
+            String(fixture.fence.runClaim.epoch),
+            String(fixture.fence.workspaceLease.epoch),
+          ],
+        );
+        return client.query(
+          "SELECT revoked,ciphertext FROM worker_run_external_tool_snapshots WHERE run_id=$1",
+          [fixture.fence.scope.runId],
+        );
+      },
+    );
+    expect(ciphertext.rows).toEqual([{ revoked: true, ciphertext: null }]);
+  });
+
+  it("外部工具快照视图许可绑定精确版本并发消费恰好一次，不能换绑同名新版本", async () => {
+    const fixture = await createExternalToolFixture("consume_once");
+    const permit = await fixture.issue();
+    await expect(
+      fixture.worker.consumeExternalEffectPermit({
+        fence: fixture.fence,
+        expectedAttemptVersion: 1,
+        permit: { ...permit, toolVersionId: fixture.outsideVersionId },
+      }),
+    ).resolves.toEqual({ outcome: "external_tool_snapshot_invalid" });
+    const { toolVersionId, ...unbound } = permit;
+    expect(toolVersionId).toBe(fixture.versionId);
+    await expect(
+      fixture.worker.consumeExternalEffectPermit({
+        fence: fixture.fence,
+        expectedAttemptVersion: 1,
+        permit: unbound,
+      }),
+    ).resolves.toEqual({ outcome: "external_tool_snapshot_invalid" });
+    const results = await Promise.all(
+      [0, 1].map(() =>
+        fixture.worker.consumeExternalEffectPermit({
+          fence: fixture.fence,
+          expectedAttemptVersion: 1,
+          permit,
+        }),
+      ),
+    );
+    expect(results.map((result) => result.outcome).sort()).toEqual([
+      "already_consumed",
+      "consumed",
+    ]);
+  });
+
+  it("外部工具快照视图拒绝许可引用快照外的同名版本", async () => {
+    const fixture = await createExternalToolFixture("outside_permit");
+    const permit = await fixture.issue(fixture.outsideVersionId);
+    await expect(
+      fixture.worker.consumeExternalEffectPermit({
+        fence: fixture.fence,
+        expectedAttemptVersion: 1,
+        permit,
+      }),
+    ).resolves.toEqual({ outcome: "external_tool_snapshot_invalid" });
+  });
+
+  it("外部工具快照视图撤销先持有 FK KEY SHARE 时消费等待，提交后重新读取并拒绝", async () => {
+    const fixture = await createExternalToolFixture("revoke_race");
+    const permit = await fixture.issue();
+    const blocker = await adminControlPool.connect();
+    let consumption: ReturnType<PgExecutionPersistence["consumeExternalEffectPermit"]> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT set_config('app.user_id',$1,true)", [fixture.manager.user.id]);
+      await blocker.query(
+        "INSERT INTO external_tool_revocations(tool_version_id,reason,actor_user_id) VALUES($1,'测试并发撤销',$2)",
+        [fixture.versionId, fixture.manager.user.id],
+      );
+      const pid = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      consumption = fixture.worker.consumeExternalEffectPermit({
+        fence: fixture.fence,
+        expectedAttemptVersion: 1,
+        permit,
+      });
+      await waitForDatabaseBlocker(pid.rows[0]!.pid);
+      await blocker.query("COMMIT");
+      await expect(consumption).resolves.toEqual({ outcome: "external_tool_revoked" });
+    } finally {
+      await blocker.query("ROLLBACK");
+      blocker.release();
+      await consumption;
+    }
+  });
+
+  it("外部工具快照视图真实消费事务持锁至提交，阻塞后到撤销且不需要 Runtime 底表 UPDATE 权限", async () => {
+    const fixture = await createExternalToolFixture("consume_race");
+    const permit = await fixture.issue();
+    const paused = Promise.withResolvers<number>();
+    const resume = Promise.withResolvers<void>();
+    const pausingPool = {
+      async connect() {
+        const client = await runtimePool.connect();
+        return {
+          async query(sql: string, values?: unknown[]) {
+            const result = await client.query(sql, values);
+            if (sql.includes("UPDATE external_effect_permits SET consumed_at")) {
+              const pid = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+              paused.resolve(pid.rows[0]!.pid);
+              await resume.promise;
+            }
+            return result;
+          },
+          release(error?: Error) {
+            client.release(error);
+          },
+        } as unknown as PoolClient;
+      },
+    } as unknown as Pool;
+    const consumption = new PgExecutionPersistence(pausingPool).consumeExternalEffectPermit({
+      fence: fixture.fence,
+      expectedAttemptVersion: 1,
+      permit,
+    });
+    let revocation: Promise<void> | undefined;
+    try {
+      const blockerPid = await Promise.race([
+        paused.promise,
+        consumption.then((result) => {
+          throw new Error(`消费未到达提交边界：${result.outcome}`);
+        }),
+      ]);
+      revocation = fixture.registry.revoke({
+        actorUserId: fixture.manager.user.id,
+        toolVersionId: fixture.versionId,
+        reason: "消费后撤销",
+      });
+      await waitForDatabaseBlocker(blockerPid);
+      resume.resolve();
+      await expect(consumption).resolves.toMatchObject({ outcome: "consumed" });
+      await revocation;
+      await expect(
+        fixture.reader.read({ fence: fixture.fence, toolVersionIds: [fixture.versionId] }),
+      ).rejects.toMatchObject({ code: "EXTERNAL_TOOL_REVOKED" });
+    } finally {
+      resume.resolve();
+      await consumption;
+      await revocation;
+    }
   });
 
   it("外部工具密文仅允许 Admin Control 写入，Runtime 零权限", async () => {

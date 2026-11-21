@@ -51,7 +51,9 @@ claimed/running/finalizing → recovery_required → abandoned | failed
 
 ## 外部工具快照与撤销
 
-Worker 仅凭 RunAgentSnapshot 中的精确 `toolVersionId` 读取外部工具版本和凭据；PostgreSQL Runtime 角色只能查询按当前 Tenant、Run 快照且未撤销过滤的受限视图，不能读取版本、密文或撤销底表。凭据只在 Worker 内解密并交给 Tool Router 的 Transport，不进入 Prompt、Schema、事件或模型可见回执。MCP 与 HTTP 都经一次性许可和 durable 回执；撤销检查在工具调用前及 turn 安全点执行，发现撤销后不再发起调用并停止 Run。
+Worker 通过独立的 Worker Coordinator 连接读取 RunAgentSnapshot 中精确 `toolVersionId` 对应的外部工具版本与密文；共享 Runtime 角色无密文视图或底表读取权限。视图将调用方提交的 claim token、claim epoch 和 Workspace lease epoch 与数据库中当前 Attempt、未过期且未释放的 claim、Workspace writer 和队列执行权事实匹配，不将 Tenant/Run 会话设置当作执行授权。凭据只在 Worker 内解密并交给 Tool Router 的 Transport，不进入 Prompt、Schema、事件或模型可见回执。
+
+MCP 与 HTTP 的一次性许可绑定精确版本；DNS 与目标预检在最终消费之前完成，消费事务再次验证 Run 快照引用与撤销事实，并通过版本行锁与撤销提交建立顺序。先提交的撤销阻止发包；已经消费的调用不能撤回。turn 安全点仍检查撤销。已证实撤销以 `EXTERNAL_TOOL_REVOKED` 停止 Run；快照缺失或不匹配以 `EXTERNAL_TOOL_SNAPSHOT_INVALID` 失败关闭；连接等读取故障进入持久化恢复，不构成撤销证据。
 
 子 Agent 的外部工具授权默认为空，显式授权记录精确版本 ID 并随子 Agent 持久化；恢复或 Worker 重启保持同一集合。跨 Run 复用时取授权版本与新 Run 快照的交集，不得按工具名替换成新版本。
 
@@ -110,7 +112,7 @@ Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回
 
 ## 外部工具结果未知
 
-外部工具请求写出后发生超时、断连或进程中断时，结果属于 UNKNOWN，Attempt 进入恢复且普通 Worker 再投递不得重放。只有独立显式对账入口核对持久化的工具版本、canonical 参数摘要与原幂等键完全一致后，才可授权声明幂等工具复用同一幂等键重试；Transport 自身不得重放。外部工具版本与凭据读取必须受 Run 快照限定，接入 Agent 快照前 Worker 不获得相应数据库读取授权。
+外部工具请求写出后发生超时、断连或进程中断时，结果属于 UNKNOWN，根 Attempt 以 `EXTERNAL_TOOL_RESULT_UNKNOWN` 持久化为 `recovery_required`，普通 Worker 再投递不得重放。根、子 Session 共用这一边界：先关闭后续副作用入口，再持久化待对账事实；子 Agent 不将它降级为普通 `SUBAGENT_FAILED`，父 Agent 也不能继续成功收口。撤销阻止新调用，但不能覆盖既有待对账事实。只有独立显式对账入口核对持久化的工具版本、canonical 参数摘要与原幂等键完全一致后，才可授权声明幂等工具复用同一幂等键重试；Transport 自身不得重放。外部工具版本与凭据读取受 Run 快照及当前执行栅栏限定。
 
 外部工具 Transport 将失败明确分为两类可安全结束的结果：`not_sent` 表示可证明请求未写出（例如目标预检、DNS、缺少方法绑定或 TLS 握手完成前的失败）；`responded_failure` 表示收到可归一化的失败响应。两类都写入失败回执，不进入 UNKNOWN 恢复。HTTP 3xx（拒绝跟随）与 4xx（包括 408、429）属于 `responded_failure`；HTTP 5xx、写出后超时或取消、断连、2xx 正文中途中断、超限以及无法解释的 2xx 正文仍属于 UNKNOWN 并转入恢复。合法空成功响应（204、205 或声明长度为 0 的 2xx）按成功结算。MCP 协议错误响应和工具错误映射为 `responded_failure`。Transport 不重试；未明确分类的异常一律按 UNKNOWN 处理，且每次调用只结算一次。
 

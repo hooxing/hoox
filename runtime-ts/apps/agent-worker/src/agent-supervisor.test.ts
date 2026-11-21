@@ -148,6 +148,34 @@ function completedSession(
 const authorization = {} as ConsumedExternalEffectAuthorization;
 
 describe("AgentSupervisor", () => {
+  it("子 Agent UNKNOWN 上提到根恢复边界，不降级为 SUBAGENT_FAILED", async () => {
+    const control = persistence();
+    const settled = vi.spyOn(control, "settleTurn");
+    const mailbox = vi.spyOn(control, "appendMailbox");
+    const recovery = vi.fn(async () => undefined);
+    const supervisor = new AgentSupervisor({
+      persistence: control,
+      rootAgentThreadId: agentThreadId("root_agent_unknown"),
+      attemptId: "attempt_agent_unknown",
+      fence,
+      createSession: async () => ({
+        ...completedSession("不应成功"),
+        runPrompt: async () => ({
+          kind: "recovery_required",
+          code: "EXTERNAL_TOOL_RESULT_UNKNOWN",
+        }),
+      }),
+      authorizeModelStart: async () => authorization,
+      onToolEvent: async () => undefined,
+      onExternalToolResultUnknown: recovery,
+    });
+    await supervisor.initialize();
+    await supervisor.spawn({ callId: "spawn-unknown", task: "写入", tools: [], forkTurns: "none" });
+    await supervisor.drain();
+    expect(recovery).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    expect(mailbox).not.toHaveBeenCalled();
+  });
   it("按父 Agent 选择的工具和最近 N turn 创建独立 Session，并通过 mailbox 交付", async () => {
     const created: Parameters<
       ConstructorParameters<typeof AgentSupervisor>[0]["createSession"]

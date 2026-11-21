@@ -19,6 +19,7 @@ import type {
 } from "@hoox/domain";
 import type { RunSkillSnapshot } from "@hoox/skill";
 import type { WorkspaceManifest } from "@hoox/workspace";
+import type { ExternalToolSnapshotError } from "./external-tool.js";
 import type { ControlledRolloutProjection } from "./rollout-projection.js";
 import type { RunAgentSnapshot, RunAgentStopCode } from "./run-agent-snapshot.js";
 import type { RuntimeAgentEvent } from "./runtime-agent-event.js";
@@ -385,6 +386,7 @@ export interface ExternalEffectPermit {
   readonly effect: "model_start" | "model_continue" | "agent_model_start" | "tool_execution";
   readonly callId: string;
   readonly toolName: string;
+  readonly toolVersionId?: string;
   readonly argsDigest: Sha256Digest;
   readonly issuedAt: IsoTimestamp;
   readonly expiresAt: IsoTimestamp;
@@ -393,6 +395,7 @@ export interface ExternalEffectPermit {
 export interface ExternalEffectCall {
   readonly callId: string;
   readonly toolName: string;
+  readonly toolVersionId?: string;
   readonly argsDigest: Sha256Digest;
 }
 
@@ -436,6 +439,7 @@ export type StableWorkerErrorCode =
   | "AGENT_CONFIGURATION_UNSUPPORTED"
   | "EXTERNAL_TOOL_RESULT_UNKNOWN"
   | "EXTERNAL_TOOL_REVOKED"
+  | "EXTERNAL_TOOL_SNAPSHOT_INVALID"
   | "CANCELLED"
   | "CONTEXT_TOO_LARGE"
   | "TIMEOUT"
@@ -765,6 +769,8 @@ export interface ExecutionPersistencePort {
           | "expired"
           | "cancelled"
           | "agent_revision_revoked"
+          | "external_tool_revoked"
+          | "external_tool_snapshot_invalid"
           | "fence_lost"
           | "conflict"
           | "unavailable"
@@ -1138,7 +1144,9 @@ export interface AgentSessionFactoryPort {
         readonly attachments?: readonly UserInputAttachmentReference[];
       }[];
     }>;
-    readonly onExternalToolRevoked?: () => void;
+    readonly onExternalToolSnapshotFailure?: (code: ExternalToolSnapshotError["code"]) => void;
+    /** 根、子 Session 共用根 Attempt 的待对账边界；返回前必须停止后续副作用并持久化恢复事实。 */
+    readonly onExternalToolResultUnknown?: () => Promise<void>;
     readonly authorizeToolEffect: (
       call: ExternalEffectCall,
     ) => Promise<ConsumedExternalEffectAuthorization>;
@@ -1207,7 +1215,9 @@ export interface RecoveryMetricsPort {
       | "cancelled"
       | "timeout"
       | "shutdown"
-      | "external_tool_revoked";
+      | "external_tool_revoked"
+      | "external_tool_snapshot_invalid"
+      | "external_tool_result_unknown";
     readonly cleanupOutcome: "settled" | "unknown" | "failed";
   }): Promise<void>;
 }

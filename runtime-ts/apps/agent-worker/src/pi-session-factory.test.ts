@@ -1643,4 +1643,121 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       "result:call-pi-valid-path:deliver_file",
     ]);
   });
+
+  it("Playground deliver_file 在执行入口拒绝且不准备 Sandbox 或发布 Artifact", async () => {
+    const authority = createArtifactExecutionAuthorizationAuthority();
+    let sourceReads = 0;
+    let publications = 0;
+    const deliverFileTools = new DeliverFileToolRouterFactory({
+      source: {
+        read: async () => {
+          sourceReads += 1;
+          return {
+            outcome: "found" as const,
+            relativePath: "reports/final.pdf",
+            body: new Uint8Array([1, 2, 3]),
+          };
+        },
+      },
+      publications: {
+        publish: async (input) => {
+          publications += 1;
+          return {
+            artifactId: artifactId("artifact_pi_deliver_file"),
+            resourceVersionId: resourceVersionId("resource_version_pi_deliver_file"),
+            name: input.name,
+            size: input.body.byteLength,
+            sha256: sha256Digest("a".repeat(64)),
+            mediaType: "application/pdf",
+          };
+        },
+      },
+      authorizationVerifier: authority.verifier,
+    });
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed({
+      ...fakeSeed("pi-playground-deliver-file"),
+      origin: "playground",
+    });
+    const sandboxes = new FakeSandboxRegistry();
+    const faux = fauxProvider({
+      api: `faux-worker-deliver-file-${Date.now()}`,
+      provider: `faux-worker-deliver-file-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall(
+          "deliver_file",
+          { path: "/workspace/reports/final.pdf" },
+          { id: "call-playground-deliver" },
+        ),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("Playground 不发布 Artifact"),
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
+    const operations: string[] = [];
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async (call) => {
+          operations.push(`call:${call.toolCallId}:${call.toolName}`);
+          return "recorded" as const;
+        },
+        record: async (call) => {
+          operations.push(`result:${call.toolCallId}:${call.toolName}`);
+          const observation = await outputs.readControlledReceipt(call);
+          return observation === undefined
+            ? { outcome: "conflict" as const }
+            : { outcome: "recorded" as const, observation, isTruncated: false };
+        },
+      }),
+      authority.issuer,
+      undefined,
+      undefined,
+      deliverFileTools,
+    );
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-deliver-file-worker", runTimeoutMs: 60_000 },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(sourceReads).toBe(0);
+    expect(publications).toBe(0);
+    expect(persistence.permits.filter(({ permit }) => permit.effect === "tool_execution")).toEqual(
+      [],
+    );
+    expect(operations).toEqual([
+      "call:call-playground-deliver:deliver_file",
+      "result:call-playground-deliver:deliver_file",
+    ]);
+    expect(
+      persistence
+        .record(scope)
+        .events.some(
+          (event) =>
+            event.kind === "agent_event" &&
+            event.payload.type === "tool.completed" &&
+            event.payload.isError,
+        ),
+    ).toBe(true);
+  });
 });

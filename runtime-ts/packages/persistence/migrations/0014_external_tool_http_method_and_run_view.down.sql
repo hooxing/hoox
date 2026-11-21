@@ -1,0 +1,6 @@
+DROP VIEW worker_run_external_tool_snapshots, runtime_external_tool_permit_gate;
+ALTER TABLE external_effect_permits DROP COLUMN tool_version_id;
+ALTER TABLE external_tool_versions
+  DROP CONSTRAINT external_tool_versions_http_method_source_check,
+  DROP COLUMN http_method;
+ALTER TABLE runtime_subagent_conversations DROP COLUMN external_tool_version_ids;

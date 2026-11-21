@@ -55,10 +55,10 @@ if (claimed.rowCount === 0) return replyWithStoredResult(key);
 - 3xx 与 4xx（包括 408、429）：受控失败，不进入恢复；Transport 不跟随重定向，不读取错误正文并立即关闭连接。
 - 5xx、无法解释的 2xx 正文、正文超过字节上限、正文中途断开、写出后超时或取消：结果未知，按[外部工具结果未知](../architecture/run-execution-and-recovery.md#外部工具结果未知)进入恢复，不自动重放。
 
-模型只看到正文投影；凭据、本次签名与时间戳在 JSON 解析后逐值剔除，不进入模型可见结果、日志或错误。
+持凭据端点的成功响应不向模型公开正文；检测到凭据回显时，固定提示明确调用已成功、请勿重试。无凭据端点可以返回有界业务正文，本次签名和时间戳不会原样投影。详见[模型可见结果](../architecture/tool-calling-modes.md#模型可见结果)。
 
 ## 当前实现范围
 
-Router 通过受信执行端口提供 Tenant、终端用户、Thread、Run 内部标识；Transport 不从模型参数推导。HTTP 方法只来自工具版本方法绑定端口，缺少绑定时请求在写出前以 `not_sent` 拒绝，不默认 POST；GET 仅可用于只读工具，且模型参数不得与端点固定查询键重名。整次调用从 DNS 预检起共享一个截止时间。Transport 每次调用新建连接、直接拨号到已校验 IP，证书与 SNI 按原主机名校验并保留原 `Host`。方法尚未持久化到工具版本，生产装配前须由工具版本提供方法绑定。
+Router 通过受信执行端口提供 Tenant、终端用户、Thread、Run 内部标识；Transport 不从模型参数推导。HTTP 方法只来自不可变版本快照，不默认 POST；GET 仅可用于只读工具，且模型参数不得与端点固定查询键重名。整次调用从 DNS 预检起共享一个截止时间。Transport 每次调用新建连接、直接拨号到已校验 IP，证书与 SNI 按原主机名校验并保留原 `Host`。缺少方法的 HTTP 版本不能装配；Transport 也会在缺少方法时按 `not_sent` 拒绝发包。调用上下文只包含可信 Tenant、Thread、Run 内部事实；当前尚无可信终端用户映射，因此发送“无终端用户”固定标识，不以所有者或 Thread 创建者代替。`EXTERNAL_TOOL_IDENTITY_ROOT_KEY` 是部署级秘密，生产必填，用于派生不透明身份标识。
 
 OpenAPI 导入器只接收一个 3.x operation 对象、HTTPS server、POST/GET 方法和受控 Schema 子集。server 独立校验后再拼接路径，路径仅允许由字母、数字和 `-._~` 组成的非点段，解析后必须保持 server 的 origin。各层对象只接受白名单字段，任何 `$ref`（包括与内联字段混用）都会被拒绝；`responses` 不参与转换。GET 仅转换标量 query 参数，参数名不得与 server 中的固定查询键重名。路径参数、回调、安全定义、POST query 参数和非 JSON 请求体不予转换。

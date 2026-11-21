@@ -370,7 +370,7 @@ function AuthenticatedWorkspace({
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [uploadFiles, setUploadFiles] = useState<readonly File[]>([]);
   const [apiKeysOpen, setApiKeysOpen] = useState(false);
-  const [webhooksOpen, setWebhooksOpen] = useState(false);
+  const [webhookContext, setWebhookContext] = useState<{ readonly tenantId: string | null }>();
   const [historyFiles, setHistoryFiles] = useState<readonly HistoryFile[]>([]);
   const [pendingInputs, setPendingInputs] = useState<readonly PendingConversationInput[]>([]);
   const [continuity, setContinuity] =
@@ -439,6 +439,23 @@ function AuthenticatedWorkspace({
   const cloudDriveApi = useMemo(() => resolveCloudDriveApi(apiClient), [apiClient]);
   const teamWorkspaceApi = useMemo(() => resolveTeamWorkspaceApi(apiClient), [apiClient]);
   const personalizationApi = useMemo(() => resolvePersonalizationApi(apiClient), [apiClient]);
+  const webhookApi = useMemo(() => {
+    if (
+      !apiClient.listWebhooks ||
+      !apiClient.createWebhook ||
+      !apiClient.rotateWebhookSecret ||
+      !apiClient.disableWebhook ||
+      !apiClient.deleteWebhook
+    )
+      return undefined;
+    return {
+      listWebhooks: apiClient.listWebhooks.bind(apiClient),
+      createWebhook: apiClient.createWebhook.bind(apiClient),
+      rotateWebhookSecret: apiClient.rotateWebhookSecret.bind(apiClient),
+      disableWebhook: apiClient.disableWebhook.bind(apiClient),
+      deleteWebhook: apiClient.deleteWebhook.bind(apiClient),
+    };
+  }, [apiClient]);
   const attachmentPreviewLoader = useMemo(
     () => apiClient.previewHistoryFile?.bind(apiClient),
     [apiClient],
@@ -500,6 +517,7 @@ function AuthenticatedWorkspace({
   const switchWorkspace = useCallback(
     (teamId: string | undefined, threadId?: string) => {
       apiClient.setTenantId?.(teamId);
+      setWebhookContext(undefined);
       setActiveTeamId(teamId);
       if (teamId !== undefined) setCloudTeamId(teamId);
       // 同一空间内新建空会话只清除选择，不清空已加载的导航投影；否则重复点击会让团队任务永久消失。
@@ -539,6 +557,7 @@ function AuthenticatedWorkspace({
       // 否则后续全局请求会继续携带不可恢复的 X-Tenant-ID。
       if (activeTeamId !== undefined && !items.some((team) => team.id === activeTeamId)) {
         apiClient.setTenantId?.(undefined);
+        setWebhookContext(undefined);
         setActiveTeamId(undefined);
       }
       setSelectedTeamId((current) =>
@@ -1432,21 +1451,14 @@ function AuthenticatedWorkspace({
               onClose={() => setApiKeysOpen(false)}
             />
           )}
-        {webhooksOpen &&
-          apiClient.listWebhooks &&
-          apiClient.createWebhook &&
-          apiClient.rotateWebhookSecret &&
-          apiClient.disableWebhook &&
-          apiClient.deleteWebhook && (
+        {webhookContext !== undefined &&
+          webhookContext.tenantId === (activeTeamId ?? null) &&
+          webhookApi !== undefined && (
             <WebhookManager
-              api={{
-                listWebhooks: apiClient.listWebhooks.bind(apiClient),
-                createWebhook: apiClient.createWebhook.bind(apiClient),
-                rotateWebhookSecret: apiClient.rotateWebhookSecret.bind(apiClient),
-                disableWebhook: apiClient.disableWebhook.bind(apiClient),
-                deleteWebhook: apiClient.deleteWebhook.bind(apiClient),
-              }}
-              onClose={() => setWebhooksOpen(false)}
+              key={webhookContext.tenantId ?? "personal"}
+              tenantId={webhookContext.tenantId}
+              api={webhookApi}
+              onClose={() => setWebhookContext(undefined)}
             />
           )}
         <NavigationSidebar
@@ -1618,15 +1630,15 @@ function AuthenticatedWorkspace({
                 API Key
               </button>
             )}
-          {apiClient.listWebhooks &&
-            apiClient.createWebhook &&
-            apiClient.rotateWebhookSecret &&
-            apiClient.disableWebhook &&
-            apiClient.deleteWebhook &&
+          {webhookApi !== undefined &&
             (activeTeam === undefined ||
               activeTeam.role === "owner" ||
               activeTeam.role === "admin") && (
-              <button type="button" className="api-key-entry" onClick={() => setWebhooksOpen(true)}>
+              <button
+                type="button"
+                className="api-key-entry"
+                onClick={() => setWebhookContext({ tenantId: activeTeamId ?? null })}
+              >
                 Webhook 管理
               </button>
             )}

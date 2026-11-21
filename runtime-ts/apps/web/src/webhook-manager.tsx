@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, type RuntimeApi, type TenantWebhook, type WebhookEventType } from "./api.js";
 const eventOptions: readonly { id: WebhookEventType; label: string }[] = [
   { id: "run.waiting", label: "Run 等待" },
@@ -10,12 +10,14 @@ const eventOptions: readonly { id: WebhookEventType; label: string }[] = [
 ];
 export function WebhookManager({
   api,
+  tenantId,
   onClose,
 }: {
   readonly api: Pick<
     RuntimeApi,
     "listWebhooks" | "createWebhook" | "rotateWebhookSecret" | "disableWebhook" | "deleteWebhook"
   >;
+  readonly tenantId: string | null;
   readonly onClose: () => void;
 }) {
   const [items, setItems] = useState<readonly TenantWebhook[]>([]);
@@ -28,36 +30,67 @@ export function WebhookManager({
   const [secret, setSecret] = useState<string>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
-  const refresh = useCallback(async () => setItems((await api.listWebhooks()).items), [api]);
+  const requestScope = useRef({ active: false });
   useEffect(() => {
-    void refresh().catch(() => setError("无法加载 Webhook。"));
+    // 每次激活独占作用域，防止 StrictMode 重建后旧请求重新获得状态写入资格。
+    const scope = { active: true };
+    requestScope.current = scope;
+    return () => {
+      scope.active = false;
+    };
+  }, []);
+  const refresh = useCallback(async () => {
+    const scope = requestScope.current;
+    const result = await api.listWebhooks(tenantId);
+    if (scope.active) setItems(result.items);
+  }, [api, tenantId]);
+  useEffect(() => {
+    const scope = requestScope.current;
+    void refresh().catch(() => {
+      if (scope.active) setError("无法加载 Webhook。");
+    });
   }, [refresh]);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(undefined);
+    const scope = requestScope.current;
     try {
-      const result = await api.createWebhook({ name, endpointUrl, eventTypes: selected });
+      const result = await api.createWebhook({ name, endpointUrl, eventTypes: selected }, tenantId);
+      if (!scope.active) return;
       setSecret(result.secret);
       setName("");
       setEndpoint("");
       await refresh();
     } catch (reason) {
-      setError(reason instanceof ApiError ? reason.message : "无法创建 Webhook。");
+      if (scope.active)
+        setError(reason instanceof ApiError ? reason.message : "无法创建 Webhook。");
     } finally {
-      setBusy(false);
+      if (scope.active) setBusy(false);
     }
   }
-  async function run(action: () => Promise<unknown>) {
+  async function run(action: () => Promise<string | undefined>) {
     setBusy(true);
     setError(undefined);
+    const scope = requestScope.current;
     try {
-      await action();
+      const result = await action();
+      if (!scope.active) return;
+      if (result !== undefined) setSecret(result);
       await refresh();
     } catch (reason) {
-      setError(reason instanceof ApiError ? reason.message : "Webhook 操作失败。");
+      if (scope.active)
+        setError(reason instanceof ApiError ? reason.message : "Webhook 操作失败。");
     } finally {
-      setBusy(false);
+      if (scope.active) setBusy(false);
+    }
+  }
+  async function copySecret(value: string) {
+    const scope = requestScope.current;
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      if (scope.active) setError("复制失败，请手动复制。");
     }
   }
   return (
@@ -85,14 +118,7 @@ export function WebhookManager({
         <div className="api-key-once">
           <strong>请立即复制签名密钥，此后无法再次查看。</strong>
           <code>{secret}</code>
-          <button
-            type="button"
-            onClick={() =>
-              void navigator.clipboard
-                .writeText(secret)
-                .catch(() => setError("复制失败，请手动复制。"))
-            }
-          >
+          <button type="button" onClick={() => void copySecret(secret)}>
             复制密钥
           </button>
           <button type="button" onClick={() => setSecret(undefined)}>
@@ -156,7 +182,7 @@ export function WebhookManager({
               type="button"
               disabled={busy}
               onClick={() =>
-                void run(async () => setSecret((await api.rotateWebhookSecret(item.id)).secret))
+                void run(async () => (await api.rotateWebhookSecret(item.id, tenantId)).secret)
               }
             >
               轮换密钥
@@ -165,7 +191,12 @@ export function WebhookManager({
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => void run(() => api.disableWebhook(item.id))}
+                onClick={() =>
+                  void run(async () => {
+                    await api.disableWebhook(item.id, tenantId);
+                    return undefined;
+                  })
+                }
               >
                 停用
               </button>
@@ -173,7 +204,12 @@ export function WebhookManager({
             <button
               type="button"
               disabled={busy}
-              onClick={() => void run(() => api.deleteWebhook(item.id))}
+              onClick={() =>
+                void run(async () => {
+                  await api.deleteWebhook(item.id, tenantId);
+                  return undefined;
+                })
+              }
             >
               删除
             </button>

@@ -428,7 +428,7 @@ describe("RuntimeApi", () => {
         status: 200,
       }),
     );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
     await expect(api.submitThreadInput("thread_1", "只改配色", "auto", "run_1")).resolves.toEqual(
       receipt,
     );
@@ -500,7 +500,7 @@ describe("RuntimeApi", () => {
           status: 200,
         }),
       );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
     const result = await api.uploadResource(
       new File([new Uint8Array([1, 2, 3])], "数据.csv", { type: "text/csv" }),
     );
@@ -535,7 +535,7 @@ describe("RuntimeApi", () => {
         { status: 200 },
       ),
     );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
 
     await expect(
       api.previewHistoryFile({ resourceId: "resource_image", versionId: "version_image" }),
@@ -554,7 +554,7 @@ describe("RuntimeApi", () => {
           { status: 200 },
         ),
       );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
     await expect(api.listLatestRuns("thread_1")).resolves.toEqual([{ id: "run_2" }]);
     expect(fetcher.mock.calls[0]?.[0]).toBe("/api/v1/threads/thread_1/runs?limit=1");
   });
@@ -604,7 +604,7 @@ describe("RuntimeApi", () => {
         }),
       ),
     );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
     await expect(api.downloadArtifact("thread_1", "run_1", "artifact_1")).resolves.toBe(
       "https://example.test/file",
     );
@@ -624,7 +624,7 @@ describe("RuntimeApi", () => {
         }),
       ),
     );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
     await expect(api.previewArtifact("thread_1", "run_1", "artifact_1")).resolves.toEqual({
       kind: "text",
       text: "<script>window.pwned=true</script>",
@@ -710,7 +710,7 @@ describe("RuntimeApi", () => {
           }),
         ),
       );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
     await expect(api.listThreadContext("thread_1")).resolves.toMatchObject([
       {
         sequence: 1,
@@ -743,7 +743,7 @@ describe("RuntimeApi", () => {
         status: 200,
       }),
     );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
     await expect(api.getThreadContinuity("thread/1")).resolves.toEqual(status);
     expect(fetcher.mock.calls[0]?.[0]).toBe("/api/v1/threads/thread%2F1/continuity");
 
@@ -793,7 +793,7 @@ describe("RuntimeApi", () => {
           }),
         ),
       );
-    const api = new RuntimeApi(fetcher);
+    const api = new RuntimeApi(fetcher, "/api");
     await api.installSkill("code-review", "review");
     await api.setSkillEnabled(installed, false);
     await api.uninstallSkill({ ...installed, versionToken: 3 });
@@ -900,5 +900,38 @@ describe("RuntimeApi", () => {
     expect(fetcher.mock.calls[1]?.[0]).toBe(
       "/api/v1/me/history-files/resource_history/versions/version_history/download",
     );
+  });
+  it.each([
+    { tenantId: "tenant_opened", expected: "tenant_opened", label: "固定团队" },
+    { tenantId: null, expected: null, label: "固定个人空间" },
+    { tenantId: undefined, expected: "tenant_switched", label: "省略时兼容活动空间" },
+  ])("所有 Webhook 管理请求隔离 Tenant：$label", async ({ tenantId, expected }) => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({ data: { items: [] } }),
+    );
+    const api = new RuntimeApi(fetcher, "/api");
+    api.setTenantId("tenant_opened");
+    api.setTenantId("tenant_switched");
+    const input = {
+      name: "测试回调",
+      endpointUrl: "https://hooks.example.invalid/hoox",
+      eventTypes: ["run.succeeded" as const],
+    };
+    await api.listWebhooks(tenantId);
+    await api.createWebhook(input, tenantId);
+    await api.rotateWebhookSecret("hook/one", tenantId);
+    await api.disableWebhook("hook/one", tenantId);
+    await api.deleteWebhook("hook/one", tenantId);
+    expect(fetcher.mock.calls.map(([path, init]) => [path, init?.method ?? "GET"])).toEqual([
+      ["/api/v1/webhooks", "GET"],
+      ["/api/v1/webhooks", "POST"],
+      ["/api/v1/webhooks/hook%2Fone/rotate-secret", "POST"],
+      ["/api/v1/webhooks/hook%2Fone/disable", "POST"],
+      ["/api/v1/webhooks/hook%2Fone", "DELETE"],
+    ]);
+    for (const [, init] of fetcher.mock.calls) {
+      expect(new Headers(init?.headers).get("X-Tenant-ID")).toBe(expected);
+    }
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual(input);
   });
 });

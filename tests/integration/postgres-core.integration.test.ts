@@ -229,7 +229,10 @@ function timestamp(second: number): ReturnType<typeof isoTimestamp> {
   return isoTimestamp(`2099-07-26T08:00:${second.toString().padStart(2, "0")}.000Z`);
 }
 
-async function createFixture(suffix: string): Promise<Fixture> {
+async function createFixture(
+  suffix: string,
+  fixtureRepositories: CoreRepositories = repositories,
+): Promise<Fixture> {
   const user = createUser(userId(`user_${suffix}`), timestamp(0));
   const personal = createPersonalTenant({
     id: tenantId(`tenant_${suffix}`),
@@ -239,7 +242,7 @@ async function createFixture(suffix: string): Promise<Fixture> {
   });
   const scope: TenantScope = { tenantId: personal.tenant.id, userId: user.id };
   expect(
-    await repositories.tenants.createPersonal({
+    await fixtureRepositories.tenants.createPersonal({
       user,
       tenant: personal.tenant,
       membership: personal.ownerMembership,
@@ -253,19 +256,24 @@ async function createFixture(suffix: string): Promise<Fixture> {
     title: `任务 ${suffix}`,
     now: timestamp(1),
   });
-  expect(await repositories.threads.create(scope, thread)).toEqual({
+  expect(await fixtureRepositories.threads.create(scope, thread)).toEqual({
     outcome: "created",
     version: 0n,
   });
   const queued = createRun({ id: runId(`run_${suffix}`), thread, now: timestamp(2) });
   const run = transitionRun(queued, "running", timestamp(3));
-  expect(await repositories.runs.create(scope, run)).toEqual({ outcome: "created", version: 0n });
+  expect(await fixtureRepositories.runs.create(scope, run)).toEqual({
+    outcome: "created",
+    version: 0n,
+  });
   const workspace = createWorkspace({
     id: workspaceId(`workspace_${suffix}`),
     thread,
     now: timestamp(4),
   });
-  expect(await repositories.workspaces.create(scope, workspace)).toEqual({ outcome: "created" });
+  expect(await fixtureRepositories.workspaces.create(scope, workspace)).toEqual({
+    outcome: "created",
+  });
   return {
     scope,
     writeScope: { tenantId: scope.tenantId, rootRunId: run.id },
@@ -2902,27 +2910,43 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("记忆密钥独立于模型托管、加密保存且只影响新 Run", async () => {
-    const initial = await createFixture("memory_bootstrap");
-    const cipher = new ModelProviderCredentialCipher("integration-memory-root-at-least-32-bytes");
-    const repository = new PgAdminControlRepository(adminControlPool, cipher);
-    const service = new AdminControlService(
-      repository,
-      repository,
-      { probeModel: async () => undefined, probeMemory: async () => undefined },
-      [],
-    );
-    const runtime = new PgRuntimeControlConfigurationRepository(runtimePool, cipher);
-    const scope = { tenantId: initial.scope.tenantId, runId: initial.run.id };
-    await migratorPool.query(
-      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
-      [initial.user.id],
-    );
-    const context = (id: string) => ({
-      actorUserId: initial.user.id,
-      idempotencyKey: `memory-online-${id}`,
-      requestDigest: "b".repeat(64),
+    // generation 是安装级单例，仅更换 Tenant 或 Run 无法隔离其他用例的配置变更。
+    const target = await createIsolatedMigrationTarget("memory_config");
+    const isolatedRuntimePool = createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema: target.context.schema,
+      maxConnections: 2,
+    });
+    const isolatedAdminControlUrl = new URL(target.connectionString);
+    isolatedAdminControlUrl.username = target.context.adminControlRole;
+    const isolatedAdminControlPool = createPostgresPool({
+      connectionString: isolatedAdminControlUrl.toString(),
+      schema: target.context.schema,
+      maxConnections: 2,
     });
     try {
+      await migrateUp(target.pool, target.context);
+      const isolatedRepositories = new PgCoreRepositories(isolatedRuntimePool);
+      const initial = await createFixture("memory_bootstrap", isolatedRepositories);
+      const cipher = new ModelProviderCredentialCipher("integration-memory-root-at-least-32-bytes");
+      const repository = new PgAdminControlRepository(isolatedAdminControlPool, cipher);
+      const service = new AdminControlService(
+        repository,
+        repository,
+        { probeModel: async () => undefined, probeMemory: async () => undefined },
+        [],
+      );
+      const runtime = new PgRuntimeControlConfigurationRepository(isolatedRuntimePool, cipher);
+      const scope = { tenantId: initial.scope.tenantId, runId: initial.run.id };
+      await target.pool.query(
+        "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+        [initial.user.id],
+      );
+      const context = (id: string) => ({
+        actorUserId: initial.user.id,
+        idempotencyKey: `memory-online-${id}`,
+        requestDigest: "b".repeat(64),
+      });
       const empty = await runtime.resolveForRun(scope);
       expect(empty).toEqual({ generation: 0 });
       const command = {
@@ -2945,13 +2969,13 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(JSON.stringify(await repository.listMemoryProviders(initial.user.id))).not.toContain(
         "ciphertext",
       );
-      const raw = await migratorPool.query(
+      const raw = await target.pool.query(
         "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='memory_provider'",
       );
       expect(JSON.stringify(raw.rows)).not.toContain(command.apiKey);
       expect(raw.rows[0].configuration.credential).toBeDefined();
       await expect(runtime.resolveForRun(scope)).resolves.toEqual(empty);
-      const activeRun = await createFixture("memory_active");
+      const activeRun = await createFixture("memory_active", isolatedRepositories);
       const activeScope = { tenantId: activeRun.scope.tenantId, runId: activeRun.run.id };
       const active = await runtime.resolveForRun(activeScope);
       expect(active?.model).toBeUndefined();
@@ -2962,7 +2986,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         expectedGeneration: await repository.generation(initial.user.id),
       });
       await expect(runtime.resolveForRun(activeScope)).resolves.toEqual(active);
-      const newRun = await createFixture("memory_updated");
+      const newRun = await createFixture("memory_updated", isolatedRepositories);
       expect(
         (await runtime.resolveForRun({ tenantId: newRun.scope.tenantId, runId: newRun.run.id }))
           ?.memoryApiKey,
@@ -2979,21 +3003,17 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         await repository.resolveMemoryCredential(initial.user.id, "mem0", reused.revision),
       ).toBe("integration-memory-key-b");
       await expect(
-        adminControlPool.query("SELECT * FROM run_runtime_config_snapshots"),
+        isolatedAdminControlPool.query("SELECT * FROM run_runtime_config_snapshots"),
       ).rejects.toMatchObject({ code: "42501" });
-      const foreign = await withTenantTransaction(runtimePool, initial.scope, (client) =>
+      const foreign = await withTenantTransaction(isolatedRuntimePool, initial.scope, (client) =>
         client.query("SELECT run_id FROM run_runtime_config_snapshots WHERE run_id=$1", [
           activeRun.run.id,
         ]),
       );
       expect(foreign.rows).toHaveLength(0);
     } finally {
-      await migratorPool.query(`DELETE FROM run_runtime_config_snapshots;
-        DELETE FROM admin_control_audits; DELETE FROM admin_control_commands;
-        DELETE FROM admin_control_activation_events; DELETE FROM admin_control_active_configs;
-        DELETE FROM admin_control_provider_probes; DELETE FROM admin_control_config_revisions;
-        DELETE FROM platform_control_operators;
-        UPDATE admin_control_generation SET generation=0,updated_at=clock_timestamp() WHERE singleton='global'`);
+      await Promise.all([isolatedRuntimePool.end(), isolatedAdminControlPool.end()]);
+      await target.close();
     }
   });
 
@@ -4577,6 +4597,12 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(sequencePrivileges.rows).toEqual([
       {
         sequence_name: "agent_definition_audits_audit_id_seq",
+        can_select: false,
+        can_update: false,
+        can_use: false,
+      },
+      {
+        sequence_name: "external_tool_admin_audits_audit_id_seq",
         can_select: false,
         can_update: false,
         can_use: false,

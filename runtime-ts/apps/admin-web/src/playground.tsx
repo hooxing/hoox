@@ -176,7 +176,9 @@ function PlaygroundWorkspace({
         </label>
         <p id="playground-mocks-help" className="playground-note">
           键使用外部工具版本 ID 或客户端工具名称，值为该工具返回的
-          JSON。留空对象表示不模拟；配置会随本次运行固定，普通运行不会读取。
+          JSON。留空对象表示不模拟；配置会随本次运行固定，普通运行不会读取。 Mock
+          仅覆盖已登记的外部工具与客户端工具；Sandbox 命令（含 Skill
+          脚本）仍可联网，可能产生真实外部副作用。
         </p>
         {mocks === undefined && (
           <Alert type="error" showIcon title="Mock 配置必须是有效的 JSON 对象。" />

@@ -192,6 +192,49 @@ describe("AgentSupervisor", () => {
     expect((await supervisor.list())[0]?.status).toBe("idle");
   });
 
+  it("子 Agent 外部工具默认不下放，显式授权固定精确版本且拒绝快照外版本", async () => {
+    const created: Parameters<
+      ConstructorParameters<typeof AgentSupervisor>[0]["createSession"]
+    >[0][] = [];
+    const supervisor = new AgentSupervisor({
+      persistence: persistence(),
+      rootAgentThreadId: agentThreadId("root_external_tool_delegation"),
+      attemptId: "attempt_external_tool_delegation",
+      fence,
+      allowedExternalToolVersionIds: ["tool-version-a", "tool-version-b"],
+      createSession: async (input) => {
+        created.push(input);
+        return completedSession("完成");
+      },
+      authorizeModelStart: async () => authorization,
+      onToolEvent: async () => undefined,
+    });
+    await supervisor.initialize();
+    supervisor.setParentHistory(parentHistory());
+
+    await supervisor.spawn({ callId: "default", task: "默认", tools: [], forkTurns: "none" });
+    await supervisor.spawn({
+      callId: "explicit",
+      task: "显式",
+      tools: [],
+      externalToolVersionIds: ["tool-version-b"],
+      forkTurns: "none",
+    });
+    expect(created.map((session) => session.externalToolVersionIds)).toEqual([
+      [],
+      ["tool-version-b"],
+    ]);
+    await expect(
+      supervisor.spawn({
+        callId: "unauthorized",
+        task: "越权",
+        tools: [],
+        externalToolVersionIds: ["tool-version-c"],
+        forkTurns: "none",
+      }),
+    ).rejects.toThrow("AGENT_TOOLS_INVALID");
+  });
+
   it("follow-up 复用 Agent 历史，而 send_message 不会为闲置 Agent 自动启动 turn", async () => {
     const sessions: Parameters<
       ConstructorParameters<typeof AgentSupervisor>[0]["createSession"]

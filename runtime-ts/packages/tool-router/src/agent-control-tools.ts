@@ -19,6 +19,9 @@ const SpawnArgumentsSchema = Type.Object(
   {
     task: Type.String({ minLength: 1, maxLength: 32 * 1024 }),
     tools: Type.Array(ToolNameSchema, { maxItems: DELEGABLE_PI_TOOL_NAMES.length }),
+    external_tool_version_ids: Type.Optional(
+      Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 64 }),
+    ),
     fork_turns: Type.String({
       pattern: "^(none|all|[1-9][0-9]*)$",
       maxLength: 6,
@@ -93,6 +96,7 @@ export interface AgentControlPiToolExecutorPort {
     readonly callId: string;
     readonly task: string;
     readonly tools: readonly DelegablePiToolName[];
+    readonly externalToolVersionIds?: readonly string[];
     readonly forkTurns: "none" | "all" | number;
   }): Promise<unknown>;
   sendMessage(input: {

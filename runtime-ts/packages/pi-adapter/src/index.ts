@@ -25,3 +25,5 @@ export * from "./rollout-recovery.js";
 export * from "./runtime-compaction.js";
 export * from "./thread-history.js";
 export * from "./external-tool-factory.js";
+
+export * from "./external-tool-factory.js";

@@ -100,6 +100,8 @@ export interface AgentControlPort {
     readonly callId: string;
     readonly task: string;
     readonly tools: readonly DelegableAgentToolName[];
+    /** 精确版本授权；省略或空数组都不下放外部工具。 */
+    readonly externalToolVersionIds?: readonly string[];
     readonly forkTurns: AgentForkTurns;
   }): Promise<AgentSummary>;
   sendMessage(input: {
@@ -129,6 +131,7 @@ export interface AgentThreadPersistenceSnapshot {
   readonly canonicalPath: string;
   readonly task: string;
   readonly tools: readonly DelegableAgentToolName[];
+  readonly externalToolVersionIds?: readonly string[];
   readonly toolManifestDigest: Sha256Digest;
   readonly forkTurns: AgentForkTurns;
   readonly turnId: string;
@@ -143,6 +146,7 @@ export interface SubAgentConversationSnapshot {
   readonly task: string;
   readonly currentTask: string;
   readonly tools: readonly DelegableAgentToolName[];
+  readonly externalToolVersionIds?: readonly string[];
   readonly toolManifestDigest: Sha256Digest;
   readonly forkTurns: AgentForkTurns;
   readonly turnOrdinal: number;
@@ -430,6 +434,8 @@ export type ClaimExecutionResult =
 export type StableWorkerErrorCode =
   | RunAgentStopCode
   | "AGENT_CONFIGURATION_UNSUPPORTED"
+  | "EXTERNAL_TOOL_RESULT_UNKNOWN"
+  | "EXTERNAL_TOOL_REVOKED"
   | "CANCELLED"
   | "CONTEXT_TOO_LARGE"
   | "TIMEOUT"
@@ -1020,7 +1026,12 @@ export type AgentTurnOutcome =
   | {
       /** Tool Observation 未形成可恢复的 durable 事实；本 Attempt 不能继续成功。 */
       readonly kind: "recovery_required";
-      readonly code: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT" | "SANDBOX_FAILED";
+      readonly code:
+        | "PERSISTENCE_UNAVAILABLE"
+        | "IDEMPOTENCY_CONFLICT"
+        | "SANDBOX_FAILED"
+        | "EXTERNAL_TOOL_RESULT_UNKNOWN"
+        | "EXTERNAL_TOOL_REVOKED";
     }
   | {
       readonly kind: "waiting";
@@ -1086,6 +1097,8 @@ export interface AgentSessionFactoryPort {
     readonly agent?: AgentExecutionIdentity;
     /** 仅对子 Session 生效；工具集合已经由 AgentSupervisor 与父 Agent 能力取交集。 */
     readonly enabledToolNames?: readonly DelegableAgentToolName[];
+    /** 子 Agent 只能获得父 Session 显式选中的 Run 快照版本。 */
+    readonly enabledExternalToolVersionIds?: readonly string[];
     /** 只向 root Session 注册协作工具，子 Session 不得递归获得该能力。 */
     readonly agentControl?: AgentControlPort;
     /**
@@ -1125,6 +1138,7 @@ export interface AgentSessionFactoryPort {
         readonly attachments?: readonly UserInputAttachmentReference[];
       }[];
     }>;
+    readonly onExternalToolRevoked?: () => void;
     readonly authorizeToolEffect: (
       call: ExternalEffectCall,
     ) => Promise<ConsumedExternalEffectAuthorization>;
@@ -1188,7 +1202,12 @@ export interface RecoveryMetricsPort {
   recordOrphanCleanup(input: {
     readonly scope: ExecutionScope;
     readonly registryId: string;
-    readonly reason: RuntimeMutationResult["outcome"] | "cancelled" | "timeout" | "shutdown";
+    readonly reason:
+      | RuntimeMutationResult["outcome"]
+      | "cancelled"
+      | "timeout"
+      | "shutdown"
+      | "external_tool_revoked";
     readonly cleanupOutcome: "settled" | "unknown" | "failed";
   }): Promise<void>;
 }

@@ -1130,6 +1130,21 @@ async function hasInstallationState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasRunExternalToolSnapshotView(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.runtime_run_external_tool_snapshots',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.run_agent_snapshots',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_versions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_credentials',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_revocations',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunAgentSnapshotState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.run_agent_snapshots',$1::text)) IS NOT NULL AS present`,
@@ -2963,6 +2978,18 @@ async function assertActiveRuntimeWhitelist(
       `Runtime 不得持有 sequence 权限：${grantedSequences.sort().join(",")}`,
     );
   }
+  const externalSnapshotView = await hasRunExternalToolSnapshotView(client, context.schema);
+  const externalSnapshotViewPrivilege = await client.query<{ allowed: boolean }>(
+    `SELECT CASE WHEN to_regclass(format('%I.runtime_run_external_tool_snapshots',$2::text)) IS NULL
+                 THEN false ELSE has_table_privilege($1,format('%I.runtime_run_external_tool_snapshots',$2::text),'SELECT') END AS allowed`,
+    [context.runtimeRole, context.schema],
+  );
+  if (externalSnapshotViewPrivilege.rows[0]?.allowed !== externalSnapshotView) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      "Runtime 外部工具快照受限视图权限偏离白名单",
+    );
+  }
   await assertDatabaseAndSchemaBoundary(client, context, true);
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
@@ -3721,6 +3748,11 @@ export async function bootstrapRuntimeAccessOnClient(
     await client.query(
       `ALTER POLICY agent_revision_revocations_snapshot_read ON ${schema}.agent_revision_revocations TO ${role};
        GRANT SELECT,INSERT ON TABLE ${schema}.run_agent_snapshots TO ${role}`,
+    );
+  }
+  if (await hasRunExternalToolSnapshotView(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT ON TABLE ${schema}.runtime_run_external_tool_snapshots TO ${role}`,
     );
   }
   if (await hasAgentDefinitionState(client, context.schema)) {

@@ -18,7 +18,7 @@ Worker 首次为 Run 解析运行配置时持久化快照；尚未建立快照�
 
 工具开关不是沙箱文件 ACL：保留 `exec_command` 时仍可通过命令读写文件，关闭文件工具不能替代沙箱隔离。后台显示该限制。共享工具目录、规范化规则和数据库约束拒绝未知、重复及非数组选择；选择顺序不改变能力缓存或模型 Schema。工具新增必须同步目录、受控执行和[用户展示契约](#用户可见工具信息与错误处理)；已显式保存的名单不自动启用新增工具。
 
-B1 已提供外部工具版本到 Pi `AgentTool` 的工厂和经 Tool Router 执行的共同路径，但尚未接入 Session 注册；可用名单只能来自后续接入的 RunAgentSnapshot，不能按请求临时发现。出站地址校验只接受 HTTPS、拒绝 URL 凭据，并对 DNS 解析结果逐个检查；Transport 必须连接到已校验的地址并禁止重定向。`EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES` 默认关闭，只有部署显式启用才放行私有地址。
+Worker 按 RunAgentSnapshot 读取并经受限视图检查外部工具版本，按规范工具名的字典序注册 MCP/HTTP 工具；这些工具进入能力清单、Schema 摘要与上下文预算，不按请求临时发现。子 Agent 默认不获得外部工具，显式授权绑定精确版本 ID。MCP/HTTP 调用经 Tool Router 与一次性许可。出站地址校验只接受 HTTPS、拒绝 URL 凭据，并对 DNS 解析结果逐个检查；Transport 必须连接到已校验的地址并禁止重定向。`EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES` 默认关闭，只有部署显式启用才放行私有地址。
 
 ## 模型与执行边界
 
@@ -75,4 +75,4 @@ try {
 
 ## 外部工具装配边界
 
-MCP 与 HTTP 外部工具共用不可变版本、受控 Schema、一次性许可、Tool Router 与有界结果回执。Transport 仅负责协议调用，不能绕过 Router 或自行重试。工具定义由固定 Run 快照提供；未接入 Agent 快照授权之前，Worker 不读取外部工具版本或凭据。请求写出后的不确定结果按 UNKNOWN 进入恢复，不自动重放。
+MCP 与 HTTP 外部工具共用不可变版本、受控 Schema、一次性许可、Tool Router 与有界结果回执。Transport 仅负责协议调用，不能绕过 Router 或自行重试。工具定义由固定 Run 快照提供；Worker 不读取外部工具底表；快照之外、已撤销或读取不完整的版本均失败关闭。请求写出后的不确定结果按 UNKNOWN 进入恢复，不自动重放。

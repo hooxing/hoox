@@ -1,6 +1,13 @@
 import { normalizeRuntimeToolSelection, type RuntimeToolName } from "@hoox/protocol";
 import { measureExecutionPhase } from "@hoox/domain";
 import { createHash } from "node:crypto";
+import { createExternalToolFactory } from "@hoox/pi-adapter";
+import type { ExternalToolExecutionPorts } from "@hoox/tool-router";
+import type {
+  ExternalToolRuntimeSnapshot,
+  ExternalToolSnapshotReader,
+  ExternalToolTransport,
+} from "@hoox/run-contracts";
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@hoox/artifact";
 import type { ScheduledTask, ScheduledTaskMutation } from "@hoox/automation";
 import {
@@ -34,6 +41,8 @@ import {
   type ToolCallingMode,
 } from "@hoox/pi-adapter";
 import {
+  createHttpExternalToolTransport,
+  McpExternalToolTransport,
   AutomationUpdateArgumentError,
   automationToolMutation,
   type AutomationUpdateToolArguments,
@@ -174,6 +183,12 @@ export interface PromptImageLoaderPort {
  * waiting 未来由 request_user_input 工具适配器产生；本阶段只实现持久 RolloutProjection 的恢复机制，
  * 再用 prompt 真正启动模型，绝不对空 Session 调 followUp。
  */
+export interface WorkerExternalToolConfiguration {
+  readonly snapshots: ExternalToolSnapshotReader;
+  readonly httpIdentityRootKey?: Uint8Array;
+  readonly allowPrivateAddresses: boolean;
+}
+
 export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   readonly toolRejectionReceiptBarrier = "durable" as const;
   private readonly modelContext;
@@ -229,6 +244,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly toolCallingMode: ToolCallingMode = "native",
     private readonly enabledTools?: readonly RuntimeToolName[],
     private readonly telemetry?: WorkerTelemetry,
+    private readonly externalToolConfiguration?: WorkerExternalToolConfiguration,
   ) {
     this.enabledTools = normalizeRuntimeToolSelection(enabledTools);
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
@@ -271,6 +287,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       input.toolCallingMode ?? this.toolCallingMode,
       input.enabledTools ?? this.enabledTools,
       this.telemetry,
+      this.externalToolConfiguration,
     );
   }
 
@@ -399,7 +416,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       | ReturnType<PiWorkerSessionFactory["createObservationRecorder"]>
       | undefined;
     let controller: PiSessionController | undefined;
-    let observationRecoveryCode: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT" | undefined;
+    let observationRecoveryCode:
+      | "PERSISTENCE_UNAVAILABLE"
+      | "IDEMPOTENCY_CONFLICT"
+      | "EXTERNAL_TOOL_RESULT_UNKNOWN"
+      | undefined;
     let toolEffectRejected = false;
     const skillSnapshot: RunSkillSnapshot =
       input.skillSnapshot ??
@@ -695,6 +716,112 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         });
       },
     };
+    const configuredExternalToolIds =
+      input.agentSnapshot.content.tools.mode === "configured"
+        ? input.agentSnapshot.content.tools.externalTools.map((tool) => tool.versionId).sort()
+        : [];
+    const allowedExternalToolIds =
+      input.agent?.agentKind === "subagent"
+        ? [...(input.enabledExternalToolVersionIds ?? [])].sort()
+        : configuredExternalToolIds;
+    const externalSnapshots =
+      allowedExternalToolIds.length === 0
+        ? Object.freeze([])
+        : await (async () => {
+            const configuration = this.externalToolConfiguration;
+            if (configuration === undefined) throw new Error("EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE");
+            const snapshots = await configuration.snapshots.read({
+              tenantId: input.scope.tenantId,
+              runId: input.scope.runId,
+              toolVersionIds: allowedExternalToolIds,
+            });
+            const actual = snapshots.map((snapshot) => snapshot.tool.toolVersionId).sort();
+            if (
+              actual.length !== allowedExternalToolIds.length ||
+              actual.some((id, index) => id !== allowedExternalToolIds[index])
+            )
+              throw new Error("EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE");
+            return snapshots;
+          })();
+    if (
+      externalSnapshots.some((snapshot) => snapshot.tool.source === "http") &&
+      this.externalToolConfiguration?.httpIdentityRootKey === undefined
+    )
+      throw new Error("EXTERNAL_TOOL_IDENTITY_ROOT_KEY_UNAVAILABLE");
+    const externalTransport: ExternalToolTransport | undefined =
+      this.externalToolConfiguration === undefined
+        ? undefined
+        : {
+            invoke: (call) =>
+              call.tool.source === "mcp"
+                ? new McpExternalToolTransport().invoke(call)
+                : this.externalToolConfiguration?.httpIdentityRootKey === undefined
+                  ? Promise.reject(new Error("EXTERNAL_TOOL_IDENTITY_ROOT_KEY_UNAVAILABLE"))
+                  : createHttpExternalToolTransport({
+                      identityRootKey: this.externalToolConfiguration.httpIdentityRootKey,
+                    }).invoke(call),
+          };
+    const externalToolFactory =
+      externalSnapshots.length === 0 || externalTransport === undefined
+        ? undefined
+        : createExternalToolFactory({
+            allowPrivateAddresses: this.externalToolConfiguration?.allowPrivateAddresses,
+            transport: externalTransport,
+            getCallContext: () => ({
+              tenantId: input.scope.tenantId,
+              threadId: input.scope.threadId,
+              runId: input.scope.runId,
+            }),
+            httpMethodForVersion: (id) =>
+              externalSnapshots.find((item) => item.tool.toolVersionId === id)?.tool.httpMethod,
+            persistStarted: async (call) => {
+              await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
+              let current: readonly ExternalToolRuntimeSnapshot[] | undefined;
+              try {
+                current = await this.externalToolConfiguration?.snapshots.read({
+                  tenantId: input.scope.tenantId,
+                  runId: input.scope.runId,
+                  toolVersionIds: [
+                    externalSnapshots.find((item) => item.tool.modelToolName === call.toolName)
+                      ?.tool.toolVersionId ?? "",
+                  ],
+                });
+              } catch {
+                input.onExternalToolRevoked?.();
+                throw new Error("EXTERNAL_TOOL_REVOKED");
+              }
+              if (current?.length !== 1) {
+                input.onExternalToolRevoked?.();
+                throw new Error("EXTERNAL_TOOL_REVOKED");
+              }
+            },
+            authorizeAndConsume: async (call) => {
+              await authorizeStartedTool({
+                callId: call.callId,
+                toolName: call.toolName,
+                argsDigest: call.argsDigest,
+              });
+            },
+            recordReceipt: async ({ callId, receipt }) => {
+              const parsed = JSON.parse(receipt) as { readonly outcome?: "succeeded" | "failed" };
+              const name = startedToolCalls.get(callId);
+              if (name === undefined) throw new Error("EXTERNAL_TOOL_RECEIPT_INVALID");
+              await externalReceiptWriter?.(
+                callId,
+                name,
+                parsed.outcome === "succeeded" ? "succeeded" : "failed",
+              );
+            },
+            requireRecovery: async () => {
+              observationRecoveryCode = "EXTERNAL_TOOL_RESULT_UNKNOWN";
+            },
+            failClosed: () => {
+              input.onExternalToolRevoked?.();
+            },
+          } as ExternalToolExecutionPorts);
+    let externalReceiptWriter:
+      | ((callId: string, name: string, outcome: "succeeded" | "failed") => Promise<unknown>)
+      | undefined;
     const sessionMaterial = {
       toolCallingMode: this.toolCallingMode,
       ...(this.enabledTools === undefined ? {} : { enabledTools: this.enabledTools }),
@@ -732,6 +859,20 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         return prepared.sandbox;
       },
       authorizeToolEffect: authorizeStartedTool,
+      ...(externalToolFactory === undefined
+        ? {}
+        : {
+            externalTools: (ports: {
+              readonly recordControlledReceipt: (
+                callId: string,
+                toolName: string,
+                outcome: "succeeded" | "failed",
+              ) => Promise<unknown>;
+            }) => {
+              externalReceiptWriter = ports.recordControlledReceipt;
+              return externalToolFactory(externalSnapshots);
+            },
+          }),
       createToolObservationRecorder: (outputs: ControlledToolReceiptSource) => {
         const recorder = this.createObservationRecorder(input, outputs);
         observationRecorder = recorder;
@@ -918,7 +1059,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         ...(initialThreadHistory === undefined
           ? {}
           : { threadActiveHistory: initialThreadHistory }),
-        ...(input.onTurnSafePoint === undefined
+        ...(input.onTurnSafePoint === undefined && externalSnapshots.length === 0
           ? {}
           : {
               prepareNextTurnHistory: async (
@@ -927,6 +1068,21 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                   { type: "turn.completed" }
                 >,
               ) => {
+                if (externalSnapshots.length > 0) {
+                  try {
+                    const current = await this.externalToolConfiguration?.snapshots.read({
+                      tenantId: input.scope.tenantId,
+                      runId: input.scope.runId,
+                      toolVersionIds: externalSnapshots.map(
+                        (snapshot) => snapshot.tool.toolVersionId,
+                      ),
+                    });
+                    if (current?.length !== externalSnapshots.length) throw new Error();
+                  } catch {
+                    input.onExternalToolRevoked?.();
+                    throw new Error("EXTERNAL_TOOL_REVOKED");
+                  }
+                }
                 const persisted = await input.onTurnSafePoint?.(event);
                 if (persisted === undefined) return undefined;
                 let replacement: ThreadActiveHistoryV1 | undefined;

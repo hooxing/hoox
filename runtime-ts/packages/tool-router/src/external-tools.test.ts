@@ -17,6 +17,7 @@ const normalized = normalizeExternalToolSchema({
 const toolVersion: ExternalToolVersion = {
   toolVersionId: "tv1",
   source: "http",
+  httpMethod: "POST",
   endpoint: "https://8.8.8.8/api",
   modelToolName: "http__lookup",
   description: "查找记录",
@@ -390,13 +391,15 @@ describe("外部工具运行骨架", () => {
       recordReceipt: async () => {},
       requireRecovery: async () => {},
     };
-    await createExternalToolAgentTool(toolVersion, ports).execute("no-method", { value: "x" });
-    expect(invoke.mock.calls[0]?.[0]).not.toHaveProperty("method");
+    const { httpMethod: _httpMethod, ...withoutMethod } = toolVersion;
+    expect(() => createExternalToolAgentTool(withoutMethod, ports)).toThrow(
+      "EXTERNAL_TOOL_HTTP_METHOD_INVALID",
+    );
     await createExternalToolAgentTool(toolVersion, {
       ...ports,
       httpMethodForVersion: () => "GET",
     }).execute("bound-method", { value: "x" });
-    expect(invoke.mock.calls[1]?.[0]).toMatchObject({ method: "GET" });
+    expect(invoke.mock.calls[0]?.[0]).toMatchObject({ method: "GET" });
   });
   it("总超时从 DNS 预检开始，预检耗尽预算时以未写出失败结束", async () => {
     const invoke = vi.fn(async (_input: { readonly deadlineAt: number }) => ({

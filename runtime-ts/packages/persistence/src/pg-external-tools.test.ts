@@ -54,6 +54,31 @@ describe("外部工具持久化适配器", () => {
     );
     expect(insert?.[1]).toContain("_lookup");
   });
+  it("HTTP 发布将方法绑定写入不可变工具版本", async () => {
+    const query = vi.fn(async (..._args: unknown[]) => ({ rows: [], rowCount: 1 }));
+    const registry = new PgExternalToolRegistry(
+      poolFor(query),
+      new ExternalToolCredentialCipher("m".repeat(48)),
+    );
+    await registry.publish({
+      actorUserId: "admin-user",
+      tool: {
+        ...tool,
+        toolVersionId: "http-version-1",
+        source: "http",
+        modelToolName: "http__lookup",
+        remoteToolName: null,
+        httpMethod: "GET",
+        credentialRef: null,
+      },
+    });
+    const insert = query.mock.calls.find(([statement]) =>
+      String(statement).includes("INSERT INTO external_tool_versions"),
+    );
+    expect(insert?.[1]).toContain("GET");
+    expect(String(insert?.[0])).toContain("http_method");
+  });
+
   it("撤销追加不可变事实并绑定管理身份", async () => {
     const query = vi.fn(async (..._args: unknown[]) => ({ rows: [], rowCount: 1 }));
     const registry = new PgExternalToolRegistry(

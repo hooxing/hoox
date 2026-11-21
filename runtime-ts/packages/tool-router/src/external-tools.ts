@@ -280,6 +280,7 @@ export interface ExternalToolExecutionPorts {
     readonly callId: string;
     readonly code: "EXTERNAL_TOOL_RESULT_UNKNOWN";
   }) => Promise<void>;
+  readonly failClosed?: (input: { readonly code: "EXTERNAL_TOOL_REVOKED" }) => void;
   readonly maxModelVisibleBytes?: number;
   readonly isExplicitlyReconciledRetry?: (input: {
     readonly toolVersionId: string;

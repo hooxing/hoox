@@ -72,6 +72,7 @@ export interface ExternalToolRuntimeSnapshot {
 /** 快照接入前只允许假实现；生产实现须按 RunAgentSnapshot 限定版本并处理密文。 */
 export interface ExternalToolSnapshotReader {
   read(input: {
+    readonly tenantId: string;
     readonly runId: string;
     readonly toolVersionIds: readonly string[];
   }): Promise<readonly ExternalToolRuntimeSnapshot[]>;

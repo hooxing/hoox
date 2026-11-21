@@ -41,6 +41,7 @@ export interface ExecutionContext {
   readonly sandboxIdleAction: "pause" | "kill";
   stopped?:
     | "agent_revision_revoked"
+    | "external_tool_revoked"
     | "cancelled"
     | "shutdown"
     | "timeout"

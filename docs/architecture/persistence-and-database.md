@@ -42,6 +42,7 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 
 - 命令式写入使用显式幂等键，并以 canonical JSON 摘要绑定完整请求；同键异摘要稳定冲突。
 - COMMIT 响应未知（`TransactionCommitUnknownError`）时只按原幂等键精确读回，禁止再次 INSERT 或重写。
+- Webhook Dispatcher 的领取、发送前复核与结算使用覆盖连接池等待及整个事务的客户端截止时间；超时淘汰连接，不能只依赖服务端 `statement_timeout`。提交结果未知时不立即重放领取或结算，由领取令牌与数据库租约恢复收敛。
 - 序列化冲突只重放完全相同的命令；重试范围和次数见 [Run 执行与恢复](run-execution-and-recovery.md#重试与未知结果)。
 - 租约、TTL、`created_at` 等时间只使用数据库时钟，应用不得提交发生时间。
 - Agent Worker 的连接池开启预备语句缓存（`createPostgresPool({ preparedStatements: true })`）：带参数的单语句查询按 SQL 文本哈希命名，同一连接执行 5 次后复用通用计划。带 RLS 的多表 fence 查询规划约 4.5ms、执行约 0.4ms，因此这是事件持久化的主要提速手段。查询文本必须由常量拼成，不能把参数内联进 SQL，否则每个不同值都会产生一条新的预备语句；经过事务级连接池（如 PgBouncer transaction 模式）连接时不得开启。
@@ -54,6 +55,8 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 - 在可信 Tenant scope 内领取，以 token、generation 和数据库租约作为栅栏，迟到写回是 no-op；
 - 在调用远端前持久化“已开始”事实，之后的崩溃或不确定响应收敛为 `unknown`，不自动重复；
 - 失败按有界退避重试，耗尽后进入明确的终止或人工处理状态。
+
+Webhook 管理删除只写入不可恢复的停用墓碑，不物理删除订阅或 Outbox，避免并发业务事务已经选中的订阅在外键检查前消失并回滚 Run 状态。墓碑不再出现在管理列表，也不能轮换密钥或再次停用；物理回收随 Tenant 生命周期级删除级联进行。发送复核与在途请求的边界见 [Webhook 参考](../reference/webhooks.md)。
 
 事件写入在原事务中调用 `pg_notify` 唤醒 API 的事件流；通知只携带散列路由键，不是授权或持久事实，丢失由定时补读覆盖。
 

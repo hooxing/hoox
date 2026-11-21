@@ -191,6 +191,8 @@ export async function probePostgres(pool: Pool, expectedRuntimeRole?: string): P
 export interface TransactionOptions {
   readonly isolationLevel?: "READ COMMITTED" | "REPEATABLE READ" | "SERIALIZABLE";
   readonly readOnly?: boolean;
+  /** 客户端侧事务截止时间；到期销毁连接，使静默网络断流不会永久占用连接池。 */
+  readonly deadlineMs?: number;
 }
 
 /**
@@ -223,40 +225,85 @@ function asReleaseError(error: unknown, fallback: string): Error {
   return error instanceof Error ? error : new Error(fallback);
 }
 
+function discardClient(client: PoolClient, error: Error): void {
+  const stream = (client as unknown as { connection?: { stream?: { destroy(): void } } }).connection
+    ?.stream;
+  // release(error) 先标记连接结束，避免关闭事件成为未处理错误；空闲连接还须强制断开，不能等待对端 FIN。
+  client.release(error);
+  stream?.destroy();
+}
+
 export async function withTransaction<T>(
   pool: Pool,
   operation: (client: PoolClient) => Promise<T>,
   options: TransactionOptions = {},
 ): Promise<T> {
   const isolation = options.isolationLevel ?? "READ COMMITTED";
+  if (
+    options.deadlineMs !== undefined &&
+    (!Number.isSafeInteger(options.deadlineMs) || options.deadlineMs < 1)
+  )
+    throw new TypeError("POSTGRES_TRANSACTION_DEADLINE_INVALID");
   if (!isolationLevels.has(isolation)) throw new TypeError("事务隔离级别不在运行时白名单中");
-  const client = await pool.connect().catch((error: unknown) => {
-    throw mapPersistenceError(error, "取得数据库连接");
-  });
+  let client: PoolClient | undefined;
   let releaseError: Error | undefined;
+  let expired = false;
+  let committing = false;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadlineError = new Error("POSTGRES_TRANSACTION_DEADLINE_EXCEEDED");
+  const deadline = new Promise<never>((_resolve, reject) => {
+    if (options.deadlineMs === undefined) return;
+    deadlineTimer = setTimeout(() => {
+      expired = true;
+      releaseError = deadlineError;
+      reject(
+        committing ? new TransactionCommitUnknownError({ cause: deadlineError }) : deadlineError,
+      );
+    }, options.deadlineMs);
+  });
+  const bounded = <Result>(pending: Promise<Result>): Promise<Result> =>
+    options.deadlineMs === undefined ? pending : Promise.race([pending, deadline]);
   try {
-    await client.query(
-      `BEGIN ISOLATION LEVEL ${isolation}${options.readOnly === true ? " READ ONLY" : ""}`,
+    const connecting = pool
+      .connect()
+      .then((connected) => {
+        // 池等待也受同一截止时间限制；迟到取得的连接不可交给已取消的事务。
+        if (expired) {
+          discardClient(connected, deadlineError);
+          throw deadlineError;
+        }
+        return connected;
+      })
+      .catch((error: unknown) => {
+        throw mapPersistenceError(error, "取得数据库连接");
+      });
+    client = await bounded(connecting);
+    await bounded(
+      client.query(
+        `BEGIN ISOLATION LEVEL ${isolation}${options.readOnly === true ? " READ ONLY" : ""}`,
+      ),
     );
     let result: T;
     try {
-      result = await operation(client);
+      result = await bounded(operation(client));
     } catch (operationError) {
+      if (expired) throw operationError;
       try {
-        await client.query("ROLLBACK");
+        await bounded(client.query("ROLLBACK"));
       } catch (rollbackError) {
-        // 原始失败比回滚失败更有诊断价值，但坏连接必须显式从连接池淘汰。
         releaseError = asReleaseError(rollbackError, "数据库回滚失败");
       }
       throw operationError;
     }
     try {
-      await client.query("COMMIT");
+      committing = true;
+      await bounded(client.query("COMMIT"));
       return result;
     } catch (commitError) {
-      if (commitWasDefinitelyRejected(commitError)) {
+      committing = false;
+      if (!expired && commitWasDefinitelyRejected(commitError)) {
         try {
-          await client.query("ROLLBACK");
+          await bounded(client.query("ROLLBACK"));
         } catch (rollbackError) {
           releaseError = asReleaseError(rollbackError, "提交失败后的回滚失败");
         }
@@ -264,10 +311,16 @@ export async function withTransaction<T>(
       }
       // 不能在未知连接上再发 ROLLBACK；COMMIT 可能已经成功，坏连接直接淘汰。
       releaseError = asReleaseError(commitError, "数据库 COMMIT 响应未知");
-      throw new TransactionCommitUnknownError({ cause: commitError });
+      throw commitError instanceof TransactionCommitUnknownError
+        ? commitError
+        : new TransactionCommitUnknownError({ cause: commitError });
     }
   } finally {
-    client.release(releaseError);
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    if (client !== undefined) {
+      if (releaseError !== undefined) discardClient(client, releaseError);
+      else client.release(undefined);
+    }
   }
 }
 

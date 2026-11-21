@@ -19,6 +19,7 @@ const input = {
   definitionId: "agent_first",
   revisionId: "rev_first_draft",
   message: "测试草稿回答",
+  mocks: {},
 };
 
 function response(data: unknown) {
@@ -111,13 +112,15 @@ describe("后台 Playground", () => {
     expect(fetcher.mock.calls.map(([path]) => path)).toEqual([list]);
   });
 
-  it("用会话和幂等键提交草稿，不自报来源、Tenant 或 Mock；用受理结果定位 D1 详情", async () => {
+  it("随本次受理提交 Mock JSON，不自报来源或 Tenant；用受理结果定位 D1 详情", async () => {
     const { page, fetcher } = mount();
     await chooseDraft(page);
+    const mocks = { client_lookup: { answer: "simulated" } };
+    enter(field<HTMLTextAreaElement>(page, "工具 Mock（JSON 对象）"), JSON.stringify(mocks));
     await submit(page);
     const req = fetcher.mock.calls.find(([path]) => path === endpoint)?.[1];
     expect(req).toMatchObject({ method: "POST", cache: "no-store", credentials: "same-origin" });
-    expect(JSON.parse(String(req?.body))).toEqual(input);
+    expect(JSON.parse(String(req?.body))).toEqual({ ...input, mocks });
     expect(new Headers(req?.headers).get("Authorization")).toBe(`Bearer ${token}`);
     expect(new Headers(req?.headers).get("Idempotency-Key")).toBeTruthy();
     expect(new Headers(req?.headers).has("X-Tenant-Id")).toBe(false);

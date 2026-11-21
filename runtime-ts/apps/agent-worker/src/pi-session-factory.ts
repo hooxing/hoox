@@ -45,6 +45,7 @@ import {
   McpExternalToolTransport,
   AutomationUpdateArgumentError,
   automationToolMutation,
+  createPlaygroundClientToolMocks,
   type AutomationUpdateToolArguments,
 } from "@hoox/tool-router";
 import {
@@ -794,6 +795,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               ? {}
               : { allowPrivateAddresses: this.externalToolConfiguration.allowPrivateAddresses }),
             transport: externalTransport,
+            runOrigin: input.origin,
+            playgroundMocks: input.origin === "playground" ? input.playgroundMocks : {},
             getCallContext: () => ({
               tenantId: input.scope.tenantId,
               threadId: input.scope.threadId,
@@ -813,13 +816,17 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             },
             authorizeAndConsume: authorizeStartedTool,
             recordReceipt: async ({ callId, receipt }) => {
-              const parsed = JSON.parse(receipt) as { readonly outcome?: "succeeded" | "failed" };
+              const parsed = JSON.parse(receipt) as {
+                readonly outcome?: "succeeded" | "failed";
+                readonly executionMode?: "playground_mock";
+              };
               const name = startedToolCalls.get(callId);
               if (name === undefined) throw new Error("EXTERNAL_TOOL_RECEIPT_INVALID");
               await externalReceiptWriter?.(
                 callId,
                 name,
                 parsed.outcome === "succeeded" ? "succeeded" : "failed",
+                parsed.executionMode,
               );
             },
             requireRecovery: async () => {
@@ -829,7 +836,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             },
           });
     let externalReceiptWriter:
-      | ((callId: string, name: string, outcome: "succeeded" | "failed") => Promise<unknown>)
+      | ((
+          callId: string,
+          name: string,
+          outcome: "succeeded" | "failed",
+          executionMode?: "playground_mock",
+        ) => Promise<unknown>)
       | undefined;
     const sessionMaterial = {
       toolCallingMode: this.toolCallingMode,
@@ -876,11 +888,34 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 callId: string,
                 toolName: string,
                 outcome: "succeeded" | "failed",
+                executionMode?: "playground_mock",
               ) => Promise<unknown>;
             }) => {
               externalReceiptWriter = ports.recordControlledReceipt;
               return externalToolFactory(externalSnapshots);
             },
+          }),
+      ...(input.origin !== "playground" ||
+      configuredTools.mode !== "configured" ||
+      configuredTools.clientTools.length === 0
+        ? {}
+        : {
+            clientTools: (ports: {
+              readonly recordControlledReceipt: (
+                callId: string,
+                toolName: string,
+                outcome: "succeeded" | "failed",
+                executionMode?: "playground_mock",
+              ) => Promise<unknown>;
+            }) =>
+              createPlaygroundClientToolMocks(configuredTools.clientTools, {
+                origin: input.origin,
+                mocks: input.playgroundMocks,
+                persistStarted: async ({ callId, toolName }) => {
+                  await recordStartedTool({ toolCallId: callId, toolName });
+                },
+                recordReceipt: ports.recordControlledReceipt,
+              }),
           }),
       createToolObservationRecorder: (outputs: ControlledToolReceiptSource) => {
         const recorder = this.createObservationRecorder(input, outputs);

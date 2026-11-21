@@ -18,7 +18,14 @@ export function registerPlaygroundRoutes(
   authenticate: AuthenticateRequest,
 ): void {
   if (!playground) return;
-  app.post<{ Body: { definitionId: string; revisionId: string; message: string } }>(
+  app.post<{
+    Body: {
+      definitionId: string;
+      revisionId: string;
+      message: string;
+      mocks?: Record<string, unknown>;
+    };
+  }>(
     "/v1/playground/runs",
     {
       preValidation: async (request) => requireJsonContentType(request),
@@ -31,6 +38,7 @@ export function registerPlaygroundRoutes(
             definitionId: IdSchema,
             revisionId: IdSchema,
             message: { type: "string", minLength: 1, maxLength: MAX_RUN_INPUT_UTF8_BYTES },
+            mocks: { type: "object", maxProperties: 64, additionalProperties: true },
           },
         },
         response: {
@@ -71,12 +79,14 @@ export function registerPlaygroundRoutes(
       ) {
         throw new ApiFailure("bad_request");
       }
+      const mocks = request.body.mocks ?? {};
+      if (Buffer.byteLength(JSON.stringify(mocks)) > 65_536) throw new ApiFailure("bad_request");
       const accepted = await playground.accept({
         scope: auth.scope,
         definitionId,
         revisionId,
         message,
-        mocks: {},
+        mocks,
         idempotencyKey: requireIdempotencyKey(request),
       });
       if (!accepted) throw new ApiFailure("forbidden");

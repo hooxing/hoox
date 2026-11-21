@@ -43,6 +43,7 @@ export type RuntimeAgentEvent =
       callId: string;
       name: string;
       isError: boolean;
+      executionMode?: "playground_mock";
       failure?: ToolFailure;
     }
   | { type: "finalization.started"; callId: string }

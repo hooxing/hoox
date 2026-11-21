@@ -1198,6 +1198,20 @@ describe("管理员 Playground 受理", () => {
       scope: { tenantId: "tenant_owner_a", userId: "user_owner_a" },
     });
   });
+  it("将本次 Mock 配置与运行受理原子绑定，不接受客户端来源字段", async () => {
+    const accept = vi.fn(async () => ({
+      tenantId: "tenant_owner_a",
+      threadId: "thread_test",
+      runId: "run_test",
+    }));
+    const { app } = fixture({ playground: { accept } });
+    openApps.push(app);
+    const mocks = { tool_version_lookup: { result: "simulated" }, client_lookup: null };
+    const result = await app.inject({ ...request, payload: { ...request.payload, mocks } });
+    expect(result.statusCode).toBe(200);
+    expect(accept).toHaveBeenCalledWith(expect.objectContaining({ mocks }));
+  });
+
   it("不是 Agent 管理员时不确认受理；不能切换 Tenant 或使用集成 Key", async () => {
     const accept = vi.fn(async () => undefined);
     const owner = personalBundle("owner_a");
@@ -1234,7 +1248,6 @@ describe("管理员 Playground 受理", () => {
     { origin: "playground" },
     { tenantId: "tenant_elsewhere" },
     { actorUserId: "user_admin" },
-    { mocks: { lookup: "禁止伪装成功" } },
   ])("不接受客户端身份、来源或未接线的 Mock：%j", async (extra) => {
     const accept = vi.fn(async () => undefined);
     const { app } = fixture({ playground: { accept } });

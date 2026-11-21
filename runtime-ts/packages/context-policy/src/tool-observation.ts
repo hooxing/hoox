@@ -90,6 +90,7 @@ export interface ControlledToolReceipt {
   readonly trust: "sandbox_untrusted";
   readonly toolName: string;
   readonly outcome: ControlledToolOutcome;
+  readonly executionMode?: "playground_mock";
   readonly message: string;
 }
 
@@ -104,6 +105,7 @@ export interface ControlledToolReceiptSource {
 export function encodeControlledToolReceipt(
   toolName: string,
   outcome: ControlledToolOutcome,
+  executionMode?: "playground_mock",
 ): string {
   if (!SAFE_ID.test(toolName)) throw new TypeError("Tool 名称格式无效");
   return JSON.stringify({
@@ -111,7 +113,13 @@ export function encodeControlledToolReceipt(
     trust: "sandbox_untrusted",
     toolName,
     outcome,
-    message: outcome === "succeeded" ? "工具调用已完成。" : "工具调用未完成。",
+    ...(executionMode === undefined ? {} : { executionMode }),
+    message:
+      executionMode === "playground_mock"
+        ? "工具调用由 Playground Mock 完成。"
+        : outcome === "succeeded"
+          ? "工具调用已完成。"
+          : "工具调用未完成。",
   } satisfies ControlledToolReceipt);
 }
 
@@ -129,10 +137,12 @@ export function parseControlledToolReceipt(value: string): ControlledToolReceipt
     candidate.trust !== "sandbox_untrusted" ||
     !SAFE_ID.test(candidate.toolName ?? "") ||
     (candidate.outcome !== "succeeded" && candidate.outcome !== "failed") ||
+    (candidate.executionMode !== undefined && candidate.executionMode !== "playground_mock") ||
     value !==
       encodeControlledToolReceipt(
         candidate.toolName ?? "",
         candidate.outcome as ControlledToolOutcome,
+        candidate.executionMode,
       )
   ) {
     throw new TypeError("Tool 执行回执不符合固定受控 schema");

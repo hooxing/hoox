@@ -78,13 +78,24 @@ export class PgPlaygroundRepository {
         `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at,origin) VALUES($1,$2,$3,'queued',now(),now(),'playground')`,
         [tenantId, runId, threadId],
       );
-      await createPlaygroundConfigurationSnapshots(client, {
+      const snapshot = await createPlaygroundConfigurationSnapshots(client, {
         tenantId,
         userId,
         threadId,
         runId,
         revisionId,
       });
+      const allowedMockKeys = new Set(
+        snapshot.content.tools.mode === "configured"
+          ? [
+              ...snapshot.content.tools.externalTools.map((tool) => tool.versionId),
+              ...snapshot.content.tools.clientTools.map((tool) => tool.name),
+            ]
+          : [],
+      );
+      if (Object.keys(mocks).some((key) => !allowedMockKeys.has(key))) {
+        throw new RunAgentUnavailableError();
+      }
       await client.query(
         `INSERT INTO run_playground_mocks(tenant_id,run_id,mock_results,idempotency_key,request_digest) VALUES($1,$2,$3::jsonb,$4,$5)`,
         [tenantId, runId, JSON.stringify(mocks), idempotencyKey, requestDigest],

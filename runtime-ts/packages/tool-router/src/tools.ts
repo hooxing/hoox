@@ -176,6 +176,7 @@ export function createObservedSandboxTools(
     callId: string,
     toolName: string,
     outcome: "succeeded" | "failed",
+    executionMode?: "playground_mock",
   ) => Promise<ToolObservationResult>;
 } {
   const outputs = new Map<string, { readonly name: string; readonly text: string }>();
@@ -206,8 +207,8 @@ export function createObservedSandboxTools(
   return {
     tools: createSandboxToolsInternal(sandbox, authorizer, capture, rejectModelContinuation),
     outputs: source,
-    recordControlledReceipt: (callId, toolName, outcome) =>
-      capture(callId, toolName, encodeControlledToolReceipt(toolName, outcome)),
+    recordControlledReceipt: (callId, toolName, outcome, executionMode) =>
+      capture(callId, toolName, encodeControlledToolReceipt(toolName, outcome, executionMode)),
   };
 }
 

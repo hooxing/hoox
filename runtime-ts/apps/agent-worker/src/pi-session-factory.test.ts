@@ -119,6 +119,8 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     );
     const session = await sessions.create({
       agentSnapshot: fakeAgentSnapshot(),
+      origin: "normal",
+      playgroundMocks: {},
       scope,
       attemptId: claimed.snapshot.attempt.attemptId,
       fence: claimed.fence,
@@ -405,6 +407,8 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const authorizedToolCalls: ExternalEffectCall[] = [];
     const session = await sessions.create({
       agentSnapshot: fakeAgentSnapshot(),
+      origin: "normal",
+      playgroundMocks: {},
       scope,
       attemptId: claimed.snapshot.attempt.attemptId,
       fence: claimed.fence,

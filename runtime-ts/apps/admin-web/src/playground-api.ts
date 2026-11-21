@@ -5,6 +5,7 @@ export interface PlaygroundInput {
   readonly definitionId: string;
   readonly revisionId: string;
   readonly message: string;
+  readonly mocks?: Readonly<Record<string, unknown>>;
 }
 
 export interface PlaygroundReceipt {
@@ -30,7 +31,7 @@ function isReceipt(value: unknown): value is PlaygroundReceipt {
 }
 
 export async function startPlaygroundRun(
-  { definitionId, revisionId, message }: PlaygroundInput,
+  { definitionId, revisionId, message, mocks = {} }: PlaygroundInput,
   idempotencyKey: string,
 ): Promise<PlaygroundReceipt> {
   const authorization = adminAuthorizationHeader();
@@ -47,7 +48,7 @@ export async function startPlaygroundRun(
         "Content-Type": "application/json",
         "Idempotency-Key": idempotencyKey,
       },
-      body: JSON.stringify({ definitionId, revisionId, message }),
+      body: JSON.stringify({ definitionId, revisionId, message, mocks }),
     });
   } catch {
     throw new AdminApiError("未能确认运行是否已受理，请用相同输入重试。", 0, true);

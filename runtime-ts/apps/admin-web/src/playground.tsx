@@ -39,6 +39,7 @@ function PlaygroundWorkspace({
   const [definitionId, setDefinitionId] = useState("");
   const [revisionId, setRevisionId] = useState("");
   const [message, setMessage] = useState("");
+  const [mocksJson, setMocksJson] = useState("{}");
   const [accepted, setAccepted] = useState<{ receipt: PlaygroundReceipt; version: string }>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -47,7 +48,21 @@ function PlaygroundWorkspace({
   const revision = history.data?.items.find(
     (item) => item.id === revisionId && item.status !== "revoked",
   );
-  const ready = !busy && !history.isError && revision !== undefined && message.trim() !== "";
+  let mocks: Readonly<Record<string, unknown>> | undefined;
+  try {
+    const parsed: unknown = JSON.parse(mocksJson);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      mocks = parsed as Readonly<Record<string, unknown>>;
+    }
+  } catch {
+    mocks = undefined;
+  }
+  const ready =
+    !busy &&
+    !history.isError &&
+    revision !== undefined &&
+    message.trim() !== "" &&
+    mocks !== undefined;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -57,7 +72,11 @@ function PlaygroundWorkspace({
     try {
       // 响应丢失时沿用同一键；修改输入或成功受理后再生成新键。
       key.current ??= crypto.randomUUID();
-      const result = await startPlaygroundRun({ definitionId, revisionId, message }, key.current);
+      if (mocks === undefined) return;
+      const result = await startPlaygroundRun(
+        { definitionId, revisionId, message, mocks },
+        key.current,
+      );
       setAccepted({
         receipt: result,
         version: `${revision.displayName} · 版本 ${revision.revision}`,
@@ -143,7 +162,25 @@ function PlaygroundWorkspace({
             onChange={(event) => setMessage(event.target.value)}
           />
         </label>
-        <p className="playground-note">此处不提供工具 Mock。请勿发送依赖模拟工具返回值的测试。</p>
+        <label className="agent-field" htmlFor="playground-mocks">
+          <span>工具 Mock（JSON 对象）</span>
+          <Input.TextArea
+            id="playground-mocks"
+            rows={6}
+            spellCheck={false}
+            value={mocksJson}
+            disabled={busy}
+            onChange={(event) => setMocksJson(event.target.value)}
+            aria-describedby="playground-mocks-help"
+          />
+        </label>
+        <p id="playground-mocks-help" className="playground-note">
+          键使用外部工具版本 ID 或客户端工具名称，值为该工具返回的
+          JSON。留空对象表示不模拟；配置会随本次运行固定，普通运行不会读取。
+        </p>
+        {mocks === undefined && (
+          <Alert type="error" showIcon title="Mock 配置必须是有效的 JSON 对象。" />
+        )}
         {error && <Alert type="error" showIcon title={error} />}
         <Button type="primary" htmlType="submit" loading={busy} disabled={!ready}>
           发起运行

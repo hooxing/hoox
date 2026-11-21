@@ -481,6 +481,16 @@ export interface CreateSafePiSessionOptions {
       callId: string,
       toolName: string,
       outcome: "succeeded" | "failed",
+      executionMode?: "playground_mock",
+    ) => Promise<unknown>;
+  }) => readonly AgentTool[];
+  /** 客户端工具当前只有 Playground Mock 执行器，不提供真实副作用端口。 */
+  clientTools?: (ports: {
+    readonly recordControlledReceipt: (
+      callId: string,
+      toolName: string,
+      outcome: "succeeded" | "failed",
+      executionMode?: "playground_mock",
     ) => Promise<unknown>;
   }) => readonly AgentTool[];
   rolloutProjection?: ControlledRolloutProjection;
@@ -935,6 +945,13 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   if (options.externalTools !== undefined) {
     nativeTools.push(
       ...(options.externalTools({
+        recordControlledReceipt: observedSandboxTools.recordControlledReceipt,
+      }) as AgentTool[]),
+    );
+  }
+  if (options.clientTools !== undefined) {
+    nativeTools.push(
+      ...(options.clientTools({
         recordControlledReceipt: observedSandboxTools.recordControlledReceipt,
       }) as AgentTool[]),
     );

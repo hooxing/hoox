@@ -1,6 +1,10 @@
 import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "@hoox/prompt-builder";
 import { createHash } from "node:crypto";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
+import {
+  assertControlledRolloutProjection,
+  rolloutProjectionDigest,
+} from "@hoox/run-contracts/mutation-protocol";
 import { type RuntimeRolloutEntry, sha256Digest } from "@hoox/domain";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
@@ -240,6 +244,17 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
         ],
       },
     });
+    if (projected.outcome !== "ready") throw new Error("Mock Rollout 未能恢复");
+    expect(() => assertControlledRolloutProjection(projected.projection)).not.toThrow();
+    expect(rolloutProjectionDigest(projected.projection)).toMatch(/^[a-f0-9]{64}$/u);
+    const projectedMock = projected.projection.items.find((item) => item.kind === "tool_receipt");
+    if (projectedMock?.kind !== "tool_receipt") throw new Error("Mock 回执未进入投影");
+    expect(() =>
+      assertControlledRolloutProjection({
+        ...projected.projection,
+        items: [{ ...projectedMock, executionMode: "arbitrary" as never }],
+      }),
+    ).toThrow("受控上下文投影无效");
     const valid = controlledResultEntry(1, "mock-call", "sandbox_read_file", "playground_mock");
     const body = {
       ...valid.body,

@@ -400,24 +400,42 @@ export function createExternalToolAgentTool(
         const response = await ports.transport.invoke(invocation);
         if (response.body.byteLength > tool.maxResponseBytes)
           throw new Error("EXTERNAL_TOOL_RESPONSE_LIMIT");
-        let visible: string;
-        if (response.body.byteLength === 0) visible = "外部工具调用已成功，未返回内容。";
-        // 尚无已持久化的可信字段投影契约；持凭据端点只能返回固定回执，字面脱敏不能阻断任意编码回显。
-        else if (tool.credentialRef !== null || (credential !== undefined && credential.length > 0))
-          visible = "外部工具调用已成功，响应正文未向模型公开。";
-        else {
-          const secrets = (response.authMaterial ?? []).filter((value) => value.length > 0);
-          const raw = new TextDecoder().decode(response.body);
-          visible = raw;
-          if (/json/i.test(response.contentType)) {
-            try {
-              visible = JSON.stringify(redactJson(JSON.parse(raw), secrets));
-            } catch {
-              throw new Error("EXTERNAL_TOOL_RESPONSE_INVALID");
-            }
+        const secrets = [credential, ...(response.authMaterial ?? [])].filter(
+          (value): value is string => value !== undefined && value.length > 0,
+        );
+        const raw = new TextDecoder().decode(response.body);
+        let parsed: unknown;
+        let isJson = false;
+        if (/json/i.test(response.contentType) && raw.length > 0) {
+          try {
+            parsed = JSON.parse(raw);
+            isJson = true;
+          } catch {
+            throw new Error("EXTERNAL_TOOL_RESPONSE_INVALID");
           }
-          visible = redactText(visible, secrets);
         }
+        if (
+          secrets.length > 0 &&
+          (containsCredentialEcho(raw, secrets) ||
+            (isJson && containsCredentialEchoInJson(parsed, secrets)))
+        ) {
+          await ports.recordReceipt({ callId, receipt: receipt("succeeded") });
+          return {
+            content: [
+              {
+                type: "text",
+                text: "外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。",
+              },
+            ],
+            details: { withheld: "EXTERNAL_TOOL_CREDENTIAL_ECHO" },
+          };
+        }
+        let visible =
+          response.body.byteLength === 0
+            ? "外部工具调用已成功，未返回内容。"
+            : isJson
+              ? JSON.stringify(redactJson(parsed, secrets))
+              : redactText(raw, secrets);
         const cap = Math.max(1, Math.min(8192, ports.maxModelVisibleBytes ?? 8192));
         const bytes = new TextEncoder().encode(visible);
         if (bytes.byteLength > cap) visible = decodeUtf8Prefix(bytes, cap);
@@ -438,6 +456,44 @@ export function createExternalToolAgentTool(
       }
     },
   };
+}
+
+function credentialRepresentations(secret: string): readonly string[] {
+  const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+  const encoded = Buffer.from(secret, "utf8");
+  const urlEncoded = encodeURIComponent(secret);
+  const base64 = encoded.toString("base64");
+  const base64Url = encoded.toString("base64url");
+  return [
+    secret,
+    [...secret].reverse().join(""),
+    urlEncoded,
+    urlEncoded.replace(/%[0-9a-f]{2}/giu, (part) => part.toLowerCase()),
+    base64,
+    base64.replace(/=+$/u, ""),
+    base64Url,
+    encoded.toString("hex"),
+    encoded.toString("hex").toUpperCase(),
+    jsonEscaped,
+  ].filter((value) => value.length > 0);
+}
+
+function containsCredentialEcho(value: string, secrets: readonly string[]): boolean {
+  return secrets.some((secret) =>
+    credentialRepresentations(secret).some((representation) => value.includes(representation)),
+  );
+}
+
+function containsCredentialEchoInJson(value: unknown, secrets: readonly string[]): boolean {
+  if (typeof value === "string") return containsCredentialEcho(value, secrets);
+  if (Array.isArray(value))
+    return value.some((item) => containsCredentialEchoInJson(item, secrets));
+  if (value !== null && typeof value === "object")
+    return Object.entries(value).some(
+      ([key, item]) =>
+        containsCredentialEcho(key, secrets) || containsCredentialEchoInJson(item, secrets),
+    );
+  return false;
 }
 
 function redactText(value: string, secrets: readonly string[]): string {

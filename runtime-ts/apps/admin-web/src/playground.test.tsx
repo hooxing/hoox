@@ -97,6 +97,17 @@ beforeEach(() =>
 afterEach(() => localStorage.clear());
 
 describe("后台 Playground", () => {
+  it("在 Mock 配置旁提示 Sandbox 命令仍可联网并产生真实外部副作用", async () => {
+    const { page } = mount();
+    await settle();
+    const mocksField = field<HTMLTextAreaElement>(page, "工具 Mock（JSON 对象）");
+    const helpId = mocksField.getAttribute("aria-describedby");
+    expect(helpId).toBe("playground-mocks-help");
+    expect(page.querySelector(`#${helpId}`)?.textContent).toContain(
+      "Mock 仅覆盖已登记的外部工具与客户端工具；Sandbox 命令（含 Skill 脚本）仍可联网，可能产生真实外部副作用。",
+    );
+  });
+
   it("Agent 菜单直达；只读角色不能选版本或发起运行", async () => {
     const { page, fetcher } = mount({ canManage: false });
     await settle();

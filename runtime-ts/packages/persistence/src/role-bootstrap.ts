@@ -3669,6 +3669,7 @@ const webhookDispatcherColumns: Readonly<
       "webhook_id",
       "event_id",
       "payload",
+      "source_run_origin",
       "state",
       "attempts",
       "next_attempt_at",

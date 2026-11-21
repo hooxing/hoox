@@ -610,6 +610,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               readonly arguments: unknown;
               readonly signal?: AbortSignal;
             }) => {
+              if (input.origin === "playground")
+                throw new Error("PLAYGROUND_ARTIFACT_PUBLICATION_FORBIDDEN");
               const prepared = await prepareStartedSandboxTool({
                 callId: request.callId,
                 toolName: "deliver_file",
@@ -684,6 +686,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               readonly arguments: AutomationUpdateToolArguments;
               readonly signal?: AbortSignal;
             }) => {
+              // Playground 可保留稳定工具 Schema，但执行边界不得改动正式自动化。
+              if (input.origin === "playground")
+                throw new Error("PLAYGROUND_AUTOMATION_MUTATION_FORBIDDEN");
               await authorizeStartedTool({
                 callId: request.callId,
                 toolName: "automation_update",
@@ -996,14 +1001,28 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         ? {}
         : {
             agentControlToolExecutor: {
-              spawn: (call: Parameters<NonNullable<typeof agentControl>["spawn"]>[0]) =>
-                agentControl.spawn(call),
-              sendMessage: (call: Parameters<NonNullable<typeof agentControl>["sendMessage"]>[0]) =>
-                agentControl.sendMessage(call),
-              followUp: (call: Parameters<NonNullable<typeof agentControl>["followUp"]>[0]) =>
-                agentControl.followUp(call),
-              interrupt: (call: Parameters<NonNullable<typeof agentControl>["interrupt"]>[0]) =>
-                agentControl.interrupt(call),
+              spawn: (call: Parameters<NonNullable<typeof agentControl>["spawn"]>[0]) => {
+                if (input.origin === "playground")
+                  throw new Error("PLAYGROUND_AGENT_CONTROL_FORBIDDEN");
+                return agentControl.spawn(call);
+              },
+              sendMessage: (
+                call: Parameters<NonNullable<typeof agentControl>["sendMessage"]>[0],
+              ) => {
+                if (input.origin === "playground")
+                  throw new Error("PLAYGROUND_AGENT_CONTROL_FORBIDDEN");
+                return agentControl.sendMessage(call);
+              },
+              followUp: (call: Parameters<NonNullable<typeof agentControl>["followUp"]>[0]) => {
+                if (input.origin === "playground")
+                  throw new Error("PLAYGROUND_AGENT_CONTROL_FORBIDDEN");
+                return agentControl.followUp(call);
+              },
+              interrupt: (call: Parameters<NonNullable<typeof agentControl>["interrupt"]>[0]) => {
+                if (input.origin === "playground")
+                  throw new Error("PLAYGROUND_AGENT_CONTROL_FORBIDDEN");
+                return agentControl.interrupt(call);
+              },
               list: () => agentControl.list(),
               wait: (call: Parameters<NonNullable<typeof agentControl>["wait"]>[0]) =>
                 agentControl.wait(call),

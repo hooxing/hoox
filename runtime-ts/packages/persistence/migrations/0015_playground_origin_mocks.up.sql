@@ -339,3 +339,24 @@ WHERE EXISTS (
    WHERE actor.user_id=NULLIF(current_setting('app.user_id',true),'')
      AND actor.status='active'
 );
+
+-- Webhook Outbox 保留来源快照，避免领取与发送许可边界依赖可变 Run 可见性。
+ALTER TABLE webhook_outbox
+  ADD COLUMN source_run_id text,
+  ADD COLUMN source_run_origin text NOT NULL DEFAULT 'unknown'
+    CHECK (source_run_origin IN ('normal','playground','evaluation','api','unknown'));
+
+-- 历史 Outbox 以既有事件中的 Run ID 与持久化来源回填；找不到事实的旧事件保持 unknown 并失败关闭。
+UPDATE webhook_outbox outbox
+   SET source_run_id=source_run.id,
+       source_run_origin=source_run.origin
+  FROM runs source_run
+ WHERE source_run.tenant_id=outbox.tenant_id
+   AND source_run.id=outbox.payload->'data'->>'runId';
+
+ALTER TABLE webhook_outbox
+  ADD CONSTRAINT webhook_outbox_source_run_shape
+    CHECK ((source_run_origin='unknown')=(source_run_id IS NULL)),
+  ADD CONSTRAINT webhook_outbox_source_run_fk
+    FOREIGN KEY (tenant_id,source_run_id,source_run_origin)
+    REFERENCES runs(tenant_id,id,origin) ON DELETE RESTRICT;

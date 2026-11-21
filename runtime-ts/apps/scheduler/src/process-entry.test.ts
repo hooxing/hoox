@@ -12,6 +12,10 @@ function productionEnvironment(): Record<string, string> {
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_RUNTIME_ROLE: "runtime",
     DATABASE_SCHEMA: "runtime",
+    WEBHOOK_SECRET_ENCRYPTION_KEY: "test-webhook-encryption-root-at-least-thirty-two-bytes",
+    WEBHOOK_DISPATCHER_DATABASE_URL:
+      "postgresql://webhook_dispatcher:credential@database:5432/runtime?sslmode=verify-full",
+    DATABASE_WEBHOOK_DISPATCHER_ROLE: "webhook_dispatcher",
     CUBESANDBOX_API_URL: "https://cube-api.invalid",
     CUBESANDBOX_PROXY_SCHEME: "https",
     SCHEDULER_TENANT_ID: "tenant-test",

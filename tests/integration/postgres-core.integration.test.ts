@@ -82,10 +82,19 @@ import {
 import {
   createPostgresPool,
   type Pool,
+  type PoolClient,
   withTenantTransaction,
+  withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
 import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
+import {
+  enqueueRunStatusWebhook,
+  enqueueWebhookEvent,
+  PgWebhookOutboxStore,
+  PgWebhookRepository,
+  runWebhookPayload,
+} from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
@@ -220,7 +229,10 @@ function timestamp(second: number): ReturnType<typeof isoTimestamp> {
   return isoTimestamp(`2099-07-26T08:00:${second.toString().padStart(2, "0")}.000Z`);
 }
 
-async function createFixture(suffix: string): Promise<Fixture> {
+async function createFixture(
+  suffix: string,
+  fixtureRepositories: CoreRepositories = repositories,
+): Promise<Fixture> {
   const user = createUser(userId(`user_${suffix}`), timestamp(0));
   const personal = createPersonalTenant({
     id: tenantId(`tenant_${suffix}`),
@@ -230,7 +242,7 @@ async function createFixture(suffix: string): Promise<Fixture> {
   });
   const scope: TenantScope = { tenantId: personal.tenant.id, userId: user.id };
   expect(
-    await repositories.tenants.createPersonal({
+    await fixtureRepositories.tenants.createPersonal({
       user,
       tenant: personal.tenant,
       membership: personal.ownerMembership,
@@ -244,19 +256,24 @@ async function createFixture(suffix: string): Promise<Fixture> {
     title: `任务 ${suffix}`,
     now: timestamp(1),
   });
-  expect(await repositories.threads.create(scope, thread)).toEqual({
+  expect(await fixtureRepositories.threads.create(scope, thread)).toEqual({
     outcome: "created",
     version: 0n,
   });
   const queued = createRun({ id: runId(`run_${suffix}`), thread, now: timestamp(2) });
   const run = transitionRun(queued, "running", timestamp(3));
-  expect(await repositories.runs.create(scope, run)).toEqual({ outcome: "created", version: 0n });
+  expect(await fixtureRepositories.runs.create(scope, run)).toEqual({
+    outcome: "created",
+    version: 0n,
+  });
   const workspace = createWorkspace({
     id: workspaceId(`workspace_${suffix}`),
     thread,
     now: timestamp(4),
   });
-  expect(await repositories.workspaces.create(scope, workspace)).toEqual({ outcome: "created" });
+  expect(await fixtureRepositories.workspaces.create(scope, workspace)).toEqual({
+    outcome: "created",
+  });
   return {
     scope,
     writeScope: { tenantId: scope.tenantId, rootRunId: run.id },
@@ -293,8 +310,10 @@ interface IsolatedMigrationTarget {
     readonly workerCoordinatorRole: string;
     readonly teamCoordinatorRole: string;
     readonly adminControlRole: string;
+    readonly webhookDispatcherRole: string;
     readonly schema: string;
   };
+  readonly webhookDispatcherConnectionString: string;
   close(): Promise<void>;
 }
 
@@ -306,8 +325,12 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   const isolatedCoordinatorRole = `it_coord_${isolatedSuffix}`;
   const isolatedTeamCoordinatorRole = `it_team_${isolatedSuffix}`;
   const isolatedAdminControlRole = `it_control_${isolatedSuffix}`;
-  const isolatedSchema = `it_${suffix}_${isolatedSuffix}`;
+  const isolatedWebhookDispatcherRole = `it_webhook_${isolatedSuffix}`;
   const password = randomBytes(24).toString("hex");
+  const isolatedWebhookDispatcherUrl = new URL(migrationDatabaseUrl);
+  isolatedWebhookDispatcherUrl.username = isolatedWebhookDispatcherRole;
+  isolatedWebhookDispatcherUrl.password = password;
+  const isolatedSchema = `it_${suffix}_${isolatedSuffix}`;
   const url = new URL(migrationDatabaseUrl);
   url.username = isolatedRole;
   url.password = password;
@@ -322,7 +345,9 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedAdminControlRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}";
+     CREATE ROLE "${isolatedWebhookDispatcherRole}" LOGIN PASSWORD '${password}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
      CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedRole}"`,
   );
   const pool = createPostgresPool({
@@ -341,15 +366,18 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
       workerCoordinatorRole: isolatedCoordinatorRole,
       teamCoordinatorRole: isolatedTeamCoordinatorRole,
       adminControlRole: isolatedAdminControlRole,
+      webhookDispatcherRole: isolatedWebhookDispatcherRole,
       schema: isolatedSchema,
     },
+    webhookDispatcherConnectionString: isolatedWebhookDispatcherUrl.toString(),
     close: async () => {
       if (closed) return;
       closed = true;
       await pool.end();
       await administrativePool.query(
         `DROP SCHEMA "${isolatedSchema}" CASCADE;
-         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}";
+         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
+         DROP ROLE "${isolatedWebhookDispatcherRole}";
          DROP ROLE "${isolatedAdminControlRole}";
          DROP ROLE "${isolatedTeamCoordinatorRole}";
          DROP ROLE "${isolatedCoordinatorRole}";
@@ -432,7 +460,524 @@ afterAll(async () => {
   if (administrativePool !== undefined) await administrativePool.end();
 });
 
+function webhookSecret(tag: string) {
+  return { version: 1 as const, nonce: `n_${tag}`, ciphertext: `c_${tag}`, authTag: `t_${tag}` };
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenant: string,
+  user: string,
+  operation: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  return withTenantTransaction(pool, { tenantId: tenant, userId: user }, operation);
+}
+
+async function webhookIsolatedPools(target: IsolatedMigrationTarget) {
+  const teamUrl = new URL(target.webhookDispatcherConnectionString);
+  teamUrl.username = target.context.teamCoordinatorRole;
+  const pools = {
+    dispatcher: createPostgresPool({
+      connectionString: target.webhookDispatcherConnectionString,
+      schema: target.context.schema,
+      maxConnections: 2,
+    }),
+    runtime: createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema: target.context.schema,
+      maxConnections: 2,
+    }),
+    team: createPostgresPool({
+      connectionString: teamUrl.toString(),
+      schema: target.context.schema,
+      maxConnections: 1,
+    }),
+  };
+  return {
+    ...pools,
+    close: async () => {
+      await Promise.all([pools.dispatcher.end(), pools.runtime.end(), pools.team.end()]);
+    },
+  };
+}
+
+async function seedWebhookTenant(target: IsolatedMigrationTarget, label: string) {
+  const tenant = tenantId(`tenant_webhook_${label}_${process.pid}`);
+  const user = userId(`user_webhook_${label}_${process.pid}`);
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
+    [user],
+  );
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,clock_timestamp())`,
+    [tenant, user],
+  );
+  return { tenant, user };
+}
+
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("Webhook 角色边界：Dispatcher 只读投递列，Runtime 与 Team Coordinator 不能改写密文或 Outbox", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_acl");
+    const webhook = await webhookIsolatedPools(target);
+    try {
+      await migrateUp(target.pool, target.context);
+      const { tenant, user } = await seedWebhookTenant(target, "acl");
+      const repository = new PgWebhookRepository(webhook.runtime);
+      const created = await repository.create({
+        scope: { tenantId: tenant, userId: user },
+        name: "acl",
+        endpointUrl: "https://hooks.example.invalid/acl",
+        eventTypes: ["run.cancelled"],
+        secret: webhookSecret("c1"),
+      });
+
+      const managementBindings = await administrativePool.query<{ roles: string[] }>(
+        `SELECT ARRAY(SELECT pg_get_userbyid(r)::text FROM unnest(polroles) r) AS roles FROM pg_policy
+          WHERE polrelid IN (format('%I.tenant_webhooks',$1::text)::regclass,format('%I.webhook_outbox',$1::text)::regclass)
+            AND polname IN ('tenant_webhooks_tenant_policy','webhook_outbox_tenant_policy')`,
+        [target.context.schema],
+      );
+      expect(managementBindings.rows).toEqual([{ roles: [runtimeRole] }, { roles: [runtimeRole] }]);
+      // Dispatcher：只读投递所需列，不能读取订阅名称、业务表或写入 Outbox。
+      await expect(
+        webhook.dispatcher.query("SELECT id,endpoint_url,secret_ciphertext FROM tenant_webhooks"),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      for (const sql of [
+        "SELECT name FROM tenant_webhooks",
+        "SELECT created_by_user_id FROM tenant_webhooks",
+        "SELECT last_error_code FROM webhook_outbox",
+        "SELECT event_type FROM webhook_outbox",
+        "SELECT id FROM runs LIMIT 1",
+        "SELECT id FROM tenants LIMIT 1",
+        `INSERT INTO webhook_outbox(tenant_id,id,webhook_id,event_id,event_type,payload) VALUES('${tenant}','x','${created.id}','e','run.cancelled','{}')`,
+        "UPDATE tenant_webhooks SET secret_ciphertext='{}'::jsonb",
+        "DELETE FROM webhook_outbox",
+      ])
+        await expect(webhook.dispatcher.query(sql), sql).rejects.toMatchObject({ code: "42501" });
+
+      // Runtime：不能改写目的地址，也不能读取或结算 Outbox。
+      await expect(
+        asTenant(webhook.runtime, tenant, user, (client) =>
+          client.query("UPDATE tenant_webhooks SET endpoint_url='https://evil.example.invalid/'"),
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+      for (const sql of [
+        "SELECT id FROM webhook_outbox",
+        "UPDATE webhook_outbox SET state='delivered'",
+      ])
+        await expect(
+          asTenant(webhook.runtime, tenant, user, (client) => client.query(sql)),
+          sql,
+        ).rejects.toMatchObject({ code: "42501" });
+
+      // Team Coordinator：只能为解散批量取消入队，不能读取或改写订阅密文与 Outbox。
+      for (const sql of [
+        "UPDATE tenant_webhooks SET secret_ciphertext='{}'::jsonb",
+        "UPDATE tenant_webhooks SET disabled_at=clock_timestamp(),disabled_reason='x'",
+        "SELECT secret_ciphertext FROM tenant_webhooks",
+        "SELECT endpoint_url FROM tenant_webhooks",
+        "UPDATE webhook_outbox SET state='disabled'",
+        "SELECT id FROM webhook_outbox",
+      ])
+        await expect(
+          asTenant(webhook.team, tenant, user, (client) => client.query(sql)),
+          sql,
+        ).rejects.toMatchObject({ code: "42501" });
+      await asTenant(webhook.team, tenant, user, (client) =>
+        enqueueRunStatusWebhook(client, {
+          tenantId: tenant,
+          runId: "run_team_dissolved",
+          status: "cancelled",
+          runVersion: 3,
+          occurredAt: "2026-11-20T00:00:00.000Z",
+        }),
+      );
+      const queued = await administrativePool.query<{ secret: unknown; event_type: string }>(
+        `SELECT webhook.secret_ciphertext AS secret,outbox.event_type
+           FROM "${target.context.schema}".webhook_outbox outbox
+           JOIN "${target.context.schema}".tenant_webhooks webhook
+             ON webhook.tenant_id=outbox.tenant_id AND webhook.id=outbox.webhook_id
+          WHERE outbox.tenant_id=$1`,
+        [tenant],
+      );
+      expect(queued.rows).toEqual([{ secret: webhookSecret("c1"), event_type: "run.cancelled" }]);
+
+      // Dispatcher 只能停用订阅，不能恢复启用。
+      await repository.disable({ tenantId: tenant, userId: user }, created.id);
+      const reenabled = await webhook.dispatcher.query(
+        "UPDATE tenant_webhooks SET disabled_at=NULL,disabled_reason=NULL WHERE id=$1",
+        [created.id],
+      );
+      expect(reenabled.rowCount).toBe(0);
+    } finally {
+      await webhook.close();
+      await target.close();
+    }
+  });
+
+  it("Webhook Dispatcher 角色更换后撤销旧角色的 Schema、表与列权限", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_rebind");
+    const replacementRole = `${target.context.webhookDispatcherRole}_next`;
+    const password = randomBytes(24).toString("hex");
+    await administrativePool.query(
+      `CREATE ROLE "${replacementRole}" LOGIN PASSWORD '${password}'
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       GRANT CONNECT ON DATABASE "${databaseName}" TO "${replacementRole}"`,
+    );
+    const replacementUrl = new URL(migrationDatabaseUrl);
+    replacementUrl.username = replacementRole;
+    replacementUrl.password = password;
+    const oldDispatcher = createPostgresPool({
+      connectionString: target.webhookDispatcherConnectionString,
+      schema: target.context.schema,
+      maxConnections: 1,
+    });
+    const newDispatcher = createPostgresPool({
+      connectionString: replacementUrl.toString(),
+      schema: target.context.schema,
+      maxConnections: 1,
+    });
+    try {
+      await migrateUp(target.pool, target.context);
+      await expect(oldDispatcher.query("SELECT id FROM webhook_outbox")).resolves.toBeDefined();
+      await bootstrapRuntimeAccess(target.pool, {
+        ...target.context,
+        webhookDispatcherRole: replacementRole,
+      });
+      // 失去 Schema USAGE 后对象解析即失败（42P01），否则为权限拒绝（42501）。
+      for (const sql of [
+        "SELECT id FROM webhook_outbox",
+        "SELECT endpoint_url FROM tenant_webhooks",
+        "UPDATE webhook_outbox SET state='pending'",
+      ])
+        await expect(oldDispatcher.query(sql), sql).rejects.toSatisfy(
+          (error: { code?: string }) => error.code === "42501" || error.code === "42P01",
+        );
+      const residual = await administrativePool.query<{
+        readonly usage: boolean;
+        readonly outbox: boolean;
+        readonly subscriptions: boolean;
+      }>(
+        `SELECT has_schema_privilege($1,$2,'USAGE') AS usage,
+                has_any_column_privilege($1,format('%I.webhook_outbox',$2::text),'SELECT') AS outbox,
+                has_any_column_privilege($1,format('%I.tenant_webhooks',$2::text),'SELECT') AS subscriptions`,
+        [target.context.webhookDispatcherRole, target.context.schema],
+      );
+      expect(residual.rows[0]).toEqual({ usage: false, outbox: false, subscriptions: false });
+      const policies = await administrativePool.query<{ readonly roles: string[] }>(
+        `SELECT ARRAY(SELECT member::regrole::text FROM unnest(polroles) member) AS roles
+           FROM pg_policy WHERE polname='webhook_outbox_dispatcher_policy'
+            AND polrelid=format('%I.webhook_outbox',$1::text)::regclass`,
+        [target.context.schema],
+      );
+      expect(policies.rows[0]?.roles).toEqual([replacementRole]);
+      await expect(newDispatcher.query("SELECT id FROM webhook_outbox")).resolves.toBeDefined();
+    } finally {
+      await oldDispatcher.end();
+      await newDispatcher.end();
+      await target.close();
+      await administrativePool.query(
+        `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${replacementRole}";
+         DROP ROLE "${replacementRole}"`,
+      );
+    }
+  });
+
+  it("Webhook 停用、轮换与次数上限在领取时对整个订阅生效", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_claim");
+    const webhook = await webhookIsolatedPools(target);
+    try {
+      await migrateUp(target.pool, target.context);
+      const { tenant, user } = await seedWebhookTenant(target, "claim");
+      const scope = { tenantId: tenant, userId: user };
+      const repository = new PgWebhookRepository(webhook.runtime);
+      const primary = await repository.create({
+        scope,
+        name: "primary",
+        endpointUrl: "https://hooks.example.invalid/primary",
+        eventTypes: ["run.succeeded", "run.failed"],
+        secret: webhookSecret("c1"),
+      });
+      const event = (runId: string) =>
+        runWebhookPayload({
+          tenantId: tenant,
+          runId,
+          status: "succeeded",
+          runVersion: 1,
+          occurredAt: "2026-11-20T00:00:00.000Z",
+        });
+      const enqueue = (runId: string, commit = true) =>
+        asTenant(webhook.runtime, tenant, user, async (client) => {
+          const payload = event(runId);
+          if (payload === undefined) throw new Error("事件缺失");
+          await enqueueWebhookEvent({ client, tenantId: tenant, payload });
+          if (!commit) throw new Error("ROLLBACK_FOR_TEST");
+        });
+      const outbox = async () =>
+        (
+          await administrativePool.query<{
+            readonly id: string;
+            readonly webhook_id: string;
+            readonly state: string;
+            readonly attempts: number;
+            readonly last_error_code: string | null;
+          }>(
+            `SELECT id,webhook_id,state,attempts,last_error_code
+               FROM "${target.context.schema}".webhook_outbox ORDER BY created_at,id`,
+          )
+        ).rows;
+
+      // 回滚不入队，重放同一事件不重复入队。
+      await expect(enqueue("run_rollback", false)).rejects.toThrow("ROLLBACK_FOR_TEST");
+      expect(await outbox()).toEqual([]);
+      await enqueue("run_one");
+      await enqueue("run_one");
+      expect(await outbox()).toHaveLength(1);
+
+      // 每次发送前读取当前密钥：轮换后已领取但未发出的投递也使用新密钥。
+      const store = new PgWebhookOutboxStore(webhook.dispatcher, {
+        maxAttempts: 2,
+        leaseMs: 30_000,
+      });
+      const first = await store.claim({ owner: "it" });
+      expect(first?.endpointUrl).toBe("https://hooks.example.invalid/primary");
+      if (first === undefined) throw new Error("未领取");
+      await expect(store.permitSend(first, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("c1"),
+      });
+      // 第二条事件先写入，但在另一连接的轮换提交后才提交，不能固化旧密钥。
+      await asTenant(webhook.runtime, tenant, user, async (client) => {
+        const payload = event("run_two");
+        if (!payload) throw new Error("事件缺失");
+        await enqueueWebhookEvent({ client, tenantId: tenant, payload });
+        expect(await repository.rotate(scope, primary.id, webhookSecret("c2"))).toBe(true);
+      });
+      expect(await outbox()).toHaveLength(2);
+      await expect(store.permitSend(first, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("c2"),
+      });
+      // 剩余租约不足以覆盖发送时限时拒绝发送。
+      await expect(store.permitSend(first, 60_000)).resolves.toEqual({ outcome: "skip" });
+      // 同一 Tenant 已在途时，排除该 Tenant 后不再领取。
+      await expect(
+        store.claim({ owner: "it", excludedTenantIds: [tenant] }),
+      ).resolves.toBeUndefined();
+      await store.settle(first, { kind: "retry", errorCode: "timeout", delayMs: 0 });
+
+      // 次数上限在领取时强制：最后一次尝试未结算且租约过期后直接进入终态并停用整个订阅。
+      const second = await store.claim({ owner: "it" });
+      const third = await store.claim({ owner: "it" });
+      if (second === undefined || third === undefined) throw new Error("未领取");
+      expect([second.attempts, third.attempts].sort()).toEqual([1, 2]);
+      const last = second.attempts === 2 ? second : third;
+      const other = second.attempts === 2 ? third : second;
+      await expect(store.permitSend(last, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("c2"),
+      });
+      await expect(store.permitSend(other, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("c2"),
+      });
+      await store.settle(other, { kind: "retry", errorCode: "timeout", delayMs: 0 });
+      await administrativePool.query(
+        `UPDATE "${target.context.schema}".webhook_outbox SET claim_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND id=$2`,
+        [tenant, last.id],
+      );
+      await expect(store.claim({ owner: "it" })).resolves.toBeUndefined();
+      const exhausted = (await outbox()).find((row) => row.id === last.id);
+      expect(exhausted).toMatchObject({
+        state: "disabled",
+        attempts: 2,
+        last_error_code: "attempts_exhausted",
+      });
+      // 迟到的结算不能把已终结的记录拉回。
+      await store.settle(last, { kind: "delivered" });
+      expect((await outbox()).find((row) => row.id === last.id)?.state).toBe("disabled");
+      expect((await repository.list(scope))[0]).toMatchObject({
+        id: primary.id,
+        disabledReason: "delivery_attempts_exhausted",
+      });
+      // 自动停用作用于整个订阅：同订阅其余积压不再领取，新事件不再入队。
+      expect((await outbox()).find((row) => row.id === other.id)?.state).toBe("pending");
+      await enqueue("run_after_disable");
+      expect(await outbox()).toHaveLength(2);
+
+      // 手动停用：已领取未发出的投递在复核时结算为 webhook_disabled，积压不再领取。
+      const manual = await repository.create({
+        scope,
+        name: "manual",
+        endpointUrl: "https://hooks.example.invalid/manual",
+        eventTypes: ["run.succeeded"],
+        secret: webhookSecret("m1"),
+      });
+      await enqueue("run_manual_a");
+      await enqueue("run_manual_b");
+      const manualStore = new PgWebhookOutboxStore(webhook.dispatcher);
+      const claimed = await manualStore.claim({ owner: "it" });
+      if (claimed === undefined) throw new Error("未领取");
+      expect(claimed.webhookId).toBe(manual.id);
+      await repository.disable(scope, manual.id);
+      await expect(manualStore.permitSend(claimed, 0)).resolves.toEqual({ outcome: "skip" });
+      expect((await outbox()).find((row) => row.id === claimed.id)).toMatchObject({
+        state: "disabled",
+        last_error_code: "webhook_disabled",
+      });
+      await expect(manualStore.claim({ owner: "it" })).resolves.toBeUndefined();
+    } finally {
+      await webhook.close();
+      await target.close();
+    }
+  });
+
+  it("Webhook 并发逻辑删除与 Run 取消不会回滚业务状态", async () => {
+    const fixture = await createFixture(`webhook_delete_race_${process.pid}`);
+    const repository = new PgWebhookRepository(runtimePool);
+    const webhook = await repository.create({
+      scope: fixture.scope,
+      name: "delete-race",
+      endpointUrl: "https://hooks.example.invalid/delete-race",
+      eventTypes: ["run.cancelled"],
+      secret: webhookSecret("race"),
+    });
+    const current = await repositories.runs.get(fixture.scope, fixture.run.id);
+    if (!current) throw new Error("Run 缺失");
+    const cancelled = transitionRun(current.entity, "cancelled", timestamp(35));
+    const barrier = await administrativePool.connect();
+    let cancellation: Promise<unknown> | undefined;
+    try {
+      const blocker = await barrier.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid,pg_advisory_lock(hashtext($1))",
+        [fixture.scope.tenantId],
+      );
+      // BEFORE INSERT 在订阅快照已选中、外键检查之前暂停，强制覆盖原物理删除会失败的交错。
+      await administrativePool.query(`
+        CREATE FUNCTION "${schema}".webhook_delete_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id));
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER webhook_delete_barrier BEFORE INSERT ON "${schema}".webhook_outbox
+          FOR EACH ROW EXECUTE FUNCTION "${schema}".webhook_delete_barrier();
+      `);
+      cancellation = repositories.runs.update(fixture.scope, cancelled, current.version);
+      const completed = cancellation.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      await expect
+        .poll(async () => {
+          const waiting = await administrativePool.query<{ waiting: boolean }>(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS waiting",
+            [blocker.rows[0]?.pid],
+          );
+          return waiting.rows[0]?.waiting;
+        })
+        .toBe(true);
+      // 两个业务事务使用独立连接；删除必须在取消事务恢复外键检查之前完成。
+      expect(await repository.remove(fixture.scope, webhook.id)).toBe(true);
+      await barrier.query("SELECT pg_advisory_unlock(hashtext($1))", [fixture.scope.tenantId]);
+      expect(await completed).toMatchObject({ value: { outcome: "updated" } });
+    } finally {
+      await barrier.query("SELECT pg_advisory_unlock_all()");
+      await cancellation?.catch(() => undefined);
+      barrier.release();
+      await administrativePool.query(
+        `DROP TRIGGER IF EXISTS webhook_delete_barrier ON "${schema}".webhook_outbox; DROP FUNCTION IF EXISTS "${schema}".webhook_delete_barrier()`,
+      );
+    }
+    expect((await repositories.runs.get(fixture.scope, fixture.run.id))?.entity.status).toBe(
+      "cancelled",
+    );
+    expect(await repository.list(fixture.scope)).toEqual([]);
+    expect(await repository.remove(fixture.scope, webhook.id)).toBe(false);
+    expect(await repository.disable(fixture.scope, webhook.id)).toBeUndefined();
+    expect(await repository.rotate(fixture.scope, webhook.id, webhookSecret("after_delete"))).toBe(
+      false,
+    );
+  });
+
+  it("Webhook 数据库客户端截止时间淘汰悬挂连接后可继续使用连接池", async () => {
+    const pool = createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema,
+      maxConnections: 1,
+    });
+    try {
+      let previousPid: number | undefined;
+      await expect(
+        withTransaction(
+          pool,
+          async (client) => {
+            const result = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+            previousPid = result.rows[0]?.pid;
+            await client.query("SELECT pg_sleep(10)");
+          },
+          { deadlineMs: 100 },
+        ),
+      ).rejects.toThrow("POSTGRES_TRANSACTION_DEADLINE_EXCEEDED");
+      const next = await pool.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      expect(next.rows[0]?.pid).not.toBe(previousPid);
+      expect(next.rows[0]?.pid).toEqual(expect.any(Number));
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("Webhook 事件随 API 取消在同一事务入队，版本冲突与重放不重复入队", async () => {
+    const fixture = await createFixture(`webhook_cancel_${process.pid}`);
+    const repository = new PgWebhookRepository(runtimePool);
+    await repository.create({
+      scope: fixture.scope,
+      name: "cancel",
+      endpointUrl: "https://hooks.example.invalid/cancel",
+      eventTypes: ["run.cancelled", "run.succeeded"],
+      secret: webhookSecret("c1"),
+    });
+    const current = await repositories.runs.get(fixture.scope, fixture.run.id);
+    if (current === undefined) throw new Error("Run 缺失");
+    const cancelled = transitionRun(current.entity, "cancelled", timestamp(30));
+    // 在隔离 Schema 注入入队失败，直接证明取消与事件之间没有独立提交窗口。
+    await administrativePool.query(
+      `ALTER TABLE "${schema}".webhook_outbox ADD CONSTRAINT it_reject_cancel CHECK (event_type <> 'run.cancelled') NOT VALID`,
+    );
+    try {
+      await expect(
+        repositories.runs.update(fixture.scope, cancelled, current.version),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      expect(await repositories.runs.get(fixture.scope, fixture.run.id)).toEqual(current);
+    } finally {
+      await administrativePool.query(
+        `ALTER TABLE "${schema}".webhook_outbox DROP CONSTRAINT it_reject_cancel`,
+      );
+    }
+    await expect(
+      repositories.runs.update(fixture.scope, cancelled, current.version),
+    ).resolves.toMatchObject({ outcome: "updated" });
+    await expect(
+      repositories.runs.update(fixture.scope, cancelled, current.version),
+    ).resolves.toEqual({ outcome: "conflict" });
+    const rows = await administrativePool.query<{
+      readonly event_type: string;
+      readonly event_id: string;
+      readonly payload: { readonly id: string; readonly data: Record<string, unknown> };
+    }>(`SELECT event_type,event_id,payload FROM "${schema}".webhook_outbox WHERE tenant_id=$1`, [
+      fixture.scope.tenantId,
+    ]);
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0]?.event_type).toBe("run.cancelled");
+    expect(Object.keys(rows.rows[0]?.payload ?? {}).sort()).toEqual([
+      "createdAt",
+      "data",
+      "id",
+      "type",
+    ]);
+    expect(rows.rows[0]?.payload.data).toEqual({ runId: fixture.run.id, status: "cancelled" });
+    expect(rows.rows[0]?.payload.id).toBe(rows.rows[0]?.event_id);
+  });
+
   it("为迁移前已有 Thread 回填不可变默认 Agent 绑定", async () => {
     const target = await createIsolatedMigrationTarget("agent_backfill");
     const oldMigrations = await mkdtemp(join(tmpdir(), "hoox-agent-old-migrations-"));
@@ -2179,7 +2724,22 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     try {
       await migrateUp(target.pool, target.context);
       const created = (await policies()).rows;
-      expect(created).toHaveLength(12);
+      expect(created.map((policy) => policy.policyname)).toEqual([
+        "cleanup_outbox_admin_projection_read",
+        "execution_attempts_admin_projection_read",
+        "memory_ingestion_outbox_admin_projection_read",
+        "run_dispatch_outbox_admin_projection_read",
+        "run_events_admin_projection_read",
+        "runs_admin_projection_read",
+        "sandbox_registry_admin_projection_read",
+        "scheduled_task_occurrences_admin_projection_read",
+        "scheduled_tasks_admin_projection_read",
+        "tenant_skill_installations_admin_projection_read",
+        "thread_continuity_metric_observations_admin_projection_read",
+        "threads_admin_projection_read",
+        "user_accounts_admin_projection_read",
+        "user_sessions_admin_projection_read",
+      ]);
       for (const policy of created) {
         await target.pool.query(
           `ALTER POLICY "${policy.policyname}" ON "${policy.tablename}" TO "${migratorRole}"`,
@@ -2350,27 +2910,43 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("记忆密钥独立于模型托管、加密保存且只影响新 Run", async () => {
-    const initial = await createFixture("memory_bootstrap");
-    const cipher = new ModelProviderCredentialCipher("integration-memory-root-at-least-32-bytes");
-    const repository = new PgAdminControlRepository(adminControlPool, cipher);
-    const service = new AdminControlService(
-      repository,
-      repository,
-      { probeModel: async () => undefined, probeMemory: async () => undefined },
-      [],
-    );
-    const runtime = new PgRuntimeControlConfigurationRepository(runtimePool, cipher);
-    const scope = { tenantId: initial.scope.tenantId, runId: initial.run.id };
-    await migratorPool.query(
-      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
-      [initial.user.id],
-    );
-    const context = (id: string) => ({
-      actorUserId: initial.user.id,
-      idempotencyKey: `memory-online-${id}`,
-      requestDigest: "b".repeat(64),
+    // generation 是安装级单例，仅更换 Tenant 或 Run 无法隔离其他用例的配置变更。
+    const target = await createIsolatedMigrationTarget("memory_config");
+    const isolatedRuntimePool = createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema: target.context.schema,
+      maxConnections: 2,
+    });
+    const isolatedAdminControlUrl = new URL(target.connectionString);
+    isolatedAdminControlUrl.username = target.context.adminControlRole;
+    const isolatedAdminControlPool = createPostgresPool({
+      connectionString: isolatedAdminControlUrl.toString(),
+      schema: target.context.schema,
+      maxConnections: 2,
     });
     try {
+      await migrateUp(target.pool, target.context);
+      const isolatedRepositories = new PgCoreRepositories(isolatedRuntimePool);
+      const initial = await createFixture("memory_bootstrap", isolatedRepositories);
+      const cipher = new ModelProviderCredentialCipher("integration-memory-root-at-least-32-bytes");
+      const repository = new PgAdminControlRepository(isolatedAdminControlPool, cipher);
+      const service = new AdminControlService(
+        repository,
+        repository,
+        { probeModel: async () => undefined, probeMemory: async () => undefined },
+        [],
+      );
+      const runtime = new PgRuntimeControlConfigurationRepository(isolatedRuntimePool, cipher);
+      const scope = { tenantId: initial.scope.tenantId, runId: initial.run.id };
+      await target.pool.query(
+        "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+        [initial.user.id],
+      );
+      const context = (id: string) => ({
+        actorUserId: initial.user.id,
+        idempotencyKey: `memory-online-${id}`,
+        requestDigest: "b".repeat(64),
+      });
       const empty = await runtime.resolveForRun(scope);
       expect(empty).toEqual({ generation: 0 });
       const command = {
@@ -2393,13 +2969,13 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(JSON.stringify(await repository.listMemoryProviders(initial.user.id))).not.toContain(
         "ciphertext",
       );
-      const raw = await migratorPool.query(
+      const raw = await target.pool.query(
         "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='memory_provider'",
       );
       expect(JSON.stringify(raw.rows)).not.toContain(command.apiKey);
       expect(raw.rows[0].configuration.credential).toBeDefined();
       await expect(runtime.resolveForRun(scope)).resolves.toEqual(empty);
-      const activeRun = await createFixture("memory_active");
+      const activeRun = await createFixture("memory_active", isolatedRepositories);
       const activeScope = { tenantId: activeRun.scope.tenantId, runId: activeRun.run.id };
       const active = await runtime.resolveForRun(activeScope);
       expect(active?.model).toBeUndefined();
@@ -2410,7 +2986,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         expectedGeneration: await repository.generation(initial.user.id),
       });
       await expect(runtime.resolveForRun(activeScope)).resolves.toEqual(active);
-      const newRun = await createFixture("memory_updated");
+      const newRun = await createFixture("memory_updated", isolatedRepositories);
       expect(
         (await runtime.resolveForRun({ tenantId: newRun.scope.tenantId, runId: newRun.run.id }))
           ?.memoryApiKey,
@@ -2427,21 +3003,17 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         await repository.resolveMemoryCredential(initial.user.id, "mem0", reused.revision),
       ).toBe("integration-memory-key-b");
       await expect(
-        adminControlPool.query("SELECT * FROM run_runtime_config_snapshots"),
+        isolatedAdminControlPool.query("SELECT * FROM run_runtime_config_snapshots"),
       ).rejects.toMatchObject({ code: "42501" });
-      const foreign = await withTenantTransaction(runtimePool, initial.scope, (client) =>
+      const foreign = await withTenantTransaction(isolatedRuntimePool, initial.scope, (client) =>
         client.query("SELECT run_id FROM run_runtime_config_snapshots WHERE run_id=$1", [
           activeRun.run.id,
         ]),
       );
       expect(foreign.rows).toHaveLength(0);
     } finally {
-      await migratorPool.query(`DELETE FROM run_runtime_config_snapshots;
-        DELETE FROM admin_control_audits; DELETE FROM admin_control_commands;
-        DELETE FROM admin_control_activation_events; DELETE FROM admin_control_active_configs;
-        DELETE FROM admin_control_provider_probes; DELETE FROM admin_control_config_revisions;
-        DELETE FROM platform_control_operators;
-        UPDATE admin_control_generation SET generation=0,updated_at=clock_timestamp() WHERE singleton='global'`);
+      await Promise.all([isolatedRuntimePool.end(), isolatedAdminControlPool.end()]);
+      await target.close();
     }
   });
 
@@ -3873,7 +4445,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           "title_generation_version",
         ]),
       ],
-      ["memberships", new Set(["lock_marker"])],
+      ["memberships", new Set(["lock_marker", "status"])],
       [
         "blob_lifecycles",
         new Set([
@@ -4007,10 +4579,35 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       database_create: false,
       database_temporary: false,
     });
-    const sequenceCount = await migratorPool.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'S'",
+    const sequencePrivileges = await migratorPool.query<{
+      sequence_name: string;
+      can_select: boolean;
+      can_update: boolean;
+      can_use: boolean;
+    }>(
+      `SELECT relname AS sequence_name,
+              has_sequence_privilege($1, oid, 'SELECT') AS can_select,
+              has_sequence_privilege($1, oid, 'UPDATE') AS can_update,
+              has_sequence_privilege($1, oid, 'USAGE') AS can_use
+         FROM pg_class
+        WHERE relnamespace = current_schema()::regnamespace AND relkind = 'S'
+        ORDER BY relname`,
+      [runtimeRole],
     );
-    expect(sequenceCount.rows[0]?.count).toBe("0");
+    expect(sequencePrivileges.rows).toEqual([
+      {
+        sequence_name: "agent_definition_audits_audit_id_seq",
+        can_select: false,
+        can_update: false,
+        can_use: false,
+      },
+      {
+        sequence_name: "external_tool_admin_audits_audit_id_seq",
+        can_select: false,
+        can_update: false,
+        can_use: false,
+      },
+    ]);
     await expect(
       runtimePool.query("CREATE TABLE forbidden_runtime_ddl(id integer)"),
     ).rejects.toMatchObject({

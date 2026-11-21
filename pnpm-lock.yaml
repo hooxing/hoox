@@ -78,7 +78,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: 4.1.10
-        version: 4.1.10(@opentelemetry/api@1.10.0)(@types/node@24.13.3)(jsdom@26.1.0)(vite@8.1.5(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.20.6)(yaml@2.9.0))
+        version: 4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(jsdom@26.1.0)(vite@8.1.5(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.20.6)(yaml@2.9.0))
 
   runtime-ts/apps/admin-control-api:
     dependencies:
@@ -266,6 +266,9 @@ importers:
       '@hoox/skill':
         specifier: workspace:*
         version: link:../../packages/skill
+      '@hoox/tool-router':
+        specifier: workspace:*
+        version: link:../../packages/tool-router
       fastify:
         specifier: 5.12.6
         version: 5.12.6
@@ -290,6 +293,16 @@ importers:
       '@hoox/thread-title':
         specifier: workspace:*
         version: link:../../packages/thread-title
+      '@hoox/tool-router':
+        specifier: workspace:*
+        version: link:../../packages/tool-router
+      pg:
+        specifier: 8.22.0
+        version: 8.22.0
+    devDependencies:
+      '@types/pg':
+        specifier: 8.20.0
+        version: 8.20.0
 
   runtime-ts/apps/skill-admin-api:
     dependencies:
@@ -2351,6 +2364,9 @@ packages:
   '@smithy/core@3.30.0':
     resolution: {integrity: sha512-dl2yRglDxfzH9uJ4fSo4zTaAHa0zH7+V7BZMRWy8hEYIKT1BiqMUK/CN6T3ADQ3kbA5N1tmUulroJ2UtONS7Kw==}
     engines: {node: '>=18.0.0'}
+    deprecated: |-
+      Deprecated due to a bug in custom logger data redaction. Upgrade to the latest version. If you used a custom logger with this
+        version, review your logs and rotate any credentials or other secrets. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.4.14':
     resolution: {integrity: sha512-QgbuahIb2qxQeZQvNK0sw3aF3JH5zwH8j2lLp5DUasVXexGGMWULAR+7z0omPXFolCP/m5wN9M5lm9EGdSviTQ==}
@@ -8337,7 +8353,7 @@ snapshots:
       - supports-color
       - terser
 
-  vitest@4.1.10(@opentelemetry/api@1.10.0)(@types/node@24.13.3)(jsdom@26.1.0)(vite@8.1.5(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.20.6)(yaml@2.9.0)):
+  vitest@4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(jsdom@26.1.0)(vite@8.1.5(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.20.6)(yaml@2.9.0)):
     dependencies:
       '@vitest/expect': 4.1.10
       '@vitest/mocker': 4.1.10(vite@8.1.5(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.20.6)(yaml@2.9.0))
@@ -8360,7 +8376,7 @@ snapshots:
       vite: 8.1.5(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.20.6)(yaml@2.9.0)
       why-is-node-running: 2.3.0
     optionalDependencies:
-      '@opentelemetry/api': 1.10.0
+      '@opentelemetry/api': 1.9.0
       '@types/node': 24.13.3
       jsdom: 26.1.0
     transitivePeerDependencies:

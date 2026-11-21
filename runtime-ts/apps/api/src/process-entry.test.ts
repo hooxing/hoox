@@ -6,6 +6,7 @@ function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
     BETTER_AUTH_SECRET: "test-better-auth-secret-at-least-thirty-two-bytes",
+    WEBHOOK_SECRET_ENCRYPTION_KEY: "test-webhook-encryption-root-at-least-thirty-two-bytes",
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_SCHEMA: "runtime",
     DATABASE_RUNTIME_ROLE: "runtime",

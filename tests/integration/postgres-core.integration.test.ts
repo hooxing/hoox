@@ -3038,6 +3038,41 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(result.rows[0]?.constraint_definition).toContain("remote_tool_name IS NULL");
   });
 
+  it("外部工具快照视图仅向 Runtime 开放按 Run 授权读取", async () => {
+    const privileges = await migratorPool.query<{
+      readonly view_select: boolean;
+      readonly version_select: boolean;
+      readonly credential_select: boolean;
+      readonly revocation_select: boolean;
+    }>(
+      `SELECT has_table_privilege($1,format('%I.%I',$2::text,'runtime_run_external_tool_snapshots'),'SELECT') AS view_select,
+              has_table_privilege($1,format('%I.%I',$2::text,'external_tool_versions'),'SELECT') AS version_select,
+              has_table_privilege($1,format('%I.%I',$2::text,'external_tool_credentials'),'SELECT') AS credential_select,
+              has_table_privilege($1,format('%I.%I',$2::text,'external_tool_revocations'),'SELECT') AS revocation_select`,
+      [runtimeRole, schema],
+    );
+    expect(privileges.rows).toEqual([
+      {
+        view_select: true,
+        version_select: false,
+        credential_select: false,
+        revocation_select: false,
+      },
+    ]);
+    const view = await migratorPool.query<{ readonly definition: string }>(
+      `SELECT pg_get_viewdef(format('%I.%I',$1::text,'runtime_run_external_tool_snapshots')::regclass,true) AS definition`,
+      [schema],
+    );
+    expect(view.rows[0]?.definition).toContain("app.external_tool_run_id");
+    expect(view.rows[0]?.definition).toContain("external_tool_revocations");
+    expect(view.rows[0]?.definition).toContain("externalTools");
+    const method = await migratorPool.query<{ readonly data_type: string }>(
+      `SELECT data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name='external_tool_versions' AND column_name='http_method'`,
+      [schema],
+    );
+    expect(method.rows).toEqual([{ data_type: "text" }]);
+  });
+
   it("外部工具密文仅允许 Admin Control 写入，Runtime 零权限", async () => {
     const rows = await migratorPool.query<{
       readonly table_name: string;

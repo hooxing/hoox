@@ -1,6 +1,6 @@
 # MCP 与外部工具接入规范
 
-- 状态：草案
+- 状态：实施中；版本存储、凭据加密、MCP/HTTP Transport 与 Run 快照读取已实现，Session 装配及端到端验收进行中
 - 创建日期：2026-09-11
 - 适用范围：`runtime-ts/packages/domain`、`persistence`、`protocol`、`admin-control`、`run-contracts`、`pi-adapter`、`prompt-builder`、`tool-router`、`runtime-ts/apps/api`、`agent-worker`、`admin-control-api`、`admin-web`
 - 目标读者：负责外部工具接入、管理面发布、Run 快照、副作用授权与恢复的开发者与维护者
@@ -8,7 +8,7 @@
 
 ## 1. 生命周期与权威边界
 
-本文是尚未实现的目标契约，说明 MCP Server 与其他外部工具接入必须满足的能力模型、边界、失败语义和验收，不描述当前已经具备的行为。当前模型只能使用内置工具集合，MCP 未接入，外部工具只有经 `@hoox/tool-router` 的 `deliver_file`。
+本文保留外部工具接入目标契约；当前实现状态见第 8 节。Worker 外部工具读取受 Run 快照和未撤销状态限制，凭据仅在 Worker 内解密，工具执行经 Tool Router。
 
 全部切片实现并验证后，稳定的工具装配与副作用规则迁入[架构总览](../architecture/overview.md)与相应参考文档，本文转为“已完成”并退出目标规范索引。若命名、Transport 或 schema 转换结论改变，直接修订本文并在变更中说明原因。
 
@@ -95,13 +95,13 @@ Run 创建时按与 `RunSkillSnapshot` 同级的方式固定：启用 Server 的
 
 | 切片 | 状态 | 主要位置 | 验收 |
 | --- | --- | --- | --- |
-| 领域与持久化 | 未开始 | `@hoox/domain`、`@hoox/persistence` 迁移与 RLS | Server 版本、工具描述、Run 快照的不可变性与 Tenant 隔离测试 |
+| 领域与持久化 | 已实现，端到端验收待完成 | `@hoox/domain`、`@hoox/persistence` 迁移与 RLS | Server 版本、工具描述、Run 快照不可变性、Runtime 受限视图权限与 Tenant 隔离测试 |
 | 管理面 | 未开始 | `@hoox/protocol`、`@hoox/admin-control`、`admin-control-api`、`admin-web` | 发布原子性、凭据不回显、撤销失败关闭 |
-| Run 快照 | 未开始 | `apps/api` Run 创建、`@hoox/run-contracts`、`@hoox/persistence` | 跨恢复 `toolSchemaHash` 一致、后续发布不影响已有 Run |
-| Pi 工具协议 | 未开始 | `@hoox/pi-adapter` 新工具工厂、`pi-session.ts` 注册 | schema 固定、manifest 派生、非法参数回执 |
-| 执行路由 | 未开始 | `@hoox/tool-router`、`apps/agent-worker/src/pi-session-factory.ts` | 许可绑定、参数摘要、结果未知不重放 |
-| Transport 客户端 | 部分实现 | `@hoox/tool-router` MCP Streamable HTTP 客户端 | 本地假 Server 覆盖初始化、清单探测、调用、Schema 拒绝、受控协议错误、响应上限与未知结果；真实 MCP Server 冒烟待验证 |
-| 协作与提示词边界 | 未开始 | `@hoox/run-contracts` 子 Agent 白名单、`@hoox/prompt-builder` 版本 | 子 Agent 只能按显式授权下放；Prompt 变更同步版本与测试 |
+| Run 快照 | 已实现，端到端验收待完成 | `apps/api` Run 创建、`@hoox/run-contracts`、`@hoox/persistence` | 跨恢复 `toolSchemaHash` 一致、后续发布不影响已有 Run |
+| Pi 工具协议 | 已实现，端到端验收待完成 | `@hoox/pi-adapter` 新工具工厂、`pi-session.ts` 注册 | 按字典序注册、schema 固定、manifest 派生、非法参数回执 |
+| 执行路由 | 已实现，端到端验收待完成 | `@hoox/tool-router`、`apps/agent-worker/src/pi-session-factory.ts` | 许可绑定、参数摘要、结果未知不重放 |
+| Transport 客户端 | 已实现（本地假服务验收中） | `@hoox/tool-router` MCP Streamable HTTP 客户端 | 本地假 Server 覆盖初始化、清单探测、调用、Schema 拒绝、受控协议错误、响应上限与未知结果；真实 MCP Server 冒烟待验证 |
+| 协作与提示词边界 | 已实现，端到端验收待完成 | `@hoox/run-contracts` 子 Agent 白名单、`@hoox/prompt-builder` 版本 | 子 Agent 默认不下放，显式授权绑定精确版本 ID；恢复保持授权且跨 Run 只取精确版本交集 |
 
 ## 9. 验收门槛
 

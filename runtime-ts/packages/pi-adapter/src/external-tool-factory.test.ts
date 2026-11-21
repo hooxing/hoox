@@ -10,6 +10,7 @@ const s = normalizeExternalToolSchema({
 const make = (name: string): ExternalToolVersion => ({
   toolVersionId: name,
   source: "http",
+  httpMethod: "POST",
   endpoint: "https://8.8.8.8/api",
   modelToolName: name,
   description: "tool",
@@ -35,8 +36,25 @@ describe("外部工具 Pi 工厂", () => {
       recordReceipt: async () => {},
       requireRecovery: async () => {},
     });
+    const first = create([{ tool: make("http__z") }, { tool: make("http__a") }]);
+    const reversed = create([{ tool: make("http__a") }, { tool: make("http__z") }]);
+    expect(first.map((tool) => tool.name)).toEqual(["http__a", "http__z"]);
     expect(
-      create([{ tool: make("http__z") }, { tool: make("http__a") }]).map((tool) => tool.name),
-    ).toEqual(["http__a", "http__z"]);
+      first.map((tool) =>
+        JSON.stringify({
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        }),
+      ),
+    ).toEqual(
+      reversed.map((tool) =>
+        JSON.stringify({
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        }),
+      ),
+    );
   });
 });

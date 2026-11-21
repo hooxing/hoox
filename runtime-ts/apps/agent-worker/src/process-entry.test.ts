@@ -34,6 +34,7 @@ function productionEnvironment(): Record<string, string> {
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "opaque-model-value",
     MODEL_CREDENTIAL_ENCRYPTION_KEY: "production-model-credential-root-at-least-32-bytes",
+    EXTERNAL_TOOL_IDENTITY_ROOT_KEY: "production-external-tool-identity-root-at-least-32-bytes",
     MODEL_ID: "test-model",
     MODEL_SUPPORTS_IMAGES: "false",
     MODEL_CONTEXT_WINDOW: "128000",
@@ -86,6 +87,18 @@ describe("Agent Worker 进程入口", () => {
       parseWorkerProcessEnvironment({ ...enabled, OTEL_EXPORT_CONTENT_ENABLED: "true" }).telemetry
         ?.contentEnabled,
     ).toBe(true);
+  });
+
+  it("生产外部工具身份根密钥必填且至少 32 字符", () => {
+    const env = productionEnvironment();
+    expect(parseWorkerProcessEnvironment(env).externalToolIdentityRootKey).toBe(
+      env.EXTERNAL_TOOL_IDENTITY_ROOT_KEY,
+    );
+    expect(() =>
+      parseWorkerProcessEnvironment({ ...env, EXTERNAL_TOOL_IDENTITY_ROOT_KEY: "too-short" }),
+    ).toThrow();
+    delete env.EXTERNAL_TOOL_IDENTITY_ROOT_KEY;
+    expect(() => parseWorkerProcessEnvironment(env)).toThrow();
   });
 
   it("私有出站目标默认关闭且只能通过显式布尔配置放行", () => {

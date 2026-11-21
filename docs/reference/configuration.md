@@ -98,7 +98,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 ### 外部工具出站地址
 
-`EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES` 默认关闭。仅在部署确实需要访问受控 RFC1918 私网或 IPv6 ULA 服务时，才可设为 `true`；该开关不会放行 IPv4/IPv6 链路本地地址、云元数据端点（包括 `169.254.169.254`、`fd00:ec2::254`、`100.100.100.200`）或被识别为本地用途的 NAT64/Teredo 地址。外部工具仍只允许 HTTPS，DNS 解析结果会在连接前校验并固定到已校验地址，且不跟随重定向。
+`EXTERNAL_TOOL_IDENTITY_ROOT_KEY` 是 Worker 使用的部署级身份根密钥，生产必填；使用至少 32 字节的随机秘密，并通过部署秘密管理注入，不得复用外部工具凭据。它只用于派生 HTTP 工具请求中的不透明身份标识。`EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES` 默认关闭。仅在部署确实需要访问受控 RFC1918 私网或 IPv6 ULA 服务时，才可设为 `true`；该开关不会放行 IPv4/IPv6 链路本地地址、云元数据端点（包括 `169.254.169.254`、`fd00:ec2::254`、`100.100.100.200`）或被识别为本地用途的 NAT64/Teredo 地址。外部工具仍只允许 HTTPS，DNS 解析结果会在连接前校验并固定到已校验地址，且不跟随重定向。
 
 ## Worker OpenTelemetry 配置
 

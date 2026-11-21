@@ -27,6 +27,7 @@ interface ChildState {
   readonly initialTask: string;
   currentTask: string;
   readonly tools: readonly DelegableAgentToolName[];
+  readonly externalToolVersionIds: readonly string[];
   readonly toolManifestDigest: ReturnType<typeof digestCanonical>;
   readonly forkTurns: AgentForkTurns;
   turnOrdinal: number;
@@ -48,10 +49,12 @@ interface AgentSupervisorDependencies {
   readonly fence: Parameters<AgentControlPersistencePort["initializeRoot"]>[0]["fence"];
   readonly maxThreads?: number;
   readonly maxConcurrentAgents?: number;
+  readonly allowedExternalToolVersionIds?: readonly string[];
   readonly now?: () => number;
   readonly createSession: (input: {
     readonly identity: AgentExecutionIdentity;
     readonly tools: readonly DelegableAgentToolName[];
+    readonly externalToolVersionIds: readonly string[];
     readonly history?: ThreadActiveHistoryV1;
   }) => Promise<WorkerAgentSessionPort>;
   readonly authorizeModelStart: (input: {
@@ -161,7 +164,15 @@ export class AgentSupervisor implements AgentControlPort {
       throw new Error(`AGENT_ROOT_${result.outcome.toUpperCase()}`);
     }
     for (const conversation of result.conversations) {
-      if (conversation.toolManifestDigest !== digestCanonical({ tools: conversation.tools })) {
+      const externalToolVersionIds = conversation.externalToolVersionIds ?? [];
+      if (
+        conversation.toolManifestDigest !==
+        digestCanonical(
+          externalToolVersionIds.length === 0
+            ? { tools: conversation.tools }
+            : { tools: conversation.tools, externalToolVersionIds },
+        )
+      ) {
         throw new Error("AGENT_TOOL_MANIFEST_CONFLICT");
       }
       const child: ChildState = {
@@ -170,6 +181,7 @@ export class AgentSupervisor implements AgentControlPort {
         initialTask: conversation.task,
         currentTask: conversation.currentTask,
         tools: conversation.tools,
+        externalToolVersionIds,
         toolManifestDigest: conversation.toolManifestDigest,
         forkTurns: conversation.forkTurns,
         turnOrdinal: conversation.turnOrdinal,
@@ -203,7 +215,16 @@ export class AgentSupervisor implements AgentControlPort {
     const task = boundedText(input.task, MAX_MESSAGE_BYTES);
     if (!task.trim()) throw new Error("AGENT_TASK_INVALID");
     const tools = this.#validateTools(input.tools);
-    const toolManifestDigest = digestCanonical({ tools });
+    const allowedExternal = new Set(this.dependencies.allowedExternalToolVersionIds ?? []);
+    const externalToolVersionIds = [...new Set(input.externalToolVersionIds ?? [])].sort();
+    if (
+      externalToolVersionIds.length !== (input.externalToolVersionIds ?? []).length ||
+      externalToolVersionIds.some((id) => !allowedExternal.has(id))
+    )
+      throw new Error("AGENT_TOOLS_INVALID");
+    const toolManifestDigest = digestCanonical(
+      externalToolVersionIds.length === 0 ? { tools } : { tools, externalToolVersionIds },
+    );
     const commandId = stableId("cmd", "spawn", input.callId);
     const childId = agentThreadId(
       stableId(
@@ -223,6 +244,7 @@ export class AgentSupervisor implements AgentControlPort {
       canonicalPath: path,
       task,
       tools,
+      ...(externalToolVersionIds.length === 0 ? {} : { externalToolVersionIds }),
       toolManifestDigest,
       forkTurns: input.forkTurns,
       turnId,
@@ -236,6 +258,7 @@ export class AgentSupervisor implements AgentControlPort {
       argsDigest: digestCanonical({
         task,
         tools,
+        ...(externalToolVersionIds.length === 0 ? {} : { externalToolVersionIds }),
         toolManifestDigest,
         forkTurns: input.forkTurns,
       }),
@@ -255,6 +278,7 @@ export class AgentSupervisor implements AgentControlPort {
         initialTask: task,
         currentTask: task,
         tools,
+        externalToolVersionIds,
         toolManifestDigest,
         forkTurns: input.forkTurns,
         turnOrdinal: 1,
@@ -467,6 +491,9 @@ export class AgentSupervisor implements AgentControlPort {
       session = await this.dependencies.createSession({
         identity,
         tools: child.tools,
+        externalToolVersionIds: child.externalToolVersionIds.filter((id) =>
+          (this.dependencies.allowedExternalToolVersionIds ?? []).includes(id),
+        ),
         ...(child.history === undefined ? {} : { history: child.history }),
       });
       child.session = session;

@@ -5,6 +5,7 @@ export const ExternalToolVersionDtoSchema = Type.Object(
     toolVersionId: Type.String({ minLength: 1, maxLength: 128 }),
     source: Type.Union([Type.Literal("mcp"), Type.Literal("http")]),
     remoteToolName: Type.Union([Type.String({ minLength: 1, maxLength: 512 }), Type.Null()]),
+    httpMethod: Type.Optional(Type.Union([Type.Literal("GET"), Type.Literal("POST")])),
     modelToolName: Type.String({
       minLength: 1,
       maxLength: 128,

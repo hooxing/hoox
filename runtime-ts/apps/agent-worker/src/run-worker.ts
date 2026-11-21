@@ -454,7 +454,12 @@ export class RunWorker {
     shutdown?.addEventListener("abort", onShutdown, { once: true });
     if (shutdown?.aborted) onShutdown();
     const timeout = this.dependencies.clock.schedule(this.#runTimeoutMs, () => {
-      if (context.stopped === "shutdown" || context.stopped === "agent_revision_revoked") return;
+      if (
+        context.stopped === "shutdown" ||
+        context.stopped === "agent_revision_revoked" ||
+        context.stopped === "external_tool_revoked"
+      )
+        return;
       context.stopped = "timeout";
       executionAbort.abort("run_timeout");
       void requestAbort();
@@ -499,8 +504,7 @@ export class RunWorker {
     const { content } = snapshot.agent;
     if (
       content.sandboxTemplateId !== undefined ||
-      (content.tools.mode === "configured" &&
-        (content.tools.externalTools.length > 0 || content.tools.clientTools.length > 0))
+      (content.tools.mode === "configured" && content.tools.clientTools.length > 0)
     ) {
       return await this.finalizeWithoutRevision(
         context,
@@ -641,6 +645,10 @@ export class RunWorker {
       rootAgentThreadId: rootAgentThreadId(context.attemptId),
       attemptId: context.attemptId,
       fence: context.fence,
+      allowedExternalToolVersionIds:
+        agentSnapshot.content.tools.mode === "configured"
+          ? agentSnapshot.content.tools.externalTools.map((tool) => tool.versionId)
+          : [],
       createSession: async (child) =>
         await this.dependencies.sessions.create({
           scope,
@@ -648,6 +656,7 @@ export class RunWorker {
           fence: context.fence,
           agent: child.identity,
           enabledToolNames: child.tools,
+          enabledExternalToolVersionIds: child.externalToolVersionIds,
           ensureSandboxReady,
           rolloutProjection: Object.freeze({
             schemaVersion: 2 as const,
@@ -658,6 +667,10 @@ export class RunWorker {
           ...(snapshot.skills === undefined ? {} : { skillSnapshot: snapshot.skills }),
           ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
           ...(child.history === undefined ? {} : { threadActiveHistory: child.history }),
+          onExternalToolRevoked: () => {
+            context.stopped = "external_tool_revoked";
+            run.executionAbort.abort("external_tool_revoked");
+          },
           authorizeToolEffect: (call) =>
             this.authorizeToolEffectAfterStarted(context, cancellation, call),
           writeTodo: async () => {
@@ -704,6 +717,10 @@ export class RunWorker {
       ...(this.options.threadContextWriteEnabled !== true
         ? {}
         : { onTurnSafePoint: (event) => run.events.commitTurnSafePoint(event) }),
+      onExternalToolRevoked: () => {
+        context.stopped = "external_tool_revoked";
+        run.executionAbort.abort("external_tool_revoked");
+      },
       authorizeToolEffect: (call) =>
         this.authorizeToolEffectAfterStarted(context, cancellation, call),
       writeTodo: (call) => this.writeTodoAfterStarted(context, cancellation, call),
@@ -1944,7 +1961,11 @@ export class RunWorker {
   ): Promise<RunWorkerResult> {
     closeEventAcceptance(context);
     if (context.abortPromise) await context.abortPromise;
-    if (stopped === "cancelled" || stopped === "agent_revision_revoked") {
+    if (
+      stopped === "cancelled" ||
+      stopped === "agent_revision_revoked" ||
+      stopped === "external_tool_revoked"
+    ) {
       const retainedThreadSandbox =
         sandbox !== undefined && context.threadSandboxLease !== undefined ? sandbox : undefined;
       const deferredCleanupOutbox =
@@ -1955,7 +1976,11 @@ export class RunWorker {
       return await this.finalizeWithoutRevision(
         context,
         stopped === "cancelled" ? "cancelled" : "failed",
-        stopped === "cancelled" ? "CANCELLED" : "AGENT_REVISION_REVOKED",
+        stopped === "cancelled"
+          ? "CANCELLED"
+          : stopped === "agent_revision_revoked"
+            ? "AGENT_REVISION_REVOKED"
+            : "EXTERNAL_TOOL_REVOKED",
         retainedThreadSandbox,
         false,
         deferredCleanupOutbox,

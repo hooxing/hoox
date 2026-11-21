@@ -49,6 +49,12 @@ claimed/running/finalizing → recovery_required → abandoned | failed
 
 每个 Attempt 只有一条进程内 `DurableOperationLane`。事件写入、普通 mutation 与读回、外部副作用许可签发与消费、停止检查和续租都按进入顺序串行执行；命令与预期版本必须在进入通道后从最新上下文构造。停止时先停止生产者，再排空通道。
 
+## 外部工具快照与撤销
+
+Worker 仅凭 RunAgentSnapshot 中的精确 `toolVersionId` 读取外部工具版本和凭据；PostgreSQL Runtime 角色只能查询按当前 Tenant、Run 快照且未撤销过滤的受限视图，不能读取版本、密文或撤销底表。凭据只在 Worker 内解密并交给 Tool Router 的 Transport，不进入 Prompt、Schema、事件或模型可见回执。MCP 与 HTTP 都经一次性许可和 durable 回执；撤销检查在工具调用前及 turn 安全点执行，发现撤销后不再发起调用并停止 Run。
+
+子 Agent 的外部工具授权默认为空，显式授权记录精确版本 ID 并随子 Agent 持久化；恢复或 Worker 重启保持同一集合。跨 Run 复用时取授权版本与新 Run 快照的交集，不得按工具名替换成新版本。
+
 ## 重试与未知结果
 
 | 情况 | 行为 |

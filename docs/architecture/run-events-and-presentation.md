@@ -8,6 +8,10 @@
 - 读取只返回当前 Run 最新 Attempt 的事件，sequence 游标不能跨 Attempt。Run 不存在、Thread 不匹配、跨 Tenant 或成员关系失效一律返回 404，数据库异常返回 503，不泄漏内部错误。
 - 浏览器内的未发布文字、动画和计时状态只是展示缓冲；停止、切换任务或刷新时丢弃，不影响服务端事实。
 
+## Webhook Outbox
+
+Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交该业务事实的同一事务写入 Tenant Webhook Outbox；所有提交 Run 状态转换的路径（Worker 收尾、API 取消、过期 Attempt 安全失败、团队解散批量取消）都经同一入队入口，事件 ID 由 Tenant、Run、转换后版本与状态（或 Artifact ID）确定性派生，重放不重复入队。Outbox 只保存字段白名单内、不含文件名与附件字节的事件载荷，不保存目的地址或签名密钥；投递端无需读取业务表。新增 Run 状态写入路径时必须同事务调用该入口。`run.requires_action` 只代表 C4 写入的客户端工具等待事实，不能从普通 `waiting` 推断；由 C4 在该事实事务中产生。Scheduler 使用独立数据库角色领取并结算 Outbox，按至少一次语义发送，接收端以事件 ID 去重。完整载荷、签名与重试语义见 [Webhook 参考](../reference/webhooks.md)。
+
 ## 推送与续读
 
 - API 通过 SSE 推送持久事件页。浏览器用 fetch 读取 SSE，继续携带 Authorization 与 Tenant Header，不把令牌放入 URL。每次补读重新认证并确认 Run 归属，流按有限页读取并服从背压，连接定期结束后按已接收游标续连。

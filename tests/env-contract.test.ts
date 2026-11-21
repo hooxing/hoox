@@ -25,6 +25,7 @@ function validExample(): string {
         key === "DATABASE_URL" ||
         key === "DATABASE_WORKER_COORDINATOR_URL" ||
         key === "DATABASE_TEAM_COORDINATOR_URL" ||
+        key === "WEBHOOK_DISPATCHER_DATABASE_URL" ||
         key === "DATABASE_BOOTSTRAP_URL" ||
         key === "MIGRATION_DATABASE_URL" ||
         key === "SKILL_PUBLISHER_DATABASE_URL" ||
@@ -49,6 +50,7 @@ function validExample(): string {
         key.endsWith("TOKEN") ||
         key.endsWith("TEMPLATE_ID") ||
         key === "MODEL_CREDENTIAL_ENCRYPTION_KEY" ||
+        key === "WEBHOOK_SECRET_ENCRYPTION_KEY" ||
         key === "RESOURCEFS_PROXY_TLS_KEY_PATH" ||
         key === "RESOURCEFS_PROXY_TLS_CERT_PATH" ||
         key === "MINIO_ROOT_USER" ||
@@ -63,6 +65,36 @@ function validExample(): string {
 }
 
 describe("环境变量示例契约", () => {
+  it("各受限角色连接与 Bootstrap 指向同一开发数据库", async () => {
+    const example = await readFile(new URL("../.env.example", import.meta.url), "utf8");
+    const values = new Map(
+      example.split(/\r?\n/u).map((line) => {
+        const separator = line.indexOf("=");
+        return separator < 0 ? [line, ""] : [line.slice(0, separator), line.slice(separator + 1)];
+      }),
+    );
+    const bootstrap = new URL(values.get("DATABASE_BOOTSTRAP_URL") ?? "");
+    for (const [roleKey, urlKey] of [
+      ["DATABASE_RUNTIME_ROLE", "DATABASE_URL"],
+      ["DATABASE_RUNTIME_ROLE", "DATABASE_DOCKER_URL"],
+      ["DATABASE_MIGRATOR_ROLE", "MIGRATION_DATABASE_URL"],
+      ["DATABASE_SKILL_PUBLISHER_ROLE", "SKILL_PUBLISHER_DATABASE_URL"],
+      ["DATABASE_WORKER_COORDINATOR_ROLE", "DATABASE_WORKER_COORDINATOR_URL"],
+      ["DATABASE_TEAM_COORDINATOR_ROLE", "DATABASE_TEAM_COORDINATOR_URL"],
+      ["DATABASE_ADMIN_CONTROL_ROLE", "ADMIN_CONTROL_DATABASE_URL"],
+      ["DATABASE_WEBHOOK_DISPATCHER_ROLE", "WEBHOOK_DISPATCHER_DATABASE_URL"],
+    ] as const) {
+      const url = new URL(values.get(urlKey) ?? "");
+      expect(url.protocol, urlKey).toBe(bootstrap.protocol);
+      expect(url.port, urlKey).toBe(bootstrap.port);
+      expect(url.pathname, urlKey).toBe(bootstrap.pathname);
+      expect(url.hostname, urlKey).toBe(
+        urlKey === "DATABASE_DOCKER_URL" ? "host.docker.internal" : bootstrap.hostname,
+      );
+      expect(decodeURIComponent(url.username), urlKey).toBe(values.get(roleKey));
+    }
+  });
+
   it("OTLP 样例拒绝带凭据的端点和请求头且不回显配置值", () => {
     const issues = validateEnvironmentExample(
       validExample()

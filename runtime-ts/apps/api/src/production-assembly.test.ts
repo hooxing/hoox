@@ -42,6 +42,7 @@ vi.mock("@hoox/persistence/blob", () => ({
 }));
 vi.mock("@hoox/persistence/postgres", () => ({
   PgInstallationRepository: class {},
+  WebhookSecretCipher: class {},
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
 }));
 vi.mock("@hoox/persistence/thread", () => ({
@@ -86,6 +87,7 @@ function productionEnvironment(): Record<string, string> {
     S3_SECRET_ACCESS_KEY: "opaque-test-value",
     S3_FORCE_PATH_STYLE: "true",
     RESOURCE_FILESYSTEM_SIGNING_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    WEBHOOK_SECRET_ENCRYPTION_KEY: "webhook-root-placeholder-at-least-32-bytes",
   };
 }
 

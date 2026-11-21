@@ -97,6 +97,13 @@ export interface AgentDefinitionAdminRepositoryPort
       AgentRevisionContent["model"],
       { mode: "pinned" }
     >[];
+    readonly externalToolOptions: readonly {
+      readonly toolVersionId: string;
+      readonly source: "mcp" | "http";
+      readonly modelToolName: string;
+      readonly description: string;
+      readonly batchName: string;
+    }[];
     readonly items: readonly {
       readonly definition: StoredAgentDefinition;
       readonly revision?: StoredAgentRevisionSummary;

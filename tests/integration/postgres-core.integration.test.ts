@@ -90,6 +90,7 @@ import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
+import { externalToolRegistryTests } from "./postgres-external-tool-registry.js";
 
 function skillSnapshotBlobRef(sha256: string, size: number, mediaType: string): string {
   const tenantId = "tenant_test_publisher";
@@ -3038,6 +3039,31 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(result.rows[0]?.constraint_definition).toContain("remote_tool_name IS NULL");
   });
 
+  it("外部工具 Agent 选择投影不含 Schema 与凭据字段", async () => {
+    const columns = await migratorPool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema=$1 AND table_name='external_tool_selectable_versions'
+        ORDER BY ordinal_position`,
+      [schema],
+    );
+    expect(columns.rows.map((row) => row.column_name)).toEqual([
+      "tool_version_id",
+      "source",
+      "model_tool_name",
+      "description",
+      "batch_name",
+    ]);
+    const privileges = await migratorPool.query<{
+      runtime_select: boolean;
+      control_select: boolean;
+    }>(
+      `SELECT has_table_privilege($1,format('%I.external_tool_selectable_versions',$3::text),'SELECT') AS runtime_select,
+              has_table_privilege($2,format('%I.external_tool_selectable_versions',$3::text),'SELECT') AS control_select`,
+      [runtimeRole, adminControlRole, schema],
+    );
+    expect(privileges.rows[0]).toEqual({ runtime_select: false, control_select: true });
+  });
+
   it("外部工具密文仅允许 Admin Control 写入，Runtime 零权限", async () => {
     const rows = await migratorPool.query<{
       readonly table_name: string;
@@ -5130,3 +5156,8 @@ describe("PostgreSQL Runtime 模型与模式快照", () => {
     }
   });
 });
+
+externalToolRegistryTests(
+  () => ({ control: adminControlPool, db: migratorPool }),
+  migrationSecurity,
+);

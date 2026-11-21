@@ -10,6 +10,8 @@ import {
   type ValidatedExternalTarget,
 } from "@hoox/run-contracts";
 
+import { validateExternalHttpsTarget } from "./external-tools.js";
+
 const PROTOCOL_VERSION = "2025-06-18";
 type RpcEnvelope = {
   readonly jsonrpc?: unknown;
@@ -197,6 +199,16 @@ function jsonRpcBody(id: number, method: string, params: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
 }
 
+interface McpProbeBudget {
+  used: number;
+  readonly maximum: number;
+}
+function accountProbeBytes(budget: McpProbeBudget | undefined, bytes: number): void {
+  if (!budget) return;
+  budget.used += bytes;
+  if (budget.used > budget.maximum) throw resultUnknown();
+}
+
 export class McpStreamableHttpClient {
   private readonly exchange: McpExchange;
   constructor(exchange: McpExchange = exchangeMcpHttp) {
@@ -211,9 +223,11 @@ export class McpStreamableHttpClient {
       timeoutMs: number;
       maxResponseBytes: number;
       credential?: string;
+      deadlineAt?: number;
       signal?: AbortSignal;
       callContext?: ExternalToolCallContext;
       idempotencyKey?: string;
+      budget?: McpProbeBudget;
     },
     id: number,
   ): Promise<Record<string, unknown>> {
@@ -223,7 +237,7 @@ export class McpStreamableHttpClient {
         target,
         body: jsonRpcBody(id, method, params),
         timeoutMs: options.timeoutMs,
-        deadlineAt: Date.now() + options.timeoutMs,
+        deadlineAt: options.deadlineAt ?? Date.now() + options.timeoutMs,
         maxResponseBytes: options.maxResponseBytes,
         ...(options.credential === undefined ? {} : { credential: options.credential }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -237,6 +251,7 @@ export class McpStreamableHttpClient {
       throw resultUnknown();
     }
     if (response.body.byteLength > options.maxResponseBytes) throw resultUnknown();
+    accountProbeBytes(options.budget, response.body.byteLength);
     if (response.status < 200 || response.status >= 300) {
       if (response.status >= 300 && response.status < 500) throw respondedFailure();
       throw resultUnknown();
@@ -264,7 +279,13 @@ export class McpStreamableHttpClient {
 
   async initialize(
     target: ValidatedExternalTarget,
-    options: { timeoutMs: number; maxResponseBytes: number; credential?: string },
+    options: {
+      timeoutMs: number;
+      deadlineAt?: number;
+      maxResponseBytes: number;
+      credential?: string;
+      budget?: McpProbeBudget;
+    },
   ): Promise<void> {
     const result = await this.rpc(
       target,
@@ -292,7 +313,7 @@ export class McpStreamableHttpClient {
         target,
         body,
         timeoutMs: options.timeoutMs,
-        deadlineAt: Date.now() + options.timeoutMs,
+        deadlineAt: options.deadlineAt ?? Date.now() + options.timeoutMs,
         maxResponseBytes: options.maxResponseBytes,
         ...(options.credential === undefined ? {} : { credential: options.credential }),
       });
@@ -301,16 +322,24 @@ export class McpStreamableHttpClient {
       throw resultUnknown();
     }
     if (response.body.byteLength > options.maxResponseBytes) throw resultUnknown();
+    accountProbeBytes(options.budget, response.body.byteLength);
     if (response.status >= 300 && response.status < 500) throw respondedFailure();
     if (response.status < 200 || response.status >= 500) throw resultUnknown();
   }
 
   async listTools(
     target: ValidatedExternalTarget,
-    options: { timeoutMs: number; maxResponseBytes: number; credential?: string },
+    options: {
+      timeoutMs: number;
+      deadlineAt?: number;
+      maxResponseBytes: number;
+      credential?: string;
+      budget?: McpProbeBudget;
+    },
   ): Promise<readonly Record<string, unknown>[]> {
     const tools: Record<string, unknown>[] = [];
     let cursor: string | undefined;
+    const cursors = new Set<string>();
     let id = 2;
     do {
       const result = await this.rpc(
@@ -321,10 +350,25 @@ export class McpStreamableHttpClient {
         id++,
       );
       if (!Array.isArray(result.tools)) throw respondedFailure();
-      tools.push(...(result.tools as Record<string, unknown>[]));
-      if (tools.length > 64) throw new Error("MCP_TOOL_LIMIT");
-      if (result.nextCursor !== undefined && typeof result.nextCursor !== "string")
+      if (result.tools.length + tools.length > 64) throw new Error("MCP_TOOL_LIMIT");
+      if (
+        !result.tools.every(
+          (tool: unknown) => tool !== null && typeof tool === "object" && !Array.isArray(tool),
+        )
+      )
         throw respondedFailure();
+      tools.push(...result.tools);
+      if (result.nextCursor !== undefined) {
+        // 空页同样消耗预算；远端不能通过更换游标无限延长探测。
+        if (
+          typeof result.nextCursor !== "string" ||
+          !result.nextCursor ||
+          cursors.has(result.nextCursor) ||
+          cursors.size >= 63
+        )
+          throw respondedFailure();
+        cursors.add(result.nextCursor);
+      }
       cursor = result.nextCursor as string | undefined;
     } while (cursor !== undefined);
     return tools;
@@ -426,6 +470,150 @@ export class McpExternalToolTransport implements ExternalToolTransport {
   }
 }
 
+export type McpProbeToolReport =
+  | Readonly<{
+      accepted: true;
+      remoteToolName: string;
+      modelToolName: string;
+      description: string;
+      inputSchema: Readonly<Record<string, unknown>>;
+      inputSchemaDigest: string;
+    }>
+  | Readonly<{
+      accepted: false;
+      /** 远端声明的原始名称仅在为非空且有界字符串时回显，便于管理员定位被拒工具。 */
+      remoteToolName?: string;
+      reason: string;
+      reasonMessage: string;
+    }>;
+
+function validRemoteName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value) <= 512 &&
+    ![...value].some((char) => {
+      const code = char.codePointAt(0) ?? 0;
+      return code < 0x20 || code === 0x7f;
+    })
+  );
+}
+
+const probeReasons: Readonly<Record<string, string>> = Object.freeze({
+  MCP_TOOL_INVALID: "工具名称或描述格式不受支持",
+  MCP_SCHEMA_REJECTED: "工具参数 Schema 不符合平台支持的安全子集",
+  MCP_TOOL_DESCRIPTION_INVALID: "工具描述超过允许长度",
+  MCP_TOOL_NAME_INVALID: "工具名称无法安全转换为平台名称",
+  MCP_TOOL_NAME_COLLISION: "多个工具转换后名称冲突",
+});
+
+/** 管理探测沿用部署的目标地址策略；DNS 耗时计入整次探测预算。 */
+export async function probeMcpEndpoint(
+  input: {
+    endpoint: string;
+    serverName: string;
+    timeoutMs: number;
+    maxResponseBytes: number;
+    credential?: string;
+  },
+  allowPrivate = false,
+): Promise<readonly McpProbeToolReport[]> {
+  const deadlineAt = Date.now() + input.timeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const target = await Promise.race([
+      validateExternalHttpsTarget(input.endpoint, { allowPrivate }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(notSent("EXTERNAL_TOOL_UNAVAILABLE")), input.timeoutMs);
+      }),
+    ]);
+    return probeMcpServerReport({ ...input, target, deadlineAt });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 返回逐工具受控报告；Schema、工具描述和服务端原始异常不会作为拒绝原因透出。 */
+export async function probeMcpServerReport(input: {
+  deadlineAt?: number;
+  client?: McpStreamableHttpClient;
+  target: ValidatedExternalTarget;
+  serverName: string;
+  timeoutMs: number;
+  maxResponseBytes: number;
+  credential?: string;
+}): Promise<readonly McpProbeToolReport[]> {
+  const client = input.client ?? new McpStreamableHttpClient();
+  const options = {
+    deadlineAt: Math.min(input.deadlineAt ?? Infinity, Date.now() + input.timeoutMs),
+    timeoutMs: input.timeoutMs,
+    maxResponseBytes: input.maxResponseBytes,
+    budget: { used: 0, maximum: input.maxResponseBytes },
+    ...(input.credential === undefined ? {} : { credential: input.credential }),
+  };
+  await client.initialize(input.target, options);
+  const tools = await client.listTools(input.target, options);
+  const modelNames = new Set<string>();
+  const marker = input.credential && JSON.stringify(input.credential).slice(1, -1);
+  return tools.map((tool) => {
+    // 在规范化丢弃未知字段、或错误路径回显名称之前检查原始声明。
+    if (marker && JSON.stringify(tool).includes(marker))
+      return {
+        accepted: false,
+        reason: "MCP_UNSAFE_METADATA",
+        reasonMessage: "远端工具元数据不允许展示或发布",
+      };
+    try {
+      if (
+        !validRemoteName(tool.name) ||
+        (tool.description !== undefined && typeof tool.description !== "string")
+      )
+        throw new Error("MCP_TOOL_INVALID");
+      let normalized: ReturnType<typeof normalizeExternalToolSchema>;
+      try {
+        normalized = normalizeExternalToolSchema(tool.inputSchema);
+      } catch (error) {
+        const reason =
+          error instanceof TypeError && /^EXTERNAL_TOOL_[A-Z_]+$/u.test(error.message)
+            ? `MCP_SCHEMA_REJECTED:${error.message}`
+            : "MCP_SCHEMA_REJECTED:EXTERNAL_TOOL_SCHEMA_INVALID";
+        throw new Error(reason);
+      }
+      const description = (tool.description as string | undefined) ?? "";
+      if (Buffer.byteLength(description) > 2048) throw new Error("MCP_TOOL_DESCRIPTION_INVALID");
+      const modelToolName = normalizeExternalToolName("mcp", input.serverName, tool.name);
+      if (modelNames.has(modelToolName)) throw new Error("MCP_TOOL_NAME_COLLISION");
+      modelNames.add(modelToolName);
+      return Object.freeze({
+        remoteToolName: tool.name,
+        modelToolName,
+        description,
+        inputSchema: normalized.schema,
+        inputSchemaDigest: normalized.digest,
+        accepted: true,
+      });
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : "";
+      const reason =
+        raw === "EXTERNAL_TOOL_NAME_INVALID"
+          ? "MCP_TOOL_NAME_INVALID"
+          : Object.hasOwn(probeReasons, raw) ||
+              /^MCP_SCHEMA_REJECTED:EXTERNAL_TOOL_[A-Z_]+$/u.test(raw)
+            ? raw
+            : "MCP_TOOL_INVALID";
+      const remoteToolName = validRemoteName(tool.name) ? tool.name : undefined;
+      return Object.freeze({
+        accepted: false,
+        ...(remoteToolName === undefined ? {} : { remoteToolName }),
+        reason,
+        reasonMessage: raw.startsWith("MCP_SCHEMA_REJECTED:")
+          ? "工具参数 Schema 不符合平台支持的安全子集"
+          : (probeReasons[reason] ?? "工具定义不符合平台要求"),
+      });
+    }
+  });
+}
+
 export async function probeMcpServer(input: {
   client?: McpStreamableHttpClient;
   target: ValidatedExternalTarget;
@@ -442,49 +630,20 @@ export async function probeMcpServer(input: {
     inputSchemaDigest: string;
   }[]
 > {
-  const client = input.client ?? new McpStreamableHttpClient();
-  const options = {
-    timeoutMs: input.timeoutMs,
-    maxResponseBytes: input.maxResponseBytes,
-    ...(input.credential === undefined ? {} : { credential: input.credential }),
-  };
-  await client.initialize(input.target, options);
-  const tools = await client.listTools(input.target, options);
-  if (tools.length > 64) throw new Error("MCP_TOOL_LIMIT");
-  const modelNames = new Set<string>();
-  return tools.map((tool) => {
-    if (
-      typeof tool.name !== "string" ||
-      !tool.name ||
-      (tool.description !== undefined && typeof tool.description !== "string")
-    )
-      throw new Error("MCP_TOOL_INVALID");
-    let normalized: ReturnType<typeof normalizeExternalToolSchema>;
-    try {
-      normalized = normalizeExternalToolSchema(tool.inputSchema);
-    } catch (error) {
-      const reason =
-        error instanceof TypeError && /^EXTERNAL_TOOL_[A-Z_]+$/u.test(error.message)
-          ? error.message
-          : "EXTERNAL_TOOL_SCHEMA_INVALID";
-      throw new Error(`MCP_SCHEMA_REJECTED:${reason}`);
-    }
-    const description = (tool.description as string | undefined) ?? "";
-    if (Buffer.byteLength(description) > 2048) throw new Error("MCP_TOOL_DESCRIPTION_INVALID");
-    let modelToolName: string;
-    try {
-      modelToolName = normalizeExternalToolName("mcp", input.serverName, tool.name);
-    } catch {
-      throw new Error("MCP_TOOL_NAME_INVALID");
-    }
-    if (modelNames.has(modelToolName)) throw new Error("MCP_TOOL_NAME_COLLISION");
-    modelNames.add(modelToolName);
+  const report = await probeMcpServerReport(input);
+  const rejected = report.find((tool) => !tool.accepted);
+  if (rejected) {
+    if (rejected.reason?.startsWith("MCP_SCHEMA_REJECTED:")) throw new Error(rejected.reason);
+    throw new Error(rejected.reason ?? "MCP_TOOL_INVALID");
+  }
+  return report.map((tool) => {
+    if (!tool.accepted) throw new Error(tool.reason);
     return {
-      remoteToolName: tool.name,
-      modelToolName,
-      description,
-      inputSchema: normalized.schema,
-      inputSchemaDigest: normalized.digest,
+      remoteToolName: tool.remoteToolName,
+      modelToolName: tool.modelToolName,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      inputSchemaDigest: tool.inputSchemaDigest,
     };
   });
 }

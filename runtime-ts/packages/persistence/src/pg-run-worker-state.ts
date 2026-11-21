@@ -1,5 +1,9 @@
-import { enqueueWebhookEvent, type WebhookEventType } from "./pg-webhooks.js";
 import { randomUUID } from "node:crypto";
+import {
+  artifactWebhookPayload,
+  enqueueRunStatusWebhook,
+  enqueueWebhookEvent,
+} from "./pg-webhooks.js";
 import {
   isoTimestamp,
   type Run,
@@ -1847,11 +1851,22 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             [input.scope.tenantId, row.attempt_id, attemptStatus, databaseNow],
           );
           if (attemptStatus === "failed") {
-            await client.query(
+            const failed = await client.query<{ readonly version: string }>(
               `UPDATE runs SET status='failed', version=version+1, updated_at=$3
-                WHERE tenant_id=$1 AND id=$2 AND status='running'`,
+                WHERE tenant_id=$1 AND id=$2 AND status='running'
+                RETURNING version`,
               [input.scope.tenantId, input.scope.runId, databaseNow],
             );
+            const failedVersion = failed.rows[0]?.version;
+            // 只有本事务实际完成 running→failed 时才产生事件；外部已终结的 Run 不重复发送。
+            if (failedVersion !== undefined)
+              await enqueueRunStatusWebhook(client, {
+                tenantId: input.scope.tenantId,
+                runId: input.scope.runId,
+                status: "failed",
+                runVersion: failedVersion,
+                occurredAt: databaseNow,
+              });
           }
           await client.query(
             `UPDATE run_claims SET released_at=$3, updated_at=$3
@@ -2427,9 +2442,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     }
 
     if (command.nextRunStatus !== undefined && !externallyCancelled) {
-      const updated = await client.query(
+      const updated = await client.query<{ readonly version: string }>(
         `UPDATE runs SET status=$3,version=version+1,updated_at=$4
-          WHERE tenant_id=$1 AND id=$2 AND status='running'`,
+          WHERE tenant_id=$1 AND id=$2 AND status='running'
+          RETURNING version`,
         [
           command.fence.scope.tenantId,
           command.fence.scope.runId,
@@ -2437,27 +2453,15 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           databaseNow,
         ],
       );
-      if (updated.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
-      const eventType: WebhookEventType =
-        command.nextRunStatus === "waiting"
-          ? "run.waiting"
-          : command.nextRunStatus === "succeeded"
-            ? "run.succeeded"
-            : command.nextRunStatus === "failed"
-              ? "run.failed"
-              : "run.cancelled";
-      const eventId = `evt_${randomUUID()}`;
-      await enqueueWebhookEvent({
-        client,
+      const nextVersion = updated.rows[0]?.version;
+      if (updated.rowCount !== 1 || nextVersion === undefined)
+        throw new RuntimeWriteAbort("conflict");
+      await enqueueRunStatusWebhook(client, {
         tenantId: command.fence.scope.tenantId,
-        eventId,
-        eventType,
-        payload: {
-          id: eventId,
-          type: eventType,
-          createdAt: databaseNow,
-          data: { runId: command.fence.scope.runId, status: command.nextRunStatus },
-        },
+        runId: command.fence.scope.runId,
+        status: command.nextRunStatus,
+        runVersion: nextVersion,
+        occurredAt: databaseNow,
       });
     }
 
@@ -3163,18 +3167,15 @@ async function settleWorkspaceArtifactIntents(
        VALUES($1,$2,'published',$3)`,
       [input.tenantId, intent.artifact_id, input.databaseNow],
     );
-    const eventId = `evt_${randomUUID()}`;
     await enqueueWebhookEvent({
       client,
       tenantId: input.tenantId,
-      eventId,
-      eventType: "artifact.published",
-      payload: {
-        id: eventId,
-        type: "artifact.published",
-        createdAt: input.databaseNow,
-        data: { artifactId: intent.artifact_id, runId: input.runId, name: intent.name },
-      },
+      payload: artifactWebhookPayload({
+        tenantId: input.tenantId,
+        artifactId: intent.artifact_id,
+        runId: input.runId,
+        occurredAt: input.databaseNow,
+      }),
     });
     if (
       shouldIndexArtifactInHistory({

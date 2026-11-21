@@ -9,6 +9,7 @@ import type {
   ThreadForkPort,
 } from "./ports.js";
 import { withTenantTransaction } from "./postgres.js";
+import { enqueueRunStatusWebhook } from "./pg-webhooks.js";
 import { cancelThreadQueuedRun, lockThreadExecutionHead } from "./pg-thread-run-queue.js";
 
 interface TeamDirectoryRow extends QueryResultRow {
@@ -384,13 +385,27 @@ async function cancelTeamPendingWork(client: PoolClient, tenantId: string): Prom
         [tenantId, thread.id],
       );
       if (runs.rows.length === 0) break;
-      await client.query(
+      const cancelled = await client.query<{
+        readonly id: string;
+        readonly version: string;
+        readonly updated_at: Date | string;
+      }>(
         `UPDATE runs
             SET status='cancelled',version=version+1,updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND thread_id=$2
-            AND status IN ('queued','running','waiting')`,
+            AND status IN ('queued','running','waiting')
+          RETURNING id,version,updated_at`,
         [tenantId, thread.id],
       );
+      // 解散的批量取消同样是 Run 终态转换，必须与转换同事务入队。
+      for (const run of cancelled.rows)
+        await enqueueRunStatusWebhook(client, {
+          tenantId,
+          runId: run.id,
+          status: "cancelled",
+          runVersion: run.version,
+          occurredAt: new Date(run.updated_at).toISOString(),
+        });
 
       const orderedRuns =
         head?.active_run_id === null || head?.active_run_id === undefined

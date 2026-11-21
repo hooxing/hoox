@@ -77,13 +77,17 @@ import {
 import {
   createPostgresPool,
   type Pool,
+  type PoolClient,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
 import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
 import {
+  enqueueRunStatusWebhook,
   enqueueWebhookEvent,
+  PgWebhookOutboxStore,
   PgWebhookRepository,
+  runWebhookPayload,
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import {
   loadPostgreSqlMigrationContract,
@@ -426,152 +430,428 @@ afterAll(async () => {
   if (administrativePool !== undefined) await administrativePool.end();
 });
 
-describe("PostgreSQL 迁移与强权限边界", () => {
-  it("Webhook Dispatcher 只能读取投递 Outbox，不能读取订阅或业务表", async () => {
-    const target = await createIsolatedMigrationTarget("webhook_dispatcher");
-    const dispatcher = createPostgresPool({
+function webhookSecret(tag: string) {
+  return { version: 1 as const, nonce: `n_${tag}`, ciphertext: `c_${tag}`, authTag: `t_${tag}` };
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenant: string,
+  user: string,
+  operation: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  return withTenantTransaction(pool, { tenantId: tenant, userId: user }, operation);
+}
+
+async function webhookIsolatedPools(target: IsolatedMigrationTarget) {
+  const teamUrl = new URL(target.webhookDispatcherConnectionString);
+  teamUrl.username = target.context.teamCoordinatorRole;
+  const pools = {
+    dispatcher: createPostgresPool({
       connectionString: target.webhookDispatcherConnectionString,
+      schema: target.context.schema,
+      maxConnections: 2,
+    }),
+    runtime: createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema: target.context.schema,
+      maxConnections: 2,
+    }),
+    team: createPostgresPool({
+      connectionString: teamUrl.toString(),
+      schema: target.context.schema,
+      maxConnections: 1,
+    }),
+  };
+  return {
+    ...pools,
+    close: async () => {
+      await Promise.all([pools.dispatcher.end(), pools.runtime.end(), pools.team.end()]);
+    },
+  };
+}
+
+async function seedWebhookTenant(target: IsolatedMigrationTarget, label: string) {
+  const tenant = tenantId(`tenant_webhook_${label}_${process.pid}`);
+  const user = userId(`user_webhook_${label}_${process.pid}`);
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
+    [user],
+  );
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,clock_timestamp())`,
+    [tenant, user],
+  );
+  return { tenant, user };
+}
+
+describe("PostgreSQL 迁移与强权限边界", () => {
+  it("Webhook 角色边界：Dispatcher 只读投递列，Runtime 与 Team Coordinator 不能改写密文或 Outbox", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_acl");
+    const webhook = await webhookIsolatedPools(target);
+    try {
+      await migrateUp(target.pool, target.context);
+      const { tenant, user } = await seedWebhookTenant(target, "acl");
+      const repository = new PgWebhookRepository(webhook.runtime);
+      const created = await repository.create({
+        scope: { tenantId: tenant, userId: user },
+        name: "acl",
+        endpointUrl: "https://hooks.example.invalid/acl",
+        eventTypes: ["run.cancelled"],
+        secret: webhookSecret("c1"),
+      });
+
+      const managementBindings = await administrativePool.query<{ roles: string[] }>(
+        `SELECT ARRAY(SELECT pg_get_userbyid(r)::text FROM unnest(polroles) r) AS roles FROM pg_policy
+          WHERE polrelid IN (format('%I.tenant_webhooks',$1::text)::regclass,format('%I.webhook_outbox',$1::text)::regclass)
+            AND polname IN ('tenant_webhooks_tenant_policy','webhook_outbox_tenant_policy')`,
+        [target.context.schema],
+      );
+      expect(managementBindings.rows).toEqual([{ roles: [runtimeRole] }, { roles: [runtimeRole] }]);
+      // Dispatcher：只读投递所需列，不能读取订阅名称、业务表或写入 Outbox。
+      await expect(
+        webhook.dispatcher.query("SELECT id,endpoint_url,secret_ciphertext FROM tenant_webhooks"),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      for (const sql of [
+        "SELECT name FROM tenant_webhooks",
+        "SELECT created_by_user_id FROM tenant_webhooks",
+        "SELECT last_error_code FROM webhook_outbox",
+        "SELECT event_type FROM webhook_outbox",
+        "SELECT id FROM runs LIMIT 1",
+        "SELECT id FROM tenants LIMIT 1",
+        `INSERT INTO webhook_outbox(tenant_id,id,webhook_id,event_id,event_type,payload) VALUES('${tenant}','x','${created.id}','e','run.cancelled','{}')`,
+        "UPDATE tenant_webhooks SET secret_ciphertext='{}'::jsonb",
+        "DELETE FROM webhook_outbox",
+      ])
+        await expect(webhook.dispatcher.query(sql), sql).rejects.toMatchObject({ code: "42501" });
+
+      // Runtime：不能改写目的地址，也不能读取或结算 Outbox。
+      await expect(
+        asTenant(webhook.runtime, tenant, user, (client) =>
+          client.query("UPDATE tenant_webhooks SET endpoint_url='https://evil.example.invalid/'"),
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+      for (const sql of [
+        "SELECT id FROM webhook_outbox",
+        "UPDATE webhook_outbox SET state='delivered'",
+      ])
+        await expect(
+          asTenant(webhook.runtime, tenant, user, (client) => client.query(sql)),
+          sql,
+        ).rejects.toMatchObject({ code: "42501" });
+
+      // Team Coordinator：只能为解散批量取消入队，不能读取或改写订阅密文与 Outbox。
+      for (const sql of [
+        "UPDATE tenant_webhooks SET secret_ciphertext='{}'::jsonb",
+        "UPDATE tenant_webhooks SET disabled_at=clock_timestamp(),disabled_reason='x'",
+        "SELECT secret_ciphertext FROM tenant_webhooks",
+        "SELECT endpoint_url FROM tenant_webhooks",
+        "UPDATE webhook_outbox SET state='disabled'",
+        "SELECT id FROM webhook_outbox",
+      ])
+        await expect(
+          asTenant(webhook.team, tenant, user, (client) => client.query(sql)),
+          sql,
+        ).rejects.toMatchObject({ code: "42501" });
+      await asTenant(webhook.team, tenant, user, (client) =>
+        enqueueRunStatusWebhook(client, {
+          tenantId: tenant,
+          runId: "run_team_dissolved",
+          status: "cancelled",
+          runVersion: 3,
+          occurredAt: "2026-11-20T00:00:00.000Z",
+        }),
+      );
+      const queued = await administrativePool.query<{ secret: unknown; event_type: string }>(
+        `SELECT webhook.secret_ciphertext AS secret,outbox.event_type
+           FROM "${target.context.schema}".webhook_outbox outbox
+           JOIN "${target.context.schema}".tenant_webhooks webhook
+             ON webhook.tenant_id=outbox.tenant_id AND webhook.id=outbox.webhook_id
+          WHERE outbox.tenant_id=$1`,
+        [tenant],
+      );
+      expect(queued.rows).toEqual([{ secret: webhookSecret("c1"), event_type: "run.cancelled" }]);
+
+      // Dispatcher 只能停用订阅，不能恢复启用。
+      await repository.disable({ tenantId: tenant, userId: user }, created.id);
+      const reenabled = await webhook.dispatcher.query(
+        "UPDATE tenant_webhooks SET disabled_at=NULL,disabled_reason=NULL WHERE id=$1",
+        [created.id],
+      );
+      expect(reenabled.rowCount).toBe(0);
+    } finally {
+      await webhook.close();
+      await target.close();
+    }
+  });
+
+  it("Webhook Dispatcher 角色更换后撤销旧角色的 Schema、表与列权限", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_rebind");
+    const replacementRole = `${target.context.webhookDispatcherRole}_next`;
+    const password = randomBytes(24).toString("hex");
+    await administrativePool.query(
+      `CREATE ROLE "${replacementRole}" LOGIN PASSWORD '${password}'
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       GRANT CONNECT ON DATABASE "${databaseName}" TO "${replacementRole}"`,
+    );
+    const replacementUrl = new URL(migrationDatabaseUrl);
+    replacementUrl.username = replacementRole;
+    replacementUrl.password = password;
+    const oldDispatcher = createPostgresPool({
+      connectionString: target.webhookDispatcherConnectionString,
+      schema: target.context.schema,
+      maxConnections: 1,
+    });
+    const newDispatcher = createPostgresPool({
+      connectionString: replacementUrl.toString(),
       schema: target.context.schema,
       maxConnections: 1,
     });
     try {
       await migrateUp(target.pool, target.context);
-      await expect(
-        dispatcher.query("SELECT id FROM webhook_outbox LIMIT 1"),
-      ).resolves.toBeDefined();
-      await expect(
-        dispatcher.query("SELECT id FROM tenant_webhooks LIMIT 1"),
-      ).rejects.toMatchObject({ code: "42501" });
-      await expect(dispatcher.query("SELECT id FROM runs LIMIT 1")).rejects.toMatchObject({
-        code: "42501",
+      await expect(oldDispatcher.query("SELECT id FROM webhook_outbox")).resolves.toBeDefined();
+      await bootstrapRuntimeAccess(target.pool, {
+        ...target.context,
+        webhookDispatcherRole: replacementRole,
       });
-      const tenant = `tenant_webhook_${process.pid}`;
-      const user = `user_webhook_${process.pid}`;
-      const webhook = `wh_${process.pid}`;
-      await administrativePool.query(
-        `INSERT INTO "${target.context.schema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
-        [user],
+      // 失去 Schema USAGE 后对象解析即失败（42P01），否则为权限拒绝（42501）。
+      for (const sql of [
+        "SELECT id FROM webhook_outbox",
+        "SELECT endpoint_url FROM tenant_webhooks",
+        "UPDATE webhook_outbox SET state='pending'",
+      ])
+        await expect(oldDispatcher.query(sql), sql).rejects.toSatisfy(
+          (error: { code?: string }) => error.code === "42501" || error.code === "42P01",
+        );
+      const residual = await administrativePool.query<{
+        readonly usage: boolean;
+        readonly outbox: boolean;
+        readonly subscriptions: boolean;
+      }>(
+        `SELECT has_schema_privilege($1,$2,'USAGE') AS usage,
+                has_any_column_privilege($1,format('%I.webhook_outbox',$2::text),'SELECT') AS outbox,
+                has_any_column_privilege($1,format('%I.tenant_webhooks',$2::text),'SELECT') AS subscriptions`,
+        [target.context.webhookDispatcherRole, target.context.schema],
       );
-      await administrativePool.query(
-        `INSERT INTO "${target.context.schema}".tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,clock_timestamp())`,
-        [tenant, user],
+      expect(residual.rows[0]).toEqual({ usage: false, outbox: false, subscriptions: false });
+      const policies = await administrativePool.query<{ readonly roles: string[] }>(
+        `SELECT ARRAY(SELECT member::regrole::text FROM unnest(polroles) member) AS roles
+           FROM pg_policy WHERE polname='webhook_outbox_dispatcher_policy'
+            AND polrelid=format('%I.webhook_outbox',$1::text)::regclass`,
+        [target.context.schema],
       );
-      const runtimeForWebhook = createPostgresPool({
-        connectionString: runtimeDatabaseUrl,
-        schema: target.context.schema,
-      });
-      try {
-        const client = await runtimeForWebhook.connect();
-        try {
-          await client.query("BEGIN");
-          await client.query(
-            "SELECT set_config('app.tenant_id',$1,true),set_config('app.user_id',$2,true)",
-            [tenant, user],
-          );
-          await client.query(
-            `INSERT INTO tenant_webhooks(tenant_id,id,name,endpoint_url,event_types,secret_ciphertext,created_by_user_id,created_at) VALUES($1,$2,'integration','https://hooks.example.invalid/a',ARRAY['run.succeeded'],$3::jsonb,$4,clock_timestamp())`,
-            [
-              tenant,
-              webhook,
-              JSON.stringify({ version: 1, nonce: "n", ciphertext: "c", authTag: "t" }),
-              user,
-            ],
-          );
-          await enqueueWebhookEvent({
-            client,
-            tenantId: tenant,
-            eventId: "evt_webhook_txn",
-            eventType: "run.succeeded",
-            payload: { id: "evt_webhook_txn", type: "run.succeeded", data: { runId: "run_hook" } },
-          });
-          await client.query("ROLLBACK");
-        } finally {
-          client.release();
-        }
-        const rolledBack = await administrativePool.query(
-          `SELECT count(*)::int AS count FROM "${target.context.schema}".webhook_outbox WHERE tenant_id=$1`,
-          [tenant],
-        );
-        expect(rolledBack.rows[0]?.count).toBe(0);
-        const committed = await runtimeForWebhook.connect();
-        try {
-          await committed.query("BEGIN");
-          await committed.query(
-            "SELECT set_config('app.tenant_id',$1,true),set_config('app.user_id',$2,true)",
-            [tenant, user],
-          );
-          await committed.query(
-            `INSERT INTO tenant_webhooks(tenant_id,id,name,endpoint_url,event_types,secret_ciphertext,created_by_user_id,created_at) VALUES($1,$2,'integration','https://hooks.example.invalid/a',ARRAY['run.succeeded'],$3::jsonb,$4,clock_timestamp())`,
-            [
-              tenant,
-              webhook,
-              JSON.stringify({ version: 1, nonce: "n", ciphertext: "c", authTag: "t" }),
-              user,
-            ],
-          );
-          await enqueueWebhookEvent({
-            client: committed,
-            tenantId: tenant,
-            eventId: "evt_webhook_txn",
-            eventType: "run.succeeded",
-            payload: { id: "evt_webhook_txn", type: "run.succeeded", data: { runId: "run_hook" } },
-          });
-          await committed.query("COMMIT");
-        } finally {
-          committed.release();
-        }
-        const visible = await dispatcher.query(
-          `SELECT event_id,event_type,payload->>'id' AS payload_id FROM webhook_outbox WHERE tenant_id=$1`,
-          [tenant],
-        );
-        expect(visible.rows).toEqual([
-          {
-            event_id: "evt_webhook_txn",
-            event_type: "run.succeeded",
-            payload_id: "evt_webhook_txn",
-          },
-        ]);
-        const repository = new PgWebhookRepository(runtimeForWebhook);
-        const scope = { tenantId: tenant, userId: user };
-        await expect(
-          repository.rotate(scope, webhook, {
-            version: 1,
-            nonce: "n2",
-            ciphertext: "c2",
-            authTag: "t2",
-          }),
-        ).resolves.toBe(true);
-        const rotated = await administrativePool.query(
-          `SELECT secret_ciphertext FROM "${target.context.schema}".webhook_outbox WHERE tenant_id=$1 AND webhook_id=$2`,
-          [tenant, webhook],
-        );
-        expect(rotated.rows[0]?.secret_ciphertext).toEqual({
-          version: 1,
-          nonce: "n2",
-          ciphertext: "c2",
-          authTag: "t2",
-        });
-        await administrativePool.query(
-          `UPDATE "${target.context.schema}".webhook_outbox SET state='disabled',attempts=12,last_error_code='delivery_failed' WHERE tenant_id=$1 AND webhook_id=$2`,
-          [tenant, webhook],
-        );
-        expect((await repository.list(scope))[0]?.disabledReason).toBe("delivery_failed");
-        await expect(
-          repository.rotate(scope, webhook, {
-            version: 1,
-            nonce: "n3",
-            ciphertext: "c3",
-            authTag: "t3",
-          }),
-        ).resolves.toBe(true);
-        expect((await repository.list(scope))[0]?.disabledReason).toBe("delivery_failed");
-      } finally {
-        await runtimeForWebhook.end();
-      }
+      expect(policies.rows[0]?.roles).toEqual([replacementRole]);
+      await expect(newDispatcher.query("SELECT id FROM webhook_outbox")).resolves.toBeDefined();
     } finally {
-      await dispatcher.end();
+      await oldDispatcher.end();
+      await newDispatcher.end();
+      await target.close();
+      await administrativePool.query(
+        `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${replacementRole}";
+         DROP ROLE "${replacementRole}"`,
+      );
+    }
+  });
+
+  it("Webhook 停用、轮换与次数上限在领取时对整个订阅生效", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_claim");
+    const webhook = await webhookIsolatedPools(target);
+    try {
+      await migrateUp(target.pool, target.context);
+      const { tenant, user } = await seedWebhookTenant(target, "claim");
+      const scope = { tenantId: tenant, userId: user };
+      const repository = new PgWebhookRepository(webhook.runtime);
+      const primary = await repository.create({
+        scope,
+        name: "primary",
+        endpointUrl: "https://hooks.example.invalid/primary",
+        eventTypes: ["run.succeeded", "run.failed"],
+        secret: webhookSecret("c1"),
+      });
+      const event = (runId: string) =>
+        runWebhookPayload({
+          tenantId: tenant,
+          runId,
+          status: "succeeded",
+          runVersion: 1,
+          occurredAt: "2026-11-20T00:00:00.000Z",
+        });
+      const enqueue = (runId: string, commit = true) =>
+        asTenant(webhook.runtime, tenant, user, async (client) => {
+          const payload = event(runId);
+          if (payload === undefined) throw new Error("事件缺失");
+          await enqueueWebhookEvent({ client, tenantId: tenant, payload });
+          if (!commit) throw new Error("ROLLBACK_FOR_TEST");
+        });
+      const outbox = async () =>
+        (
+          await administrativePool.query<{
+            readonly id: string;
+            readonly webhook_id: string;
+            readonly state: string;
+            readonly attempts: number;
+            readonly last_error_code: string | null;
+          }>(
+            `SELECT id,webhook_id,state,attempts,last_error_code
+               FROM "${target.context.schema}".webhook_outbox ORDER BY created_at,id`,
+          )
+        ).rows;
+
+      // 回滚不入队，重放同一事件不重复入队。
+      await expect(enqueue("run_rollback", false)).rejects.toThrow("ROLLBACK_FOR_TEST");
+      expect(await outbox()).toEqual([]);
+      await enqueue("run_one");
+      await enqueue("run_one");
+      expect(await outbox()).toHaveLength(1);
+
+      // 每次发送前读取当前密钥：轮换后已领取但未发出的投递也使用新密钥。
+      const store = new PgWebhookOutboxStore(webhook.dispatcher, {
+        maxAttempts: 2,
+        leaseMs: 30_000,
+      });
+      const first = await store.claim({ owner: "it" });
+      expect(first?.endpointUrl).toBe("https://hooks.example.invalid/primary");
+      if (first === undefined) throw new Error("未领取");
+      await expect(store.permitSend(first, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("c1"),
+      });
+      // 第二条事件先写入，但在另一连接的轮换提交后才提交，不能固化旧密钥。
+      await asTenant(webhook.runtime, tenant, user, async (client) => {
+        const payload = event("run_two");
+        if (!payload) throw new Error("事件缺失");
+        await enqueueWebhookEvent({ client, tenantId: tenant, payload });
+        expect(await repository.rotate(scope, primary.id, webhookSecret("c2"))).toBe(true);
+      });
+      expect(await outbox()).toHaveLength(2);
+      await expect(store.permitSend(first, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("c2"),
+      });
+      // 剩余租约不足以覆盖发送时限时拒绝发送。
+      await expect(store.permitSend(first, 60_000)).resolves.toEqual({ outcome: "skip" });
+      // 同一 Tenant 已在途时，排除该 Tenant 后不再领取。
+      await expect(
+        store.claim({ owner: "it", excludedTenantIds: [tenant] }),
+      ).resolves.toBeUndefined();
+      await store.settle(first, { kind: "retry", errorCode: "timeout", delayMs: 0 });
+
+      // 次数上限在领取时强制：最后一次尝试未结算且租约过期后直接进入终态并停用整个订阅。
+      const second = await store.claim({ owner: "it" });
+      const third = await store.claim({ owner: "it" });
+      if (second === undefined || third === undefined) throw new Error("未领取");
+      expect([second.attempts, third.attempts].sort()).toEqual([1, 2]);
+      const last = second.attempts === 2 ? second : third;
+      const other = second.attempts === 2 ? third : second;
+      await expect(store.permitSend(last, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("c2"),
+      });
+      await expect(store.permitSend(other, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("c2"),
+      });
+      await store.settle(other, { kind: "retry", errorCode: "timeout", delayMs: 0 });
+      await administrativePool.query(
+        `UPDATE "${target.context.schema}".webhook_outbox SET claim_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND id=$2`,
+        [tenant, last.id],
+      );
+      await expect(store.claim({ owner: "it" })).resolves.toBeUndefined();
+      const exhausted = (await outbox()).find((row) => row.id === last.id);
+      expect(exhausted).toMatchObject({
+        state: "disabled",
+        attempts: 2,
+        last_error_code: "attempts_exhausted",
+      });
+      // 迟到的结算不能把已终结的记录拉回。
+      await store.settle(last, { kind: "delivered" });
+      expect((await outbox()).find((row) => row.id === last.id)?.state).toBe("disabled");
+      expect((await repository.list(scope))[0]).toMatchObject({
+        id: primary.id,
+        disabledReason: "delivery_attempts_exhausted",
+      });
+      // 自动停用作用于整个订阅：同订阅其余积压不再领取，新事件不再入队。
+      expect((await outbox()).find((row) => row.id === other.id)?.state).toBe("pending");
+      await enqueue("run_after_disable");
+      expect(await outbox()).toHaveLength(2);
+
+      // 手动停用：已领取未发出的投递在复核时结算为 webhook_disabled，积压不再领取。
+      const manual = await repository.create({
+        scope,
+        name: "manual",
+        endpointUrl: "https://hooks.example.invalid/manual",
+        eventTypes: ["run.succeeded"],
+        secret: webhookSecret("m1"),
+      });
+      await enqueue("run_manual_a");
+      await enqueue("run_manual_b");
+      const manualStore = new PgWebhookOutboxStore(webhook.dispatcher);
+      const claimed = await manualStore.claim({ owner: "it" });
+      if (claimed === undefined) throw new Error("未领取");
+      expect(claimed.webhookId).toBe(manual.id);
+      await repository.disable(scope, manual.id);
+      await expect(manualStore.permitSend(claimed, 0)).resolves.toEqual({ outcome: "skip" });
+      expect((await outbox()).find((row) => row.id === claimed.id)).toMatchObject({
+        state: "disabled",
+        last_error_code: "webhook_disabled",
+      });
+      await expect(manualStore.claim({ owner: "it" })).resolves.toBeUndefined();
+    } finally {
+      await webhook.close();
       await target.close();
     }
+  });
+
+  it("Webhook 事件随 API 取消在同一事务入队，版本冲突与重放不重复入队", async () => {
+    const fixture = await createFixture(`webhook_cancel_${process.pid}`);
+    const repository = new PgWebhookRepository(runtimePool);
+    await repository.create({
+      scope: fixture.scope,
+      name: "cancel",
+      endpointUrl: "https://hooks.example.invalid/cancel",
+      eventTypes: ["run.cancelled", "run.succeeded"],
+      secret: webhookSecret("c1"),
+    });
+    const current = await repositories.runs.get(fixture.scope, fixture.run.id);
+    if (current === undefined) throw new Error("Run 缺失");
+    const cancelled = transitionRun(current.entity, "cancelled", timestamp(30));
+    // 在隔离 Schema 注入入队失败，直接证明取消与事件之间没有独立提交窗口。
+    await administrativePool.query(
+      `ALTER TABLE "${schema}".webhook_outbox ADD CONSTRAINT it_reject_cancel CHECK (event_type <> 'run.cancelled') NOT VALID`,
+    );
+    try {
+      await expect(
+        repositories.runs.update(fixture.scope, cancelled, current.version),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      expect(await repositories.runs.get(fixture.scope, fixture.run.id)).toEqual(current);
+    } finally {
+      await administrativePool.query(
+        `ALTER TABLE "${schema}".webhook_outbox DROP CONSTRAINT it_reject_cancel`,
+      );
+    }
+    await expect(
+      repositories.runs.update(fixture.scope, cancelled, current.version),
+    ).resolves.toMatchObject({ outcome: "updated" });
+    await expect(
+      repositories.runs.update(fixture.scope, cancelled, current.version),
+    ).resolves.toEqual({ outcome: "conflict" });
+    const rows = await administrativePool.query<{
+      readonly event_type: string;
+      readonly event_id: string;
+      readonly payload: { readonly id: string; readonly data: Record<string, unknown> };
+    }>(`SELECT event_type,event_id,payload FROM "${schema}".webhook_outbox WHERE tenant_id=$1`, [
+      fixture.scope.tenantId,
+    ]);
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0]?.event_type).toBe("run.cancelled");
+    expect(Object.keys(rows.rows[0]?.payload ?? {}).sort()).toEqual([
+      "createdAt",
+      "data",
+      "id",
+      "type",
+    ]);
+    expect(rows.rows[0]?.payload.data).toEqual({ runId: fixture.run.id, status: "cancelled" });
+    expect(rows.rows[0]?.payload.id).toBe(rows.rows[0]?.event_id);
   });
 
   it("为迁移前已有 Thread 回填不可变默认 Agent 绑定", async () => {

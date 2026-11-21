@@ -20,6 +20,7 @@ class ScriptedTeamCollaborationClient {
   readonly statements: Statement[] = [];
   releasedWith: unknown;
   private readonly runReadCounts = new Map<string, number>();
+  private lastRunBatch: readonly string[] = [];
 
   constructor(
     private readonly actor: "owner" | "member" = "owner",
@@ -64,7 +65,16 @@ class ScriptedTeamCollaborationClient {
       const threadId = String(values?.[1]);
       const readCount = this.runReadCounts.get(threadId) ?? 0;
       this.runReadCounts.set(threadId, readCount + 1);
-      const rows = (this.runBatchesByThread[threadId]?.[readCount] ?? []).map((id) => ({ id }));
+      this.lastRunBatch = this.runBatchesByThread[threadId]?.[readCount] ?? [];
+      const rows = this.lastRunBatch.map((id) => ({ id }));
+      return { rows, rowCount: rows.length };
+    }
+    if (sql.includes("UPDATE runs")) {
+      const rows = this.lastRunBatch.map((id) => ({
+        id,
+        version: "2",
+        updated_at: new Date("2026-08-12T00:00:00.000Z"),
+      }));
       return { rows, rowCount: rows.length };
     }
     return { rows: [], rowCount: 1 };
@@ -170,6 +180,25 @@ describe("PostgreSQL 团队解散队列收敛", () => {
       "run-queued",
       "run-waiting",
     ]);
+    // 批量取消同样是 Run 终态转换：每个被取消的 Run 都在同一事务、撤销成员前入队 Webhook。
+    const webhookIndexes = client.statements.flatMap((statement, index) =>
+      statement.sql.includes("INSERT INTO webhook_outbox") ? [index] : [],
+    );
+    expect(webhookIndexes).toHaveLength(3);
+    expect(
+      webhookIndexes.map((index) => {
+        const payload = JSON.parse(String(client.statements[index]?.values?.[3])) as {
+          readonly type: string;
+          readonly data: { readonly runId: string };
+        };
+        return [payload.type, payload.data.runId];
+      }),
+    ).toEqual([
+      ["run.cancelled", "run-queued"],
+      ["run.cancelled", "run-active"],
+      ["run.cancelled", "run-waiting"],
+    ]);
+    expect(webhookIndexes.every((index) => index > runIndex && index < membershipIndex)).toBe(true);
     expect(client.statements.at(-1)?.sql).toBe("COMMIT");
     expect(client.releasedWith).toBeUndefined();
   });

@@ -1,4 +1,4 @@
-import { tenantId } from "@hoox/domain";
+import { resourceId, resourceVersionId, tenantId } from "@hoox/domain";
 import type { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
@@ -197,8 +197,8 @@ describe("PostgreSQL ResourceFS 稳定 Thread 入口", () => {
 
     const file = await catalog.resolveLibraryFile({
       tenantId: tenantId("tenant-a"),
-      resourceId: "resource-contract",
-      versionId: "version-contract",
+      resourceId: resourceId("resource-contract"),
+      versionId: resourceVersionId("version-contract"),
     });
 
     expect(file).toMatchObject({
@@ -217,14 +217,44 @@ describe("PostgreSQL ResourceFS 稳定 Thread 入口", () => {
     expect(query?.sql).toContain("reference.purpose=version.blob_purpose");
   });
 
+  it("历史文件目录、普通资源目录和直接下载都按持久化来源排除 Playground 产物", async () => {
+    const client = new ScriptedHistoryLibraryClient();
+    const catalog = new PgResourceFilesystemCatalog(poolFor(client));
+    await catalog.listThreadIds({ tenantId: tenantId("tenant-a") });
+    await catalog.listRecentDirectories({ tenantId: tenantId("tenant-a") });
+    await catalog.listTaskPage({ tenantId: tenantId("tenant-a"), query: "", limit: 10 });
+    await catalog.resolveLibraryFile({
+      tenantId: tenantId("tenant-a"),
+      resourceId: resourceId("resource-contract"),
+      versionId: resourceVersionId("version-contract"),
+    });
+    await catalog.list({ tenantId: tenantId("tenant-a") });
+    await catalog.resolve({
+      tenantId: tenantId("tenant-a"),
+      resourceId: resourceId("resource-contract"),
+      versionId: resourceVersionId("version-contract"),
+    });
+
+    const sourceQueries = client.statements.filter(
+      (statement) =>
+        statement.sql.includes("thread_history_directories") ||
+        statement.sql.includes("SELECT thread.id AS thread_id") ||
+        statement.sql.includes("artifact_publications publication"),
+    );
+    expect(sourceQueries.length).toBeGreaterThanOrEqual(6);
+    expect(sourceQueries.every((statement) => statement.sql.includes("origin='playground'"))).toBe(
+      true,
+    );
+  });
+
   it("Agent deliverable 直接复用 workspace Stable Blob", async () => {
     const client = new ScriptedHistoryLibraryClient("workspace");
     const catalog = new PgResourceFilesystemCatalog(poolFor(client));
 
     const file = await catalog.resolveLibraryFile({
       tenantId: tenantId("tenant-a"),
-      resourceId: "resource-contract",
-      versionId: "version-contract",
+      resourceId: resourceId("resource-contract"),
+      versionId: resourceVersionId("version-contract"),
     });
 
     expect(file?.object).toMatchObject({

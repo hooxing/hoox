@@ -2,6 +2,11 @@ import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { RunExplorerService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import {
+  artifactWebhookPayload,
+  enqueueRunStatusWebhook,
+  enqueueWebhookEvent,
+} from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
 import {
   createPostgresPool,
@@ -248,6 +253,50 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
           [origin, `test-mock-${origin}`],
         ),
       ).rejects.toMatchObject({ code: "23514" });
+    }
+  });
+
+  it("持久化 Playground 来源同时阻止状态与 Artifact 业务 Webhook 入队", async () => {
+    await administrator.query(
+      `INSERT INTO "${schema}".tenant_webhooks(
+         tenant_id,id,name,endpoint_url,event_types,secret_ciphertext,created_by_user_id,created_at
+       ) VALUES('tenant_a','webhook_pg','测试订阅','https://hooks.invalid/receive',
+         ARRAY['run.succeeded','artifact.published'],'{}'::jsonb,'user_owner_a',now())`,
+    );
+    await administrator.query(
+      `UPDATE "${schema}".runs SET origin='playground' WHERE tenant_id='tenant_a' AND id='run_a1'`,
+    );
+    const client = await runtime.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.tenant_id','tenant_a',true)");
+      await enqueueRunStatusWebhook(client, {
+        tenantId: "tenant_a",
+        runId: "run_a1",
+        status: "succeeded",
+        runVersion: 2,
+        occurredAt: "2026-11-21T00:00:00.000Z",
+      });
+      await enqueueWebhookEvent({
+        client,
+        tenantId: "tenant_a",
+        payload: artifactWebhookPayload({
+          tenantId: "tenant_a",
+          artifactId: "artifact_playground",
+          runId: "run_a1",
+          occurredAt: "2026-11-21T00:00:00.000Z",
+        }),
+      });
+      const pending = await client.query<{ readonly count: string }>(
+        `SELECT count(*)::text AS count FROM webhook_outbox WHERE tenant_id='tenant_a'`,
+      );
+      expect(pending.rows[0]?.count).toBe("0");
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
+      await administrator.query(
+        `UPDATE "${schema}".runs SET origin='normal' WHERE tenant_id='tenant_a' AND id='run_a1'`,
+      );
     }
   });
 

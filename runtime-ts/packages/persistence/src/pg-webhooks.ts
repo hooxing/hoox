@@ -219,8 +219,20 @@ export async function enqueueWebhookEvent(input: {
      SELECT $1,'delivery_'||replace(gen_random_uuid()::text,'-',''),webhook.id,$2,$3,$4::jsonb
        FROM tenant_webhooks webhook
       WHERE webhook.tenant_id=$1 AND webhook.disabled_at IS NULL AND webhook.event_types @> ARRAY[$3]::text[]
+        AND EXISTS (
+          SELECT 1 FROM runs source_run
+           WHERE source_run.tenant_id=$1
+             AND source_run.id=$5
+             AND source_run.origin<>'playground'
+        )
      ON CONFLICT(tenant_id,webhook_id,event_id) DO NOTHING`,
-    [input.tenantId, input.payload.id, input.payload.type, JSON.stringify(input.payload)],
+    [
+      input.tenantId,
+      input.payload.id,
+      input.payload.type,
+      JSON.stringify(input.payload),
+      input.payload.data.runId,
+    ],
   );
 }
 

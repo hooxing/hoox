@@ -203,7 +203,9 @@ export class PgWorkerTenantAssignments {
                           )
                         END AS next_attempt_at
                    FROM memory_ingestion_outbox memory
-                  WHERE memory.tenant_id=$1
+                   JOIN runs memory_run
+                     ON memory_run.tenant_id=memory.tenant_id AND memory_run.id=memory.run_id
+                  WHERE memory.tenant_id=$1 AND memory_run.origin<>'playground'
                     AND memory.state IN ('pending','claimed','submitted')
                  UNION ALL
                  SELECT CASE WHEN title.state='pending'

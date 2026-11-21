@@ -65,10 +65,20 @@ export async function enqueueMemoryIngestion(
          ON attempt.tenant_id=tenant.id AND attempt.attempt_id=$4
         AND attempt.run_id=run.id AND attempt.thread_id=thread.id
       WHERE tenant.id=$1 AND tenant.kind IN ('personal','team')
+        AND run.origin<>'playground'
+        AND NOT EXISTS (
+          SELECT 1 FROM memory_ingestion_outbox existing
+           WHERE existing.tenant_id=run.tenant_id AND existing.run_id=run.id
+        )
      ON CONFLICT (tenant_id,run_id) DO NOTHING`,
     [input.tenantId, input.runId, input.threadId, input.attemptId, input.sourceThroughSequence],
   );
   if (inserted.rowCount !== 1) {
+    const source = await client.query<{ readonly origin: string }>(
+      `SELECT origin FROM runs WHERE tenant_id=$1 AND id=$2 AND thread_id=$3`,
+      [input.tenantId, input.runId, input.threadId],
+    );
+    if (source.rows[0]?.origin === "playground") return;
     const replay = await client.query(
       `SELECT 1 FROM memory_ingestion_outbox
         WHERE tenant_id=$1 AND run_id=$2 AND thread_id=$3 AND attempt_id=$4
@@ -98,16 +108,18 @@ export class PgMemoryIngestionStore implements MemoryIngestionStore {
         { tenantId: input.tenantId },
         async (client) => {
           const result = await client.query<ClaimedMemoryRow>(
-            `SELECT run_id,thread_id,attempt_id,subject_user_id,tenant_kind,
-                    source_through_sequence::text,provider_event_id::text,
-                    claim_generation::text,attempt_count
-               FROM memory_ingestion_outbox
-              WHERE tenant_id=$1 AND (
-                (state IN ('pending','submitted') AND next_attempt_at<=clock_timestamp())
-                OR (state='claimed' AND claim_expires_at<=clock_timestamp())
+            `SELECT memory.run_id,memory.thread_id,memory.attempt_id,memory.subject_user_id,memory.tenant_kind,
+                    memory.source_through_sequence::text,memory.provider_event_id::text,
+                    memory.claim_generation::text,memory.attempt_count
+               FROM memory_ingestion_outbox memory
+               JOIN runs source_run
+                 ON source_run.tenant_id=memory.tenant_id AND source_run.id=memory.run_id
+              WHERE memory.tenant_id=$1 AND source_run.origin<>'playground' AND (
+                (memory.state IN ('pending','submitted') AND memory.next_attempt_at<=clock_timestamp())
+                OR (memory.state='claimed' AND memory.claim_expires_at<=clock_timestamp())
               )
-              ORDER BY next_attempt_at,created_at,run_id
-              FOR UPDATE SKIP LOCKED LIMIT 1`,
+              ORDER BY memory.next_attempt_at,memory.created_at,memory.run_id
+              FOR UPDATE OF memory SKIP LOCKED LIMIT 1`,
             [input.tenantId],
           );
           const row = result.rows[0];

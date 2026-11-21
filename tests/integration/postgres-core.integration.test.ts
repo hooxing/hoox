@@ -748,7 +748,31 @@ async function seedWebhookTenant(target: IsolatedMigrationTarget, label: string)
     `INSERT INTO "${target.context.schema}".tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,clock_timestamp())`,
     [tenant, user],
   );
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".memberships(tenant_id,id,user_id,role,status,created_at)
+     VALUES($1,$2,$3,'owner','active',clock_timestamp())`,
+    [tenant, `membership_${label}_${process.pid}`, user],
+  );
   return { tenant, user };
+}
+
+async function seedWebhookRun(
+  target: IsolatedMigrationTarget,
+  tenant: string,
+  user: string,
+  runId: string,
+) {
+  const threadId = `thread_${runId}`;
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+     VALUES($1,$2,$3,'Webhook fixture','active',clock_timestamp(),clock_timestamp())`,
+    [tenant, threadId, user],
+  );
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
+     VALUES($1,$2,$3,'succeeded',clock_timestamp(),clock_timestamp(),'normal')`,
+    [tenant, runId, threadId],
+  );
 }
 
 describe("PostgreSQL 迁移与强权限边界", () => {
@@ -759,6 +783,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await migrateUp(target.pool, target.context);
       const { tenant, user } = await seedWebhookTenant(target, "acl");
       const repository = new PgWebhookRepository(webhook.runtime);
+      await seedWebhookRun(target, tenant, user, "run_team_dissolved");
       const created = await repository.create({
         scope: { tenantId: tenant, userId: user },
         name: "acl",
@@ -934,6 +959,16 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         eventTypes: ["run.succeeded", "run.failed"],
         secret: webhookSecret("c1"),
       });
+      for (const runId of [
+        "run_rollback",
+        "run_one",
+        "run_two",
+        "run_after_disable",
+        "run_manual_a",
+        "run_manual_b",
+      ]) {
+        await seedWebhookRun(target, tenant, user, runId);
+      }
       const event = (runId: string) =>
         runWebhookPayload({
           tenantId: tenant,
@@ -4323,6 +4358,58 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await administrativePool.query(
         `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
       );
+    }
+  });
+
+  it("Playground 来源数据在 FORCE RLS 隐藏时仍阻止回退并保留隔离事实", async () => {
+    const target = await createIsolatedMigrationTarget("playground_down_guard");
+    try {
+      await migrateUp(target.pool, target.context);
+      await administrativePool.query(
+        `BEGIN;
+         SET LOCAL search_path TO "${target.context.schema}";
+         SET LOCAL session_replication_role = replica;
+         INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at,is_playground)
+           VALUES('tenant_hidden','thread_hidden','user_hidden','Playground','active',now(),now(),true);
+         INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
+           VALUES('tenant_hidden','run_hidden','thread_hidden','queued',now(),now(),'playground');
+         COMMIT;`,
+      );
+      const hidden = await target.pool.query<{ readonly count: string }>(
+        "SELECT count(*)::text AS count FROM runs WHERE origin='playground'",
+      );
+      expect(hidden.rows[0]?.count).toBe("0");
+
+      let rollbackError: unknown;
+      try {
+        await migrateDown(target.pool, {
+          ...target.context,
+          runtimeRole,
+          targetVersion: 14,
+          allowDestructive: true,
+          environment: "test",
+        });
+      } catch (error) {
+        rollbackError = error;
+      }
+      expect(sqlStateFromCause(rollbackError)).toBe("55000");
+      const preserved = await administrativePool.query<{
+        readonly origin: string;
+        readonly marked: boolean;
+      }>(
+        `SELECT run.origin,thread.is_playground AS marked
+           FROM "${target.context.schema}".runs run
+           JOIN "${target.context.schema}".threads thread
+             ON thread.tenant_id=run.tenant_id AND thread.id=run.thread_id
+          WHERE run.id='run_hidden'`,
+      );
+      expect(preserved.rows).toEqual([{ origin: "playground", marked: true }]);
+      const migrationVersion = await administrativePool.query<{ readonly version: number }>(
+        `SELECT max(version)::int AS version FROM "${target.context.schema}".runtime_schema_migrations`,
+      );
+      expect(migrationVersion.rows[0]?.version).toBe(migrationContract.latestVersion);
+    } finally {
+      await target.close();
     }
   });
 

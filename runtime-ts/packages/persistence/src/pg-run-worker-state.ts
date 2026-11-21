@@ -2277,6 +2277,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         revisionId: change.revisionId,
         databaseNow,
         historyFilesystemEnabled: this.options.historyFilesystemEnabled ?? false,
+        isPlayground: row.run_origin === "playground",
         historyDirectoryTimeZone:
           this.options.historyDirectoryTimeZone ?? DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
       });
@@ -2921,7 +2922,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               fence.lease_epoch AS fence_lease_epoch,
               lease.root_run_id AS lease_root_run_id,lease.epoch AS lease_row_epoch,
               lease.expires_at AS lease_expires_at,
-              r.status AS run_status,w.current_revision_number,w.current_revision_id,w.lease_epoch,
+              r.status AS run_status,r.origin AS run_origin,
+              w.current_revision_number,w.current_revision_id,w.lease_epoch,
               head.active_run_id AS head_active_run_id,
               head.active_turn_id AS head_active_turn_id,
               head.writer_owner AS head_writer_owner,head.writer_token AS head_writer_token,
@@ -3031,6 +3033,7 @@ async function settleWorkspaceArtifactIntents(
     readonly revisionId: string;
     readonly databaseNow: ReturnType<typeof isoTimestamp>;
     readonly historyFilesystemEnabled: boolean;
+    readonly isPlayground: boolean;
     readonly historyDirectoryTimeZone: string;
   },
 ): Promise<void> {
@@ -3127,7 +3130,9 @@ async function settleWorkspaceArtifactIntents(
         intent.resource_id,
         intent.resource_name,
         intent.resource_version_id,
-        intent.purpose === "deliverable" ? "searchable" : "pending_explicit_commit",
+        !input.isPlayground && intent.purpose === "deliverable"
+          ? "searchable"
+          : "pending_explicit_commit",
         input.databaseNow,
       ],
     );
@@ -3230,6 +3235,7 @@ async function settleWorkspaceArtifactIntents(
       }),
     });
     if (
+      !input.isPlayground &&
       shouldIndexArtifactInHistory({
         historyFilesystemEnabled: input.historyFilesystemEnabled,
         purpose: intent.purpose,

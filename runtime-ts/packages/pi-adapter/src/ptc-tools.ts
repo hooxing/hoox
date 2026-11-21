@@ -133,6 +133,7 @@ export function createPtcTool(input: {
             // durable 开始必须先于任何工具实现；外层 run_code 的许可不能替代子调用许可。
             await input.prepareTool({ callId, toolName: name, parentCallId });
             let isError = true;
+            let isPlaygroundMock = false;
             let failure: ToolFailure | undefined;
             try {
               if (programAbort.signal.aborted) throw new Error("PTC 程序已取消");
@@ -151,6 +152,11 @@ export function createPtcTool(input: {
                 () => input.emit({ type: "tool.updated", callId, name }),
               );
               input.assertContinuationAllowed();
+              const details = result.details;
+              isPlaygroundMock =
+                typeof details === "object" &&
+                details !== null &&
+                (details as Readonly<Record<string, unknown>>).executionMode === "mock";
               isError = false;
               return result;
             } catch (error) {
@@ -163,6 +169,7 @@ export function createPtcTool(input: {
                 callId,
                 name,
                 isError,
+                ...(isPlaygroundMock ? { executionMode: "playground_mock" as const } : {}),
                 ...(failure === undefined ? {} : { failure }),
               });
             }

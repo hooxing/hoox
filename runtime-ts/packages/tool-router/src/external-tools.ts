@@ -264,7 +264,7 @@ export function externalTargetConnection(target: ValidatedExternalTarget) {
   });
 }
 
-function toTypeBox(schema: Record<string, unknown>): TSchema {
+export function externalToolSchemaToTypeBox(schema: Record<string, unknown>): TSchema {
   const description =
     typeof schema.description === "string" ? { description: schema.description } : {};
   let result: TSchema;
@@ -280,7 +280,12 @@ function toTypeBox(schema: Record<string, unknown>): TSchema {
         result = Type.Object(
           Object.fromEntries(
             Object.entries(schema.properties as Record<string, Record<string, unknown>>).map(
-              ([k, v]) => [k, required.has(k) ? toTypeBox(v) : Type.Optional(toTypeBox(v))],
+              ([k, v]) => [
+                k,
+                required.has(k)
+                  ? externalToolSchemaToTypeBox(v)
+                  : Type.Optional(externalToolSchemaToTypeBox(v)),
+              ],
             ),
           ) as Record<string, TSchema>,
           { additionalProperties: false, ...description },
@@ -288,7 +293,10 @@ function toTypeBox(schema: Record<string, unknown>): TSchema {
         break;
       }
       case "array":
-        result = Type.Array(toTypeBox(schema.items as Record<string, unknown>), description);
+        result = Type.Array(
+          externalToolSchemaToTypeBox(schema.items as Record<string, unknown>),
+          description,
+        );
         break;
       case "string":
         result = Type.String(description);
@@ -310,6 +318,8 @@ function toTypeBox(schema: Record<string, unknown>): TSchema {
 
 export interface ExternalToolExecutionPorts {
   readonly allowPrivateAddresses?: boolean;
+  readonly runOrigin?: "normal" | "playground" | "evaluation" | "api";
+  readonly playgroundMocks?: Readonly<Record<string, unknown>>;
   readonly resolveAddresses?: ExternalAddressResolver;
   readonly persistStarted: (input: {
     readonly callId: string;
@@ -348,7 +358,7 @@ export function createExternalToolAgentTool(
   credential?: string,
 ): AgentTool<TSchema, unknown> {
   const tool = validateExternalToolVersion(version);
-  const parameters = toTypeBox(tool.inputSchema as Record<string, unknown>);
+  const parameters = externalToolSchemaToTypeBox(tool.inputSchema as Record<string, unknown>);
   let recoveryRequired = false;
   return {
     name: tool.modelToolName,
@@ -368,6 +378,22 @@ export function createExternalToolAgentTool(
         };
       }
       const args = rawArgs;
+      const mockKey = [tool.toolVersionId, tool.modelToolName].find(
+        (key) =>
+          ports.runOrigin === "playground" && Object.hasOwn(ports.playgroundMocks ?? {}, key),
+      );
+      if (mockKey !== undefined) {
+        await ports.persistStarted({ callId, toolName: tool.modelToolName });
+        await ports.recordReceipt({
+          callId,
+          receipt: encodeControlledToolReceipt(tool.modelToolName, "succeeded", "playground_mock"),
+        });
+        const mockValue = ports.playgroundMocks?.[mockKey];
+        return {
+          content: [{ type: "text", text: `[Playground Mock] ${canonicalJson(mockValue)}` }],
+          details: { executionMode: "mock", mockResult: mockValue },
+        };
+      }
       const serialized = canonicalJson(args);
       const argsDigest = sha256Digest(createHash("sha256").update(serialized).digest("hex"));
       const failed = async (code: string) => {
@@ -377,6 +403,10 @@ export function createExternalToolAgentTool(
           details: { error: code },
         };
       };
+      if (ports.runOrigin === "playground") {
+        await ports.persistStarted({ callId, toolName: tool.modelToolName });
+        return failed("PLAYGROUND_MOCK_NOT_CONFIGURED");
+      }
       let invocation: Parameters<ExternalToolTransport["invoke"]>[0];
       try {
         const retry = ports.isExplicitlyReconciledRetry
@@ -595,7 +625,10 @@ export function validateExternalToolArguments(
   tool: ExternalToolVersion,
   value: unknown,
 ): value is Record<string, unknown> {
-  return Value.Check(toTypeBox(tool.inputSchema as Record<string, unknown>), value);
+  return Value.Check(
+    externalToolSchemaToTypeBox(tool.inputSchema as Record<string, unknown>),
+    value,
+  );
 }
 function decodeUtf8Prefix(bytes: Uint8Array, maxBytes: number): string {
   const decoder = new TextDecoder("utf-8", { fatal: true });

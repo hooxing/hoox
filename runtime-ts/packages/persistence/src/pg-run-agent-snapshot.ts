@@ -45,7 +45,29 @@ export async function createRunConfigurationSnapshots(
      RETURNING definition_id,revision_id,revision_digest,content`,
     [input.tenantId, input.threadId, input.runId],
   );
-  const row = inserted.rows[0];
+  await finalizeSkillSnapshot(client, input, inserted.rows[0]);
+}
+
+export async function createPlaygroundConfigurationSnapshots(
+  client: PoolClient,
+  input: AgentScope & { readonly userId: string; readonly revisionId: string },
+): Promise<RunAgentSnapshot> {
+  const inserted = await client.query<SnapshotRow>(
+    `INSERT INTO run_agent_snapshots(tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content)
+     SELECT t.tenant_id,$3,t.id,t.agent_definition_id,r.id,r.content_digest,r.content
+       FROM threads t JOIN agent_revisions r ON r.definition_id=t.agent_definition_id
+      WHERE t.tenant_id=$1 AND t.id=$2 AND t.is_playground AND r.id=$4 AND r.status IN ('draft','published')
+     RETURNING definition_id,revision_id,revision_digest,content`,
+    [input.tenantId, input.threadId, input.runId, input.revisionId],
+  );
+  return await finalizeSkillSnapshot(client, input, inserted.rows[0]);
+}
+
+async function finalizeSkillSnapshot(
+  client: PoolClient,
+  input: Parameters<typeof createRunSkillSnapshot>[1],
+  row: SnapshotRow | undefined,
+): Promise<RunAgentSnapshot> {
   if (row === undefined) throw new RunAgentUnavailableError();
   let snapshot: RunAgentSnapshot;
   try {
@@ -58,6 +80,7 @@ export async function createRunConfigurationSnapshots(
     agentSkillVersions: snapshot.content.skillVersions,
     includeTenantSkills: snapshot.content.includeTenantSkills,
   });
+  return snapshot;
 }
 
 export async function readRunAgentSnapshot(

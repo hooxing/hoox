@@ -73,6 +73,7 @@ import {
   PgRenamePersonalThreadCommand,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import { PgMemoryIngestionStore } from "../../runtime-ts/packages/persistence/src/pg-memory-ingestion.js";
+import { PgScheduledTaskRepository } from "../../runtime-ts/packages/persistence/src/pg-scheduled-tasks.js";
 import { PgResourceCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-library.js";
 import {
   PgRunDispatchCreation,
@@ -95,6 +96,7 @@ import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/
 import { PgThreadSandboxLifecycleConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-thread-sandbox-lifecycle-consumer.js";
 import {
   PgWebhookRepository,
+  PgWebhookOutboxStore,
   type WebhookEventType,
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgWorkerTenantAssignments } from "../../runtime-ts/packages/persistence/src/pg-worker-tenant-assignment.js";
@@ -636,26 +638,240 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     await runtime?.end();
     await workerCoordinator?.end();
     await migrator?.end();
-    if (!(schema.startsWith("it_rw_") || schema.startsWith("m4_ci_"))) {
-      throw new Error("拒绝清理非测试 Schema");
-    }
-    await admin
-      ?.query(
-        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
-       REVOKE CONNECT ON DATABASE "${databaseName}"
-         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}"`,
+    if (preprovisionedDatabase) {
+      // 预置角色属于整个 CI 集群；本套件只清理约定的 M4 Schema，保留所有角色与 CONNECT。
+      if (schema !== "m4_ci_runtime_schema") throw new Error("拒绝清理非 M4 测试 Schema");
+      await admin?.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    } else {
+      const roles = [
+        runtimeRole,
+        migratorRole,
+        skillPublisherRole,
+        workerCoordinatorRole,
+        teamCoordinatorRole,
+        adminControlRole,
+        webhookDispatcherRole,
+      ];
+      if (
+        schema !== `it_rw_${suffix}` ||
+        !roles.every((role) => role.startsWith("it_rw_") && role.endsWith(suffix))
       )
-      .catch(() => undefined);
-    await admin?.query(
-      `DROP ROLE IF EXISTS "${runtimeRole}";
-       DROP ROLE IF EXISTS "${workerCoordinatorRole}";
-       DROP ROLE IF EXISTS "${teamCoordinatorRole}";
-       DROP ROLE IF EXISTS "${webhookDispatcherRole}";
-       DROP ROLE IF EXISTS "${adminControlRole}";
-       DROP ROLE IF EXISTS "${skillPublisherRole}";
-       DROP ROLE IF EXISTS "${migratorRole}"`,
-    );
+        throw new Error("拒绝清理非本测试角色");
+      await admin?.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+        REVOKE CONNECT ON DATABASE "${databaseName}" FROM ${roles.map((role) => `"${role}"`).join(",")};
+        DROP ROLE ${roles.map((role) => `"${role}"`).join(",")}`);
+    }
     await admin?.end();
+  });
+
+  it("Playground Run 在执行与 PostgreSQL 写入边界都不能暂停正式定时任务", async () => {
+    const f = await fixture(`playground-automation-${suffix}`);
+    const repository = new PgScheduledTaskRepository(runtime);
+    const task = await repository.mutate({
+      scope: { tenantId: f.scope.tenantId, userId: f.user.id },
+      commandId: `normal-task-${suffix}`,
+      requestDigest: createHash("sha256")
+        .update(
+          JSON.stringify({
+            action: "create",
+            sourceThreadId: f.thread.id,
+            targetThreadId: f.thread.id,
+            name: "正式任务",
+            instruction: "保持正式任务不变",
+            firstRunAt: "2099-07-27T00:00:00.000Z",
+            timezone: "UTC",
+          }),
+        )
+        .digest("hex"),
+      mutation: {
+        action: "create",
+        sourceThreadId: f.thread.id,
+        targetThreadId: f.thread.id,
+        name: "正式任务",
+        instruction: "保持正式任务不变",
+        firstRunAt: "2099-07-27T00:00:00.000Z",
+        timezone: "UTC",
+      },
+    });
+    expect(task.outcome).toBe("applied");
+    if (task.outcome !== "applied") throw new Error("未创建正式定时任务");
+    await admin.query(
+      `UPDATE "${schema}".runs SET origin='playground',status='running'
+        WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, f.scope.runId],
+    );
+    const mutation = { action: "pause" as const, taskId: task.task.id };
+    expect(
+      await repository.mutateFromRun({
+        tenantId: f.scope.tenantId,
+        threadId: f.scope.threadId,
+        runId: f.scope.runId,
+        commandId: `playground-pause-${suffix}`,
+        mutation,
+      }),
+    ).toEqual({ outcome: "not_authorized" });
+    expect(
+      await repository.mutate({
+        scope: { tenantId: f.scope.tenantId, userId: f.user.id },
+        commandId: `direct-playground-pause-${suffix}`,
+        requestDigest: createHash("sha256").update(JSON.stringify(mutation)).digest("hex"),
+        mutation,
+        createdByRunId: f.scope.runId,
+      }),
+    ).toEqual({ outcome: "not_authorized" });
+    const persisted = await admin.query<{ readonly status: string }>(
+      `SELECT status FROM "${schema}".scheduled_tasks WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, task.task.id],
+    );
+    expect(persisted.rows[0]?.status).toBe("active");
+  });
+
+  it("Webhook 领取与发送许可边界跳过 Playground Outbox 且不停用订阅", async () => {
+    const f = await fixture(`playground-webhook-${suffix}`);
+    await admin.query(
+      `UPDATE "${schema}".runs SET origin='playground',status='running'
+        WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, f.scope.runId],
+    );
+    const subscription = await new PgWebhookRepository(runtime).create({
+      scope: { tenantId: f.scope.tenantId, userId: f.user.id },
+      name: "Playground 防护测试",
+      endpointUrl: "https://hooks.example.invalid/playground",
+      eventTypes: ["run.failed"],
+      secret: { version: 1, nonce: "n", ciphertext: "c", authTag: "t" },
+    });
+    const suffixId = `playground-${suffix}`;
+    await admin.query(
+      `INSERT INTO "${schema}".webhook_outbox(
+         tenant_id,id,webhook_id,event_id,event_type,payload,source_run_id,source_run_origin
+       ) VALUES($1,$2,$3,$4,'run.failed',$5::jsonb,$6,'playground')`,
+      [
+        f.scope.tenantId,
+        `delivery-${suffixId}`,
+        subscription.id,
+        `event-${suffixId}`,
+        JSON.stringify({ type: "run.failed", data: { runId: f.scope.runId } }),
+        f.scope.runId,
+      ],
+    );
+    const webhookStorePool = createPostgresPool({ connectionString: adminUrl, schema });
+    const store = new PgWebhookOutboxStore(webhookStorePool);
+    await admin.query(
+      `INSERT INTO "${schema}".webhook_outbox(
+         tenant_id,id,webhook_id,event_id,event_type,payload,source_run_origin
+       ) VALUES($1,$2,$3,$4,'run.failed',$5::jsonb,'unknown')`,
+      [
+        f.scope.tenantId,
+        `delivery-unknown-${suffixId}`,
+        subscription.id,
+        `event-unknown-${suffixId}`,
+        JSON.stringify({ type: "run.failed", data: { runId: "unresolved" } }),
+      ],
+    );
+    expect(await store.claim({ owner: `claim-${suffixId}` })).toBeUndefined();
+    const settled = await admin.query<{ readonly state: string; readonly last_error_code: string }>(
+      `SELECT state,last_error_code FROM "${schema}".webhook_outbox
+        WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, `delivery-${suffixId}`],
+    );
+    expect(settled.rows[0]).toEqual({ state: "disabled", last_error_code: "playground_source" });
+    const unresolved = await admin.query<{
+      readonly state: string;
+      readonly last_error_code: string | null;
+    }>(
+      `SELECT state,last_error_code FROM "${schema}".webhook_outbox
+        WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, `delivery-unknown-${suffixId}`],
+    );
+    expect(unresolved.rows[0]).toEqual({ state: "pending", last_error_code: null });
+
+    const unknownPermitId = `delivery-unknown-permit-${suffixId}`;
+    const unknownToken = `unknown-claim-${suffixId}`;
+    await admin.query(
+      `INSERT INTO "${schema}".webhook_outbox(
+         tenant_id,id,webhook_id,event_id,event_type,payload,state,claim_token,claim_expires_at,source_run_origin
+       ) VALUES($1,$2,$3,$4,'run.failed',$5::jsonb,'claimed',$6,clock_timestamp()+interval '1 minute','unknown')`,
+      [
+        f.scope.tenantId,
+        unknownPermitId,
+        subscription.id,
+        `event-unknown-permit-${suffixId}`,
+        JSON.stringify({ type: "run.failed", data: { runId: "unresolved" } }),
+        unknownToken,
+      ],
+    );
+    expect(
+      await store.permitSend(
+        {
+          tenantId: f.scope.tenantId,
+          id: unknownPermitId,
+          webhookId: subscription.id,
+          eventId: `event-unknown-permit-${suffixId}`,
+          endpointUrl: "https://hooks.example.invalid/playground",
+          payload: {},
+          attempts: 1,
+          claimToken: unknownToken,
+        },
+        100,
+      ),
+    ).toEqual({ outcome: "skip" });
+    const unresolvedPermit = await admin.query<{
+      readonly state: string;
+      readonly last_error_code: string | null;
+    }>(
+      `SELECT state,last_error_code FROM "${schema}".webhook_outbox
+        WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, unknownPermitId],
+    );
+    expect(unresolvedPermit.rows[0]).toEqual({ state: "claimed", last_error_code: null });
+
+    const permitId = `delivery-permit-${suffixId}`;
+    const token = `legacy-claim-${suffixId}`;
+    await admin.query(
+      `INSERT INTO "${schema}".webhook_outbox(
+         tenant_id,id,webhook_id,event_id,event_type,payload,state,claim_token,claim_expires_at,
+         source_run_id,source_run_origin
+       ) VALUES($1,$2,$3,$4,'run.failed',$5::jsonb,'claimed',$6,clock_timestamp()+interval '1 minute',$7,'playground')`,
+      [
+        f.scope.tenantId,
+        permitId,
+        subscription.id,
+        `event-permit-${suffixId}`,
+        JSON.stringify({ type: "run.failed", data: { runId: f.scope.runId } }),
+        token,
+        f.scope.runId,
+      ],
+    );
+    expect(
+      await store.permitSend(
+        {
+          tenantId: f.scope.tenantId,
+          id: permitId,
+          webhookId: subscription.id,
+          eventId: `event-permit-${suffixId}`,
+          endpointUrl: "https://hooks.example.invalid/playground",
+          payload: {},
+          attempts: 1,
+          claimToken: token,
+        },
+        100,
+      ),
+    ).toEqual({ outcome: "skip" });
+    const result = await admin.query<{ readonly state: string; readonly last_error_code: string }>(
+      `SELECT state,last_error_code FROM "${schema}".webhook_outbox
+        WHERE tenant_id=$1 AND id=$2`,
+      [f.scope.tenantId, permitId],
+    );
+    expect(result.rows[0]).toEqual({ state: "disabled", last_error_code: "playground_source" });
+    expect(
+      (
+        await new PgWebhookRepository(runtime).list({
+          tenantId: f.scope.tenantId,
+          userId: f.user.id,
+        })
+      ).find(({ id }) => id === subscription.id)?.disabledAt,
+    ).toBeUndefined();
+    await webhookStorePool.end();
   });
 
   it("受限控制角色保存工具模式、恢复历史配置并拒绝非法直写", async () => {

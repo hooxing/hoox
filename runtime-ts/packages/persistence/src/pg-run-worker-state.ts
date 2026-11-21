@@ -115,7 +115,7 @@ const aggregateColumns = `
   creator_membership.role AS thread_creator_membership_role,
   creator_membership.status AS thread_creator_membership_status,
   creator_membership.created_at AS thread_creator_membership_created_at,
-  r.id AS run_id, r.status AS run_status,
+  r.id AS run_id, r.status AS run_status, r.origin AS run_origin,
   r.created_at AS run_created_at, r.updated_at AS run_updated_at,
   w.id AS workspace_id, w.current_revision_number, w.current_revision_id,
   w.lease_epoch, w.created_at AS workspace_created_at, w.updated_at AS workspace_updated_at,
@@ -1180,6 +1180,16 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             input.scope.runId,
           );
           const agent = await readRunAgentSnapshot(client, input.scope);
+          const runOrigin: "normal" | "playground" | "evaluation" | "api" = row.run_origin;
+          const playgroundMocks =
+            runOrigin === "playground"
+              ? ((
+                  await client.query<{ mock_results: Readonly<Record<string, unknown>> }>(
+                    `SELECT mock_results FROM run_playground_mocks WHERE tenant_id=$1 AND run_id=$2`,
+                    [input.scope.tenantId, input.scope.runId],
+                  )
+                ).rows[0]?.mock_results ?? {})
+              : {};
           const agentRevoked =
             agent !== undefined && (await isRunAgentRevoked(client, input.scope));
           const skills = await readRunSkillSnapshot(
@@ -1201,6 +1211,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             snapshot: {
               agent: agentRevoked ? "AGENT_REVISION_REVOKED" : (agent ?? "AGENT_SNAPSHOT_INVALID"),
               run: state.run,
+              origin: runOrigin,
+              playgroundMocks,
               tenantKind: row.tenant_kind === "personal" ? "personal" : "team",
               memorySubjectUserId: String(row.owner_user_id ?? row.thread_created_by_user_id),
               requestedByUserId: String(
@@ -2265,6 +2277,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         revisionId: change.revisionId,
         databaseNow,
         historyFilesystemEnabled: this.options.historyFilesystemEnabled ?? false,
+        isPlayground: row.run_origin === "playground",
         historyDirectoryTimeZone:
           this.options.historyDirectoryTimeZone ?? DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
       });
@@ -2909,7 +2922,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               fence.lease_epoch AS fence_lease_epoch,
               lease.root_run_id AS lease_root_run_id,lease.epoch AS lease_row_epoch,
               lease.expires_at AS lease_expires_at,
-              r.status AS run_status,w.current_revision_number,w.current_revision_id,w.lease_epoch,
+              r.status AS run_status,r.origin AS run_origin,
+              w.current_revision_number,w.current_revision_id,w.lease_epoch,
               head.active_run_id AS head_active_run_id,
               head.active_turn_id AS head_active_turn_id,
               head.writer_owner AS head_writer_owner,head.writer_token AS head_writer_token,
@@ -3019,6 +3033,7 @@ async function settleWorkspaceArtifactIntents(
     readonly revisionId: string;
     readonly databaseNow: ReturnType<typeof isoTimestamp>;
     readonly historyFilesystemEnabled: boolean;
+    readonly isPlayground: boolean;
     readonly historyDirectoryTimeZone: string;
   },
 ): Promise<void> {
@@ -3115,7 +3130,9 @@ async function settleWorkspaceArtifactIntents(
         intent.resource_id,
         intent.resource_name,
         intent.resource_version_id,
-        intent.purpose === "deliverable" ? "searchable" : "pending_explicit_commit",
+        !input.isPlayground && intent.purpose === "deliverable"
+          ? "searchable"
+          : "pending_explicit_commit",
         input.databaseNow,
       ],
     );
@@ -3218,6 +3235,7 @@ async function settleWorkspaceArtifactIntents(
       }),
     });
     if (
+      !input.isPlayground &&
       shouldIndexArtifactInHistory({
         historyFilesystemEnabled: input.historyFilesystemEnabled,
         purpose: intent.purpose,

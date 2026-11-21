@@ -1172,6 +1172,14 @@ async function hasRunAgentSnapshotState(client: PoolClient, schema: string): Pro
   return result.rows[0]?.present === true;
 }
 
+async function hasRunPlaygroundMockState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.run_playground_mocks',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAgentDefinitionState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.agent_definitions',$1::text)) IS NOT NULL
@@ -1324,6 +1332,7 @@ export async function activeTablePolicy(
   if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
   if (!(await hasWebhookState(client, schema))) {
     policy.delete("tenant_webhooks");
+    if (policy.has("run_playground_mocks")) policy.set("run_playground_mocks", new Set());
     policy.delete("webhook_outbox");
   }
   if (await hasManagedSandboxState(client, schema)) {
@@ -1464,6 +1473,10 @@ export async function activeTablePolicy(
   if (await hasRunAgentSnapshotState(client, schema)) {
     policy.set("run_agent_snapshots", new Set(["SELECT", "INSERT"]));
   }
+  if (await hasRunPlaygroundMockState(client, schema)) {
+    policy.set("run_playground_mocks", new Set(["SELECT", "INSERT"]));
+    policy.set("runs", new Set(["SELECT", "INSERT"]));
+  }
   if (!(await hasAgentDefinitionState(client, schema))) {
     for (const table of [
       "agent_definitions",
@@ -1524,6 +1537,10 @@ export async function activeColumnUpdatePolicy(
   }
   if (await hasRunAgentSnapshotState(client, schema)) {
     policy.set("run_agent_snapshots", new Set());
+  }
+  if (await hasRunPlaygroundMockState(client, schema)) {
+    policy.set("run_playground_mocks", new Set());
+    policy.set("runs", new Set(["version", "status", "updated_at"]));
   }
   if (await hasAgentDefinitionState(client, schema)) {
     for (const table of [
@@ -3638,9 +3655,14 @@ const webhookTeamSelectColumns = ["tenant_id", "id", "event_types", "disabled_at
 // 入队使用 ON CONFLICT 去重，PostgreSQL 要求对仲裁唯一键列持有 SELECT；不开放其他 Outbox 列。
 const webhookOutboxConflictColumns = ["tenant_id", "webhook_id", "event_id"];
 // Dispatcher 只读取投递所需列；订阅名称、创建者和事件订阅集合都不可见。
-const webhookDispatcherColumns: Readonly<
-  Record<(typeof webhookTables)[number], { readonly select: string[]; readonly update: string[] }>
-> = {
+type WebhookDispatcherColumns = Readonly<
+  Record<
+    (typeof webhookTables)[number],
+    { readonly select: readonly string[]; readonly update: readonly string[] }
+  >
+>;
+
+const webhookDispatcherColumnWhitelist: WebhookDispatcherColumns = {
   tenant_webhooks: {
     select: ["tenant_id", "id", "endpoint_url", "secret_ciphertext", "disabled_at"],
     update: ["disabled_at", "disabled_reason"],
@@ -3652,6 +3674,7 @@ const webhookDispatcherColumns: Readonly<
       "webhook_id",
       "event_id",
       "payload",
+      "source_run_origin",
       "state",
       "attempts",
       "next_attempt_at",
@@ -3670,6 +3693,38 @@ const webhookDispatcherColumns: Readonly<
     ],
   },
 };
+
+/** Dispatcher ACL 白名单只包含当前迁移版本真实存在的列，Grant 和断言共用同一解析结果。 */
+async function resolveWebhookDispatcherColumns(
+  client: PoolClient,
+  schema: string,
+): Promise<WebhookDispatcherColumns> {
+  const result = await client.query<{
+    readonly table_name: (typeof webhookTables)[number];
+    readonly column_name: string;
+  }>(
+    `SELECT table_name,column_name FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name=ANY($2::text[])`,
+    [schema, [...webhookTables]],
+  );
+  const actual = new Map<(typeof webhookTables)[number], Set<string>>(
+    webhookTables.map((table) => [table, new Set<string>()]),
+  );
+  for (const row of result.rows) actual.get(row.table_name)?.add(row.column_name);
+  const resolve = (table: (typeof webhookTables)[number]) => {
+    const columns = actual.get(table) ?? new Set<string>();
+    const whitelist = webhookDispatcherColumnWhitelist[table];
+    return {
+      select: whitelist.select.filter((column) => columns.has(column)),
+      update: whitelist.update.filter((column) => columns.has(column)),
+    };
+  };
+  return {
+    tenant_webhooks: resolve("tenant_webhooks"),
+    webhook_outbox: resolve("webhook_outbox"),
+  };
+}
+
 const webhookTenantPolicies = ["tenant_webhooks_tenant_policy", "webhook_outbox_tenant_policy"];
 
 /**
@@ -3751,12 +3806,17 @@ async function grantWebhookAccess(
   }
   const dispatcher = quoteIdentifier(context.webhookDispatcherRole);
   await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${dispatcher}`);
+  const dispatcherColumns = await resolveWebhookDispatcherColumns(client, context.schema);
   for (const table of webhookTables) {
-    const allowed = webhookDispatcherColumns[table];
-    await client.query(
-      `GRANT SELECT(${columns(allowed.select)}) ON TABLE ${schema}.${table} TO ${dispatcher};
-       GRANT UPDATE(${columns(allowed.update)}) ON TABLE ${schema}.${table} TO ${dispatcher}`,
-    );
+    const allowed = dispatcherColumns[table];
+    if (allowed.select.length > 0)
+      await client.query(
+        `GRANT SELECT(${columns(allowed.select)}) ON TABLE ${schema}.${table} TO ${dispatcher}`,
+      );
+    if (allowed.update.length > 0)
+      await client.query(
+        `GRANT UPDATE(${columns(allowed.update)}) ON TABLE ${schema}.${table} TO ${dispatcher}`,
+      );
   }
   // Dispatcher 跨 Tenant 投递，但只能把仍启用的订阅改为停用，不能恢复启用。
   await client.query(
@@ -3776,6 +3836,10 @@ async function assertWebhookBoundary(
 ): Promise<void> {
   const present = await hasWebhookState(client, context.schema);
   const teamEnabled = present && (await hasTeamCollaborationState(client, context.schema));
+  const dispatcherColumns =
+    present && context.webhookDispatcherRole !== undefined
+      ? await resolveWebhookDispatcherColumns(client, context.schema)
+      : undefined;
   type Expected = (table: string, column: string, privilege: string) => boolean;
   const none: Expected = () => false;
   const checks: Array<readonly [string, Expected]> = [
@@ -3811,7 +3875,8 @@ async function assertWebhookBoundary(
     checks.push([
       context.webhookDispatcherRole,
       (table, column, privilege) => {
-        const allowed = webhookDispatcherColumns[table as (typeof webhookTables)[number]];
+        const allowed = dispatcherColumns?.[table as (typeof webhookTables)[number]];
+        if (allowed === undefined) return false;
         if (privilege === "SELECT") return allowed.select.includes(column);
         if (privilege === "UPDATE") return allowed.update.includes(column);
         return false;
@@ -4176,6 +4241,27 @@ export async function bootstrapRuntimeAccessOnClient(
       `ALTER POLICY agent_revision_revocations_snapshot_read ON ${schema}.agent_revision_revocations TO ${role};
        GRANT SELECT,INSERT ON TABLE ${schema}.run_agent_snapshots TO ${role}`,
     );
+  }
+  if (await hasRunPlaygroundMockState(client, context.schema)) {
+    // Run 来源与父 Thread 在受理后不可改写，Worker 只推进状态、版本与时间。
+    await client.query(`REVOKE UPDATE ON ${schema}.runs FROM ${role};
+      GRANT UPDATE(status, version, updated_at) ON ${schema}.runs TO ${role};
+      GRANT SELECT ON ${schema}.playground_acceptance_scope TO ${role};
+      GRANT SELECT,INSERT ON TABLE ${schema}.run_playground_mocks TO ${role};
+      ALTER POLICY playground_directory_read ON ${schema}.run_agent_snapshots TO ${quoteIdentifier(context.migratorRole)}`);
+    for (const [table, policy] of [
+      ["threads", "read"],
+      ["threads", "insert"],
+      ["runs", "read"],
+      ["runs", "insert"],
+      ["agent_definitions", "read"],
+      ["agent_revisions", "read"],
+      ["run_agent_snapshots", "insert"],
+      ["run_playground_mocks", "read"],
+      ["run_playground_mocks", "insert"],
+    ]) {
+      await client.query(`ALTER POLICY playground_${policy} ON ${schema}.${table} TO ${role}`);
+    }
   }
   if (await hasRunExternalToolSnapshotView(client, context.schema)) {
     await client.query(

@@ -514,7 +514,9 @@ export class RunWorker {
     const { content } = snapshot.agent;
     if (
       content.sandboxTemplateId !== undefined ||
-      (content.tools.mode === "configured" && content.tools.clientTools.length > 0)
+      (snapshot.origin !== "playground" &&
+        content.tools.mode === "configured" &&
+        content.tools.clientTools.length > 0)
     ) {
       return await this.finalizeWithoutRevision(
         context,
@@ -716,6 +718,8 @@ export class RunWorker {
             items: Object.freeze([]),
           }),
           agentSnapshot,
+          origin: snapshot.origin,
+          playgroundMocks: snapshot.playgroundMocks,
           ...(snapshot.skills === undefined ? {} : { skillSnapshot: snapshot.skills }),
           ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
           ...(child.history === undefined ? {} : { threadActiveHistory: child.history }),
@@ -757,6 +761,8 @@ export class RunWorker {
       rolloutProjection: snapshot.rolloutProjection,
       initialInputText: input.initialInputText,
       agentSnapshot: snapshot.agent,
+      origin: snapshot.origin,
+      playgroundMocks: snapshot.playgroundMocks,
       ...(snapshot.skills === undefined ? {} : { skillSnapshot: snapshot.skills }),
       ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
       ...(timings.startupObserver === undefined ? {} : { startupTiming: timings.startupObserver }),

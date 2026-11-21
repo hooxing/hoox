@@ -81,12 +81,18 @@ export function mapPiEvent(event: PiAgentEvent): RuntimeAgentEvent | undefined {
     }
     case "tool_execution_update":
       return { type: "tool.updated", callId: event.toolCallId, name: event.toolName };
-    case "tool_execution_end":
+    case "tool_execution_end": {
+      const details = event.result.details;
+      const isPlaygroundMock =
+        typeof details === "object" &&
+        details !== null &&
+        (details as Readonly<Record<string, unknown>>).executionMode === "mock";
       return {
         type: "tool.completed",
         callId: event.toolCallId,
         name: event.toolName,
         isError: event.isError,
+        ...(isPlaygroundMock ? { executionMode: "playground_mock" as const } : {}),
         ...(event.isError
           ? {
               failure: projectToolFailure(
@@ -99,6 +105,7 @@ export function mapPiEvent(event: PiAgentEvent): RuntimeAgentEvent | undefined {
             }
           : {}),
       };
+    }
     case "turn_end": {
       if (event.message.role !== "assistant") return undefined;
       if (

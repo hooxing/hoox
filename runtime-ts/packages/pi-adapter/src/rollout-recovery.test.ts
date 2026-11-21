@@ -1,6 +1,10 @@
 import { DEFAULT_AGENT_OPERATOR_INSTRUCTIONS } from "@hoox/prompt-builder";
 import { createHash } from "node:crypto";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
+import {
+  assertControlledRolloutProjection,
+  rolloutProjectionDigest,
+} from "@hoox/run-contracts/mutation-protocol";
 import { type RuntimeRolloutEntry, sha256Digest } from "@hoox/domain";
 import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
@@ -59,8 +63,9 @@ function controlledResultEntry(
   sequence: number,
   toolCallId: string,
   toolName = "sandbox_read_file",
+  executionMode?: "playground_mock",
 ): RuntimeRolloutEntry {
-  const receipt = encodeControlledToolReceipt(toolName, "succeeded");
+  const receipt = encodeControlledToolReceipt(toolName, "succeeded", executionMode);
   const receiptSha256 = createHash("sha256").update(receipt).digest("hex");
   return {
     ...entry(
@@ -220,6 +225,51 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
     ).toThrow(new RuntimeRecoveryError("MALFORMED_FACTS"));
   });
 
+  it("恢复保留白名单中的 Playground Mock 标记，仍拒绝未知回执字段", () => {
+    const projected = projectLoadedRuntimeRecovery(
+      loaded([
+        entry(0, "tool_call", { toolName: "sandbox_read_file" }, "mock-call"),
+        controlledResultEntry(1, "mock-call", "sandbox_read_file", "playground_mock"),
+      ]),
+    );
+    expect(projected).toMatchObject({
+      outcome: "ready",
+      projection: {
+        items: [
+          {
+            kind: "tool_receipt",
+            outcome: "succeeded",
+            observation: expect.stringContaining('"executionMode":"playground_mock"'),
+          },
+        ],
+      },
+    });
+    if (projected.outcome !== "ready") throw new Error("Mock Rollout 未能恢复");
+    expect(() => assertControlledRolloutProjection(projected.projection)).not.toThrow();
+    expect(rolloutProjectionDigest(projected.projection)).toMatch(/^[a-f0-9]{64}$/u);
+    const projectedMock = projected.projection.items.find((item) => item.kind === "tool_receipt");
+    if (projectedMock?.kind !== "tool_receipt") throw new Error("Mock 回执未进入投影");
+    expect(() =>
+      assertControlledRolloutProjection({
+        ...projected.projection,
+        items: [{ ...projectedMock, executionMode: "arbitrary" as never }],
+      }),
+    ).toThrow("受控上下文投影无效");
+    const valid = controlledResultEntry(1, "mock-call", "sandbox_read_file", "playground_mock");
+    const body = {
+      ...valid.body,
+      receipt: { ...(valid.body.receipt as object), unexpected: true },
+    };
+    expect(() =>
+      projectLoadedRuntimeRecovery(
+        loaded([
+          entry(0, "tool_call", { toolName: "sandbox_read_file" }, "mock-call"),
+          { ...valid, body, bodyDigest: digest(body) },
+        ]),
+      ),
+    ).toThrow(new RuntimeRecoveryError("MALFORMED_FACTS"));
+  });
+
   it("验证 checkpoint 摘要、replacement 前缀与窗口，重启投影确定", () => {
     const receipt = encodeControlledToolReceipt("sandbox_read_file", "succeeded");
     const receiptSha256 = createHash("sha256").update(receipt).digest("hex");
@@ -306,6 +356,45 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
         },
       }),
     ).toThrow(new RuntimeRecoveryError("MALFORMED_FACTS"));
+  });
+
+  it("Session 从恢复 Rollout 重建 Playground Mock 回执模式", async () => {
+    const harness = await sessionHarness();
+    let restoredText = "";
+    const entryWithMock = [
+      entry(0, "tool_call", { toolName: "http__lookup" }, "mock-call"),
+      controlledResultEntry(1, "mock-call", "http__lookup", "playground_mock"),
+    ];
+    harness.faux.setResponses([
+      (context) => {
+        const messages = context.messages as unknown as readonly {
+          readonly content: readonly { readonly type: string; readonly text?: string }[];
+        }[];
+        restoredText = messages
+          .flatMap((message) => message.content)
+          .filter((item) => item.type === "text")
+          .map((item) => item.text ?? "")
+          .join("\n");
+        return fauxAssistantMessage("恢复完成");
+      },
+    ]);
+    const result = await recoverSafePiSession({
+      ...harness.options,
+      loadRecovery: async (current) => ({
+        ...loaded(entryWithMock),
+        recordedCompatibility: current,
+      }),
+    });
+    expect(result.outcome).toBe("session_created");
+    if (result.outcome !== "session_created") return;
+    try {
+      await result.controller.prompt("继续");
+      expect(restoredText).toContain('"executionMode":"playground_mock"');
+      expect(restoredText).toContain("工具调用由 Playground Mock 完成。");
+      expect(restoredText).not.toContain('"executionMode":"arbitrary"');
+    } finally {
+      result.controller.dispose();
+    }
   });
 
   it("公开入口用实际 Session 身份调用 loadRecovery，原样返回 rebuild 且不创建 Session", async () => {

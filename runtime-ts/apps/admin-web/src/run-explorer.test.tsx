@@ -135,6 +135,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const root of roots.splice(0)) act(() => root.unmount());
   document.body.replaceChildren();
+  vi.useRealTimers();
 });
 
 describe("运行记录列表", () => {
@@ -202,6 +203,72 @@ describe("运行详情", () => {
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       "run_content_audit_1",
     );
+  });
+
+  it("实时侧栏从排队串行刷新到终态，人工查看正文只写一次审计", async () => {
+    vi.useFakeTimers();
+    const api = apiFixture(true);
+    const base = detail(true);
+    api.getRun
+      .mockResolvedValueOnce({ ...base, run: { ...base.run, status: "queued" } })
+      .mockResolvedValueOnce({ ...base, run: { ...base.run, status: "waiting" } })
+      .mockResolvedValueOnce({ ...base, run: { ...base.run, status: "succeeded", modelCalls: 5 } });
+    const container = render(
+      <RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" live />,
+    );
+    await settle();
+    expect(container.textContent).toContain("排队中");
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(container.textContent).toContain("等待回答");
+    expect(api.readRunContent).not.toHaveBeenCalled();
+    await act(async () => button(container, "查看正文").click());
+    expect(container.textContent).toContain("run_content_audit_1");
+    await act(async () => vi.advanceTimersByTimeAsync(20_000));
+    expect(api.getRun).toHaveBeenCalledTimes(3);
+    expect(container.textContent).toContain("成功");
+    expect(api.readRunContent).toHaveBeenCalledTimes(1);
+    act(() => button(container, "收起正文").click());
+    expect(container.textContent).not.toContain(secret);
+    expect(container.textContent).toContain("模型回复");
+  });
+
+  it("刷新发现正文权限已收回，丢弃在途的旧正文响应", async () => {
+    vi.useFakeTimers();
+    const api = apiFixture(true);
+    const base = detail(true);
+    api.getRun
+      .mockResolvedValueOnce({ ...base, run: { ...base.run, status: "running" } })
+      .mockResolvedValueOnce(detail(false));
+    const result = await api.readRunContent();
+    const pending = Promise.withResolvers<typeof result>();
+    api.readRunContent.mockClear().mockReturnValueOnce(pending.promise);
+    const container = render(
+      <RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" live />,
+    );
+    await settle();
+    act(() => button(container, "查看正文").click());
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    await act(async () => pending.resolve(result));
+    expect(container.textContent).toContain("只显示结构与指标");
+    expect(container.textContent).not.toContain(secret);
+    expect(container.textContent).not.toContain("run_content_audit_1");
+    expect(api.readRunContent).toHaveBeenCalledTimes(1);
+  });
+
+  it("慢请求不重叠；离开侧栏后迟到的结构响应不再排队刷新", async () => {
+    vi.useFakeTimers();
+    const api = apiFixture(false);
+    const pending = Promise.withResolvers<RunDetailDto>();
+    api.getRun.mockReturnValueOnce(pending.promise);
+    render(<RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" live />);
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(api.getRun).toHaveBeenCalledTimes(1);
+    act(() => roots.pop()?.unmount());
+    const base = detail(false);
+    await act(async () => pending.resolve({ ...base, run: { ...base.run, status: "running" } }));
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(api.getRun).toHaveBeenCalledTimes(1);
+    expect(api.readRunContent).not.toHaveBeenCalled();
   });
 
   it("管理台路由在运营分组下挂载运行记录详情", async () => {

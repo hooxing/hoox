@@ -59,6 +59,13 @@ export class PgResourceFilesystemCatalog
           const result = await client.query<ResourceFileRow>(
             `${baseQuery}
               WHERE resource.tenant_id=$1 AND resource.visibility='searchable'
+                AND NOT EXISTS (
+                  SELECT 1 FROM artifact_publications publication
+                  JOIN runs source_run ON source_run.tenant_id=publication.tenant_id
+                    AND source_run.id=publication.run_id AND source_run.origin='playground'
+                  WHERE publication.tenant_id=resource.tenant_id
+                    AND publication.resource_id=resource.id
+                )
               ORDER BY resource.id,version.version_number,version.id`,
             [input.tenantId],
           );
@@ -101,6 +108,12 @@ export class PgResourceFilesystemCatalog
                     directory.file_count::text
                FROM thread_history_directories directory
               WHERE directory.tenant_id=$1
+                AND NOT EXISTS (
+                  SELECT 1 FROM runs source_run
+                   WHERE source_run.tenant_id=directory.tenant_id
+                     AND source_run.thread_id=directory.thread_id
+                     AND source_run.origin='playground'
+                )
                 AND directory.naming_state IN ('ready','fallback')
                 AND directory.file_count > 0
                 AND directory.last_file_at >= clock_timestamp() - interval '6 months'
@@ -131,6 +144,12 @@ export class PgResourceFilesystemCatalog
                     directory.file_count::text
                FROM thread_history_directories directory
               WHERE directory.tenant_id=$1
+                AND NOT EXISTS (
+                  SELECT 1 FROM runs source_run
+                   WHERE source_run.tenant_id=directory.tenant_id
+                     AND source_run.thread_id=directory.thread_id
+                     AND source_run.origin='playground'
+                )
                 AND directory.naming_state IN ('ready','fallback')
                 AND directory.file_count > 0
                 AND ($2::timestamptz IS NULL OR directory.last_file_at >= $2::timestamptz)
@@ -201,6 +220,12 @@ export class PgResourceFilesystemCatalog
                    SELECT 1
                      FROM thread_history_directories directory
                     WHERE directory.tenant_id=$1
+                      AND NOT EXISTS (
+                        SELECT 1 FROM runs source_run
+                         WHERE source_run.tenant_id=directory.tenant_id
+                           AND source_run.thread_id=directory.thread_id
+                           AND source_run.origin='playground'
+                      )
                       AND directory.naming_state IN ('ready','fallback')
                       AND directory.file_count > 0
                       AND directory.last_file_at < $2::timestamptz
@@ -304,7 +329,13 @@ export class PgResourceFilesystemCatalog
           const result = await client.query<{ readonly thread_id: string }>(
             `SELECT thread.id AS thread_id
                FROM threads thread
-              WHERE thread.tenant_id=$1
+              WHERE thread.tenant_id=$1 AND NOT thread.is_playground
+                AND NOT EXISTS (
+                  SELECT 1 FROM runs source_run
+                   WHERE source_run.tenant_id=thread.tenant_id
+                     AND source_run.thread_id=thread.id
+                     AND source_run.origin='playground'
+                )
               ORDER BY thread.id`,
             [input.tenantId],
           );
@@ -332,6 +363,12 @@ export class PgResourceFilesystemCatalog
                     directory.file_count::text
                FROM thread_history_directories directory
               WHERE directory.tenant_id=$1 AND directory.directory_name=$2
+                AND NOT EXISTS (
+                  SELECT 1 FROM runs source_run
+                   WHERE source_run.tenant_id=directory.tenant_id
+                     AND source_run.thread_id=directory.thread_id
+                     AND source_run.origin='playground'
+                )
                 AND directory.naming_state IN ('ready','fallback')`,
             [input.tenantId, input.directoryName],
           );
@@ -448,6 +485,13 @@ const historyFileQuery = `SELECT entry.thread_id,directory.directory_name,
                               ON resource.tenant_id=entry.tenant_id
                              AND resource.id=entry.resource_id
                              AND resource.visibility='searchable'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM artifact_publications publication
+                               JOIN runs source_run ON source_run.tenant_id=publication.tenant_id
+                                 AND source_run.id=publication.run_id AND source_run.origin='playground'
+                               WHERE publication.tenant_id=resource.tenant_id
+                                 AND publication.resource_id=resource.id
+                             )
                             JOIN resource_versions version
                               ON version.tenant_id=entry.tenant_id
                              AND version.resource_id=entry.resource_id
@@ -467,7 +511,14 @@ async function findFile(
   const result = await client.query<ResourceFileRow>(
     `${baseQuery}
       WHERE resource.tenant_id=$1 AND resource.visibility='searchable'
-        AND resource.id=$2 AND version.id=$3`,
+        AND resource.id=$2 AND version.id=$3
+        AND NOT EXISTS (
+          SELECT 1 FROM artifact_publications publication
+          JOIN runs source_run ON source_run.tenant_id=publication.tenant_id
+            AND source_run.id=publication.run_id AND source_run.origin='playground'
+          WHERE publication.tenant_id=resource.tenant_id
+            AND publication.resource_id=resource.id
+        )`,
     [input.tenantId, input.resourceId, input.versionId],
   );
   const row = result.rows[0];
@@ -490,7 +541,13 @@ async function isHistoryThread(
   const result = await client.query(
     `SELECT 1 FROM threads thread
        JOIN tenants tenant ON tenant.id=thread.tenant_id AND tenant.kind IN ('personal','team')
-      WHERE thread.tenant_id=$1 AND thread.id=$2`,
+      WHERE thread.tenant_id=$1 AND thread.id=$2 AND NOT thread.is_playground
+        AND NOT EXISTS (
+          SELECT 1 FROM runs source_run
+           WHERE source_run.tenant_id=thread.tenant_id
+             AND source_run.thread_id=thread.id
+             AND source_run.origin='playground'
+        )`,
     [rawTenantId, rawThreadId],
   );
   return result.rowCount === 1;

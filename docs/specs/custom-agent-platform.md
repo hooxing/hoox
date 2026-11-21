@@ -197,6 +197,7 @@ Worker 只能按 Run 快照读取外部工具版本与凭据，授权在接入 A
 - 后台可以选择任意 AgentRevision（包括草稿）直接对话。旁边实时展示执行轨迹，包括模型调用、工具调用、耗时与 Token。
 - Playground 的 Run 标记 `origin=playground`，运行在执行者自己的空间中；它们不进入业务指标，也不能被终端用户看到。
 - 外部工具和客户端工具可以在 Playground 中配置 Mock 返回值。Mock 只对 `origin=playground` 生效，已发布 Revision 的正常 Run 永远不读取 Mock。
+- Mock 只覆盖已登记的外部工具与客户端工具，不覆盖 `exec_command`、Skill 脚本等 Sandbox 命令。为保持与正常 Run 的命令行为一致，Playground 不对 Sandbox 禁网，命令可以访问网络并产生真实外部副作用；需要隔离时，由管理员在 Revision 中不启用命令工具，或使用无出网的 Sandbox 配置。完整隔离边界见[运行执行与恢复](../architecture/run-execution-and-recovery.md#playground-与正式业务副作用隔离)。
 
 ### 9.2 评测集
 

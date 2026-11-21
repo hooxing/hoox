@@ -12,6 +12,7 @@ export interface ControlledRolloutProjection {
         readonly toolCallId: string;
         readonly toolName: string;
         readonly outcome: "succeeded" | "failed";
+        readonly executionMode?: "playground_mock";
         readonly observation: string;
         readonly isTruncated: boolean;
         readonly modelVisibleBytes: number;

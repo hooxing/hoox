@@ -185,6 +185,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             : { demoAdminUserId: configuration.demoAdminUserId }),
           repositories: persistence.repositories,
           agentDefinitions: persistence.agentDefinitions,
+          playground: persistence.playground,
           apiKeys: persistence.apiKeys,
           webhooks: persistence.webhooks,
           ...(configuration.webhookSecretEncryptionKey === undefined

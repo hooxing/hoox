@@ -552,6 +552,7 @@ function fixture(
     readonly installation?: ApiDependencies["installation"];
     readonly demoAdminUserId?: string;
     readonly agentDefinitions?: ApiDependencies["agentDefinitions"];
+    readonly playground?: ApiDependencies["playground"];
     readonly scheduledTasks?: ApiDependencies["scheduledTasks"];
   } = {},
 ) {
@@ -626,6 +627,7 @@ function fixture(
     ...(options.installation === undefined ? {} : { installation: options.installation }),
     ...(options.demoAdminUserId === undefined ? {} : { demoAdminUserId: options.demoAdminUserId }),
     repositories: state.repositories,
+    ...(options.playground ? { playground: options.playground } : {}),
     agentDefinitions:
       options.agentDefinitions ??
       ({
@@ -1040,6 +1042,29 @@ afterEach(async () => {
 });
 
 describe("工作台 Agent 路由", () => {
+  it.each([
+    ["/v1/threads", { title: "草稿", revisionId: "revision_draft" }],
+    ["/v1/threads", { title: "草稿", origin: "playground" }],
+    ["/v1/threads/thread_1/runs", { input: "运行草稿", revisionId: "revision_draft" }],
+    ["/v1/threads/thread_1/runs", { input: "冒用来源", origin: "playground" }],
+    [
+      "/v1/threads/thread_1/inputs",
+      { input: "转 follow-up", mode: "follow_up", origin: "playground" },
+    ],
+  ] as const)("普通受理拒绝 Playground 专属字段：%s %j", async (url, payload) => {
+    const { app, state } = fixture({ enableThreadInputs: true });
+    openApps.push(app);
+    const result = await app.inject({
+      method: "POST",
+      url,
+      payload,
+      headers: { authorization: "Bearer token-a", "idempotency-key": "forged-playground-1" },
+    });
+    expect(result.statusCode).toBe(400);
+    expect(state.threads.size).toBe(0);
+    expect(state.runs.size).toBe(0);
+  });
+
   it("仅返回展示字段，并将选中 Agent 固定到新 Thread", async () => {
     const visible = {
       id: "agent_sales",
@@ -1148,6 +1173,89 @@ describe("工作台 Agent 路由", () => {
     const unavailable = await request();
     expect(unavailable.statusCode).toBe(409);
     expect(unavailable.json().error.code).toBe("AGENT_REVISION_UNAVAILABLE");
+  });
+});
+
+describe("管理员 Playground 受理", () => {
+  const request = {
+    method: "POST" as const,
+    url: "/v1/playground/runs",
+    headers: { authorization: "Bearer token-a", "idempotency-key": "playground-test-1" },
+    payload: { definitionId: "agent_test", revisionId: "revision_draft", message: "你好" },
+  };
+  it("只传认证得出的个人身份与精确 Revision；不在响应中回显输入和 Mock", async () => {
+    const receipt = { tenantId: "tenant_owner_a", threadId: "thread_test", runId: "run_test" };
+    const accept = vi.fn(async () => ({ ...receipt, message: "不能返回" }));
+    const { app } = fixture({ playground: { accept } });
+    openApps.push(app);
+    const result = await app.inject(request);
+    expect(result.statusCode).toBe(200);
+    expect(result.json().data).toEqual(receipt);
+    expect(accept).toHaveBeenCalledWith({
+      ...request.payload,
+      idempotencyKey: "playground-test-1",
+      mocks: {},
+      scope: { tenantId: "tenant_owner_a", userId: "user_owner_a" },
+    });
+  });
+  it("将本次 Mock 配置与运行受理原子绑定，不接受客户端来源字段", async () => {
+    const accept = vi.fn(async () => ({
+      tenantId: "tenant_owner_a",
+      threadId: "thread_test",
+      runId: "run_test",
+    }));
+    const { app } = fixture({ playground: { accept } });
+    openApps.push(app);
+    const mocks = { tool_version_lookup: { result: "simulated" }, client_lookup: null };
+    const result = await app.inject({ ...request, payload: { ...request.payload, mocks } });
+    expect(result.statusCode).toBe(200);
+    expect(accept).toHaveBeenCalledWith(expect.objectContaining({ mocks }));
+  });
+
+  it("不是 Agent 管理员时不确认受理；不能切换 Tenant 或使用集成 Key", async () => {
+    const accept = vi.fn(async () => undefined);
+    const owner = personalBundle("owner_a");
+    const apiKeys = {
+      authenticateKey: vi.fn(async () => ({
+        tenantId: owner.tenant.id,
+        userId: owner.user.id,
+        apiKeyId: "key_test",
+        scopes: ["runs:create"],
+      })),
+    } as unknown as NonNullable<ApiDependencies["apiKeys"]>;
+    const { app } = fixture({ playground: { accept }, apiKeys });
+    openApps.push(app);
+    expect((await app.inject(request)).statusCode).toBe(403);
+    expect(
+      (
+        await app.inject({
+          ...request,
+          headers: { ...request.headers, "x-tenant-id": "tenant_owner_b" },
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await app.inject({
+          ...request,
+          headers: { ...request.headers, authorization: `Bearer ${createApiKeyToken()}` },
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(accept).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { origin: "playground" },
+    { tenantId: "tenant_elsewhere" },
+    { actorUserId: "user_admin" },
+  ])("不接受客户端身份、来源或未接线的 Mock：%j", async (extra) => {
+    const accept = vi.fn(async () => undefined);
+    const { app } = fixture({ playground: { accept } });
+    openApps.push(app);
+    expect(
+      (await app.inject({ ...request, payload: { ...request.payload, ...extra } })).statusCode,
+    ).toBe(400);
+    expect(accept).not.toHaveBeenCalled();
   });
 });
 

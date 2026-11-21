@@ -940,9 +940,10 @@ async function readExecutionBoundary(
   authorization: ArtifactExecutionAuthorization,
   lock = false,
 ): Promise<"valid" | "not_running" | "scope_mismatch"> {
-  const result = await client.query<{ run_status: string; valid: boolean }>(
-    `SELECT run.status AS run_status,
-            permit.consumed_at IS NOT NULL
+  const result = await client.query<{ run_status: string; run_origin: string; valid: boolean }>(
+    `SELECT run.status AS run_status,run.origin AS run_origin,
+            run.origin IN ('normal','evaluation','api')
+            AND permit.consumed_at IS NOT NULL
             AND permit.expires_at>clock_timestamp()
             AND permit.consumed_at<=permit.expires_at
             AND permit.effect='tool_execution'

@@ -3,6 +3,7 @@ import type { InstallationRepository } from "@hoox/identity";
 import type { BlobStore } from "@hoox/persistence/blob";
 import type {
   CoreRepositories,
+  PgPlaygroundRepository,
   AgentDefinitionRepositoryPort,
   PgApiKeyRepository,
   PgWebhookRepository,
@@ -39,6 +40,7 @@ import type {
 
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
+  readonly playground?: Pick<PgPlaygroundRepository, "accept">;
   readonly apiKeys?: PgApiKeyRepository;
   readonly webhooks?: PgWebhookRepository;
   readonly webhookCipher?: WebhookSecretCipher;

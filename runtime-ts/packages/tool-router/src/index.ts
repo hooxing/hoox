@@ -11,5 +11,6 @@ export * from "./tool-failure.js";
 export * from "./tool-parameter-schemas.js";
 export * from "./tools.js";
 export * from "./external-tools.js";
+export * from "./client-tools.js";
 export * from "./http-external-tool.js";
 export * from "./mcp-client.js";

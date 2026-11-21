@@ -80,6 +80,16 @@ Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回
 - 许可消费对连接类瞬时故障做有界退避；COMMIT 未知后在同一调用内重新核对所有不可变字段，读到 `consumed_at` 才视为已消费。
 - 一旦到达 `model_execution_started`，恢复路径不得自动重跑可能含工具副作用的模型轮次。
 
+## Playground 与正式业务副作用隔离
+
+`runs.origin` 是数据库持久化且由领取快照投影的可信来源事实；执行层只用它路由能力，持久化事务仍须在写入边界复核。`playground` Run 可以写入自身轨迹、Rollout、临时 Workspace 与独立 Mock 结果，但不得通过下述受控入口改变跨 Run 正式业务状态或触达真实外部服务。禁止边界失败关闭，不得因 UI、工具 Schema 或调用者参数宣称来源。
+
+隔离覆盖定时任务创建/更新/暂停/恢复/删除，长期记忆摄取入队及待消费任务认领，Artifact 发布与普通 Resource 搜索/下载/资源目录，业务 Webhook Outbox 的入队/领取/发送许可，以及 Skill、Thread/Workspace 和其他用户级资源写入。Run/Thread 私有 Todo、消息、轨迹与临时 Sandbox 操作仍归属 Playground 自身；已登记的外部工具与客户端工具必须按 Mock 边界处理，不能以“只读”标签跳过来源检查。正式 Run 的 Webhook 订阅保持启用；遗留或错误写入的 Playground Outbox 仅结算该条投递。
+
+Mock 仅用于 Playground 外部工具与客户端工具，配置随 Run 快照持久化；命中时不消费许可、不解析真实目标或触达 Transport。Mock 模式只出现在受控回执与轨迹中，不进入 system prompt、developer prompt 或工具 Schema。普通、评测和 API Run 永不读取 Mock。
+
+Playground 不对 Sandbox 禁网：`exec_command`、Skill 脚本等 Sandbox 命令与正常 Run 一样可以访问网络，可能产生真实外部副作用，不在 Mock 覆盖范围内。这一边界保持与正常 Run 的命令行为一致；需要隔离时，由管理员在 Revision 中不启用命令工具，或使用无出网的 Sandbox 配置。
+
 ## 等待与恢复
 
 - waiting 安全点持久化 scope、Rollout checkpoint、Workspace head、base revision 和可选 Sandbox 身份。Sandbox 只有在 Tenant、Thread、Workspace、base revision、session generation 全部匹配且生命周期明确为 `paused` 时才复用。

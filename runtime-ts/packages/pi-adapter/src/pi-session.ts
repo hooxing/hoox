@@ -481,6 +481,16 @@ export interface CreateSafePiSessionOptions {
       callId: string,
       toolName: string,
       outcome: "succeeded" | "failed",
+      executionMode?: "playground_mock",
+    ) => Promise<unknown>;
+  }) => readonly AgentTool[];
+  /** 客户端工具当前只有 Playground Mock 执行器，不提供真实副作用端口。 */
+  clientTools?: (ports: {
+    readonly recordControlledReceipt: (
+      callId: string,
+      toolName: string,
+      outcome: "succeeded" | "failed",
+      executionMode?: "playground_mock",
     ) => Promise<unknown>;
   }) => readonly AgentTool[];
   rolloutProjection?: ControlledRolloutProjection;
@@ -939,6 +949,13 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       }) as AgentTool[]),
     );
   }
+  if (options.clientTools !== undefined) {
+    nativeTools.push(
+      ...(options.clientTools({
+        recordControlledReceipt: observedSandboxTools.recordControlledReceipt,
+      }) as AgentTool[]),
+    );
+  }
   const preparePtcProgram = options.preparePtcProgram;
   const preparePtcTool = options.preparePtcTool;
   if (
@@ -1364,7 +1381,7 @@ function formatRolloutProjection(
       try {
         if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(item.toolCallId)) throw new Error();
         const receipt = parseControlledToolReceipt(
-          encodeControlledToolReceipt(item.toolName, item.outcome),
+          encodeControlledToolReceipt(item.toolName, item.outcome, item.executionMode),
         );
         assertControlledToolObservation({
           receipt,

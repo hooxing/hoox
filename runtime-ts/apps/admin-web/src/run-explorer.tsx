@@ -331,61 +331,54 @@ export function RunExplorerDetail({
   tenantId,
   runId,
   onBack,
+  live = false,
 }: {
   readonly api: RunExplorerApiContract;
   readonly tenantId: string;
   readonly runId: string;
-  readonly onBack: () => void;
+  readonly onBack?: () => void;
+  readonly live?: boolean;
 }) {
   const [attemptId, setAttemptId] = useState<string>();
   const [detail, setDetail] = useState<RunDetailDto>();
-  const [content, setContent] = useState<RunContentDto>();
   const [error, setError] = useState<string>();
-  const [busy, setBusy] = useState(false);
+  const [reload, setReload] = useState(0);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reload 只用于读取失败后手动刷新，不重新受理 Run。
   useEffect(() => {
     let cancelled = false;
-    setBusy(true);
+    let timer: ReturnType<typeof setTimeout>;
+    setDetail(undefined);
     setError(undefined);
-    setContent(undefined);
-    api
-      .getRun(tenantId, runId, attemptId)
-      .then((value) => {
-        if (!cancelled) setDetail(value);
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) setError(errorMessage(reason));
-      })
-      .finally(() => {
-        if (!cancelled) setBusy(false);
-      });
+    async function readOutline() {
+      try {
+        const next = await api.getRun(tenantId, runId, attemptId);
+        if (cancelled) return;
+        setDetail(next);
+        // 只串行刷新非终态 Run 的结构；正文请求必须由操作者显式触发。
+        if (live && ["queued", "running", "waiting"].includes(next.run.status)) {
+          timer = setTimeout(() => void readOutline(), 2000);
+        }
+      } catch (reason) {
+        if (cancelled) return;
+        setDetail(undefined);
+        setError(errorMessage(reason));
+      }
+    }
+    void readOutline();
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [api, tenantId, runId, attemptId]);
+  }, [api, tenantId, runId, attemptId, live, reload]);
 
-  const openContent = async () => {
-    setBusy(true);
-    setError(undefined);
-    try {
-      setContent(await api.readRunContent(tenantId, runId, detail?.attemptId));
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const timeline = content?.timeline ?? detail?.timeline;
-  const firstRecord = timeline?.records[0];
-  const origin = firstRecord === undefined ? undefined : Date.parse(firstRecord.startedAt);
   const run = detail?.run;
 
   return (
     <section className="control-panel run-detail" aria-label="Run 详情">
       <div className="user-management-heading">
         <div>
-          <span className="eyebrow">Run detail</span>
+          <span className="eyebrow">{live ? "执行轨迹" : "Run detail"}</span>
           <h2>
             <code>{runId}</code>
           </h2>
@@ -394,13 +387,22 @@ export function RunExplorerDetail({
             {run === undefined ? "" : ` · Thread ${run.threadId}`}
           </p>
         </div>
-        <button type="button" className="text-button" onClick={onBack}>
-          返回列表
-        </button>
+        {onBack && (
+          <button type="button" className="text-button" onClick={onBack}>
+            返回列表
+          </button>
+        )}
       </div>
       {error !== undefined && (
         <div className="error-banner" role="alert">
           {error}
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => setReload((value) => value + 1)}
+          >
+            重新读取轨迹
+          </button>
         </div>
       )}
       {run !== undefined && (
@@ -452,12 +454,66 @@ export function RunExplorerDetail({
           </select>
         </label>
       )}
+      {detail !== undefined ? (
+        <RunAttemptTimeline
+          key={`${detail.attemptId}/${detail.contentAccess}`}
+          api={api}
+          detail={detail}
+        />
+      ) : (
+        !error && (
+          <p className="empty-state" role="status">
+            正在读取 Run…
+          </p>
+        )
+      )}
+    </section>
+  );
+}
+
+function RunAttemptTimeline({
+  api,
+  detail,
+}: {
+  readonly api: RunExplorerApiContract;
+  readonly detail: RunDetailDto;
+}) {
+  const [content, setContent] = useState<RunContentDto>();
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const openContent = async () => {
+    if (!detail.contentAccess || !detail.attemptId || busy) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      setContent(await api.readRunContent(detail.run.tenantId, detail.run.runId, detail.attemptId));
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const timeline = content?.timeline ?? detail.timeline;
+  const firstRecord = timeline.records[0];
+  const origin = firstRecord === undefined ? undefined : Date.parse(firstRecord.startedAt);
+  return (
+    <>
+      {error && (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      )}
       <div className="run-content-boundary">
         {content !== undefined ? (
-          <span role="status">
-            正在显示正文。本次访问已记录审计（<code>{content.auditId}</code>）。
-          </span>
-        ) : detail?.contentAccess === true ? (
+          <>
+            <span role="status">
+              正在显示打开时的正文。本次访问已记录审计（<code>{content.auditId}</code>）。
+            </span>
+            <button type="button" className="text-button" onClick={() => setContent(undefined)}>
+              收起正文
+            </button>
+          </>
+        ) : detail.contentAccess ? (
           <>
             <span>
               当前只显示结构与指标。打开正文会读取 Prompt 与模型输出，并以你的身份记录审计。
@@ -475,9 +531,7 @@ export function RunExplorerDetail({
           <span>当前账号没有“查看运行正文”权限，只显示结构与指标。</span>
         )}
       </div>
-      {timeline === undefined ? (
-        <p className="empty-state">{busy ? "正在读取 Run…" : "暂无数据。"}</p>
-      ) : timeline.records.length === 0 ? (
+      {timeline.records.length === 0 ? (
         <p className="empty-state">该 Attempt 尚无持久事件。</p>
       ) : (
         <>
@@ -498,6 +552,6 @@ export function RunExplorerDetail({
           </ol>
         </>
       )}
-    </section>
+    </>
   );
 }

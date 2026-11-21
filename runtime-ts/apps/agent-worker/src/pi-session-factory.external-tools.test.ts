@@ -78,9 +78,11 @@ function seed(
   builtinTools: string[] = [],
   id = runId(`run-${name}`),
   toolCallingMode: "native" | "ptc" = "native",
+  origin: "normal" | "playground" = "normal",
 ) {
   return {
     ...fakeSeed(name, id),
+    origin,
     agent: fakeAgentSnapshot({
       tools: {
         mode: "configured",
@@ -381,6 +383,107 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
     ]);
     expect(faux.state.callCount).toBe(1);
   });
+  it("PTC 内部外部工具缺少 Playground Mock 时不触达 Transport 或许可", async () => {
+    const snapshot = version("http", origin, "playground-http-no-mock");
+    const persistence = new FakeExecutionPersistence();
+    const base = seed("playground-ptc-no-mock", [snapshot], [], undefined, "ptc");
+    const scope = persistence.addSeed({ ...base, origin: "playground", playgroundMocks: {} });
+    const { faux, sessions } = await pi(reader([snapshot]), "ptc");
+    faux.setResponses([
+      toolCall(
+        "run_code",
+        { code: `return await tools.${snapshot.tool.modelToolName}({runId: "ptc"});` },
+        "program-no-mock",
+      ),
+      fauxAssistantMessage("没有模拟结果"),
+    ]);
+    await worker(persistence, sessions).execute(scope);
+    expect(requests).toHaveLength(0);
+    expect(
+      persistence.permits.some(
+        ({ permit }) => permit.toolVersionId === snapshot.tool.toolVersionId,
+      ),
+    ).toBe(false);
+  });
+
+  it("PTC 客户端 Mock 复用已验证前驱，不重复写入开始事实", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const base = seed("client-mock-ptc", [], [], undefined, "ptc");
+    const scope = persistence.addSeed({
+      ...base,
+      origin: "playground",
+      playgroundMocks: { client_lookup: { result: "mocked" } },
+      agent: fakeAgentSnapshot({
+        tools: {
+          mode: "configured",
+          builtinTools: [],
+          externalTools: [],
+          clientTools: [
+            {
+              name: "client_lookup",
+              description: "查询客户端数据",
+              inputSchema: {
+                type: "object",
+                properties: { key: { type: "string" } },
+                required: ["key"],
+                additionalProperties: false,
+              },
+            },
+          ],
+          toolCallingMode: "ptc",
+        },
+      }),
+    });
+    const { faux, sessions, starts, receipts } = await pi(reader([]), "ptc");
+    faux.setResponses([
+      toolCall(
+        "run_code",
+        { code: 'return await tools.client_lookup({key: "ptc"});' },
+        "client-program",
+      ),
+      fauxAssistantMessage("完成"),
+    ]);
+    expect(await worker(persistence, sessions).execute(scope)).toEqual({ outcome: "succeeded" });
+    expect(starts.filter((item) => item.toolName === "client_lookup")).toHaveLength(1);
+    expect(
+      receipts.some(({ receipt }) => receipt.includes('"executionMode":"playground_mock"')),
+    ).toBe(true);
+    expect(persistence.permits.some(({ permit }) => permit.toolName === "client_lookup")).toBe(
+      false,
+    );
+  });
+
+  it("PTC 外部 Mock 将完成事件投影为 playground_mock", async () => {
+    const snapshot = version("http", origin, "playground-http-mock");
+    const persistence = new FakeExecutionPersistence();
+    const base = seed("playground-ptc-mock", [snapshot], [], undefined, "ptc");
+    const scope = persistence.addSeed({
+      ...base,
+      origin: "playground",
+      playgroundMocks: { [snapshot.tool.modelToolName]: { result: "mocked" } },
+    });
+    const { faux, sessions, starts, receipts } = await pi(reader([snapshot]), "ptc");
+    faux.setResponses([
+      toolCall(
+        "run_code",
+        { code: `return await tools.${snapshot.tool.modelToolName}({runId: "ptc-mock"});` },
+        "program-mock",
+      ),
+      fauxAssistantMessage("完成"),
+    ]);
+    expect(await worker(persistence, sessions).execute(scope)).toEqual({ outcome: "succeeded" });
+    expect(requests).toHaveLength(0);
+    expect(starts.filter(({ toolName }) => toolName === snapshot.tool.modelToolName)).toHaveLength(
+      1,
+    );
+    expect(
+      receipts.some(({ receipt }) => receipt.includes('"executionMode":"playground_mock"')),
+    ).toBe(true);
+    expect(JSON.stringify(persistence.record(scope).events)).toContain(
+      '"executionMode":"playground_mock"',
+    );
+  });
+
   it.each(["mcp", "http"] as const)(
     "PTC 的 %s 子调用复用同名 durable 前驱且仅消费一次许可",
     async (source) => {
@@ -715,6 +818,36 @@ describe("父子 Pi Session 的版本授权", () => {
       "call-spawn",
     );
   }
+  it("Playground 的 Agent Control 调用在 Session 执行边界拒绝", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const { port, conversations } = childConversations();
+    const scope = persistence.addSeed(
+      seed(
+        "playground-agent-control",
+        [],
+        ["spawn_agent", "followup_task"],
+        undefined,
+        "native",
+        "playground",
+      ),
+    );
+    const { faux, sessions } = await pi(reader([]));
+    faux.setResponses([spawn(), fauxAssistantMessage("已处理")]);
+    expect(await worker(persistence, sessions, port).execute(scope)).toEqual({
+      outcome: "succeeded",
+    });
+    expect(conversations).toEqual([]);
+    expect(persistence.record(scope).events).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_event",
+        payload: expect.objectContaining({
+          type: "tool.completed",
+          callId: "call-spawn",
+          isError: true,
+        }),
+      }),
+    );
+  });
   it("未授权的子 Agent 看不到父 Session 的外部工具", async () => {
     const { runChild, conversations } = harness();
     expect(await runChild("run-spawn", versions, spawn())).toEqual([[]]);

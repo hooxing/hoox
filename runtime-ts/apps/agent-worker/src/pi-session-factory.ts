@@ -45,6 +45,7 @@ import {
   McpExternalToolTransport,
   AutomationUpdateArgumentError,
   automationToolMutation,
+  createPlaygroundClientToolMocks,
   type AutomationUpdateToolArguments,
 } from "@hoox/tool-router";
 import {
@@ -485,13 +486,18 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       readonly toolCallId: string;
       readonly toolName: string;
     }) => {
+      const ptcParentId = ptcParents.get(call.toolCallId);
       if (
         invalidToolCalls.has(call.toolCallId) ||
-        durableToolCalls.has(call.toolCallId) ||
-        startedToolCalls.get(call.toolCallId) !== call.toolName
+        startedToolCalls.get(call.toolCallId) !== call.toolName ||
+        (durableToolCalls.has(call.toolCallId) &&
+          (ptcParentId === undefined ||
+            !durableToolCalls.has(ptcParentId) ||
+            startedToolCalls.get(ptcParentId) !== "run_code"))
       ) {
         throw new Error("Pi 工具缺少唯一且匹配的 tool.started");
       }
+      if (durableToolCalls.has(call.toolCallId)) return;
       // 先占住 callId；写入结果未知时必须转恢复，不得在本 Attempt 重放。
       durableToolCalls.add(call.toolCallId);
       let recorded: ToolObservationResult["outcome"] | undefined;
@@ -604,6 +610,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               readonly arguments: unknown;
               readonly signal?: AbortSignal;
             }) => {
+              if (input.origin === "playground")
+                throw new Error("PLAYGROUND_ARTIFACT_PUBLICATION_FORBIDDEN");
               const prepared = await prepareStartedSandboxTool({
                 callId: request.callId,
                 toolName: "deliver_file",
@@ -678,6 +686,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               readonly arguments: AutomationUpdateToolArguments;
               readonly signal?: AbortSignal;
             }) => {
+              // Playground 可保留稳定工具 Schema，但执行边界不得改动正式自动化。
+              if (input.origin === "playground")
+                throw new Error("PLAYGROUND_AUTOMATION_MUTATION_FORBIDDEN");
               await authorizeStartedTool({
                 callId: request.callId,
                 toolName: "automation_update",
@@ -794,6 +805,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               ? {}
               : { allowPrivateAddresses: this.externalToolConfiguration.allowPrivateAddresses }),
             transport: externalTransport,
+            runOrigin: input.origin,
+            playgroundMocks: input.origin === "playground" ? input.playgroundMocks : {},
             getCallContext: () => ({
               tenantId: input.scope.tenantId,
               threadId: input.scope.threadId,
@@ -813,13 +826,17 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             },
             authorizeAndConsume: authorizeStartedTool,
             recordReceipt: async ({ callId, receipt }) => {
-              const parsed = JSON.parse(receipt) as { readonly outcome?: "succeeded" | "failed" };
+              const parsed = JSON.parse(receipt) as {
+                readonly outcome?: "succeeded" | "failed";
+                readonly executionMode?: "playground_mock";
+              };
               const name = startedToolCalls.get(callId);
               if (name === undefined) throw new Error("EXTERNAL_TOOL_RECEIPT_INVALID");
               await externalReceiptWriter?.(
                 callId,
                 name,
                 parsed.outcome === "succeeded" ? "succeeded" : "failed",
+                parsed.executionMode,
               );
             },
             requireRecovery: async () => {
@@ -829,7 +846,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             },
           });
     let externalReceiptWriter:
-      | ((callId: string, name: string, outcome: "succeeded" | "failed") => Promise<unknown>)
+      | ((
+          callId: string,
+          name: string,
+          outcome: "succeeded" | "failed",
+          executionMode?: "playground_mock",
+        ) => Promise<unknown>)
       | undefined;
     const sessionMaterial = {
       toolCallingMode: this.toolCallingMode,
@@ -876,11 +898,34 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 callId: string,
                 toolName: string,
                 outcome: "succeeded" | "failed",
+                executionMode?: "playground_mock",
               ) => Promise<unknown>;
             }) => {
               externalReceiptWriter = ports.recordControlledReceipt;
               return externalToolFactory(externalSnapshots);
             },
+          }),
+      ...(input.origin !== "playground" ||
+      configuredTools.mode !== "configured" ||
+      configuredTools.clientTools.length === 0
+        ? {}
+        : {
+            clientTools: (ports: {
+              readonly recordControlledReceipt: (
+                callId: string,
+                toolName: string,
+                outcome: "succeeded" | "failed",
+                executionMode?: "playground_mock",
+              ) => Promise<unknown>;
+            }) =>
+              createPlaygroundClientToolMocks(configuredTools.clientTools, {
+                origin: input.origin,
+                mocks: input.playgroundMocks,
+                persistStarted: async ({ callId, toolName }) => {
+                  await recordStartedTool({ toolCallId: callId, toolName });
+                },
+                recordReceipt: ports.recordControlledReceipt,
+              }),
           }),
       createToolObservationRecorder: (outputs: ControlledToolReceiptSource) => {
         const recorder = this.createObservationRecorder(input, outputs);
@@ -956,14 +1001,28 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         ? {}
         : {
             agentControlToolExecutor: {
-              spawn: (call: Parameters<NonNullable<typeof agentControl>["spawn"]>[0]) =>
-                agentControl.spawn(call),
-              sendMessage: (call: Parameters<NonNullable<typeof agentControl>["sendMessage"]>[0]) =>
-                agentControl.sendMessage(call),
-              followUp: (call: Parameters<NonNullable<typeof agentControl>["followUp"]>[0]) =>
-                agentControl.followUp(call),
-              interrupt: (call: Parameters<NonNullable<typeof agentControl>["interrupt"]>[0]) =>
-                agentControl.interrupt(call),
+              spawn: (call: Parameters<NonNullable<typeof agentControl>["spawn"]>[0]) => {
+                if (input.origin === "playground")
+                  throw new Error("PLAYGROUND_AGENT_CONTROL_FORBIDDEN");
+                return agentControl.spawn(call);
+              },
+              sendMessage: (
+                call: Parameters<NonNullable<typeof agentControl>["sendMessage"]>[0],
+              ) => {
+                if (input.origin === "playground")
+                  throw new Error("PLAYGROUND_AGENT_CONTROL_FORBIDDEN");
+                return agentControl.sendMessage(call);
+              },
+              followUp: (call: Parameters<NonNullable<typeof agentControl>["followUp"]>[0]) => {
+                if (input.origin === "playground")
+                  throw new Error("PLAYGROUND_AGENT_CONTROL_FORBIDDEN");
+                return agentControl.followUp(call);
+              },
+              interrupt: (call: Parameters<NonNullable<typeof agentControl>["interrupt"]>[0]) => {
+                if (input.origin === "playground")
+                  throw new Error("PLAYGROUND_AGENT_CONTROL_FORBIDDEN");
+                return agentControl.interrupt(call);
+              },
               list: () => agentControl.list(),
               wait: (call: Parameters<NonNullable<typeof agentControl>["wait"]>[0]) =>
                 agentControl.wait(call),

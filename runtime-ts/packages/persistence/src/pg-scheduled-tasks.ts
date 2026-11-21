@@ -140,6 +140,18 @@ export class PgScheduledTaskRepository implements ScheduledTaskManagementPort {
       throw new TypeError("定时任务请求摘要不匹配");
     try {
       return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        if (input.createdByRunId !== undefined) {
+          const source = await client.query<{ readonly origin: string }>(
+            `SELECT origin FROM runs WHERE tenant_id=$1 AND id=$2 FOR SHARE`,
+            [input.scope.tenantId, input.createdByRunId],
+          );
+          // 仅允许从可见且已持久化的非 Playground Run 修改正式定时任务；缺失来源失败关闭。
+          if (
+            source.rows[0] === undefined ||
+            !["normal", "evaluation", "api"].includes(source.rows[0].origin)
+          )
+            return { outcome: "not_authorized" };
+        }
         await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))", [
           `${input.scope.tenantId}\u001f${input.scope.userId}\u001fautomation\u001f${input.commandId}`,
         ]);
@@ -193,21 +205,25 @@ export class PgScheduledTaskRepository implements ScheduledTaskManagementPort {
       this.pool,
       { tenantId: input.tenantId },
       async (client) => {
-        const row = await client.query<{ readonly created_by_user_id: string }>(
-          `SELECT thread.created_by_user_id
+        const row = await client.query<{
+          readonly created_by_user_id: string;
+          readonly origin: string;
+        }>(
+          `SELECT thread.created_by_user_id,run.origin
              FROM threads thread
              JOIN runs run ON run.tenant_id=thread.tenant_id AND run.thread_id=thread.id
             WHERE thread.tenant_id=$1 AND thread.id=$2 AND run.id=$3
               AND thread.status='active' AND run.status='running'`,
           [input.tenantId, input.threadId, input.runId],
         );
-        return row.rows[0]?.created_by_user_id;
+        return row.rows[0];
       },
       { readOnly: true },
     );
-    if (actor === undefined) return { outcome: "not_authorized" };
+    if (actor === undefined || !["normal", "evaluation", "api"].includes(actor.origin))
+      return { outcome: "not_authorized" };
     return this.mutate({
-      scope: { tenantId: input.tenantId, userId: actor },
+      scope: { tenantId: input.tenantId, userId: actor.created_by_user_id },
       commandId: input.commandId,
       requestDigest: digestMutation(input.mutation),
       mutation: input.mutation,

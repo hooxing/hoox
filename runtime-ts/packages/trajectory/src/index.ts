@@ -335,8 +335,14 @@ export function projectTrajectory(input: readonly ObservedRuntimeEvent[]): Traje
           record.detail = {
             ...record.detail,
             isError: payload.isError,
+            ...(payload.executionMode === undefined
+              ? {}
+              : { executionMode: payload.executionMode }),
             ...(payload.failure === undefined ? {} : { failure: payload.failure }),
           };
+          if (payload.executionMode === "playground_mock") {
+            record.summary = `${record.event} · Playground Mock`;
+          }
           closeRecord(record, observed, payload.isError ? "failed" : "completed");
         }
         if (payload.isError) failedToolCalls += 1;

@@ -293,6 +293,8 @@ export interface ExecutionAttemptSnapshot {
 export interface ClaimedExecutionSnapshot {
   readonly agent: RunAgentSnapshot | RunAgentStopCode;
   readonly run: Run;
+  readonly origin: "normal" | "playground" | "evaluation" | "api";
+  readonly playgroundMocks: Readonly<Record<string, unknown>>;
   /** 由领取事务从可信 Tenant 事实投影；旧快照缺失时必须按未启用历史目录处理。 */
   readonly tenantKind?: "personal" | "team";
   /** 个人 Tenant 为 owner；团队 Tenant 仅作为审计主体，外部共享 scope 不使用该值。 */
@@ -1125,6 +1127,9 @@ export interface AgentSessionFactoryPort {
     readonly initialInputText?: string;
     readonly skillSnapshot?: RunSkillSnapshot;
     readonly agentSnapshot: RunAgentSnapshot;
+    /** 仅由已持久化领取快照提供；子工具适配器不得从请求正文推导来源。 */
+    readonly origin: ClaimedExecutionSnapshot["origin"];
+    readonly playgroundMocks: ClaimedExecutionSnapshot["playgroundMocks"];
     /** Worker 在领取 Run 后读取一次；Root 与所有子 Agent 共用该不可变快照。 */
     readonly personalizationSnapshot?: RunPersonalizationSnapshot;
     readonly contextThroughSequence?: number;

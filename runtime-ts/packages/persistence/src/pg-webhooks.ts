@@ -215,12 +215,23 @@ export async function enqueueWebhookEvent(input: {
   readonly payload: RunWebhookPayload | ArtifactWebhookPayload;
 }): Promise<void> {
   await input.client.query(
-    `INSERT INTO webhook_outbox(tenant_id,id,webhook_id,event_id,event_type,payload)
-     SELECT $1,'delivery_'||replace(gen_random_uuid()::text,'-',''),webhook.id,$2,$3,$4::jsonb
+    `INSERT INTO webhook_outbox(
+       tenant_id,id,webhook_id,event_id,event_type,payload,source_run_id,source_run_origin
+     )
+     SELECT $1,'delivery_'||replace(gen_random_uuid()::text,'-',''),webhook.id,$2,$3,$4::jsonb,
+            source_run.id,source_run.origin
        FROM tenant_webhooks webhook
+       JOIN runs source_run ON source_run.tenant_id=$1 AND source_run.id=$5
       WHERE webhook.tenant_id=$1 AND webhook.disabled_at IS NULL AND webhook.event_types @> ARRAY[$3]::text[]
+        AND source_run.origin<>'playground'
      ON CONFLICT(tenant_id,webhook_id,event_id) DO NOTHING`,
-    [input.tenantId, input.payload.id, input.payload.type, JSON.stringify(input.payload)],
+    [
+      input.tenantId,
+      input.payload.id,
+      input.payload.type,
+      JSON.stringify(input.payload),
+      input.payload.data.runId,
+    ],
   );
 }
 
@@ -307,9 +318,17 @@ export class PgWebhookOutboxStore {
       this.pool,
       async (client) => {
         await client.query(
+          `UPDATE webhook_outbox
+              SET state='disabled',last_error_code='playground_source',claim_token=NULL,claim_expires_at=NULL
+            WHERE source_run_origin='playground'
+              AND state IN ('pending','claimed')
+              AND (state='pending' OR claim_expires_at<clock_timestamp())`,
+        );
+        await client.query(
           `WITH exhausted AS (
            SELECT tenant_id,id FROM webhook_outbox
-            WHERE state IN ('pending','claimed') AND attempts >= $1
+            WHERE source_run_origin IN ('normal','evaluation','api')
+              AND state IN ('pending','claimed') AND attempts >= $1
               AND (state='pending' OR claim_expires_at < clock_timestamp())
             ORDER BY next_attempt_at,created_at
             FOR UPDATE SKIP LOCKED LIMIT 100
@@ -328,7 +347,8 @@ export class PgWebhookOutboxStore {
           `WITH candidate AS (
            SELECT o.tenant_id,o.id,w.endpoint_url FROM webhook_outbox o
              JOIN tenant_webhooks w ON w.tenant_id=o.tenant_id AND w.id=o.webhook_id
-            WHERE o.state IN ('pending','claimed') AND o.next_attempt_at<=clock_timestamp()
+            WHERE o.source_run_origin IN ('normal','evaluation','api')
+              AND o.state IN ('pending','claimed') AND o.next_attempt_at<=clock_timestamp()
               AND (o.state='pending' OR o.claim_expires_at<clock_timestamp())
               AND o.attempts < $2 AND w.disabled_at IS NULL
               AND NOT (o.tenant_id = ANY($3::text[]))
@@ -380,8 +400,9 @@ export class PgWebhookOutboxStore {
         const current = await client.query<{
           secret_ciphertext: EncryptedWebhookSecret;
           disabled: boolean;
+          source_run_origin: string;
         }>(
-          `SELECT w.secret_ciphertext,w.disabled_at IS NOT NULL AS disabled
+          `SELECT w.secret_ciphertext,w.disabled_at IS NOT NULL AS disabled,o.source_run_origin
            FROM webhook_outbox o
            JOIN tenant_webhooks w ON w.tenant_id=o.tenant_id AND w.id=o.webhook_id
           WHERE o.tenant_id=$1 AND o.id=$2 AND o.state='claimed' AND o.claim_token=$3
@@ -391,6 +412,22 @@ export class PgWebhookOutboxStore {
         );
         const row = current.rows[0];
         if (row === undefined) return { outcome: "skip" } as const;
+        if (row.source_run_origin === "playground") {
+          await client.query(
+            `UPDATE webhook_outbox
+              SET state='disabled',last_error_code='playground_source',claim_token=NULL,claim_expires_at=NULL
+            WHERE tenant_id=$1 AND id=$2 AND state='claimed' AND claim_token=$3`,
+            [delivery.tenantId, delivery.id, delivery.claimToken],
+          );
+          return { outcome: "skip" } as const;
+        }
+        // 未知来源不能发送，也不能自动结算为 Playground；保留事实以供后续核查。
+        if (
+          !(["normal", "evaluation", "api"] as const).includes(
+            row.source_run_origin as "normal" | "evaluation" | "api",
+          )
+        )
+          return { outcome: "skip" } as const;
         if (row.disabled) {
           await client.query(
             `UPDATE webhook_outbox

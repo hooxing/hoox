@@ -748,10 +748,113 @@ async function seedWebhookTenant(target: IsolatedMigrationTarget, label: string)
     `INSERT INTO "${target.context.schema}".tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,clock_timestamp())`,
     [tenant, user],
   );
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".memberships(tenant_id,id,user_id,role,status,created_at)
+     VALUES($1,$2,$3,'owner','active',clock_timestamp())`,
+    [tenant, `membership_${label}_${process.pid}`, user],
+  );
   return { tenant, user };
 }
 
+async function seedWebhookRun(
+  target: IsolatedMigrationTarget,
+  tenant: string,
+  user: string,
+  runId: string,
+) {
+  const threadId = `thread_${runId}`;
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+     VALUES($1,$2,$3,'Webhook fixture','active',clock_timestamp(),clock_timestamp())`,
+    [tenant, threadId, user],
+  );
+  await administrativePool.query(
+    `INSERT INTO "${target.context.schema}".runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
+     VALUES($1,$2,$3,'succeeded',clock_timestamp(),clock_timestamp(),'normal')`,
+    [tenant, runId, threadId],
+  );
+}
+
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("14→15 升级以真实 Migrator 回填正常 Webhook，并允许 Dispatcher 投递且可回退", async () => {
+    const target = await createIsolatedMigrationTarget("webhook_v15_backfill");
+    const webhook = await webhookIsolatedPools(target);
+    try {
+      await migrateUp(target.pool, target.context);
+      expect(
+        (await target.pool.query<{ readonly current_user: string }>("SELECT current_user")).rows[0]
+          ?.current_user,
+      ).toBe(target.context.migratorRole);
+      const { tenant, user } = await seedWebhookTenant(target, "v15_backfill");
+      const runId = `run_webhook_v15_${process.pid}`;
+      await seedWebhookRun(target, tenant, user, runId);
+      const repository = new PgWebhookRepository(webhook.runtime);
+      const subscription = await repository.create({
+        scope: { tenantId: tenant, userId: user },
+        name: "migration backfill",
+        endpointUrl: "https://hooks.example.invalid/migration-backfill",
+        eventTypes: ["run.succeeded"],
+        secret: webhookSecret("v15_backfill"),
+      });
+      await asTenant(webhook.runtime, tenant, user, async (client) => {
+        await enqueueRunStatusWebhook(client, {
+          tenantId: tenant,
+          runId,
+          status: "succeeded",
+          runVersion: 1,
+          occurredAt: "2026-11-20T00:00:00.000Z",
+        });
+      });
+
+      await migrateDown(target.pool, {
+        ...target.context,
+        runtimeRole,
+        targetVersion: 14,
+        allowDestructive: true,
+        environment: "test",
+      });
+      const atVersion14 = await administrativePool.query<{ readonly present: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+          WHERE table_schema=$1 AND table_name='webhook_outbox' AND column_name='source_run_origin') AS present`,
+        [target.context.schema],
+      );
+      expect(atVersion14.rows[0]?.present).toBe(false);
+
+      // migrateUp 的连接身份是真实、无 BYPASSRLS 的 Migrator；正常 Outbox 必须可见并回填。
+      await migrateUp(target.pool, target.context);
+      const migrated = await administrativePool.query<{
+        readonly event_id: string;
+        readonly source_run_id: string;
+        readonly source_run_origin: string;
+        readonly state: string;
+      }>(
+        `SELECT event_id,source_run_id,source_run_origin,state FROM "${target.context.schema}".webhook_outbox
+          WHERE tenant_id=$1 AND payload->'data'->>'runId'=$2`,
+        [tenant, runId],
+      );
+      expect(migrated.rows).toHaveLength(1);
+      expect(migrated.rows[0]).toMatchObject({
+        source_run_id: runId,
+        source_run_origin: "normal",
+        state: "pending",
+      });
+      const store = new PgWebhookOutboxStore(webhook.dispatcher);
+      const delivery = await store.claim({ owner: "migration-backfill" });
+      expect(delivery).toMatchObject({
+        webhookId: subscription.id,
+        eventId: migrated.rows[0]?.event_id,
+      });
+      if (delivery === undefined) throw new Error("升级后正常投递不可领取");
+      await expect(store.permitSend(delivery, 0)).resolves.toEqual({
+        outcome: "send",
+        secretCiphertext: webhookSecret("v15_backfill"),
+      });
+    } finally {
+      await webhook.close();
+      await target.close();
+    }
+  });
+
   it("Webhook 角色边界：Dispatcher 只读投递列，Runtime 与 Team Coordinator 不能改写密文或 Outbox", async () => {
     const target = await createIsolatedMigrationTarget("webhook_acl");
     const webhook = await webhookIsolatedPools(target);
@@ -759,6 +862,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await migrateUp(target.pool, target.context);
       const { tenant, user } = await seedWebhookTenant(target, "acl");
       const repository = new PgWebhookRepository(webhook.runtime);
+      await seedWebhookRun(target, tenant, user, "run_team_dissolved");
       const created = await repository.create({
         scope: { tenantId: tenant, userId: user },
         name: "acl",
@@ -934,6 +1038,16 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         eventTypes: ["run.succeeded", "run.failed"],
         secret: webhookSecret("c1"),
       });
+      for (const runId of [
+        "run_rollback",
+        "run_one",
+        "run_two",
+        "run_after_disable",
+        "run_manual_a",
+        "run_manual_b",
+      ]) {
+        await seedWebhookRun(target, tenant, user, runId);
+      }
       const event = (runId: string) =>
         runWebhookPayload({
           tenantId: tenant,
@@ -4326,6 +4440,58 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("Playground 来源数据在 FORCE RLS 隐藏时仍阻止回退并保留隔离事实", async () => {
+    const target = await createIsolatedMigrationTarget("playground_down_guard");
+    try {
+      await migrateUp(target.pool, target.context);
+      await administrativePool.query(
+        `BEGIN;
+         SET LOCAL search_path TO "${target.context.schema}";
+         SET LOCAL session_replication_role = replica;
+         INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at,is_playground)
+           VALUES('tenant_hidden','thread_hidden','user_hidden','Playground','active',now(),now(),true);
+         INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
+           VALUES('tenant_hidden','run_hidden','thread_hidden','queued',now(),now(),'playground');
+         COMMIT;`,
+      );
+      const hidden = await target.pool.query<{ readonly count: string }>(
+        "SELECT count(*)::text AS count FROM runs WHERE origin='playground'",
+      );
+      expect(hidden.rows[0]?.count).toBe("0");
+
+      let rollbackError: unknown;
+      try {
+        await migrateDown(target.pool, {
+          ...target.context,
+          runtimeRole,
+          targetVersion: 14,
+          allowDestructive: true,
+          environment: "test",
+        });
+      } catch (error) {
+        rollbackError = error;
+      }
+      expect(sqlStateFromCause(rollbackError)).toBe("55000");
+      const preserved = await administrativePool.query<{
+        readonly origin: string;
+        readonly marked: boolean;
+      }>(
+        `SELECT run.origin,thread.is_playground AS marked
+           FROM "${target.context.schema}".runs run
+           JOIN "${target.context.schema}".threads thread
+             ON thread.tenant_id=run.tenant_id AND thread.id=run.thread_id
+          WHERE run.id='run_hidden'`,
+      );
+      expect(preserved.rows).toEqual([{ origin: "playground", marked: true }]);
+      const migrationVersion = await administrativePool.query<{ readonly version: number }>(
+        `SELECT max(version)::int AS version FROM "${target.context.schema}".runtime_schema_migrations`,
+      );
+      expect(migrationVersion.rows[0]?.version).toBe(migrationContract.latestVersion);
+    } finally {
+      await target.close();
+    }
+  });
+
   it("down 只有显式 test 授权可执行并能再次向前", async () => {
     await expect(
       migrateDown(migratorPool, {
@@ -4944,7 +5110,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["agent_revision_revocations", new Set(["SELECT"])],
       ["agent_definition_commands", new Set()],
       ["agent_definition_audits", new Set()],
-      ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
+      ["runs", new Set(["SELECT", "INSERT"])],
       ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
       ["workspace_revisions", new Set(["SELECT", "INSERT"])],
       ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
@@ -5008,6 +5174,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       );
     }
     const expectedColumnUpdates = new Map<string, ReadonlySet<string>>([
+      ["runs", new Set(["status", "version", "updated_at"])],
       [
         "threads",
         new Set([

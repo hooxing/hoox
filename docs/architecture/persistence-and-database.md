@@ -38,6 +38,12 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 
 角色属于整个 PostgreSQL 集群；同一集群的开发、预览和生产数据库使用不同角色集合。迁移在任何 DDL 前校验全部角色、Schema owner、`search_path` 与跨数据库依赖，并在同一事务中完成 Schema 迁移、迁移记录、策略重绑定和最小 ACL 重建。readiness 探测的是实际连接身份，而不是配置文件中的声明。
 
+## Playground 持久化边界
+
+`runs.origin` 是服务端受理路径写入的可信来源；客户端字段不能覆盖它。普通 Runtime 受理策略拒绝 Playground Thread/Run，专用 Playground 事务只有在有效 `operator`/`admin`、活动 Membership、本人个人 Tenant 均成立时才能插入草稿 Revision 快照。该路径不放宽普通已发布 Revision 的策略。
+
+`run_playground_mocks` 通过包含来源值的复合外键只能关联 Playground Run，并按 Tenant RLS 隔离。当前 Playground 受理请求可携带 `mocks` 对象，与 Run 在同一事务写入；仅当前有效管理员本人在自己的个人 Tenant 中创建的 Playground Run 可以配置。键为外部工具版本 ID 或该 Revision 中客户端工具的精确名称，值为任意合法 JSON 值；缺省为空对象。Run 创建后的 Mock 不可变，修改配置需重新受理新 Run。Worker 领取快照仅在持久化 `origin=playground` 时读取 Mock；其他来源强制投影空配置。工具执行边界再次检查可信领取快照中的来源，只有 Playground 外部工具/客户端工具可命中；Mock 命中不发起网络请求、不消费外部工具凭据许可，成功回执和轨迹标记 `playground_mock`。缺少配置时按既定工具失败语义结束，不回退到真实执行。Mock 结果只进入工具执行结果，不进入 system prompt、工具 schema 或轨迹安全视图的正文投影。数据库外键、领取投影及执行层共同保证普通、API 与评测 Run 永不读取或应用 Mock。统计视图与用户目录显式排除 Playground 数据。 Playground 的来源隔离也覆盖事务副作用：终态转换不为其创建业务 Webhook 或长期记忆任务；记忆领取器与 Tenant 调度即使遇到遗留待消费任务，也必须按关联 Run 的持久化来源跳过。Playground 交付 Artifact 保留在 Run/Artifact 事实中供受限运行详情使用，但不设为普通可搜索 Resource、不写入历史文件目录；ResourceFS、个人历史列表及按 ID/路径的直接解析都必须关联 Artifact 来源 Run 并排除 `origin=playground`，不能依赖管理身份或 UI 隐藏。
+
 ## 事务与幂等
 
 - 命令式写入使用显式幂等键，并以 canonical JSON 摘要绑定完整请求；同键异摘要稳定冲突。

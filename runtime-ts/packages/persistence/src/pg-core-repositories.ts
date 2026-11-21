@@ -29,6 +29,7 @@ import type {
   WorkspaceRepository,
 } from "./ports.js";
 import { createRunConfigurationSnapshots } from "./pg-run-agent-snapshot.js";
+import { enqueueRunStatusWebhook } from "./pg-webhooks.js";
 import { withTenantTransaction } from "./postgres.js";
 import { mapRun, mapTenant, mapTenantBundle, mapThread, mapWorkspace } from "./row-mappers.js";
 import {
@@ -477,6 +478,14 @@ export class PgRunRepository implements RunRepository {
         );
         const version = result.rows[0]?.version;
         if (version !== undefined) {
+          // API 取消等外部终态在提交 Run 转换的同一事务内入队；版本条件失败时不会到达这里。
+          await enqueueRunStatusWebhook(client, {
+            tenantId: scope.tenantId,
+            runId: run.id,
+            status: run.status,
+            runVersion: version,
+            occurredAt: run.updatedAt,
+          });
           if (run.status === "cancelled") {
             await cancelThreadQueuedRun(client, {
               tenantId: scope.tenantId,

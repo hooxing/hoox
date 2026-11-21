@@ -1381,7 +1381,7 @@ function formatRolloutProjection(
       try {
         if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(item.toolCallId)) throw new Error();
         const receipt = parseControlledToolReceipt(
-          encodeControlledToolReceipt(item.toolName, item.outcome),
+          encodeControlledToolReceipt(item.toolName, item.outcome, item.executionMode),
         );
         assertControlledToolObservation({
           receipt,

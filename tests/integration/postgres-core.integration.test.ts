@@ -1774,7 +1774,22 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     try {
       await migrateUp(target.pool, target.context);
       const created = (await policies()).rows;
-      expect(created).toHaveLength(12);
+      expect(created.map((policy) => policy.policyname)).toEqual([
+        "cleanup_outbox_admin_projection_read",
+        "execution_attempts_admin_projection_read",
+        "memory_ingestion_outbox_admin_projection_read",
+        "run_dispatch_outbox_admin_projection_read",
+        "run_events_admin_projection_read",
+        "runs_admin_projection_read",
+        "sandbox_registry_admin_projection_read",
+        "scheduled_task_occurrences_admin_projection_read",
+        "scheduled_tasks_admin_projection_read",
+        "tenant_skill_installations_admin_projection_read",
+        "thread_continuity_metric_observations_admin_projection_read",
+        "threads_admin_projection_read",
+        "user_accounts_admin_projection_read",
+        "user_sessions_admin_projection_read",
+      ]);
       for (const policy of created) {
         await target.pool.query(
           `ALTER POLICY "${policy.policyname}" ON "${policy.tablename}" TO "${migratorRole}"`,
@@ -3428,7 +3443,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           "title_generation_version",
         ]),
       ],
-      ["memberships", new Set(["lock_marker"])],
+      ["memberships", new Set(["lock_marker", "status"])],
       [
         "blob_lifecycles",
         new Set([
@@ -3562,10 +3577,29 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       database_create: false,
       database_temporary: false,
     });
-    const sequenceCount = await migratorPool.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'S'",
+    const sequencePrivileges = await migratorPool.query<{
+      sequence_name: string;
+      can_select: boolean;
+      can_update: boolean;
+      can_use: boolean;
+    }>(
+      `SELECT relname AS sequence_name,
+              has_sequence_privilege($1, oid, 'SELECT') AS can_select,
+              has_sequence_privilege($1, oid, 'UPDATE') AS can_update,
+              has_sequence_privilege($1, oid, 'USAGE') AS can_use
+         FROM pg_class
+        WHERE relnamespace = current_schema()::regnamespace AND relkind = 'S'
+        ORDER BY relname`,
+      [runtimeRole],
     );
-    expect(sequenceCount.rows[0]?.count).toBe("0");
+    expect(sequencePrivileges.rows).toEqual([
+      {
+        sequence_name: "agent_definition_audits_audit_id_seq",
+        can_select: false,
+        can_update: false,
+        can_use: false,
+      },
+    ]);
     await expect(
       runtimePool.query("CREATE TABLE forbidden_runtime_ddl(id integer)"),
     ).rejects.toMatchObject({

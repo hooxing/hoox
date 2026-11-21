@@ -346,13 +346,20 @@ ALTER TABLE webhook_outbox
   ADD COLUMN source_run_origin text NOT NULL DEFAULT 'unknown'
     CHECK (source_run_origin IN ('normal','playground','evaluation','api','unknown'));
 
--- 历史 Outbox 以既有事件中的 Run ID 与持久化来源回填；找不到事实的旧事件保持 unknown 并失败关闭。
+-- Migrator 不具备 BYPASSRLS；仅在此迁移事务内暂时关闭 FORCE RLS，确保正常历史投递也能回填。
+-- 后续任何语句失败都会回滚事务，恢复到迁移前的 RLS 状态。
+ALTER TABLE runs DISABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_outbox DISABLE ROW LEVEL SECURITY;
 UPDATE webhook_outbox outbox
    SET source_run_id=source_run.id,
        source_run_origin=source_run.origin
   FROM runs source_run
  WHERE source_run.tenant_id=outbox.tenant_id
    AND source_run.id=outbox.payload->'data'->>'runId';
+ALTER TABLE webhook_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_outbox FORCE ROW LEVEL SECURITY;
+ALTER TABLE runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE runs FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE webhook_outbox
   ADD CONSTRAINT webhook_outbox_source_run_shape

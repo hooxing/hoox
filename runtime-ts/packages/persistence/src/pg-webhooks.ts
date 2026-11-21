@@ -320,7 +320,7 @@ export class PgWebhookOutboxStore {
         await client.query(
           `UPDATE webhook_outbox
               SET state='disabled',last_error_code='playground_source',claim_token=NULL,claim_expires_at=NULL
-            WHERE source_run_origin NOT IN ('normal','evaluation','api')
+            WHERE source_run_origin='playground'
               AND state IN ('pending','claimed')
               AND (state='pending' OR claim_expires_at<clock_timestamp())`,
         );
@@ -412,11 +412,7 @@ export class PgWebhookOutboxStore {
         );
         const row = current.rows[0];
         if (row === undefined) return { outcome: "skip" } as const;
-        if (
-          !(["normal", "evaluation", "api"] as const).includes(
-            row.source_run_origin as "normal" | "evaluation" | "api",
-          )
-        ) {
+        if (row.source_run_origin === "playground") {
           await client.query(
             `UPDATE webhook_outbox
               SET state='disabled',last_error_code='playground_source',claim_token=NULL,claim_expires_at=NULL
@@ -425,6 +421,13 @@ export class PgWebhookOutboxStore {
           );
           return { outcome: "skip" } as const;
         }
+        // 未知来源不能发送，也不能自动结算为 Playground；保留事实以供后续核查。
+        if (
+          !(["normal", "evaluation", "api"] as const).includes(
+            row.source_run_origin as "normal" | "evaluation" | "api",
+          )
+        )
+          return { outcome: "skip" } as const;
         if (row.disabled) {
           await client.query(
             `UPDATE webhook_outbox

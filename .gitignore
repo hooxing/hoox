@@ -29,3 +29,6 @@ model-wire-traces/
 runtime-ts/vendor/cubesandbox-sdk/source/
 runtime-ts/vendor/cubesandbox-sdk/*.zip
 runtime-ts/vendor/cubesandbox-sdk/*.tar.gz
+
+# 本地使用的第三方 Skill，来源与许可证未登记，不进入仓库
+.agents/skills/refactoring-ui/

@@ -4,6 +4,7 @@ import {
   createHttpExternalToolTransport,
   deriveHttpToolSigningKey,
   importOpenApiOperation,
+  previewHttpToolDeclaration,
   verifyHttpToolSignature,
 } from "./http-external-tool.js";
 
@@ -209,4 +210,68 @@ describe("HTTP 外部工具签名与 OpenAPI 导入", () => {
     for (const variant of variants)
       expect(() => importOpenApiOperation(variant)).toThrow("HTTP_OPENAPI_OPERATION_UNSUPPORTED");
   });
+});
+
+describe("单端点 HTTP 预览", () => {
+  const base = {
+    mode: "endpoint",
+    toolName: "lookup",
+    description: "",
+    endpoint: "https://example.invalid/data?scope=all",
+    method: "GET",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  } as const;
+  it("保留固定查询、路径与必填字段", () => {
+    expect(previewHttpToolDeclaration(base)).toMatchObject({
+      endpoint: base.endpoint,
+      inputSchema: base.inputSchema,
+    });
+  });
+  it.each([
+    "https://user@example.invalid/data",
+    "https://example.invalid/data#fragment",
+    "https://example.invalid/data#",
+    "https://example.invalid/base/../data",
+  ])("拒绝会被 URL 重写的声明 %s", (endpoint) => {
+    expect(() => previewHttpToolDeclaration({ ...base, endpoint })).toThrow();
+  });
+  it.each([["missing"], [1], ["query", "query"], null].map((required) => ({ required })))(
+    "拒绝无效的 GET 必填字段",
+    ({ required }) => {
+      expect(() =>
+        previewHttpToolDeclaration({ ...base, inputSchema: { ...base.inputSchema, required } }),
+      ).toThrow();
+    },
+  );
+});
+
+it("两种预览均不展示含认证查询或超长的最终端点", () => {
+  for (const server of [
+    "https://example.invalid/?api%5fkey=placeholder",
+    "https://example.invalid/?X-Amz-Signature=placeholder",
+    `https://example.invalid/${"a".repeat(2048)}`,
+  ]) {
+    const common = { toolName: "lookup", description: "" };
+    expect(() =>
+      previewHttpToolDeclaration({
+        ...common,
+        mode: "openapi",
+        document: { openapi: "3.1.0", server, path: "/m", method: "GET", operation: {} },
+      }),
+    ).toThrow();
+    expect(() =>
+      previewHttpToolDeclaration({
+        ...common,
+        mode: "endpoint",
+        endpoint: server,
+        method: "GET",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      }),
+    ).toThrow();
+  }
 });

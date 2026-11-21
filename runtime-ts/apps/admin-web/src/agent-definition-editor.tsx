@@ -1,4 +1,5 @@
 import {
+  type AdminAgentDefinitionList,
   AGENT_OPERATOR_INSTRUCTIONS_MAX_BYTES,
   type AdminSetAgentAvailability,
   type AgentPinnedModelReferenceDto,
@@ -128,13 +129,7 @@ export function AgentDefinitionEditor({
   readonly initial?: AgentRevisionContentDto;
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
-  readonly externalToolOptions?: readonly {
-    toolVersionId: string;
-    source: "mcp" | "http";
-    modelToolName: string;
-    description: string;
-    batchName: string;
-  }[];
+  readonly externalToolOptions?: Readonly<AdminAgentDefinitionList["externalToolOptions"]>;
   readonly saving: boolean;
   readonly onSave: (
     content: AgentRevisionContentDto,
@@ -196,6 +191,7 @@ export function AgentDefinitionEditor({
         throw new Error("最多填写 12 条建议问题，每条不超过 500 字节。");
       }
       if (unavailableTools.length > 0) throw new Error("请移除平台已禁用的内置工具。");
+      if (unavailableExternalTools.length) throw new Error("请移除已不可选的外部工具版本。");
       await onSave(
         { ...content, suggestedQuestions, skillVersions: skills(skillVersions) },
         initial === undefined ? parseAvailability(scope, tenantIds) : undefined,
@@ -415,7 +411,10 @@ export function AgentDefinitionEditor({
                         })
                       }
                     />
-                    {tool.modelToolName} · {tool.batchName}
+                    {tool.modelToolName} · {tool.batchName} · {tool.toolVersionId}
+                    {tool.description && (
+                      <Typography.Text type="secondary"> — {tool.description}</Typography.Text>
+                    )}
                   </label>
                 );
               })}
@@ -442,7 +441,7 @@ export function AgentDefinitionEditor({
             </fieldset>
           )}
           <Typography.Text type="secondary">
-            HTTP 端点声明与 OpenAPI 导入预览即将支持；版本发布须待 HTTP 方法字段接入。
+            HTTP 工具尚不能发布或加入 Agent。管理员可在「外部工具」页预览端点声明或 OpenAPI 片段。
           </Typography.Text>
           <label className="agent-field" htmlFor={`${formId}-skills`}>
             <span>自带 Skill（每行填写 Skill ID 和版本）</span>

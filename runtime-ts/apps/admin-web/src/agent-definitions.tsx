@@ -1,4 +1,5 @@
 import type {
+  AdminAgentDefinitionList,
   AdminAgentRevisionHistory,
   AdminSetAgentAvailability,
   AgentDefinitionDto,
@@ -150,13 +151,7 @@ function CreateAgent({
   readonly api: AgentDefinitionApiContract;
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
-  readonly externalToolOptions: readonly {
-    toolVersionId: string;
-    source: "mcp" | "http";
-    modelToolName: string;
-    description: string;
-    batchName: string;
-  }[];
+  readonly externalToolOptions: Readonly<AdminAgentDefinitionList["externalToolOptions"]>;
   readonly onOpen: (id: string) => void;
   readonly onBack: () => void;
 }) {
@@ -223,13 +218,7 @@ function AgentHistory({
   readonly canManage: boolean;
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
-  readonly externalToolOptions: readonly {
-    toolVersionId: string;
-    source: "mcp" | "http";
-    modelToolName: string;
-    description: string;
-    batchName: string;
-  }[];
+  readonly externalToolOptions: Readonly<AdminAgentDefinitionList["externalToolOptions"]>;
   readonly onBack: () => void;
 }) {
   const client = useQueryClient();

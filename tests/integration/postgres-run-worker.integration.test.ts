@@ -636,25 +636,29 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     await runtime?.end();
     await workerCoordinator?.end();
     await migrator?.end();
-    if (!(schema.startsWith("it_rw_") || schema.startsWith("m4_ci_"))) {
-      throw new Error("拒绝清理非测试 Schema");
-    }
-    await admin
-      ?.query(
-        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
-       REVOKE CONNECT ON DATABASE "${databaseName}"
-         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}"`,
+    if (preprovisionedDatabase) {
+      // 预置角色属于整个 CI 集群；本套件只清理约定的 M4 Schema，保留所有角色与 CONNECT。
+      if (schema !== "m4_ci_runtime_schema") throw new Error("拒绝清理非 M4 测试 Schema");
+      await admin?.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    } else {
+      const roles = [
+        runtimeRole,
+        migratorRole,
+        skillPublisherRole,
+        workerCoordinatorRole,
+        teamCoordinatorRole,
+        adminControlRole,
+        webhookDispatcherRole,
+      ];
+      if (
+        schema !== `it_rw_${suffix}` ||
+        !roles.every((role) => role.startsWith("it_rw_") && role.endsWith(suffix))
       )
-      .catch(() => undefined);
-    await admin?.query(
-      `DROP ROLE IF EXISTS "${runtimeRole}";
-       DROP ROLE IF EXISTS "${workerCoordinatorRole}";
-       DROP ROLE IF EXISTS "${teamCoordinatorRole}";
-       DROP ROLE IF EXISTS "${webhookDispatcherRole}";
-       DROP ROLE IF EXISTS "${adminControlRole}";
-       DROP ROLE IF EXISTS "${skillPublisherRole}";
-       DROP ROLE IF EXISTS "${migratorRole}"`,
-    );
+        throw new Error("拒绝清理非本测试角色");
+      await admin?.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+        REVOKE CONNECT ON DATABASE "${databaseName}" FROM ${roles.map((role) => `"${role}"`).join(",")};
+        DROP ROLE ${roles.map((role) => `"${role}"`).join(",")}`);
+    }
     await admin?.end();
   });
 

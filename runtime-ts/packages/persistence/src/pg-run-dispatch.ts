@@ -33,7 +33,7 @@ function timestamp(value: unknown) {
   throw new TypeError("数据库未返回 Run 时间");
 }
 
-function inputDigest(value: string): string {
+export function inputDigest(value: string): string {
   if (
     value.trim().length === 0 ||
     Buffer.byteLength(value, "utf8") > maxInputBytes ||

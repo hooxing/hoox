@@ -14,6 +14,7 @@ import {
   PgRenamePersonalThreadCommand,
 } from "./pg-core-repositories.js";
 import { PgIdentityConfigurationRepository } from "./pg-identity-configuration.js";
+import { PgPlaygroundRepository } from "./pg-playground.js";
 import { PgApiKeyRepository } from "./pg-api-keys.js";
 import { PgWebhookRepository } from "./pg-webhooks.js";
 import { PgLocalAccountRepository } from "./pg-local-account.js";
@@ -91,6 +92,7 @@ export interface MigrationRuntime {
 /** API 常驻进程所需的 PostgreSQL 能力集合；身份框架只获得专用数据库适配入口。 */
 export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
+  readonly playground: PgPlaygroundRepository;
   readonly agentDefinitions: PgAgentDefinitionRepository;
   readonly archiveThread: ArchiveThreadCommandPort;
   readonly renamePersonalThread: RenamePersonalThreadCommandPort;
@@ -138,6 +140,7 @@ export function createApiPersistenceRuntime(
     options.teamCoordinator === undefined ? undefined : createPostgresPool(options.teamCoordinator);
   return Object.freeze({
     repositories: new PgCoreRepositories(pool),
+    playground: new PgPlaygroundRepository(pool),
     agentDefinitions: new PgAgentDefinitionRepository(pool),
     archiveThread: new PgArchiveThreadCommand(pool),
     renamePersonalThread: new PgRenamePersonalThreadCommand(pool),

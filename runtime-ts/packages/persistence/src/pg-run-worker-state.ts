@@ -115,7 +115,7 @@ const aggregateColumns = `
   creator_membership.role AS thread_creator_membership_role,
   creator_membership.status AS thread_creator_membership_status,
   creator_membership.created_at AS thread_creator_membership_created_at,
-  r.id AS run_id, r.status AS run_status,
+  r.id AS run_id, r.status AS run_status, r.origin AS run_origin,
   r.created_at AS run_created_at, r.updated_at AS run_updated_at,
   w.id AS workspace_id, w.current_revision_number, w.current_revision_id,
   w.lease_epoch, w.created_at AS workspace_created_at, w.updated_at AS workspace_updated_at,
@@ -1180,6 +1180,16 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             input.scope.runId,
           );
           const agent = await readRunAgentSnapshot(client, input.scope);
+          const runOrigin: "normal" | "playground" | "evaluation" | "api" = row.run_origin;
+          const playgroundMocks =
+            runOrigin === "playground"
+              ? ((
+                  await client.query<{ mock_results: Readonly<Record<string, unknown>> }>(
+                    `SELECT mock_results FROM run_playground_mocks WHERE tenant_id=$1 AND run_id=$2`,
+                    [input.scope.tenantId, input.scope.runId],
+                  )
+                ).rows[0]?.mock_results ?? {})
+              : {};
           const agentRevoked =
             agent !== undefined && (await isRunAgentRevoked(client, input.scope));
           const skills = await readRunSkillSnapshot(
@@ -1201,6 +1211,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             snapshot: {
               agent: agentRevoked ? "AGENT_REVISION_REVOKED" : (agent ?? "AGENT_SNAPSHOT_INVALID"),
               run: state.run,
+              origin: runOrigin,
+              playgroundMocks,
               tenantKind: row.tenant_kind === "personal" ? "personal" : "team",
               memorySubjectUserId: String(row.owner_user_id ?? row.thread_created_by_user_id),
               requestedByUserId: String(

@@ -33,6 +33,7 @@ const secret = "SECRET-用户与模型正文";
 let administrator!: Pool;
 let migrator!: Pool;
 let control!: Pool;
+let runtime!: Pool;
 let created = false;
 
 function roleUrl(role: string): string {
@@ -178,12 +179,14 @@ beforeAll(async () => {
   );
   migrator = createPostgresPool({ connectionString: roleUrl(roles.migratorRole), schema });
   control = createPostgresPool({ connectionString: roleUrl(roles.adminControlRole), schema });
+  runtime = createPostgresPool({ connectionString: roleUrl(roles.runtimeRole), schema });
   await migrateUp(migrator, security);
   await seed();
 });
 
 afterAll(async () => {
   await control?.end();
+  await runtime?.end();
   await migrator?.end();
   if (created) {
     await administrator.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
@@ -212,6 +215,32 @@ async function auditRows() {
 }
 
 describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
+  it("Playground 来源受管理员个人空间约束，普通 Run 不能关联 Mock", async () => {
+    const client = await runtime.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.tenant_id','tenant_a',true)");
+      await client.query("SELECT set_config('app.user_id','user_viewer',true)");
+      await client.query("SELECT set_config('app.playground_acceptance','true',true)");
+      await expect(
+        client.query(
+          `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
+         VALUES('tenant_a','run_forged_playground','thread_1','queued',now(),now(),'playground')`,
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
+    }
+
+    await expect(
+      administrator.query(
+        `INSERT INTO "${schema}".run_playground_mocks(tenant_id,run_id,mock_results,idempotency_key,request_digest)
+       VALUES('tenant_a','run_a1','{"lookup":{"ok":true}}'::jsonb,'test-mock-key',repeat('a',64))`,
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
+  });
+
   it("跨 Tenant 列表按 Tenant、状态与时间筛选，并汇总耗时、调用与 Token", async () => {
     const explorer = service();
     const all = await explorer.listRuns("user_viewer");
@@ -236,7 +265,7 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
       failedToolCalls: 1,
       errorCount: 1,
       agentDefinitionId: null,
-      origin: null,
+      origin: "normal",
       usage: {
         inputTokens: 200,
         outputTokens: 40,
@@ -262,6 +291,57 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
     expect(secondPage.items.map((item) => item.runId)).toEqual(["run_a1"]);
     expect(secondPage.nextCursor).toBeUndefined();
     expect(JSON.stringify([all, failed])).not.toContain("SECRET");
+  });
+
+  it("业务指标和用户目录不计 Playground，但诊断保留同一 Run 的耗时和 Token", async () => {
+    const client = await administrator.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL search_path TO "${schema}"`);
+      await client.query("SET LOCAL session_replication_role = replica");
+      await client.query(`INSERT INTO user_accounts(user_id,personal_tenant_id,email,normalized_email,display_name,password_algorithm,password_salt,password_hash,created_at,updated_at)
+        VALUES ('user_owner_b','tenant_b','example@test.invalid','example@test.invalid','测试用户','scrypt-v1',decode(repeat('00',16),'hex'),decode(repeat('00',32),'hex'),now(),now())`);
+      await client.query(`INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at,is_playground)
+        VALUES ('tenant_b','thread_test','user_owner_b','试运行','active',now(),now(),true)`);
+      // 与另一租户的普通 Run 同 ID，排除指标必须使用完整的 Tenant/Run 身份。
+      await client.query(`INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
+        VALUES ('tenant_b','run_a2','thread_test','running',now(),now(),'playground')`);
+      await client.query(`INSERT INTO thread_continuity_metric_observations(tenant_id,observation_id,thread_id,run_id,metric_name,value,unit)
+        VALUES ('tenant_b','model:turn_1','thread_test','run_a2','model_output_tokens',900,'tokens')`);
+      await client.query(`SET LOCAL ROLE "${roles.adminControlRole}"`);
+      await client.query("SELECT set_config('app.user_id','user_admin',true)");
+      expect(
+        (
+          await client.query(
+            "SELECT runs_total,runs_running,conversations_total,model_output_tokens_24h FROM admin_runtime_statistics",
+          )
+        ).rows,
+      ).toEqual([
+        {
+          runs_total: "3",
+          runs_running: "0",
+          conversations_total: "2",
+          model_output_tokens_24h: "40",
+        },
+      ]);
+      expect(
+        (
+          await client.query(
+            "SELECT conversation_count,run_count FROM admin_user_directory WHERE user_id='user_owner_b'",
+          )
+        ).rows,
+      ).toEqual([{ conversation_count: "1", run_count: "1" }]);
+      expect(
+        (
+          await client.query(
+            "SELECT output_tokens FROM admin_run_directory WHERE tenant_id='tenant_b' AND run_id='run_a2' AND origin='playground'",
+          )
+        ).rows,
+      ).toEqual([{ output_tokens: "900" }]);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
   });
 
   it("结构视图在数据库内剥离正文，详情只返回结构时间线且不写审计", async () => {

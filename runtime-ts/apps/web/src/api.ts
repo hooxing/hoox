@@ -21,6 +21,22 @@ export type ApiKeyScope =
   | "runs:create"
   | "tool-results:submit"
   | "webhooks:manage";
+export type WebhookEventType =
+  | "run.waiting"
+  | "run.requires_action"
+  | "run.succeeded"
+  | "run.failed"
+  | "run.cancelled"
+  | "artifact.published";
+export type TenantWebhook = {
+  readonly id: string;
+  readonly name: string;
+  readonly endpointUrl: string;
+  readonly eventTypes: readonly WebhookEventType[];
+  readonly createdAt: string;
+  readonly disabledAt?: string;
+  readonly disabledReason?: string;
+};
 export type ApiKey = {
   readonly id: string;
   readonly prefix: string;
@@ -1167,6 +1183,41 @@ export class RuntimeApi {
 
   revokeApiKey(keyId: string): Promise<ApiKey> {
     return this.request(`/v1/api-keys/${encodeURIComponent(keyId)}`, { method: "DELETE" });
+  }
+
+  // null 固定为个人 Tenant；省略参数则保留使用活动 Tenant 的兼容行为。
+  listWebhooks(tenantId?: string | null): Promise<{ readonly items: readonly TenantWebhook[] }> {
+    return this.request("/v1/webhooks", {}, tenantId);
+  }
+  createWebhook(
+    input: {
+      readonly name: string;
+      readonly endpointUrl: string;
+      readonly eventTypes: readonly WebhookEventType[];
+    },
+    tenantId?: string | null,
+  ): Promise<{ readonly webhook: TenantWebhook; readonly secret: string }> {
+    return this.request("/v1/webhooks", { method: "POST", body: JSON.stringify(input) }, tenantId);
+  }
+  rotateWebhookSecret(id: string, tenantId?: string | null): Promise<{ readonly secret: string }> {
+    return this.request(
+      `/v1/webhooks/${encodeURIComponent(id)}/rotate-secret`,
+      { method: "POST" },
+      tenantId,
+    );
+  }
+  disableWebhook(
+    id: string,
+    tenantId?: string | null,
+  ): Promise<{ readonly webhook: TenantWebhook }> {
+    return this.request(
+      `/v1/webhooks/${encodeURIComponent(id)}/disable`,
+      { method: "POST" },
+      tenantId,
+    );
+  }
+  deleteWebhook(id: string, tenantId?: string | null): Promise<{ readonly deleted: boolean }> {
+    return this.request(`/v1/webhooks/${encodeURIComponent(id)}`, { method: "DELETE" }, tenantId);
   }
 }
 

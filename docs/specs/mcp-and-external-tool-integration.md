@@ -1,6 +1,6 @@
 # MCP 与外部工具接入规范
 
-- 状态：实施中；版本存储、凭据加密、MCP/HTTP Transport 与 Run 快照读取已实现，Session 装配及端到端验收进行中
+- 状态：实施中；版本存储、凭据加密、MCP/HTTP Transport、Run 快照读取与 Session 装配已实现；管理面部分实现，端到端验收待完成
 - 创建日期：2026-09-11
 - 适用范围：`runtime-ts/packages/domain`、`persistence`、`protocol`、`admin-control`、`run-contracts`、`pi-adapter`、`prompt-builder`、`tool-router`、`runtime-ts/apps/api`、`agent-worker`、`admin-control-api`、`admin-web`
 - 目标读者：负责外部工具接入、管理面发布、Run 快照、副作用授权与恢复的开发者与维护者
@@ -8,7 +8,7 @@
 
 ## 1. 生命周期与权威边界
 
-本文保留外部工具接入目标契约；当前实现状态见第 8 节。Worker 外部工具读取受 Run 快照和未撤销状态限制，凭据仅在 Worker 内解密，工具执行经 Tool Router。
+本文定义 MCP Server 与其他外部工具接入的目标能力模型、边界、失败语义和验收。各切片状态见第 8 节；管理面发布不自动授予 Run 或 Pi Session 调用权限，工具还必须由 AgentRevision 白名单选定并固定到 Run 快照。Worker 只按 Run 快照读取版本并校验未撤销状态，凭据仅在 Worker 内解密，工具执行经 Tool Router。当前读取授权与执行边界分别见[外部工具快照读取](../architecture/agent-definition.md#外部工具快照读取)和[外部工具装配边界](../architecture/tool-calling-modes.md#外部工具装配边界)。
 
 全部切片实现并验证后，稳定的工具装配与副作用规则迁入[架构总览](../architecture/overview.md)与相应参考文档，本文转为“已完成”并退出目标规范索引。若命名、Transport 或 schema 转换结论改变，直接修订本文并在变更中说明原因。
 
@@ -16,11 +16,11 @@
 
 Runtime 现在的工具装配链路是：
 
-1. `@hoox/pi-adapter` 的 `pi-session.ts::buildSafeSessionMaterial` 组装 `customTools`：沙箱四工具（`exec_command`、`read`、`edit`、`write`）、`collapse_process_for_final_answer`、`skill`、`todo_write`、`deliver_file`、`automation_update` 与协作工具；显式 `enabledToolNames`（子 Session）会过滤沙箱工具与 `skill`，并整体关闭折叠、Todo、交付、自动化与协作工具，后两者只在 root Session 注册。
+1. `@hoox/pi-adapter` 的 `pi-session.ts::buildSafeSessionMaterial` 组装 `customTools`：沙箱四工具（`exec_command`、`read`、`edit`、`write`）、`collapse_process_for_final_answer`、`skill`、`todo_write`、`deliver_file`、`automation_update`、协作工具与按 Run 快照固定的外部工具；显式 `enabledToolNames`（子 Session）会过滤沙箱工具与 `skill`，并整体关闭折叠、Todo、交付、自动化与协作工具，后两者只在 root Session 注册。外部工具默认不下放，子 Session 只能装配显式授权的精确版本。
 2. 同一组数组同时派生 System Prompt 的 `CAPABILITY_MANIFEST`、上下文预算使用的 `serializedToolDefinitions`、`deriveSafePiSessionCompatibility` 的 `toolSchemaHash`，并接受 `assertPiSessionCapabilityManifest` 的创建后断言。
 3. `apps/agent-worker/src/pi-session-factory.ts` 为每个工具提供执行器端口：先持久化 `tool.started`，再领取并消费数据库一次性 `tool_execution` 许可，然后调用受控端口，最后写入固定受控回执。
 4. `@hoox/context-policy` 的 `encodeControlledToolReceipt` 只保存 `toolName` 与 `outcome` 的固定回执；“模型可见的有界结果由工具适配器独立返回”，并作为 Thread Context 的 `tool_result` 事实保存。
-5. `@hoox/run-contracts` 定义 `ExternalEffectCall`、`ExternalEffectPermit` 与 `AgentSessionFactoryPort.create` 的授权、Sandbox 准备和 Todo 写入端口；`@hoox/tool-router` 目前只导出 `deliver_file` 的路由、鉴权与错误归一化。
+5. `@hoox/run-contracts` 定义 `ExternalEffectCall`、`ExternalEffectPermit` 与 `AgentSessionFactoryPort.create` 的授权、Sandbox 准备和 Todo 写入端口；`@hoox/tool-router` 提供 `deliver_file` 与外部工具的路由、鉴权、错误归一化，以及 MCP/HTTP Transport。
 
 `@hoox/prompt-builder` 当前把能力数量限制为 64、单个能力 id 限制为 128 字节且字符集为 `[A-Za-z0-9._:-]`、单个描述限制为 2 KB；`@hoox/context-policy` 对工具名要求 `^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`。新工具名必须同时满足两处约束。
 
@@ -89,19 +89,19 @@ Run 创建时按与 `RunSkillSnapshot` 同级的方式固定：启用 Server 的
 
 ## 7. 管理面
 
-管理面需要提供：Server 草稿与凭据写入、发布前探测、发布、查看版本与工具清单、撤销与重新发布、在 Agent 编辑页挑选已发布的工具版本，以及调用量、失败率与结果未知率的可观测入口。管理面不返回凭据明文，不允许用户自行修改 transport 或绕过发布流程。
+平台管理员管理 Server 草稿与只写凭据，查看逐工具探测报告，按批次原子发布、查看工具版本、撤销与重新发布。Agent 编辑者只能选择已发布且未撤销的版本，Agent Revision 写入和发布时由服务端重新校验引用。HTTP 工具可从端点声明或 OpenAPI 片段预览；不可变版本已支持记录 HTTP 方法，但管理面仍仅提供 HTTP 预览，未开放 HTTP 发布。当前权限和事务边界见[平台控制面](../architecture/admin-control-plane.md#外部工具注册边界)。管理面还应提供调用量、失败率和结果未知率的可观测入口。
 
 ## 8. 实施切片与实现状态
 
 | 切片 | 状态 | 主要位置 | 验收 |
 | --- | --- | --- | --- |
 | 领域与持久化 | 已实现，端到端验收待完成 | `@hoox/domain`、`@hoox/persistence` 迁移与 RLS | Server 版本、工具描述、Run 快照不可变性、Runtime 受限视图权限与 Tenant 隔离测试 |
-| 管理面 | 未开始 | `@hoox/protocol`、`@hoox/admin-control`、`admin-control-api`、`admin-web` | 发布原子性、凭据不回显、撤销失败关闭 |
+| 管理面 | 部分实现 | `@hoox/protocol`、`@hoox/admin-control`、`admin-control-api`、`admin-web`、`@hoox/persistence` | MCP 草稿与只写凭据、逐工具探测、批次原子发布与撤销、命令审计、Agent 选择与服务端引用复核已接入；凭据不回显、撤销失败关闭；HTTP 仅预览，调用指标待接入 |
 | Run 快照 | 已实现，端到端验收待完成 | `apps/api` Run 创建、`@hoox/run-contracts`、`@hoox/persistence` | 跨恢复 `toolSchemaHash` 一致、后续发布不影响已有 Run |
 | Pi 工具协议 | 已实现，端到端验收待完成 | `@hoox/pi-adapter` 新工具工厂、`pi-session.ts` 注册 | 按字典序注册、schema 固定、manifest 派生、非法参数回执 |
 | 执行路由 | 已实现，端到端验收待完成 | `@hoox/tool-router`、`apps/agent-worker/src/pi-session-factory.ts` | 许可绑定、参数摘要、结果未知不重放 |
-| Transport 客户端 | 已实现（本地假服务验收中） | `@hoox/tool-router` MCP Streamable HTTP 客户端 | 本地假 Server 覆盖初始化、清单探测、调用、Schema 拒绝、受控协议错误、响应上限与未知结果；真实 MCP Server 冒烟待验证 |
-| 协作与提示词边界 | 已实现，端到端验收待完成 | `@hoox/run-contracts` 子 Agent 白名单、`@hoox/prompt-builder` 版本 | 子 Agent 默认不下放，显式授权绑定精确版本 ID；恢复保持授权且跨 Run 只取精确版本交集 |
+| Transport 客户端 | 已实现（本地假服务验收中） | `@hoox/tool-router` MCP Streamable HTTP 与 HTTP 客户端 | 本地假 Server 覆盖初始化、清单探测、调用、Schema 拒绝、受控协议错误、响应上限与未知结果；真实 MCP Server 冒烟待验证 |
+| 协作与提示词边界 | 已实现，端到端验收待完成 | `@hoox/run-contracts` 子 Agent 白名单、`@hoox/prompt-builder` 版本 | 子 Agent 默认不下放，显式授权绑定精确版本 ID；恢复保持授权且跨 Run 只取精确版本交集；Prompt 变更同步版本与测试 |
 
 ## 9. 验收门槛
 

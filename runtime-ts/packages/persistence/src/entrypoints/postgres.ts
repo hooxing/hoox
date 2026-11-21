@@ -15,6 +15,8 @@ export {
 export * from "../runtime.js";
 export * from "../pg-installation.js";
 export { PgApiKeyRepository } from "../pg-api-keys.js";
+export * from "../pg-webhooks.js";
+export * from "../webhook-crypto.js";
 
 export { PgAgentDefinitionRepository } from "../pg-agent-definition.js";
 export type { AgentDefinitionRepositoryPort } from "../agent-definition-port.js";

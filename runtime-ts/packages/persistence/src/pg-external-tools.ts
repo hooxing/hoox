@@ -1,3 +1,4 @@
+import { EXTERNAL_TOOL_REVOCATION_LOCK } from "./external-tool-version-write.js";
 import type { Pool, PoolClient } from "pg";
 import type { ExternalToolVersion } from "@hoox/domain";
 import { validateExternalToolVersion } from "@hoox/domain";
@@ -84,6 +85,9 @@ export class PgExternalToolRegistry {
     if (!input.reason.trim() || Buffer.byteLength(input.reason) > 1000)
       throw new TypeError("EXTERNAL_TOOL_REVOCATION_INVALID");
     await withAdminUser(this.pool, input.actorUserId, async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))", [
+        EXTERNAL_TOOL_REVOCATION_LOCK,
+      ]);
       await client.query(
         "INSERT INTO external_tool_revocations(tool_version_id,reason,actor_user_id) VALUES($1,$2,$3)",
         [input.toolVersionId, input.reason, input.actorUserId],

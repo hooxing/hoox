@@ -25,12 +25,36 @@ const mocks = vi.hoisted(() => {
     publicationRepositoryConstructed: vi.fn(),
     runExplorerRepositoryConstructed: vi.fn(),
     agentRepositoryConstructed: vi.fn(),
+    externalRepositoryConstructed: vi.fn(),
+    probeMcpEndpoint: vi.fn(async () => []),
   };
 });
+
+vi.mock("@hoox/tool-router", () => ({ probeMcpEndpoint: mocks.probeMcpEndpoint }));
 
 vi.mock("@hoox/persistence/admin", () => ({
   probeS3StableSkillPublisher: mocks.probePublisher,
   ModelProviderCredentialCipher: class {},
+  ExternalToolCredentialCipher: class {},
+  ExternalToolDraftCredentialCipher: class {},
+  PgExternalToolAdminRepository: class {
+    constructor(pool: unknown) {
+      mocks.externalRepositoryConstructed(pool);
+    }
+    async loadDraftForProbe() {
+      return {
+        draft: {
+          draftId: "draft_1",
+          generation: 1,
+          endpoint: "https://example.invalid/mcp",
+          serverName: "srv",
+          timeoutMs: 500,
+          maxResponseBytes: 1024,
+        },
+      };
+    }
+    async recordProbeAudit() {}
+  },
   PgSandboxControlRepository: class {
     overview() {
       return Promise.resolve({ generation: 0, profiles: [] });
@@ -128,6 +152,7 @@ import {
 function configuration(): AdminControlApiProcessConfiguration {
   return {
     runtimeEnvironment: "development",
+    externalToolsAllowPrivateAddresses: false,
     databaseUrl: "postgresql://control:credential@127.0.0.1:5432/runtime",
     skillPublisherDatabaseUrl: "postgresql://publisher:credential@127.0.0.1:5432/runtime",
     databaseSchema: "runtime",
@@ -165,6 +190,7 @@ function productionConfiguration(): AdminControlApiProcessConfiguration {
   return {
     ...base,
     runtimeEnvironment: "production",
+    externalToolsAllowPrivateAddresses: true,
     databaseSsl: { rejectUnauthorized: true },
     skillPublisherDatabaseSsl: { rejectUnauthorized: true },
     production: {
@@ -225,6 +251,16 @@ describe("统一后台 API 固定装配", () => {
       });
       expect(dependencies.skills.publications).toBeDefined();
       expect(dependencies.agents).toBeDefined();
+      await dependencies.externalTools?.probe({
+        actorUserId: "user_admin",
+        draftId: "draft_1",
+        expectedGeneration: 1,
+      });
+      expect(mocks.probeMcpEndpoint).toHaveBeenCalledWith(
+        expect.objectContaining({ serverName: "srv" }),
+        false,
+      );
+      expect(mocks.externalRepositoryConstructed).toHaveBeenCalledWith(mocks.controlPool);
       await expect(
         dependencies.auth.resolve({
           authorization: "Bearer unified-admin-token",
@@ -265,6 +301,16 @@ describe("统一后台 API 固定装配", () => {
       await expect(firstCall[0].control.overview("user_admin")).resolves.toMatchObject({
         runtimeEnvironment: "production",
       });
+      await firstCall[0].externalTools?.probe({
+        actorUserId: "user_admin",
+        draftId: "draft_1",
+        expectedGeneration: 1,
+      });
+      expect(mocks.probeMcpEndpoint).toHaveBeenCalledWith(
+        expect.objectContaining({ serverName: "srv" }),
+        true,
+      );
+      expect(mocks.externalRepositoryConstructed).toHaveBeenCalledWith(mocks.controlPool);
       expect(firstCall[1]).toEqual(expect.objectContaining({ logger: true }));
       expect(mocks.app.listen).toHaveBeenCalledTimes(1);
     } finally {

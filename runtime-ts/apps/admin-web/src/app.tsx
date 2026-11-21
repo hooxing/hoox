@@ -11,6 +11,7 @@ import {
   SafetyCertificateOutlined,
   SettingOutlined,
   TeamOutlined,
+  ToolOutlined,
 } from "@ant-design/icons";
 import type {
   CreateSkillSubmissionRequest,
@@ -47,6 +48,7 @@ import {
   type AgentDefinitionApiContract,
 } from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
+import { ExternalToolsPage } from "./external-tools.js";
 import { InstallationProgress } from "./installation-progress.js";
 import { RunExplorerDetail, RunExplorerList } from "./run-explorer.js";
 import { RunExplorerApi, type RunExplorerApiContract } from "./run-explorer-api.js";
@@ -55,7 +57,7 @@ import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadat
 
 const defaultApi = new SkillAdminApi();
 const defaultRunApi = new RunExplorerApi();
-const defaultAgentApi = new AdminControlApi();
+const defaultManagementApi = new AdminControlApi();
 const maxSubmissionFiles = 256;
 
 export function browserRouterBasename(baseUrl: string): string | undefined {
@@ -954,7 +956,10 @@ const navigation: NonNullable<MenuProps["items"]> = [
   {
     type: "group",
     label: "Agent",
-    children: [{ key: "/agent-definitions", icon: <RobotOutlined />, label: "Agent 管理" }],
+    children: [
+      { key: "/agent-definitions", icon: <RobotOutlined />, label: "Agent 管理" },
+      { key: "/external-tools", icon: <ToolOutlined />, label: "外部工具" },
+    ],
   },
   {
     type: "group",
@@ -988,6 +993,7 @@ const pageMetadata: Readonly<
     title: "数据运营",
     description: "用户、对话与运行可靠性指标",
   },
+  "/external-tools": { title: "外部工具", description: "管理 MCP 草稿、发布批次和 HTTP 工具预览" },
   "/agent-definitions": {
     title: "Agent 管理",
     description: "维护草稿、发布版本和 Tenant 可用范围",
@@ -1031,6 +1037,7 @@ const defaultPageMetadata = {
 
 /** 菜单与页头按一级路径匹配；Run 详情等子路由归属其列表菜单项。 */
 function navigationKey(pathname: string): string {
+  if (pathname.startsWith("/external-tools/")) return "/external-tools";
   if (pathname.startsWith("/runs/")) return "/runs";
   if (pathname.startsWith("/agent-definitions/")) return "/agent-definitions";
   return pathname;
@@ -1232,6 +1239,14 @@ function AdminPlatform({
               }
             />
             <Route
+              path="/external-tools"
+              element={<ExternalToolsPage api={defaultManagementApi} />}
+            />
+            <Route
+              path="/external-tools/http-preview"
+              element={<ExternalToolsPage api={defaultManagementApi} httpPreview />}
+            />
+            <Route
               path="/agent-definitions"
               element={<AgentDefinitionsRoute api={agentApi} kind="list" />}
             />
@@ -1368,7 +1383,7 @@ export function App({
             apiClient={apiClient ?? defaultApi}
             {...(controlApi === undefined ? {} : { controlApi })}
             runApi={runApi ?? defaultRunApi}
-            agentApi={agentApi ?? defaultAgentApi}
+            agentApi={agentApi ?? defaultManagementApi}
           />
         </QueryClientProvider>
       </AntApp>

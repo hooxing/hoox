@@ -1,4 +1,15 @@
 import type {
+  AdminCreateMcpDraft,
+  AdminUpdateMcpDraft,
+  AdminSetMcpDraftCredential,
+  AdminExternalToolOverview,
+  AdminExternalToolBatchDto,
+  AdminExternalToolGeneration,
+  AdminRevokeExternalToolBatch,
+  AdminMcpDraftDto,
+  AdminMcpProbeReport,
+  AdminHttpToolPreviewRequest,
+  AdminHttpToolPreview,
   AdminAgentDefinitionList,
   AdminAgentGeneration,
   AdminAgentRevisionHistory,
@@ -142,6 +153,62 @@ export class AdminControlApi {
       this.pendingIdempotencyKeys.delete(requestFingerprint);
     }
     return (body as SuccessEnvelope<T>).data;
+  }
+
+  listExternalTools(): Promise<AdminExternalToolOverview> {
+    return this.request("/external-tools", { cache: "no-store" });
+  }
+
+  createMcpDraft(input: AdminCreateMcpDraft): Promise<AdminMcpDraftDto> {
+    return this.request("/external-tools/mcp-drafts", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateMcpDraft(id: string, input: AdminUpdateMcpDraft): Promise<AdminMcpDraftDto> {
+    return this.request(mcpDraftPath(id), { method: "PUT", body: JSON.stringify(input) });
+  }
+
+  setMcpCredential(id: string, input: AdminSetMcpDraftCredential): Promise<AdminMcpDraftDto> {
+    return this.request(`${mcpDraftPath(id)}/credential`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  }
+
+  probeMcpDraft(id: string, input: AdminExternalToolGeneration): Promise<AdminMcpProbeReport> {
+    return this.request(`${mcpDraftPath(id)}/probe`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  publishMcpDraft(
+    id: string,
+    input: AdminExternalToolGeneration,
+  ): Promise<AdminExternalToolBatchDto> {
+    return this.request(`${mcpDraftPath(id)}/publish`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  revokeToolBatch(
+    id: string,
+    input: AdminRevokeExternalToolBatch,
+  ): Promise<AdminExternalToolBatchDto> {
+    return this.request(`/external-tools/batches/${encodeURIComponent(id)}/revoke`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  previewHttpTool(input: AdminHttpToolPreviewRequest): Promise<AdminHttpToolPreview> {
+    return this.request("/external-tools/http/preview", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   }
 
   listAgentDefinitions(): Promise<AdminAgentDefinitionList> {
@@ -417,4 +484,20 @@ export type AgentDefinitionApiContract = Pick<
   | "deactivateAgentDefinition"
   | "revokeAgentRevision"
   | "setAgentAvailability"
+>;
+
+function mcpDraftPath(id: string): string {
+  return `/external-tools/mcp-drafts/${encodeURIComponent(id)}`;
+}
+
+export type ExternalToolApiContract = Pick<
+  AdminControlApi,
+  | "listExternalTools"
+  | "createMcpDraft"
+  | "updateMcpDraft"
+  | "setMcpCredential"
+  | "probeMcpDraft"
+  | "publishMcpDraft"
+  | "revokeToolBatch"
+  | "previewHttpTool"
 >;

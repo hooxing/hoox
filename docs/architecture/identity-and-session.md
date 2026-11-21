@@ -33,7 +33,7 @@ Tenant API Key 用于服务到服务访问，与 Hoox Session 是不同凭据。
 
 每个 Key 创建独立 `integration` User，并在所属 Tenant 创建 `member` Membership；个人 Tenant 仍只允许人类 Owner 管理，集成身份以 Member 加入，不获得个人空间管理权。该身份没有登录账号，不可登录工作台；创建者只作为审计元数据，离开 Tenant 不会改变 Key 身份。吊销不可恢复；Runtime 在同一事务内先将未吊销 Key 写入吊销时间，再将对应 `integration` Membership 从 active 改为 revoked。仅授予所需列级 UPDATE，并由 Runtime 专属 RESTRICTIVE RLS 策略限制目标身份、旧状态和新状态；已吊销 Key 不再满足 UPDATE 的旧行策略，因此不能恢复。任一步未恰好更新目标行都会回滚整个事务。之后请求同时无法通过凭据校验或 Membership 授权。该身份模型可供终端用户映射复用，但映射本身不属于此边界。
 
-API Key 认证成功后，API 仍使用该集成 User 从 Membership 重建 `TenantScope`，所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。API Key 管理、登录会话、账号与团队成员管理均为人类会话边界。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
+API Key 认证成功后，API 仍使用该集成 User 从 Membership 重建 `TenantScope`，所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。API Key 管理、登录会话、账号与团队成员管理均为人类会话边界；Webhook 管理允许人类 Owner/Admin 与持有 `webhooks:manage` 作用域的 API Key。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
 
 ## 可配置登录方式
 

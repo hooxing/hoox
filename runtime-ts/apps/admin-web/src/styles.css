@@ -4382,3 +4382,32 @@ td:first-child {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 256px), 1fr));
   gap: 8px;
 }
+
+.tool-form-fields {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.tool-batch {
+  padding: 12px 0;
+  overflow-wrap: anywhere;
+}
+
+.tool-batch summary {
+  cursor: pointer;
+}
+
+.tool-batch[open] summary {
+  margin-bottom: 16px;
+}
+
+.tool-credential {
+  padding: 8px 12px;
+  border: 1px solid var(--ant-color-border, #75847c);
+  border-radius: 8px;
+  font: inherit;
+}

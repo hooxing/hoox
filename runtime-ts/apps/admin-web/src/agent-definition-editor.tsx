@@ -1,4 +1,5 @@
 import {
+  type AdminAgentDefinitionList,
   AGENT_OPERATOR_INSTRUCTIONS_MAX_BYTES,
   type AdminSetAgentAvailability,
   type AgentPinnedModelReferenceDto,
@@ -120,6 +121,7 @@ export function AgentDefinitionEditor({
   initial,
   builtinToolLimit,
   pinnedModelOptions,
+  externalToolOptions = [],
   saving,
   onSave,
   onCancel,
@@ -127,6 +129,7 @@ export function AgentDefinitionEditor({
   readonly initial?: AgentRevisionContentDto;
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
+  readonly externalToolOptions?: Readonly<AdminAgentDefinitionList["externalToolOptions"]>;
   readonly saving: boolean;
   readonly onSave: (
     content: AgentRevisionContentDto,
@@ -161,6 +164,10 @@ export function AgentDefinitionEditor({
   const configured = content.tools.mode === "configured" ? content.tools : undefined;
   const unavailableTools =
     configured?.builtinTools.filter((tool) => !builtinToolLimit.includes(tool)) ?? [];
+  const unavailableExternalTools =
+    configured?.externalTools.filter(
+      (tool) => !externalToolOptions.some((option) => option.toolVersionId === tool.versionId),
+    ) ?? [];
 
   function change<K extends keyof AgentRevisionContentDto>(
     field: K,
@@ -184,6 +191,7 @@ export function AgentDefinitionEditor({
         throw new Error("最多填写 12 条建议问题，每条不超过 500 字节。");
       }
       if (unavailableTools.length > 0) throw new Error("请移除平台已禁用的内置工具。");
+      if (unavailableExternalTools.length) throw new Error("请移除已不可选的外部工具版本。");
       await onSave(
         { ...content, suggestedQuestions, skillVersions: skills(skillVersions) },
         initial === undefined ? parseAvailability(scope, tenantIds) : undefined,
@@ -377,8 +385,63 @@ export function AgentDefinitionEditor({
               </label>
             </>
           )}
+          {configured && (
+            <fieldset className="agent-tool-list">
+              <legend>已发布外部工具</legend>
+              {externalToolOptions.map((tool) => {
+                const selected = configured.externalTools.some(
+                  (item) => item.versionId === tool.toolVersionId,
+                );
+                return (
+                  <label key={tool.toolVersionId}>
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={(event) =>
+                        change("tools", {
+                          ...configured,
+                          externalTools: event.target.checked
+                            ? [
+                                ...configured.externalTools,
+                                { kind: tool.source, versionId: tool.toolVersionId },
+                              ]
+                            : configured.externalTools.filter(
+                                (item) => item.versionId !== tool.toolVersionId,
+                              ),
+                        })
+                      }
+                    />
+                    {tool.modelToolName} · {tool.batchName} · {tool.toolVersionId}
+                    {tool.description && (
+                      <Typography.Text type="secondary"> — {tool.description}</Typography.Text>
+                    )}
+                  </label>
+                );
+              })}
+              {unavailableExternalTools.map((tool) => (
+                <label key={tool.versionId}>
+                  <input
+                    type="checkbox"
+                    checked
+                    onChange={() =>
+                      change("tools", {
+                        ...configured,
+                        externalTools: configured.externalTools.filter(
+                          (selected) => selected.versionId !== tool.versionId,
+                        ),
+                      })
+                    }
+                  />
+                  已不可选版本：{tool.versionId}（可能已撤销）
+                </label>
+              ))}
+              {externalToolOptions.length === 0 && unavailableExternalTools.length === 0 && (
+                <Typography.Text type="secondary">暂无可选的已发布外部工具。</Typography.Text>
+              )}
+            </fieldset>
+          )}
           <Typography.Text type="secondary">
-            外部工具暂不能在这里选择。切换为跟随平台会移除这一版本的显式工具配置。
+            HTTP 工具尚不能发布或加入 Agent。管理员可在「外部工具」页预览端点声明或 OpenAPI 片段。
           </Typography.Text>
           <label className="agent-field" htmlFor={`${formId}-skills`}>
             <span>自带 Skill（每行填写 Skill ID 和版本）</span>

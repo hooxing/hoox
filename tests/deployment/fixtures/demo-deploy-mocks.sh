@@ -10,6 +10,15 @@ docker() {
   if [[ "$*" == *' pull '* && "$MOCK_MODE" == command-failure ]]; then
     return 37
   fi
+  if [[ "$*" == *'--entrypoint node scheduler --input-type=module -e'* ]]; then
+    local probe="${!#}" scheduler_url
+    scheduler_url="$(sed -n 's/^WEBHOOK_DISPATCHER_DATABASE_URL=//p' "$HOOX_DEMO_ROOT/shared/scheduler.env" | tail -n 1)"
+    (
+      cd "$HOOX_DEMO_ROOT"
+      WEBHOOK_DISPATCHER_DATABASE_URL="$scheduler_url" node --input-type=module -e "$probe"
+    )
+    return
+  fi
   if [[ "$*" == *'config --services'* ]]; then
     printf 'postgres\nminio\napi\nweb\nadmin-control\nadmin-web\ntrajectory\nscheduler\nworker\n'
   elif [[ "$*" == *'exec -T postgres pg_dump'* ]]; then

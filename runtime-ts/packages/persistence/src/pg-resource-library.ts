@@ -176,11 +176,14 @@ export class PgResourceCatalog implements ResourceCatalog {
                 AND v.id = r.latest_version_id
               WHERE r.tenant_id = $1
                 AND r.visibility = 'searchable'
-                AND NOT EXISTS (
-                  SELECT 1 FROM artifact_publications publication
-                  JOIN runs source_run ON source_run.tenant_id=publication.tenant_id
-                    AND source_run.id=publication.run_id AND source_run.origin='playground'
-                  WHERE publication.tenant_id=r.tenant_id AND publication.resource_id=r.id
+                AND (
+                  r.origin<>'artifact' OR EXISTS (
+                    SELECT 1 FROM artifact_publications publication
+                    JOIN runs source_run ON source_run.tenant_id=publication.tenant_id
+                      AND source_run.id=publication.run_id
+                    WHERE publication.tenant_id=r.tenant_id AND publication.resource_id=r.id
+                      AND source_run.origin IN ('normal','evaluation','api')
+                  )
                 )
                 AND EXISTS (
                   SELECT 1 FROM memberships membership
@@ -885,11 +888,14 @@ async function findResourceVersion(
          ON v.tenant_id = r.tenant_id AND v.resource_id = r.id
       WHERE r.tenant_id = $1 AND r.id = $2 AND v.id = $3
         AND ($4::boolean = false OR r.visibility = 'searchable')
-        AND NOT EXISTS (
-          SELECT 1 FROM artifact_publications publication
-          JOIN runs source_run ON source_run.tenant_id=publication.tenant_id
-            AND source_run.id=publication.run_id AND source_run.origin='playground'
-          WHERE publication.tenant_id=r.tenant_id AND publication.resource_id=r.id
+        AND (
+          r.origin<>'artifact' OR EXISTS (
+            SELECT 1 FROM artifact_publications publication
+            JOIN runs source_run ON source_run.tenant_id=publication.tenant_id
+              AND source_run.id=publication.run_id
+            WHERE publication.tenant_id=r.tenant_id AND publication.resource_id=r.id
+              AND source_run.origin IN ('normal','evaluation','api')
+          )
         )
         AND (
           $5::text IS NULL

@@ -636,6 +636,113 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
     expect(pending.items).toEqual([]);
   });
 
+  it("身份保留但撤销管理角色时，RLS 隐藏 Playground 来源仍不会放行 Artifact Resource", async () => {
+    const promotion = await seedPromotion(tenantA, "playground-rls-source");
+    const input = command(tenantA, promotion, {
+      key: `idem-playground-rls-${unique}`,
+      resource: `resource_playground_rls_${unique}`,
+      version: `resource_version_playground_rls_${unique}`,
+      name: "Playground 产物.txt",
+    });
+    const committed = await promotions.commitPromotedVersion(input);
+    expect(committed.outcome).toBe("committed");
+    if (committed.outcome !== "committed") throw new Error("测试 Resource 未提交");
+
+    await admin.query(
+      `UPDATE "${schema}".resources SET origin='artifact'
+        WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, input.resourceId],
+    );
+    await admin.query(
+      `UPDATE "${schema}".runs SET origin='playground'
+        WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, tenantA.runId],
+    );
+    const adminClient = await admin.connect();
+    try {
+      await adminClient.query("BEGIN");
+      await adminClient.query("SET LOCAL session_replication_role='replica'");
+      await adminClient.query(
+        `INSERT INTO "${schema}".artifact_publications(
+           tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,resource_id,
+           resource_version_id,name,purpose,blob_reference_id,blob_purpose,blob_lifecycle_id,
+           blob_incarnation_id,physical_object_key,digest,media_type,size
+         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'Playground 产物.txt','diagnostic',
+                  $10,'resource',$11::uuid,$12::uuid,'playground/opaque', $13,'text/plain',1)`,
+        [
+          tenantA.scope.tenantId,
+          `artifact_playground_rls_${unique}`,
+          tenantA.threadId,
+          tenantA.runId,
+          `attempt_playground_rls_${unique}`,
+          tenantA.workspaceId,
+          tenantA.runId,
+          input.resourceId,
+          input.resourceVersionId,
+          `blob_playground_rls_${unique}`,
+          "00000000-0000-4000-8000-000000000001",
+          "00000000-0000-4000-8000-000000000002",
+          promotion.digest,
+        ],
+      );
+      await adminClient.query("COMMIT");
+    } catch (error) {
+      await adminClient.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      adminClient.release();
+    }
+    await admin.query(
+      `UPDATE "${schema}".memberships SET role='member'
+        WHERE tenant_id=$1 AND user_id=$2`,
+      [tenantA.scope.tenantId, tenantA.scope.userId],
+    );
+    await admin.query(
+      `CREATE POLICY it_hide_runs_for_resource_reader ON "${schema}".runs
+         AS RESTRICTIVE FOR SELECT TO "${runtimeRole}" USING (false)`,
+    );
+
+    const hidden = await withTenantTransaction(runtime, tenantA.scope, (client) =>
+      client.query<{ readonly count: string }>(
+        `SELECT count(*)::text AS count FROM runs WHERE tenant_id=$1 AND id=$2`,
+        [tenantA.scope.tenantId, tenantA.runId],
+      ),
+    );
+    expect(hidden.rows[0]?.count).toBe("0");
+    expect(
+      (await catalog.search({ context: tenantA.scope, normalizedQuery: "", limit: 20 })).items.map(
+        (item) => item.resourceId,
+      ),
+    ).not.toContain(input.resourceId);
+    expect(
+      await catalog.resolveVersion({
+        context: tenantA.scope,
+        resourceId: input.resourceId,
+        versionId: input.resourceVersionId,
+      }),
+    ).toEqual({ status: "not_found" });
+
+    await admin.query(`DROP POLICY it_hide_runs_for_resource_reader ON "${schema}".runs`);
+    await admin.query(
+      `DELETE FROM "${schema}".artifact_publications WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, `artifact_playground_rls_${unique}`],
+    );
+    await admin.query(
+      `UPDATE "${schema}".resources SET origin='promoted_workspace'
+        WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, input.resourceId],
+    );
+    await admin.query(`UPDATE "${schema}".runs SET origin='normal' WHERE tenant_id=$1 AND id=$2`, [
+      tenantA.scope.tenantId,
+      tenantA.runId,
+    ]);
+    await admin.query(
+      `UPDATE "${schema}".memberships SET role='owner'
+        WHERE tenant_id=$1 AND user_id=$2`,
+      [tenantA.scope.tenantId, tenantA.scope.userId],
+    );
+  });
+
   it("双租户目录、resolve 与直接 Runtime SQL 都 fail closed", async () => {
     const promotion = await seedPromotion(tenantB, "tenant-b");
     const input = command(tenantB, promotion, {

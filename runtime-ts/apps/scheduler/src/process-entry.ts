@@ -8,7 +8,12 @@ import {
   PgSandboxCleanupConsumerStore,
   PgThreadSandboxLifecycleConsumerStore,
 } from "@hoox/persistence/maintenance";
-import { createPostgresPool, probePostgres, WebhookSecretCipher } from "@hoox/persistence/postgres";
+import {
+  createPostgresPool,
+  PgWebhookOutboxStore,
+  probePostgres,
+  WebhookSecretCipher,
+} from "@hoox/persistence/postgres";
 import { WebhookDispatcher } from "./webhook-dispatcher.js";
 import { PgThreadContinuityMetrics, PgThreadTitleGenerationStore } from "@hoox/persistence/thread";
 import {
@@ -447,23 +452,19 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
             applicationName: "hoox-scheduler-webhook-dispatcher",
           });
     let webhookTimer: ReturnType<typeof setInterval> | undefined;
-    let webhookInFlight: Promise<unknown> | undefined;
+    let webhookDispatcher: WebhookDispatcher | undefined;
     try {
       if (webhookPool !== undefined && configuration.webhookDispatch !== undefined) {
         await probePostgres(webhookPool, configuration.webhookDispatch.role);
-        const dispatcher = new WebhookDispatcher(
-          webhookPool,
-          new WebhookSecretCipher(configuration.webhookDispatch.secretKey),
-          configuration.cleanup.workerId,
-        );
+        const dispatcher = new WebhookDispatcher({
+          store: new PgWebhookOutboxStore(webhookPool),
+          cipher: new WebhookSecretCipher(configuration.webhookDispatch.secretKey),
+          owner: configuration.cleanup.workerId,
+        });
+        webhookDispatcher = dispatcher;
+        // 定时补满空闲槽位；单次投递受绝对截止时间约束，慢接收端只占用自己的槽位。
         webhookTimer = setInterval(() => {
-          if (webhookInFlight !== undefined) return;
-          webhookInFlight = dispatcher
-            .runOne()
-            .catch(() => undefined)
-            .finally(() => {
-              webhookInFlight = undefined;
-            });
+          void dispatcher.pump();
         }, 500);
       }
       // 角色身份和 RLS 绕过属性必须在 cleanup loop 产生任何远端副作用前证明安全。
@@ -594,7 +595,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       const assembly = Object.freeze({
         stopAccepting: async () => {
           if (webhookTimer !== undefined) clearInterval(webhookTimer);
-          await webhookInFlight;
+          await webhookDispatcher?.close();
           await Promise.all([
             loop.close(),
             threadSandboxLoop.close(),
@@ -632,7 +633,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       return assembly;
     } catch (error) {
       if (webhookTimer !== undefined) clearInterval(webhookTimer);
-      await webhookInFlight;
+      await webhookDispatcher?.close();
       await pool.end().catch(() => undefined);
       await webhookPool?.end().catch(() => undefined);
       throw error;

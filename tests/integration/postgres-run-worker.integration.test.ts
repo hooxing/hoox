@@ -93,6 +93,10 @@ import { PgSkillRuntimeRepository } from "../../runtime-ts/packages/persistence/
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/pg-thread-input.js";
 import { PgThreadSandboxLifecycleConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-thread-sandbox-lifecycle-consumer.js";
+import {
+  PgWebhookRepository,
+  type WebhookEventType,
+} from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgWorkerTenantAssignments } from "../../runtime-ts/packages/persistence/src/pg-worker-tenant-assignment.js";
 import {
   PgWorkspaceCandidateHandoff,
@@ -143,6 +147,9 @@ const teamCoordinatorRole = preprovisionedDatabase
 const adminControlRole = preprovisionedDatabase
   ? (process.env.DATABASE_ADMIN_CONTROL_ROLE ?? "")
   : `it_rw_control_${suffix}`;
+const webhookDispatcherRole = preprovisionedDatabase
+  ? (process.env.DATABASE_WEBHOOK_DISPATCHER_ROLE ?? "")
+  : `it_rw_webhook_${suffix}`;
 const runtimePassword = randomBytes(24).toString("hex");
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherPassword = randomBytes(24).toString("hex");
@@ -340,6 +347,28 @@ async function fixture(
   return { scope, user, thread, workspace };
 }
 
+/** 为夹具 Tenant 注册订阅；密文为占位值，本套件只验证入队事实，不实际投递。 */
+async function subscribeWebhook(f: Fixture, eventTypes: readonly WebhookEventType[]) {
+  await new PgWebhookRepository(runtime).create({
+    scope: { tenantId: f.scope.tenantId, userId: f.user.id },
+    name: "integration",
+    endpointUrl: "https://hooks.example.invalid/run-worker",
+    eventTypes,
+    secret: { version: 1, nonce: "n", ciphertext: "c", authTag: "t" },
+  });
+}
+
+async function webhookOutbox(f: Fixture) {
+  const result = await admin.query<{
+    readonly event_type: string;
+    readonly payload: { readonly data: Record<string, unknown> };
+  }>(
+    `SELECT event_type,payload FROM "${schema}".webhook_outbox WHERE tenant_id=$1 ORDER BY event_type`,
+    [f.scope.tenantId],
+  );
+  return result.rows;
+}
+
 /** 用真实 PostgreSQL 的 jsonb::text 计算边界，避免测试复制一套不等价序列化规则。 */
 async function projectionAtStoredBytes(targetBytes: number) {
   // 用多个合法 turn 填充字节：checkpoint 受 200 字节限制，单个 turn 受 16KiB 限制。
@@ -510,8 +539,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${adminControlRole}" LOGIN PASSWORD '${adminControlPassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${webhookDispatcherRole}" LOGIN PASSWORD '${adminControlPassword}'
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}"
-         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}";
+         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
       );
     }
@@ -529,6 +560,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         !workerCoordinatorRole.startsWith("m4_ci_") ||
         !teamCoordinatorRole.startsWith("m4_ci_") ||
         !adminControlRole.startsWith("m4_ci_") ||
+        !webhookDispatcherRole.startsWith("m4_ci_") ||
         !safePgIdentifier.test(schema) ||
         !safePgIdentifier.test(runtimeRole) ||
         !safePgIdentifier.test(migratorRole) ||
@@ -536,6 +568,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         !safePgIdentifier.test(workerCoordinatorRole) ||
         !safePgIdentifier.test(teamCoordinatorRole) ||
         !safePgIdentifier.test(adminControlRole) ||
+        !safePgIdentifier.test(webhookDispatcherRole) ||
         migratorUrl.username !== migratorRole ||
         runtimeUrl.username !== runtimeRole ||
         workerCoordinatorUrl.username !== workerCoordinatorRole ||
@@ -570,6 +603,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       workerCoordinatorRole,
       teamCoordinatorRole,
       adminControlRole,
+      webhookDispatcherRole,
       schema,
     });
     const dispatchAcl = await admin.query<{ readonly allowed: boolean; readonly version: number }>(
@@ -609,13 +643,14 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ?.query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
        REVOKE CONNECT ON DATABASE "${databaseName}"
-         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}"`,
+         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}"`,
       )
       .catch(() => undefined);
     await admin?.query(
       `DROP ROLE IF EXISTS "${runtimeRole}";
        DROP ROLE IF EXISTS "${workerCoordinatorRole}";
        DROP ROLE IF EXISTS "${teamCoordinatorRole}";
+       DROP ROLE IF EXISTS "${webhookDispatcherRole}";
        DROP ROLE IF EXISTS "${adminControlRole}";
        DROP ROLE IF EXISTS "${skillPublisherRole}";
        DROP ROLE IF EXISTS "${migratorRole}"`,
@@ -705,6 +740,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         workerCoordinatorRole,
         teamCoordinatorRole,
         adminControlRole,
+        webhookDispatcherRole,
         schema: isolatedSchema,
       });
       const identity = await control.query<{
@@ -5175,6 +5211,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
 
   it("cleanup、Revision 终态与 Artifact 结算同事务，并隔离诊断类 Resource", async () => {
     const f = await fixture(`final-${suffix}`);
+    await subscribeWebhook(f, ["run.succeeded", "artifact.published"]);
     const claimed = await persistence.claim({
       scope: f.scope,
       workerId: "final-worker",
@@ -5521,6 +5558,20 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       workspace: { currentRevisionId: revision },
       receipt: { workspace: { currentHead: revision } },
     });
+    // 终态与 Artifact 事件和业务事实同事务提交；COMMIT 响应丢失后的重放不重复入队，
+    // Artifact 载荷不包含文件名。
+    const webhookEvents = await webhookOutbox(f);
+    expect(webhookEvents.map((event) => event.event_type).sort()).toEqual([
+      "artifact.published",
+      "artifact.published",
+      "run.succeeded",
+    ]);
+    for (const event of webhookEvents)
+      expect(Object.keys(event.payload.data).sort()).toEqual(
+        event.event_type === "run.succeeded" ? ["runId", "status"] : ["artifactId", "runId"],
+      );
+    await persistence.mutate(finalCommand);
+    expect(await webhookOutbox(f)).toHaveLength(3);
     const committedFacts = await withTenantTransaction(
       runtime,
       { tenantId: f.scope.tenantId },
@@ -5744,6 +5795,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
 
   it("租约过期由恢复协调器收敛，普通 claim 不越过 running Run", async () => {
     const f = await fixture(`recover-${suffix}`);
+    await subscribeWebhook(f, ["run.failed"]);
     const claimed = await persistence.claim({
       scope: f.scope,
       workerId: "recover-worker",
@@ -5824,6 +5876,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       candidate_status: "released",
       release_reason: "expired_recovery",
     });
+    // 过期 Attempt 的安全失败同样是 Run 终态转换，必须与转换同事务入队。
+    expect((await webhookOutbox(f)).map((event) => [event.event_type, event.payload.data])).toEqual(
+      [["run.failed", { runId: f.scope.runId, status: "failed" }]],
+    );
 
     const unsafe = await fixture(`recover-model-${suffix}`);
     const unsafeClaim = await persistence.claim({

@@ -193,6 +193,9 @@ const adminControlTables = new Set([
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
   ["api_keys", new Set(["SELECT", "INSERT"])],
+  // 订阅更新只走列级 ACL（见 runtimeColumnUpdatePolicy 的动态项）；Outbox 只允许入队。
+  ["tenant_webhooks", new Set(["SELECT", "INSERT", "DELETE"])],
+  ["webhook_outbox", new Set(["INSERT"])],
   ["user_accounts", new Set(["SELECT", "INSERT"])],
   ["user_sessions", new Set(["SELECT", "INSERT", "DELETE"])],
   ["tenants", new Set(["SELECT", "INSERT"])],
@@ -1113,6 +1116,21 @@ async function hasExternalToolState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasExternalToolAdminState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.external_tool_registration_drafts',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_draft_credentials',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_publish_batches',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_publish_batch_versions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_publish_claims',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_commands',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_audits',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_selectable_versions',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasEmbeddedIdentityState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.better_auth_users',$1::text)) IS NOT NULL
@@ -1304,6 +1322,10 @@ export async function activeTablePolicy(
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
   if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
+  if (!(await hasWebhookState(client, schema))) {
+    policy.delete("tenant_webhooks");
+    policy.delete("webhook_outbox");
+  }
   if (await hasManagedSandboxState(client, schema)) {
     for (const table of managedSandboxControlTables) policy.set(table, new Set());
     for (const table of managedSandboxRuntimeTables) policy.set(table, new Set(["SELECT"]));
@@ -1427,6 +1449,9 @@ export async function activeTablePolicy(
     ])
       policy.set(table, new Set());
   }
+  if (await hasExternalToolAdminState(client, schema)) {
+    for (const table of externalToolAdminTables) policy.set(table, new Set());
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -1478,6 +1503,8 @@ export async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  if (await hasWebhookState(client, schema))
+    policy.set("tenant_webhooks", new Set(webhookRuntimeUpdateColumns));
   const apiKeyState = await hasApiKeyState(client, schema);
   const apiKeyRevocationPolicyState =
     apiKeyState && (await hasApiKeyRevocationPolicyState(client, schema));
@@ -1519,6 +1546,9 @@ export async function activeColumnUpdatePolicy(
       "external_tool_revocations",
     ])
       policy.set(table, new Set());
+  }
+  if (await hasExternalToolAdminState(client, schema)) {
+    for (const table of externalToolAdminTables) policy.set(table, new Set());
   }
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
@@ -1700,6 +1730,7 @@ export interface MigrationSecurityContext {
   readonly workerCoordinatorRole: string;
   readonly teamCoordinatorRole: string;
   readonly adminControlRole: string;
+  readonly webhookDispatcherRole?: string;
   readonly schema: string;
 }
 
@@ -1715,6 +1746,7 @@ function validateContext(context: MigrationSecurityContext): void {
   quoteIdentifier(context.workerCoordinatorRole);
   quoteIdentifier(context.teamCoordinatorRole);
   quoteIdentifier(context.adminControlRole);
+  if (context.webhookDispatcherRole !== undefined) quoteIdentifier(context.webhookDispatcherRole);
   assertSafeSchemaName(context.schema);
   if (
     new Set([
@@ -1724,7 +1756,8 @@ function validateContext(context: MigrationSecurityContext): void {
       context.workerCoordinatorRole,
       context.teamCoordinatorRole,
       context.adminControlRole,
-    ]).size !== 6
+      ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
+    ]).size !== (context.webhookDispatcherRole === undefined ? 6 : 7)
   ) {
     throw new PersistenceError(
       "CONSTRAINT_VIOLATION",
@@ -2104,6 +2137,11 @@ export async function assertMigrationContextSafe(
     ...context,
     workerCoordinatorRole: context.adminControlRole,
   });
+  if (context.webhookDispatcherRole !== undefined)
+    await assertWorkerCoordinatorContextSafe(client, {
+      ...context,
+      workerCoordinatorRole: context.webhookDispatcherRole,
+    });
 }
 
 async function assertBootstrapContextSafe(
@@ -2130,6 +2168,12 @@ async function assertBootstrapContextSafe(
     },
     true,
   );
+  if (context.webhookDispatcherRole !== undefined)
+    await assertWorkerCoordinatorContextSafe(
+      client,
+      { ...context, workerCoordinatorRole: context.webhookDispatcherRole },
+      true,
+    );
 }
 
 interface RoleDatabaseScopeRow {
@@ -2154,6 +2198,7 @@ export function databaseRoles(context: MigrationSecurityContext): readonly strin
     context.workerCoordinatorRole,
     context.teamCoordinatorRole,
     context.adminControlRole,
+    ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
   ];
 }
 
@@ -2253,6 +2298,9 @@ async function activeTeamCoordinatorTablePolicy(
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   if (!(await hasTeamCollaborationState(client, schema))) return new Map();
   const policy = new Map(await activeTablePolicy(client, schema));
+  // Team Coordinator 只为解散时的批量取消入队：订阅表仅有列级 SELECT（见 grantWebhookAccess），
+  // Outbox 只保留继承自 Runtime 的 INSERT。
+  policy.delete("tenant_webhooks");
   for (const table of localAccountTables) policy.set(table, new Set());
   policy.set("team_member_directory", new Set(["SELECT", "INSERT"]));
   if (await hasPersonalizationSettingsState(client, schema)) {
@@ -2267,6 +2315,9 @@ async function activeTeamCoordinatorColumnUpdatePolicy(
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   if (!(await hasTeamCollaborationState(client, schema))) return new Map();
   const policy = new Map(await activeColumnUpdatePolicy(client, schema));
+  // 显式移除 Webhook 表：Team Coordinator 不得改写订阅密文、停用状态或任何 Outbox 列。
+  policy.delete("tenant_webhooks");
+  policy.delete("webhook_outbox");
   const membershipColumns = new Set(policy.get("memberships") ?? []);
   membershipColumns.add("role");
   membershipColumns.add("status");
@@ -2423,6 +2474,20 @@ async function assertAdminControlBoundary(
     allowed.set("external_tool_credentials", new Set(["INSERT"]));
     allowed.set("external_tool_revocations", new Set(["SELECT", "INSERT"]));
   }
+  const externalToolAdminEnabled =
+    enabled && (await hasExternalToolAdminState(client, context.schema));
+  if (externalToolAdminEnabled) {
+    allowed.set("external_tool_registration_drafts", new Set(["SELECT", "INSERT"]));
+    allowed.set("external_tool_draft_credentials", new Set(["SELECT", "INSERT", "DELETE"]));
+    for (const table of [
+      "external_tool_publish_batches",
+      "external_tool_publish_batch_versions",
+      "external_tool_admin_publish_claims",
+      "external_tool_admin_commands",
+      "external_tool_admin_audits",
+    ])
+      allowed.set(table, new Set(["SELECT", "INSERT"]));
+  }
   const agentDefinitionsEnabled =
     enabled && (await hasAgentDefinitionState(client, context.schema));
   if (agentDefinitionsEnabled) {
@@ -2504,6 +2569,13 @@ async function assertAdminControlBoundary(
     );
   if (agentDefinitionsEnabled) updatePolicy.set("agent_definition_tenants", new Set(["available"]));
   if (agentDefinitionsEnabled) updatePolicy.set("agent_revisions", new Set(["status"]));
+  if (externalToolAdminEnabled)
+    updatePolicy.set("external_tool_registration_drafts", new Set(externalToolDraftUpdateColumns));
+  if (externalToolAdminEnabled)
+    updatePolicy.set(
+      "external_tool_admin_publish_claims",
+      new Set(["lease_owner", "lease_expires_at"]),
+    );
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
@@ -2581,7 +2653,12 @@ async function assertAdminControlBoundary(
     [
       context.adminControlRole,
       context.schema,
-      ["admin_runtime_statistics", "admin_user_directory", ...adminRunExplorerViews],
+      [
+        "admin_runtime_statistics",
+        "admin_user_directory",
+        "external_tool_selectable_versions",
+        ...adminRunExplorerViews,
+      ],
     ],
   );
   for (const row of viewPrivileges.rows) {
@@ -2590,7 +2667,9 @@ async function assertAdminControlBoundary(
         ? enabled
         : row.view_name === "admin_user_directory"
           ? userOperationsEnabled
-          : runExplorerEnabled;
+          : row.view_name === "external_tool_selectable_versions"
+            ? externalToolAdminEnabled
+            : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3100,6 +3179,31 @@ const skillPublisherPolicyBindings = Object.freeze([
   ["skill_version_files", "skill_version_files_admin_publisher_policy", "publisher"],
 ] as const);
 
+const externalToolDraftUpdateColumns = Object.freeze([
+  "display_name",
+  "server_name",
+  "endpoint",
+  "timeout_ms",
+  "max_response_bytes",
+  "side_effect",
+  "idempotent",
+  "credential_configured",
+  "generation",
+  "updated_by",
+  "updated_at",
+] as const);
+
+// 外部工具管理面表：Runtime 零 ACL，仅 Admin Control 按白名单持有权限。
+const externalToolAdminTables = Object.freeze([
+  "external_tool_registration_drafts",
+  "external_tool_draft_credentials",
+  "external_tool_publish_batches",
+  "external_tool_publish_batch_versions",
+  "external_tool_admin_publish_claims",
+  "external_tool_admin_commands",
+  "external_tool_admin_audits",
+] as const);
+
 const adminControlPolicyBindings = Object.freeze([
   ["platform_control_operators", "platform_control_operators_migrator_policy", "migrator"],
   ["admin_control_config_revisions", "admin_control_config_revisions_migrator_policy", "migrator"],
@@ -3352,6 +3456,14 @@ async function rebindRoleScopedPolicies(
       );
     }
   }
+  if (await hasExternalToolAdminState(client, context.schema)) {
+    for (const table of externalToolAdminTables) {
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(`${table}_migrator_policy`)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.migratorRole)};
+         ALTER POLICY ${quoteIdentifier(`${table}_admin_policy`)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.adminControlRole)}`,
+      );
+    }
+  }
 }
 
 async function grantSkillPublisherAccess(
@@ -3478,6 +3590,21 @@ async function grantAdminControlAccess(
        GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
     );
   }
+  if (await hasExternalToolAdminState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
+       GRANT UPDATE(${externalToolDraftUpdateColumns.join(",")})
+         ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
+       GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.external_tool_draft_credentials TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_admin_publish_claims TO ${control};
+       GRANT UPDATE(lease_owner,lease_expires_at) ON TABLE ${schema}.external_tool_admin_publish_claims TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_publish_batches,
+         ${schema}.external_tool_publish_batch_versions,${schema}.external_tool_admin_commands,
+         ${schema}.external_tool_admin_audits TO ${control};
+       GRANT USAGE ON SEQUENCE ${schema}.external_tool_admin_audits_audit_id_seq TO ${control};
+       GRANT SELECT ON TABLE ${schema}.external_tool_selectable_versions TO ${control}`,
+    );
+  }
   if (await hasExternalToolState(client, context.schema)) {
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_versions,${schema}.external_tool_revocations TO ${control};
@@ -3494,6 +3621,299 @@ async function grantAdminControlAccess(
   }
 }
 
+async function hasWebhookState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.tenant_webhooks', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.webhook_outbox', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+const webhookTables = ["tenant_webhooks", "webhook_outbox"] as const;
+const webhookColumnPrivileges = ["SELECT", "INSERT", "UPDATE", "REFERENCES"] as const;
+const webhookRuntimeUpdateColumns = ["secret_ciphertext", "disabled_at", "disabled_reason"];
+// Team Coordinator 只为解散时的批量取消入队，读取筛选订阅所需的最少列。
+const webhookTeamSelectColumns = ["tenant_id", "id", "event_types", "disabled_at"];
+// 入队使用 ON CONFLICT 去重，PostgreSQL 要求对仲裁唯一键列持有 SELECT；不开放其他 Outbox 列。
+const webhookOutboxConflictColumns = ["tenant_id", "webhook_id", "event_id"];
+// Dispatcher 只读取投递所需列；订阅名称、创建者和事件订阅集合都不可见。
+const webhookDispatcherColumns: Readonly<
+  Record<(typeof webhookTables)[number], { readonly select: string[]; readonly update: string[] }>
+> = {
+  tenant_webhooks: {
+    select: ["tenant_id", "id", "endpoint_url", "secret_ciphertext", "disabled_at"],
+    update: ["disabled_at", "disabled_reason"],
+  },
+  webhook_outbox: {
+    select: [
+      "tenant_id",
+      "id",
+      "webhook_id",
+      "event_id",
+      "payload",
+      "state",
+      "attempts",
+      "next_attempt_at",
+      "claim_token",
+      "claim_expires_at",
+      "created_at",
+    ],
+    update: [
+      "state",
+      "attempts",
+      "next_attempt_at",
+      "claim_token",
+      "claim_expires_at",
+      "last_error_code",
+      "delivered_at",
+    ],
+  },
+};
+const webhookTenantPolicies = ["tenant_webhooks_tenant_policy", "webhook_outbox_tenant_policy"];
+
+/**
+ * 找出当前配置之外仍与 Webhook 表关联的角色：表/列 ACL 的被授予者，或任何 Webhook 策略绑定的角色。
+ * 这些通常是更换前的 Dispatcher；表所有者与当前上下文中的角色不在结果内。
+ */
+async function findStaleWebhookRoles(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<readonly string[]> {
+  if (!(await hasWebhookState(client, context.schema))) return [];
+  const result = await client.query<{ readonly role_name: string }>(
+    `WITH target AS (
+       SELECT relation.oid,relation.relacl,relation.relowner FROM pg_class relation
+        WHERE relation.relnamespace=(SELECT oid FROM pg_namespace WHERE nspname=$1)
+          AND relation.relname = ANY($2::text[])
+     ), linked AS (
+       SELECT unnest(policy.polroles) AS role_oid
+         FROM pg_policy policy JOIN target ON target.oid=policy.polrelid
+       UNION
+       SELECT (aclexplode(target.relacl)).grantee FROM target WHERE target.relacl IS NOT NULL
+       UNION
+       SELECT (aclexplode(attribute.attacl)).grantee
+         FROM pg_attribute attribute JOIN target ON target.oid=attribute.attrelid
+        WHERE attribute.attacl IS NOT NULL
+     )
+     SELECT DISTINCT role_state.rolname AS role_name
+       FROM linked JOIN pg_roles role_state ON role_state.oid=linked.role_oid
+      WHERE role_state.rolname <> ALL($3::text[])
+        AND NOT EXISTS (SELECT 1 FROM target WHERE target.relowner=role_state.oid)
+      ORDER BY 1`,
+    [context.schema, [...webhookTables], [...databaseRoles(context)]],
+  );
+  return result.rows.map((row) => row.role_name);
+}
+
+async function grantWebhookAccess(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  if (!(await hasWebhookState(client, context.schema))) return;
+  const schema = quoteIdentifier(context.schema);
+  const runtime = quoteIdentifier(context.runtimeRole);
+  const team = quoteIdentifier(context.teamCoordinatorRole);
+  const columns = (names: readonly string[]) => names.map(quoteIdentifier).join(",");
+  await client.query(
+    `GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.tenant_webhooks TO ${runtime};
+     GRANT UPDATE(${columns(webhookRuntimeUpdateColumns)}) ON TABLE ${schema}.tenant_webhooks TO ${runtime};
+     GRANT INSERT ON TABLE ${schema}.webhook_outbox TO ${runtime};
+     GRANT SELECT(${columns(webhookOutboxConflictColumns)}) ON TABLE ${schema}.webhook_outbox TO ${runtime}`,
+  );
+  if (await hasTeamCollaborationState(client, context.schema))
+    await client.query(
+      `GRANT SELECT(${columns(webhookTeamSelectColumns)}) ON TABLE ${schema}.tenant_webhooks TO ${team};
+       GRANT INSERT ON TABLE ${schema}.webhook_outbox TO ${team};
+       GRANT SELECT(${columns(webhookOutboxConflictColumns)}) ON TABLE ${schema}.webhook_outbox TO ${team}`,
+    );
+  // 管理策略与批量取消的入队策略分开，即使团队角色获得额外 ACL 也不能更新这些行。
+  for (const [policy, table] of [
+    ["tenant_webhooks_tenant_policy", "tenant_webhooks"],
+    ["webhook_outbox_tenant_policy", "webhook_outbox"],
+  ] as const)
+    await client.query(`ALTER POLICY ${policy} ON ${schema}.${table} TO ${runtime}`);
+  const tenantMatch = "tenant_id = NULLIF(current_setting('app.tenant_id', true), '')";
+  await client.query(
+    `ALTER POLICY webhook_team_subscriptions ON ${schema}.tenant_webhooks TO ${team} USING (${tenantMatch});
+     ALTER POLICY webhook_team_keys ON ${schema}.webhook_outbox TO ${team} USING (${tenantMatch});
+     ALTER POLICY webhook_team_enqueue ON ${schema}.webhook_outbox TO ${team} WITH CHECK (${tenantMatch})`,
+  );
+  if (context.webhookDispatcherRole === undefined) {
+    await client.query(
+      `ALTER POLICY tenant_webhooks_dispatcher_read ON ${schema}.tenant_webhooks TO PUBLIC USING (false);
+       ALTER POLICY tenant_webhooks_dispatcher_disable ON ${schema}.tenant_webhooks TO PUBLIC
+         USING (false) WITH CHECK (false);
+       ALTER POLICY webhook_outbox_dispatcher_policy ON ${schema}.webhook_outbox TO PUBLIC
+         USING (false) WITH CHECK (false)`,
+    );
+    return;
+  }
+  const dispatcher = quoteIdentifier(context.webhookDispatcherRole);
+  await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${dispatcher}`);
+  for (const table of webhookTables) {
+    const allowed = webhookDispatcherColumns[table];
+    await client.query(
+      `GRANT SELECT(${columns(allowed.select)}) ON TABLE ${schema}.${table} TO ${dispatcher};
+       GRANT UPDATE(${columns(allowed.update)}) ON TABLE ${schema}.${table} TO ${dispatcher}`,
+    );
+  }
+  // Dispatcher 跨 Tenant 投递，但只能把仍启用的订阅改为停用，不能恢复启用。
+  await client.query(
+    `ALTER POLICY tenant_webhooks_dispatcher_read ON ${schema}.tenant_webhooks TO ${dispatcher}
+       USING (true);
+     ALTER POLICY tenant_webhooks_dispatcher_disable ON ${schema}.tenant_webhooks TO ${dispatcher}
+       USING (disabled_at IS NULL) WITH CHECK (disabled_at IS NOT NULL AND disabled_reason IS NOT NULL);
+     ALTER POLICY webhook_outbox_dispatcher_policy ON ${schema}.webhook_outbox TO ${dispatcher}
+       USING (true) WITH CHECK (true)`,
+  );
+}
+
+async function assertWebhookBoundary(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+  staleRoles: readonly string[],
+): Promise<void> {
+  const present = await hasWebhookState(client, context.schema);
+  const teamEnabled = present && (await hasTeamCollaborationState(client, context.schema));
+  type Expected = (table: string, column: string, privilege: string) => boolean;
+  const none: Expected = () => false;
+  const checks: Array<readonly [string, Expected]> = [
+    [
+      context.runtimeRole,
+      (table, column, privilege) =>
+        table === "tenant_webhooks"
+          ? privilege === "SELECT" ||
+            privilege === "INSERT" ||
+            (privilege === "UPDATE" && webhookRuntimeUpdateColumns.includes(column))
+          : privilege === "INSERT" ||
+            (privilege === "SELECT" && webhookOutboxConflictColumns.includes(column)),
+    ],
+    [
+      context.teamCoordinatorRole,
+      teamEnabled
+        ? (table, column, privilege) =>
+            table === "tenant_webhooks"
+              ? privilege === "SELECT" && webhookTeamSelectColumns.includes(column)
+              : privilege === "INSERT" ||
+                (privilege === "SELECT" && webhookOutboxConflictColumns.includes(column))
+        : none,
+    ],
+    ...staleRoles.map((role) => [role, none] as const),
+  ];
+  for (const role of [
+    context.skillPublisherRole,
+    context.workerCoordinatorRole,
+    context.adminControlRole,
+  ])
+    checks.push([role, none]);
+  if (context.webhookDispatcherRole !== undefined)
+    checks.push([
+      context.webhookDispatcherRole,
+      (table, column, privilege) => {
+        const allowed = webhookDispatcherColumns[table as (typeof webhookTables)[number]];
+        if (privilege === "SELECT") return allowed.select.includes(column);
+        if (privilege === "UPDATE") return allowed.update.includes(column);
+        return false;
+      },
+    ]);
+  if (present) {
+    for (const [role, expected] of checks) {
+      const rows = await client.query<{
+        readonly table_name: string;
+        readonly column_name: string;
+        readonly privilege: string;
+        readonly allowed: boolean;
+      }>(
+        `SELECT column_state.table_name,column_state.column_name,requested.privilege,
+                has_column_privilege($1,format('%I.%I',$2::text,column_state.table_name),
+                  column_state.column_name,requested.privilege) AS allowed
+           FROM information_schema.columns column_state
+           CROSS JOIN unnest($3::text[]) AS requested(privilege)
+          WHERE column_state.table_schema=$2 AND column_state.table_name = ANY($4::text[])`,
+        [role, context.schema, [...webhookColumnPrivileges], [...webhookTables]],
+      );
+      for (const row of rows.rows)
+        if (row.allowed !== expected(row.table_name, row.column_name, row.privilege))
+          throw new PersistenceError(
+            "CONSTRAINT_VIOLATION",
+            `Webhook 列权限偏离白名单：${role} ${row.table_name}.${row.column_name}.${row.privilege}`,
+          );
+    }
+    const bindings = await client.query<{
+      readonly policy_name: string;
+      readonly roles: string[];
+    }>(
+      `SELECT policy.polname AS policy_name,
+              ARRAY(SELECT CASE WHEN member=0 THEN 'PUBLIC' ELSE pg_get_userbyid(member)::text END
+                      FROM unnest(policy.polroles) AS member ORDER BY 1) AS roles
+         FROM pg_policy policy JOIN pg_class relation ON relation.oid=policy.polrelid
+        WHERE relation.relnamespace=(SELECT oid FROM pg_namespace WHERE nspname=$1)
+          AND relation.relname = ANY($2::text[])`,
+      [context.schema, [...webhookTables]],
+    );
+    const expectedBindings = new Map([
+      ...webhookTenantPolicies.map((name) => [name, context.runtimeRole] as const),
+      ...["webhook_team_subscriptions", "webhook_team_keys", "webhook_team_enqueue"].map(
+        (name) => [name, context.teamCoordinatorRole] as const,
+      ),
+      ...[
+        "tenant_webhooks_dispatcher_read",
+        "tenant_webhooks_dispatcher_disable",
+        "webhook_outbox_dispatcher_policy",
+      ].map((name) => [name, context.webhookDispatcherRole ?? "PUBLIC"] as const),
+    ]);
+    if (bindings.rows.length !== expectedBindings.size)
+      throw new PersistenceError("CONSTRAINT_VIOLATION", "Webhook RLS 策略集合偏离白名单");
+    for (const row of bindings.rows) {
+      if (
+        row.roles.length !== 1 ||
+        !expectedBindings.has(row.policy_name) ||
+        row.roles[0] !== expectedBindings.get(row.policy_name)
+      )
+        throw new PersistenceError(
+          "CONSTRAINT_VIOLATION",
+          `Webhook RLS 策略绑定偏离白名单：${row.policy_name}`,
+        );
+    }
+  }
+  // Dispatcher 与已撤销的旧角色在 Webhook 以外的表上不得持有任何表或列权限。
+  const outsiders: Array<readonly [string, boolean]> = [
+    ...staleRoles.map((role) => [role, false] as const),
+    ...(context.webhookDispatcherRole === undefined
+      ? []
+      : [[context.webhookDispatcherRole, present] as const]),
+  ];
+  for (const [role, schemaUsage] of outsiders) {
+    const leaked = await client.query<{ readonly table_name: string }>(
+      `SELECT relation.relname AS table_name
+         FROM pg_class relation CROSS JOIN unnest($3::text[]) AS requested(privilege)
+        WHERE relation.relnamespace=(SELECT oid FROM pg_namespace WHERE nspname=$2)
+          AND relation.relkind IN ('r','p','S')
+          AND ((relation.relkind <> 'S' AND (
+                 has_table_privilege($1,relation.oid,requested.privilege)
+                 OR (relation.relname <> ALL($4::text[])
+                     AND requested.privilege IN ('SELECT','INSERT','UPDATE','REFERENCES')
+                     AND has_any_column_privilege($1,relation.oid,requested.privilege))))
+            OR (relation.relkind='S' AND requested.privilege IN ('SELECT','UPDATE')
+                AND has_sequence_privilege($1,relation.oid,requested.privilege)))
+        LIMIT 1`,
+      [role, context.schema, tablePrivileges, [...webhookTables]],
+    );
+    if (leaked.rows.length > 0)
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        `${role} 持有 Webhook 白名单之外的表权限：${leaked.rows[0]?.table_name ?? ""}`,
+      );
+    const usage = await client.query<{ readonly usage: boolean; readonly create: boolean }>(
+      `SELECT has_schema_privilege($1,$2,'USAGE') AS usage,has_schema_privilege($1,$2,'CREATE') AS create`,
+      [role, context.schema],
+    );
+    if (usage.rows[0]?.usage !== schemaUsage || usage.rows[0]?.create !== false)
+      throw new PersistenceError("CONSTRAINT_VIOLATION", `${role} 的 Schema 权限偏离白名单`);
+  }
+}
+
 /** 在既有迁移事务中收敛 ACL，供 down 保证 DDL 与权限回收原子提交。 */
 export async function bootstrapRuntimeAccessOnClient(
   client: PoolClient,
@@ -3501,22 +3921,29 @@ export async function bootstrapRuntimeAccessOnClient(
 ): Promise<void> {
   await assertBootstrapContextSafe(client, context);
   const role = quoteIdentifier(context.runtimeRole);
-  const publisherRole = quoteIdentifier(context.skillPublisherRole);
   const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
-  const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
-  const adminControlRole = quoteIdentifier(context.adminControlRole);
   const schema = quoteIdentifier(context.schema);
+  // 更换 Dispatcher 等角色后，旧角色仍可能保留 Schema/表/列 ACL 或 Webhook 策略绑定；
+  // 必须在重新授权前与当前角色一起撤销，否则旧凭据仍能访问投递记录。
+  const staleWebhookRoles = await findStaleWebhookRoles(client, context);
+  const revokedRoles = [
+    "PUBLIC",
+    ...[
+      context.runtimeRole,
+      context.skillPublisherRole,
+      context.workerCoordinatorRole,
+      context.teamCoordinatorRole,
+      context.adminControlRole,
+      ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
+      ...staleWebhookRoles,
+    ].map(quoteIdentifier),
+  ].join(", ");
+  await client.query(`REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM ${revokedRoles}`);
   await client.query(
-    `REVOKE ALL PRIVILEGES ON SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+    `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema} FROM ${revokedRoles}`,
   );
   await client.query(
-    `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
-  );
-  await client.query(
-    `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+    `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema} FROM ${revokedRoles}`,
   );
   await rebindRoleScopedPolicies(client, context);
   await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
@@ -3524,9 +3951,9 @@ export async function bootstrapRuntimeAccessOnClient(
     `GRANT SELECT, INSERT ON TABLE ${schema}.app_users, ${schema}.tenants, ${schema}.memberships TO ${role}`,
   );
   await client.query(
-    `REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+    `REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA ${schema} FROM ${revokedRoles}`,
   );
+  await grantWebhookAccess(client, context);
   if (await hasApiKeyState(client, context.schema)) {
     await client.query(
       `GRANT SELECT, INSERT ON TABLE ${schema}.api_keys TO ${role};
@@ -4107,6 +4534,7 @@ export async function bootstrapRuntimeAccessOnClient(
   await grantTeamCoordinatorAccess(client, context);
   await grantAdminControlAccess(client, context);
   await assertActiveRuntimeWhitelist(client, context);
+  await assertWebhookBoundary(client, context, staleWebhookRoles);
 }
 
 /** 独立、可重复的 ACL bootstrap；角色与 Schema preflight 始终先于任何 ACL 变更。 */
@@ -4131,18 +4559,22 @@ export async function teardownRuntimeSchemaAccessOnClient(
   const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
   const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
   const adminControlRole = quoteIdentifier(context.adminControlRole);
+  const webhookDispatcherRole =
+    context.webhookDispatcherRole === undefined
+      ? undefined
+      : quoteIdentifier(context.webhookDispatcherRole);
   const schema = quoteIdentifier(context.schema);
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
   );
   await assertRuntimeAccessRemoved(client, context);
 }

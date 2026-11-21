@@ -18,6 +18,7 @@
 | 准备本地环境并启动开发工作台 | [开发环境准备](development.md) |
 | 查找代码应修改的位置 | [仓库导览](architecture/repository-map.md) |
 | 配置服务、运行命令或调用 Development API | [配置参考](reference/configuration.md) · [命令参考](reference/commands.md) · [Development API](reference/development-api.md) |
+| 配置 Tenant Webhook 或实现事件接收端 | [Webhook 参考](reference/webhooks.md) |
 | 理解个人历史文件和 ResourceFS 路径 | [历史文件与 ResourceFS](reference/history-files.md) |
 | 理解 `todo_write` 协议和持久化语义 | [Todo Write](reference/todo-write.md) |
 | 部署、发布或排查运行问题 | [运维文档](operations/README.md) · [维护者文档](maintainers/README.md) |

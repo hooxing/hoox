@@ -13,6 +13,8 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "DATABASE_TEAM_COORDINATOR_ROLE",
   "DATABASE_SKILL_PUBLISHER_ROLE",
   "DATABASE_ADMIN_CONTROL_ROLE",
+  "DATABASE_WEBHOOK_DISPATCHER_ROLE",
+  "WEBHOOK_DISPATCHER_DATABASE_URL",
   "DATABASE_SCHEMA",
   "PROCESS_SHUTDOWN_TIMEOUT_MS",
   "THREAD_CURSOR_ACTIVE_KID",
@@ -83,6 +85,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "ADMIN_CONTROL_IDENTITY_API_URL",
   "MODEL_CREDENTIAL_ENCRYPTION_KEY",
   "EXTERNAL_TOOL_IDENTITY_ROOT_KEY",
+  "WEBHOOK_SECRET_ENCRYPTION_KEY",
   "MODEL_WIRE_TRACE_ENABLED",
   "MODEL_WIRE_TRACE_RETENTION_DAYS",
   "MODEL_WIRE_TRACE_MAX_BYTES",
@@ -146,6 +149,7 @@ const secretKeys = new Set([
   "DATABASE_URL",
   "DATABASE_WORKER_COORDINATOR_URL",
   "DATABASE_TEAM_COORDINATOR_URL",
+  "WEBHOOK_DISPATCHER_DATABASE_URL",
   "SKILL_PUBLISHER_DATABASE_URL",
   "ADMIN_CONTROL_DATABASE_URL",
   "THREAD_CURSOR_SIGNING_KEYS",
@@ -165,6 +169,7 @@ const secretKeys = new Set([
   "MODEL_API_KEY",
   "MODEL_CREDENTIAL_ENCRYPTION_KEY",
   "EXTERNAL_TOOL_IDENTITY_ROOT_KEY",
+  "WEBHOOK_SECRET_ENCRYPTION_KEY",
   "MEM0_API_KEY",
   "MEM0_SCOPE_HMAC_KEY",
   "MODEL_ID",
@@ -197,11 +202,12 @@ function obviousPlaceholder(key, value) {
     key === "DATABASE_URL" ||
     key === "DATABASE_WORKER_COORDINATOR_URL" ||
     key === "DATABASE_TEAM_COORDINATOR_URL" ||
+    key === "WEBHOOK_DISPATCHER_DATABASE_URL" ||
     key === "SKILL_PUBLISHER_DATABASE_URL" ||
     key === "ADMIN_CONTROL_DATABASE_URL"
   ) {
     try {
-      return new URL(value).password === "replace-me";
+      return new URL(value).password.startsWith("replace-");
     } catch {
       return false;
     }

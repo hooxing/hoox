@@ -8,7 +8,9 @@
     "@hoox/persistence": "workspace:*",
     "@hoox/process-runtime": "workspace:*",
     "@hoox/sandbox": "workspace:*",
-    "@hoox/thread-title": "workspace:*"
+    "@hoox/thread-title": "workspace:*",
+    "@hoox/tool-router": "workspace:*",
+    "pg": "8.22.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -17,5 +19,8 @@
     "dev": "node dist/development-main.js",
     "start:production": "node dist/production-main.js",
     "smoke:cleanup:real": "node --env-file-if-exists=../../../.env --import tsx src/cleanup-real-smoke.ts"
+  },
+  "devDependencies": {
+    "@types/pg": "8.20.0"
   }
 }

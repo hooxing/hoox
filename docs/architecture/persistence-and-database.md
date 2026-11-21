@@ -29,9 +29,10 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 | 角色 | 使用者 | 边界 |
 | --- | --- | --- |
 | Migrator | 迁移命令 | 拥有 Schema 和受限视图；不被常驻进程使用 |
-| Runtime | API、Worker、Scheduler | 表与列白名单 ACL；业务 Schema 不含 routine。API Key 吊销只授予 Runtime 所需列级 UPDATE，并由 Runtime 专属 RESTRICTIVE RLS 策略限制集成 Membership 状态转换和 Key 吊销行；API Key 认证只按哈希命中受 RLS 限制的凭据行 |
+| Runtime | API、Worker、Scheduler | 表与列白名单 ACL；业务 Schema 不含 routine。Tenant Webhook 订阅由 Runtime 按 Tenant RLS 管理（订阅只开放密文与停用列的列级 UPDATE，目的地址不可改），事件 Outbox 与业务状态在同一事务写入；Runtime 只能入队（INSERT 与去重唯一键列的 SELECT），不能读取或结算 Outbox。Webhook 两张表的管理策略只绑定 Runtime；Team Coordinator 通过独立的 Tenant 读列与入队策略处理批量取消。API Key 吊销只授予 Runtime 所需列级 UPDATE，并由 Runtime 专属 RESTRICTIVE RLS 策略限制集成 Membership 状态转换和 Key 吊销行；API Key 认证只按哈希命中受 RLS 限制的凭据行 |
 | Worker Coordinator | Worker 的 Tenant 发现与外部工具快照读取 | 全局读取 assignment 并更新 claim 栅栏列；只经受限视图读取持有有效双栅栏的 Run 快照版本与密文，不读取业务底表 |
-| Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Worker 不持有 |
+| Webhook Dispatcher | Scheduler 的 Webhook Outbox 消费 | 只持有 Outbox 与订阅投递列的列级 SELECT、Outbox 投递/租约列的 UPDATE 与订阅停用列的 UPDATE；不读取 Run、Thread、Membership、Tenant 或订阅名称等列；RLS 只允许把启用的订阅改为停用。Outbox 不保存地址或密钥，领取时读取订阅地址，发送前复核当前密钥与停用状态。Bootstrap 会撤销不再配置的旧 Dispatcher 角色（Schema、表、列 ACL 与策略绑定），并断言 Dispatcher 与旧角色不持有白名单外权限 |
+| Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Webhook 订阅只有筛选所需列的 SELECT、Outbox 只能入队，用于解散时的批量取消事件，除去重唯一键外不能读取 Outbox，不能读取或改写订阅密文，也不能改写已入队记录；Worker 不持有 |
 | Admin Control | 统一 Admin API 控制面 | 控制面配置、AgentDefinition 发布与撤销、Run 浏览器受限视图及正文访问审计、外部工具版本发布与撤销、审计及统计投影；AgentDefinition 写入仅允许当前有效的 `operator` 或 `admin` 身份；工具凭据仅 INSERT，管理投影不读取密文 |
 | Skill Publisher | 统一 Admin API Skill 路由 | Skill 发布状态机与对应对象存储权限 |
 
@@ -41,6 +42,7 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 
 - 命令式写入使用显式幂等键，并以 canonical JSON 摘要绑定完整请求；同键异摘要稳定冲突。
 - COMMIT 响应未知（`TransactionCommitUnknownError`）时只按原幂等键精确读回，禁止再次 INSERT 或重写。
+- Webhook Dispatcher 的领取、发送前复核与结算使用覆盖连接池等待及整个事务的客户端截止时间；超时淘汰连接，不能只依赖服务端 `statement_timeout`。提交结果未知时不立即重放领取或结算，由领取令牌与数据库租约恢复收敛。
 - 序列化冲突只重放完全相同的命令；重试范围和次数见 [Run 执行与恢复](run-execution-and-recovery.md#重试与未知结果)。
 - 租约、TTL、`created_at` 等时间只使用数据库时钟，应用不得提交发生时间。
 - Agent Worker 的连接池开启预备语句缓存（`createPostgresPool({ preparedStatements: true })`）：带参数的单语句查询按 SQL 文本哈希命名，同一连接执行 5 次后复用通用计划。带 RLS 的多表 fence 查询规划约 4.5ms、执行约 0.4ms，因此这是事件持久化的主要提速手段。查询文本必须由常量拼成，不能把参数内联进 SQL，否则每个不同值都会产生一条新的预备语句；经过事务级连接池（如 PgBouncer transaction 模式）连接时不得开启。
@@ -54,12 +56,15 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 - 在调用远端前持久化“已开始”事实，之后的崩溃或不确定响应收敛为 `unknown`，不自动重复；
 - 失败按有界退避重试，耗尽后进入明确的终止或人工处理状态。
 
+Webhook 管理删除只写入不可恢复的停用墓碑，不物理删除订阅或 Outbox，避免并发业务事务已经选中的订阅在外键检查前消失并回滚 Run 状态。墓碑不再出现在管理列表，也不能轮换密钥或再次停用；物理回收随 Tenant 生命周期级删除级联进行。发送复核与在途请求的边界见 [Webhook 参考](../reference/webhooks.md)。
+
 事件写入在原事务中调用 `pg_notify` 唤醒 API 的事件流；通知只携带散列路由键，不是授权或持久事实，丢失由定时补读覆盖。
 
 ## Routine 与迁移
 
 - 业务 Schema 不得存在自定义函数、过程或聚合，迁移 runner 在迁移前后均以严格 routine 检查失败关闭。API Key 撤销不使用数据库 routine：Runtime 的列级 UPDATE 权限受 Runtime 专属 RESTRICTIVE RLS 策略进一步约束，只能将集成 Membership 从 active 改为 revoked，不能改人类成员或恢复已吊销 Membership。由于 `SELECT ... FOR SHARE/UPDATE` 同样施加 UPDATE 策略的 USING，Membership 策略的 USING 只限定当前 Tenant 的 active 行，使人类成员的授权加锁与 `lock_marker` 自更新继续命中；集成身份与目标状态只在 WITH CHECK 中约束，因此 Runtime 也无法锁定或更新已吊销 Membership；API Key 仅允许更新未吊销行，且新状态必须仍处于当前 Tenant，因此已吊销 Key 不可恢复。Key 与 Membership 在同一事务中更新，任一更新未命中预期行则整体回滚。这些策略随 API Key 表在同一迁移中创建与回退。
-- 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。2026-11 起全部历史迁移已合并为 `0001_baseline`；基线及之后的迁移一经提交不可修改，新变化只能追加 `0002` 起的递增版本。压缩前建立的数据库会因迁移记录不一致而失败关闭，必须清空 Schema 后重建，见[开发环境准备](../development.md#迁移基线重置)。
+- 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。2026-11 起全部历史迁移已合并为 `0001_baseline`；基线及之后的迁移一经合并到 `main` 或执行即不可修改，新变化只能追加 `0002` 起的递增版本。压缩前建立的数据库会因迁移记录不一致而失败关闭，必须清空 Schema 后重建，见[开发环境准备](../development.md#迁移基线重置)。
+- 开发时使用 `pnpm migration:new <名称>` 创建成对的迁移文件。并行分支合并前，先同步 `origin/main` 并将其迁移纳入工作区，再用 `pnpm migration:renumber` 将分支新增、尚未执行的迁移顺延到基准之后，并同步更新对文件名主干的引用。若工作区或 Git 索引缺少基准迁移或与基准内容不符，命令拒绝重编号。两个命令只操作文件和 Git，不连接数据库；重编号会改变 checksum，不能用于已执行的迁移。
 - 基线 down 删除基线创建的全部表、视图与函数，不按数据内容阻止回退；新增迁移的 down 若可能丢失不可恢复事实，应自行失败关闭。
 - `pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作。
 

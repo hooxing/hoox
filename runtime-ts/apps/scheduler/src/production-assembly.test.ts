@@ -22,6 +22,14 @@ vi.mock("@hoox/persistence/maintenance", () => ({
 vi.mock("@hoox/persistence/postgres", () => ({
   createPostgresPool: mocks.createPostgresPool,
   probePostgres: mocks.probePostgres,
+  PgWebhookOutboxStore: class {
+    readonly leaseMs = 30_000;
+    readonly maxAttempts = 12;
+    async claim() {
+      return undefined;
+    }
+  },
+  WebhookSecretCipher: class {},
 }));
 
 vi.mock("@hoox/sandbox", () => ({
@@ -84,6 +92,10 @@ function environment(): Record<string, string> {
     CLEANUP_POLL_INTERVAL_MS: "1000",
     CLEANUP_LEASE_MS: "210000",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
+    DATABASE_WEBHOOK_DISPATCHER_ROLE: "webhook_dispatcher",
+    WEBHOOK_DISPATCHER_DATABASE_URL:
+      "postgresql://webhook_dispatcher:credential@database:5432/runtime?sslmode=verify-full",
+    WEBHOOK_SECRET_ENCRYPTION_KEY: "webhook-root-placeholder-at-least-32-bytes",
   };
 }
 
@@ -104,7 +116,7 @@ describe("生产 Scheduler 装配顺序", () => {
     expect(mocks.gatewayConstructed).toHaveBeenCalledTimes(1);
     expect(mocks.gatewayProbe).toHaveBeenCalledTimes(1);
     expect(mocks.loopStarted).not.toHaveBeenCalled();
-    expect(mocks.pool.end).toHaveBeenCalledTimes(1);
+    expect(mocks.pool.end).toHaveBeenCalledTimes(2);
   });
 
   it("数据库角色探针失败时不构造远端 gateway，也不启动 cleanup loop", async () => {
@@ -114,9 +126,16 @@ describe("生产 Scheduler 装配顺序", () => {
     expect(mocks.createPostgresPool).toHaveBeenCalledWith(
       expect.objectContaining({ ssl: { rejectUnauthorized: true } }),
     );
+    // Dispatcher 使用独立受限角色连接，生产同样强制 TLS 校验。
+    expect(mocks.createPostgresPool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRuntimeRole: "webhook_dispatcher",
+        ssl: { rejectUnauthorized: true },
+      }),
+    );
     expect(mocks.probePostgres).toHaveBeenCalledTimes(1);
     expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
     expect(mocks.loopStarted).not.toHaveBeenCalled();
-    expect(mocks.pool.end).toHaveBeenCalledTimes(1);
+    expect(mocks.pool.end).toHaveBeenCalledTimes(2);
   });
 });

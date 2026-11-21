@@ -6,6 +6,8 @@ import {
   digestControlRequest,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
+  ExternalToolAdminError,
+  type ExternalToolAdminService,
   RunExplorerError,
   type SandboxControlServicePort,
 } from "@hoox/admin-control";
@@ -74,6 +76,7 @@ import {
 import { PersistenceError } from "@hoox/persistence/postgres";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { EXTERNAL_TOOL_ROUTE_PREFIX, registerExternalToolRoutes } from "./external-tool-routes.js";
 import { registerAgentDefinitionRoutes } from "./agent-definition-routes.js";
 import type { IdentityAdminService } from "./identity-configuration.js";
 import type { PiModelCatalogPort } from "./pi-model-catalog.js";
@@ -116,6 +119,7 @@ type ControlServiceContract = Pick<
 export interface AdminControlApiDependencies {
   readonly sandbox?: SandboxControlServicePort;
   readonly runs?: RunExplorerRouteService;
+  readonly externalTools?: ExternalToolAdminService;
   readonly agents?: AgentDefinitionAdminRepositoryPort;
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
@@ -265,6 +269,15 @@ export function createAdminControlApiApp(
   }
   if (dependencies.runs !== undefined) {
     registerRunExplorerRoutes(app, dependencies.runs, { actor, success });
+  }
+  if (dependencies.externalTools) {
+    registerExternalToolRoutes(app, dependencies.externalTools, {
+      actor,
+      success,
+      requireJson,
+      idempotencyKey: requireIdempotencyKey,
+      responseSchemas,
+    });
   }
   if (dependencies.agents) {
     registerAgentDefinitionRoutes(app, dependencies.agents, {
@@ -702,10 +715,27 @@ function failureKind(error: unknown, request: FastifyRequest): FailureKind {
   if (error instanceof Error && error.message === "IDENTITY_ADMIN_CONFLICT") return "conflict";
   if (error instanceof TypeError && error.message.startsWith("IDENTITY_")) return "bad_request";
   if (error instanceof TypeError) return "bad_request";
+  if (error instanceof ExternalToolAdminError) {
+    switch (error.code) {
+      case "NOT_AUTHORIZED":
+        return "unauthorized";
+      case "NOT_FOUND":
+        return "not_found";
+      case "CONFLICT":
+        return "conflict";
+      case "PROBE_UNAVAILABLE":
+      case "PUBLISH_RESULT_UNKNOWN":
+        return "dependency_unavailable";
+      case "INVALID":
+      case "PUBLISH_REJECTED":
+        return "bad_request";
+    }
+  }
   if (error instanceof AgentDefinitionAccessError) return "unauthorized";
   if (
     error instanceof PersistenceError &&
-    request.url.startsWith("/v1/admin/control/agent-definitions")
+    (request.url.startsWith("/v1/admin/control/agent-definitions") ||
+      request.routeOptions.url?.startsWith(EXTERNAL_TOOL_ROUTE_PREFIX))
   ) {
     if (error.code === "CONFLICT") return "conflict";
     if (error.code === "CONSTRAINT_VIOLATION") return "bad_request";
@@ -745,7 +775,9 @@ function validationMessage(
   request: FastifyRequest,
   kind: FailureKind,
 ): string | undefined {
-  if (kind !== "bad_request") return undefined;
+  if (error instanceof ExternalToolAdminError) return error.message;
+  if (kind !== "bad_request" || request.routeOptions.url?.startsWith(EXTERNAL_TOOL_ROUTE_PREFIX))
+    return undefined;
   if (error instanceof AgentDefinitionValidationError) return error.message;
   if (request.url.startsWith("/v1/admin/control/agent-definitions")) {
     return "Agent 配置字段、可用范围或当前状态不符合要求";

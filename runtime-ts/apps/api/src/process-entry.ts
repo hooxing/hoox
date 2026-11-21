@@ -47,6 +47,11 @@ const apiEnvironmentSchema = Object.freeze({
     secret: true,
     maxLength: 512,
   }),
+  WEBHOOK_SECRET_ENCRYPTION_KEY: stringEnvironmentField({
+    secret: true,
+    maxLength: 8192,
+    requiredIn: productionEnvironment,
+  }),
   BETTER_AUTH_SECRET: stringEnvironmentField({ secret: true, maxLength: 4096 }),
   BETTER_AUTH_TRUSTED_ORIGINS: stringEnvironmentField({
     requiredIn: optionalEnvironments,
@@ -182,6 +187,7 @@ export interface ApiProcessConfiguration {
     readonly trustedOrigins: readonly string[];
   }>;
   readonly cursorSigningKeys: string;
+  readonly webhookSecretEncryptionKey?: string;
   readonly serialQueueV2Enabled: boolean;
   readonly threadContextV2ReadEnabled: boolean;
   readonly threadInputRoutingV2Enabled: boolean;
@@ -451,6 +457,9 @@ export function parseApiProcessEnvironment(
     }),
     cursorActiveKeyId: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_ACTIVE_KID"),
     cursorSigningKeys: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_SIGNING_KEYS"),
+    ...(parsed.values.WEBHOOK_SECRET_ENCRYPTION_KEY === undefined
+      ? {}
+      : { webhookSecretEncryptionKey: parsed.values.WEBHOOK_SECRET_ENCRYPTION_KEY }),
     serialQueueV2Enabled,
     threadContextV2ReadEnabled: contextReadEnabled,
     threadInputRoutingV2Enabled: inputRoutingEnabled,

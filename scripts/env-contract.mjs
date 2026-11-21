@@ -11,6 +11,8 @@ export const expectedEnvironmentKeys = Object.freeze([
   "DATABASE_MIGRATOR_ROLE",
   "DATABASE_SKILL_PUBLISHER_ROLE",
   "DATABASE_ADMIN_CONTROL_ROLE",
+  "DATABASE_WEBHOOK_DISPATCHER_ROLE",
+  "WEBHOOK_DISPATCHER_DATABASE_URL",
   "DATABASE_SCHEMA",
   "RUNTIME_ENV",
   "PROCESS_SHUTDOWN_TIMEOUT_MS",
@@ -76,6 +78,7 @@ export const expectedEnvironmentKeys = Object.freeze([
   "AGENT_WORKER_RUN_LEASE_MS",
   "AGENT_WORKER_RUN_TIMEOUT_MS",
   "MODEL_CREDENTIAL_ENCRYPTION_KEY",
+  "WEBHOOK_SECRET_ENCRYPTION_KEY",
   "MODEL_WIRE_TRACE_ENABLED",
   "MODEL_WIRE_TRACE_RETENTION_DAYS",
   "MODEL_WIRE_TRACE_MAX_BYTES",
@@ -158,6 +161,7 @@ const placeholderOnlyKeys = new Set([
   "DATABASE_URL",
   "DATABASE_WORKER_COORDINATOR_URL",
   "DATABASE_TEAM_COORDINATOR_URL",
+  "WEBHOOK_DISPATCHER_DATABASE_URL",
   "DATABASE_DOCKER_URL",
   "DATABASE_BOOTSTRAP_URL",
   "MIGRATION_DATABASE_URL",
@@ -182,6 +186,7 @@ const placeholderOnlyKeys = new Set([
   "MODEL_API_KEY",
   "MODEL_CREDENTIAL_ENCRYPTION_KEY",
   "EXTERNAL_TOOL_IDENTITY_ROOT_KEY",
+  "WEBHOOK_SECRET_ENCRYPTION_KEY",
   "MODEL_ID",
   "THREAD_CURSOR_SIGNING_KEYS",
   "RESOURCE_FILESYSTEM_SIGNING_KEY",
@@ -204,6 +209,7 @@ function looksLikePlaceholder(key, value) {
     key === "DATABASE_URL" ||
     key === "DATABASE_WORKER_COORDINATOR_URL" ||
     key === "DATABASE_TEAM_COORDINATOR_URL" ||
+    key === "WEBHOOK_DISPATCHER_DATABASE_URL" ||
     key === "DATABASE_DOCKER_URL" ||
     key === "DATABASE_BOOTSTRAP_URL" ||
     key === "MIGRATION_DATABASE_URL" ||
@@ -211,7 +217,7 @@ function looksLikePlaceholder(key, value) {
     key === "ADMIN_CONTROL_DATABASE_URL"
   ) {
     try {
-      return new URL(value).password === "replace-me";
+      return new URL(value).password.startsWith("replace-");
     } catch {
       return false;
     }

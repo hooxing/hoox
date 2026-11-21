@@ -15,5 +15,7 @@ export * from "./tool-configuration.js";
 export * from "./api-key.js";
 export * from "./external-tool.js";
 export * from "./agent-definition.js";
+export * from "./webhook.js";
 export * from "./available-agent.js";
 export * from "./admin-agent-definition.js";
+export * from "./admin-external-tool.js";

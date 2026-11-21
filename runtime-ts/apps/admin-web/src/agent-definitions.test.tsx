@@ -1,17 +1,15 @@
 // @vitest-environment jsdom
 
 import type { AgentDefinitionDto, AgentRevisionDto } from "@hoox/protocol";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, type ReactElement } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { describe, expect, it, vi } from "vitest";
+import { render, settle, button, field, enter, select } from "./testing/admin-component.js";
 import { AgentDefinitionEditor } from "./agent-definition-editor.js";
 import { AgentDefinitionsPage } from "./agent-definitions.js";
 import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
 import { AdminControlApi, type AgentDefinitionApiContract } from "./control-api.js";
 
-const roots: Root[] = [];
 const timestamp = "2026-11-20T00:00:00.000Z";
 const definition: AgentDefinitionDto = {
   id: "agent_example",
@@ -62,6 +60,7 @@ function fixture(canManage: boolean) {
       canManage,
       builtinToolLimit: ["read"],
       pinnedModelOptions: [],
+      externalToolOptions: [],
       items: [{ definition, revision: summary(current) }],
     })),
     listAgentRevisions: vi.fn(async () => ({
@@ -79,82 +78,6 @@ function fixture(canManage: boolean) {
     setAgentAvailability: vi.fn(async () => definition),
   } satisfies AgentDefinitionApiContract;
 }
-
-function render(element: ReactElement) {
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
-  roots.push(root);
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  act(() => root.render(<QueryClientProvider client={client}>{element}</QueryClientProvider>));
-  return container;
-}
-
-async function settle() {
-  for (let index = 0; index < 5; index++)
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-}
-
-function button(root: ParentNode, name: string) {
-  const result = Array.from(root.querySelectorAll("button")).find(
-    (item) => item.textContent?.replace(/\s+/gu, "") === name.replace(/\s+/gu, ""),
-  );
-  if (!result) throw new Error(`未找到按钮：${name}`);
-  return result;
-}
-
-function field<T extends HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-  root: ParentNode,
-  name: string,
-) {
-  const result = Array.from(root.querySelectorAll("label"))
-    .find((item) => item.textContent?.startsWith(name))
-    ?.querySelector<T>("input, textarea, select");
-  if (!result) throw new Error(`未找到字段：${name}`);
-  return result;
-}
-
-function enter(input: HTMLTextAreaElement | HTMLInputElement, value: string) {
-  const prototype =
-    input instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype;
-  act(() => {
-    Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
-
-function select(input: HTMLSelectElement, value: string) {
-  act(() => {
-    input.value = value;
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-}
-
-beforeEach(() => {
-  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  const computedStyle = window.getComputedStyle.bind(window);
-  vi.spyOn(window, "getComputedStyle").mockImplementation((element) => computedStyle(element));
-  vi.stubGlobal(
-    "ResizeObserver",
-    class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    },
-  );
-  vi.stubGlobal(
-    "matchMedia",
-    vi.fn(() => ({ matches: false, addListener() {}, removeListener() {} })),
-  );
-});
-afterEach(() => {
-  for (const root of roots.splice(0)) act(() => root.unmount());
-  document.body.replaceChildren();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-});
 
 describe("后台 Agent 管理", () => {
   it("viewer 只查看列表与版本差异，不提供管理操作", async () => {
@@ -235,6 +158,78 @@ describe("后台 Agent 管理", () => {
         operatorInstructions: "新草稿使用中文回答",
         tools: expect.objectContaining({ builtinTools: ["read"] }),
       }),
+      undefined,
+    );
+  });
+
+  it("Agent 工具选择只呈现传入的已发布外部工具最小信息", async () => {
+    const onSave = vi.fn(async () => undefined);
+    const container = render(
+      <AgentDefinitionEditor
+        initial={current.content}
+        builtinToolLimit={[]}
+        pinnedModelOptions={[]}
+        externalToolOptions={[
+          {
+            toolVersionId: "published-tool-v1",
+            source: "mcp",
+            modelToolName: "mcp__docs__search",
+            description: "搜索文档",
+            batchName: "文档 MCP",
+          },
+        ]}
+        saving={false}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+    select(field<HTMLSelectElement>(container, "工具配置"), "configured");
+    expect(container.textContent).toContain("mcp__docs__search · 文档 MCP");
+    expect(container.textContent).not.toContain("inputSchema");
+    expect(container.textContent).not.toContain("凭据");
+    act(() => field<HTMLInputElement>(container, "mcp__docs__search").click());
+    act(() => button(container, "保存新草稿").click());
+    await settle();
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: expect.objectContaining({
+          externalTools: [{ kind: "mcp", versionId: "published-tool-v1" }],
+        }),
+      }),
+      undefined,
+    );
+  });
+
+  it("已撤销的历史引用不能再次保存，移除后才可提交", async () => {
+    const onSave = vi.fn(async () => undefined);
+    const container = render(
+      <AgentDefinitionEditor
+        initial={{
+          ...current.content,
+          tools: {
+            mode: "configured",
+            builtinTools: [],
+            clientTools: [],
+            toolCallingMode: "native",
+            externalTools: [{ kind: "mcp", versionId: "old_version" }],
+          },
+        }}
+        builtinToolLimit={[]}
+        pinnedModelOptions={[]}
+        externalToolOptions={[]}
+        saving={false}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+    act(() => button(container, "保存新草稿").click());
+    expect(onSave).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("请移除已不可选的外部工具版本");
+    act(() => field<HTMLInputElement>(container, "已不可选版本：old_version").click());
+    act(() => button(container, "保存新草稿").click());
+    await settle();
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ tools: expect.objectContaining({ externalTools: [] }) }),
       undefined,
     );
   });

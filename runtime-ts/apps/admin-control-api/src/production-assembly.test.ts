@@ -4,6 +4,7 @@ import { createProviderProbes } from "./production-assembly.js";
 
 const configuration: AdminControlApiProcessConfiguration = Object.freeze({
   runtimeEnvironment: "test",
+  externalToolsAllowPrivateAddresses: false,
   databaseUrl: "postgresql://control:secret@localhost/control",
   skillPublisherDatabaseUrl: "postgresql://publisher:secret@localhost/control",
   databaseSchema: "agent_runtime",

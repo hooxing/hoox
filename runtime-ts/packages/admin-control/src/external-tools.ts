@@ -35,7 +35,8 @@ export type ExternalToolAdminErrorCode =
   | "CONFLICT"
   | "INVALID"
   | "PUBLISH_REJECTED"
-  | "PROBE_UNAVAILABLE";
+  | "PROBE_UNAVAILABLE"
+  | "PUBLISH_RESULT_UNKNOWN";
 
 /** 消息均为受控中文文案，可直接返回给后台；不得拼接凭据、Schema 或远端原文。 */
 export class ExternalToolAdminError extends Error {
@@ -114,6 +115,13 @@ export interface ExternalToolAdminRepositoryPort {
       readonly expectedGeneration: number;
     },
   ): Promise<AdminExternalToolBatchDto | undefined>;
+  withPublishClaim(
+    input: ExternalToolCommandContext & {
+      readonly draftId: string;
+      readonly expectedGeneration: number;
+    },
+    execute: (leaseOwner: string) => Promise<AdminExternalToolBatchDto>,
+  ): Promise<AdminExternalToolBatchDto>;
   recordProbeAudit(input: {
     readonly actorUserId: string;
     readonly draftId: string;
@@ -126,6 +134,7 @@ export interface ExternalToolAdminRepositoryPort {
       readonly draftId: string;
       readonly expectedGeneration: number;
       readonly tools: readonly AcceptedMcpProbeTool[];
+      readonly leaseOwner: string;
     },
   ): Promise<AdminExternalToolBatchDto>;
   revokeBatch(
@@ -188,6 +197,80 @@ function validateCredential(credential: string): string {
       "凭据不能为空、不得超过 8192 字节，且只能包含无首尾空白的可打印 ASCII 字符",
     );
   return credential;
+}
+
+const PROBE_GLOBAL_LIMIT = 8;
+const PROBE_TARGET_LIMIT = 2;
+let activeProbes = 0;
+const activeProbeTargets = new Map<string, number>();
+const probeWaiters = new Set<() => void>();
+async function acquireProbeSlot(target: string): Promise<() => void> {
+  while (
+    activeProbes >= PROBE_GLOBAL_LIMIT ||
+    (activeProbeTargets.get(target) ?? 0) >= PROBE_TARGET_LIMIT
+  ) {
+    await new Promise<void>((resolve) => probeWaiters.add(resolve));
+  }
+  activeProbes++;
+  activeProbeTargets.set(target, (activeProbeTargets.get(target) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeProbes--;
+    const count = (activeProbeTargets.get(target) ?? 1) - 1;
+    if (count === 0) activeProbeTargets.delete(target);
+    else activeProbeTargets.set(target, count);
+    for (const wake of probeWaiters) wake();
+    probeWaiters.clear();
+  };
+}
+
+function credentialEchoes(value: unknown, credential: string): boolean {
+  const bytes = Buffer.from(credential, "utf8");
+  const candidates = new Set([
+    credential,
+    [...credential].reverse().join(""),
+    bytes.toString("base64"),
+    bytes.toString("base64url"),
+    bytes.toString("base64").replace(/=+$/u, ""),
+    bytes.toString("hex"),
+    bytes.toString("hex").toUpperCase(),
+    encodeURIComponent(credential),
+  ]);
+  const scan = (item: unknown): boolean => {
+    if (typeof item === "string") {
+      if ([...candidates].some((candidate) => candidate.length > 0 && item.includes(candidate)))
+        return true;
+      // 识别远端文本中直接嵌入的常见编码，避免凭据只写边界被简单变换绕过。
+      try {
+        if (decodeURIComponent(item).includes(credential)) return true;
+      } catch {
+        /* 非 URL 编码文本 */
+      }
+      const compact = item.replace(/\s+/gu, "");
+      if (/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(compact)) {
+        try {
+          if (Buffer.from(compact, "base64").toString("utf8").includes(credential)) return true;
+        } catch {
+          /* 忽略非法编码 */
+        }
+      }
+      if (/^(?:[0-9a-fA-F]{2})+$/u.test(compact)) {
+        try {
+          if (Buffer.from(compact, "hex").toString("utf8").includes(credential)) return true;
+        } catch {
+          /* 忽略非法编码 */
+        }
+      }
+      return false;
+    }
+    if (Array.isArray(item)) return item.some(scan);
+    if (item && typeof item === "object")
+      return Object.entries(item).some(([key, nested]) => scan(key) || scan(nested));
+    return false;
+  };
+  return scan(value);
 }
 
 function publicProbeTool(tool: McpProbeToolResult): AdminMcpProbeTool {
@@ -314,6 +397,18 @@ export class ExternalToolAdminService {
       readonly expectedGeneration: number;
     },
   ): Promise<AdminExternalToolBatchDto> {
+    return this.repository.withPublishClaim(input, (leaseOwner) =>
+      this.publishOnce(input, leaseOwner),
+    );
+  }
+
+  private async publishOnce(
+    input: ExternalToolCommandContext & {
+      readonly draftId: string;
+      readonly expectedGeneration: number;
+    },
+    leaseOwner: string,
+  ): Promise<AdminExternalToolBatchDto> {
     const replay = await this.repository.replayPublish(input);
     if (replay !== undefined) return replay;
     const loaded = await this.repository.loadDraftForProbe(input);
@@ -322,6 +417,8 @@ export class ExternalToolAdminService {
       tools = await this.runProbe(loaded);
     } catch {
       const failure = probeFailure;
+      const replayAfterFailure = await this.readPublishResult(input);
+      if (replayAfterFailure !== undefined) return replayAfterFailure;
       await this.repository.recordProbeAudit({
         actorUserId: input.actorUserId,
         draftId: input.draftId,
@@ -336,6 +433,8 @@ export class ExternalToolAdminService {
     );
     if (tools.length === 0 || accepted.length !== tools.length) {
       const reason = summary(tools.length, tools.length - accepted.length);
+      const replayAfterRejection = await this.readPublishResult(input);
+      if (replayAfterRejection !== undefined) return replayAfterRejection;
       await this.repository.recordProbeAudit({
         actorUserId: input.actorUserId,
         draftId: input.draftId,
@@ -350,10 +449,31 @@ export class ExternalToolAdminService {
           : `${tools.length - accepted.length} 个工具不符合平台要求，整批未发布`,
       );
     }
-    return this.repository.publishMcpBatch({
-      ...input,
-      tools: accepted.map(({ accepted: _accepted, ...tool }) => tool),
-    });
+    try {
+      return await this.repository.publishMcpBatch({
+        ...input,
+        leaseOwner,
+        tools: accepted.map(({ accepted: _accepted, ...tool }) => tool),
+      });
+    } catch (error) {
+      const replayAfterWrite = await this.readPublishResult(input);
+      if (replayAfterWrite !== undefined) return replayAfterWrite;
+      throw error;
+    }
+  }
+
+  private async readPublishResult(
+    input: ExternalToolCommandContext & { draftId: string; expectedGeneration: number },
+  ) {
+    try {
+      return await this.repository.replayPublish(input);
+    } catch (error) {
+      if (error instanceof ExternalToolAdminError && error.code === "CONFLICT") throw error;
+      throw new ExternalToolAdminError(
+        "PUBLISH_RESULT_UNKNOWN",
+        "发布结果暂时无法确认；请使用相同幂等键重试查询",
+      );
+    }
   }
 
   revokeBatch(
@@ -384,25 +504,31 @@ export class ExternalToolAdminService {
     readonly draft: AdminMcpDraftDto;
     readonly credential?: string;
   }): Promise<readonly McpProbeToolResult[]> {
-    const tools = await this.probePort({
-      endpoint: loaded.draft.endpoint,
-      serverName: loaded.draft.serverName,
-      timeoutMs: loaded.draft.timeoutMs,
-      maxResponseBytes: loaded.draft.maxResponseBytes,
-      ...(loaded.credential === undefined ? {} : { credential: loaded.credential }),
-    });
-    const { credential } = loaded;
-    if (credential === undefined) return tools;
-    // 报告与发布共用此边界：远端反射凭据时拒绝整个工具，不保留名称或 Schema。
-    return tools.map((tool) =>
-      containsCredential(tool, credential)
-        ? {
-            accepted: false,
-            reason: "MCP_UNSAFE_METADATA",
-            reasonMessage: "远端工具元数据不允许展示或发布",
-          }
-        : tool,
-    );
+    const target = new URL(loaded.draft.endpoint).host.toLowerCase();
+    const release = await acquireProbeSlot(target);
+    try {
+      const tools = await this.probePort({
+        endpoint: loaded.draft.endpoint,
+        serverName: loaded.draft.serverName,
+        timeoutMs: loaded.draft.timeoutMs,
+        maxResponseBytes: loaded.draft.maxResponseBytes,
+        ...(loaded.credential === undefined ? {} : { credential: loaded.credential }),
+      });
+      const { credential } = loaded;
+      if (credential === undefined) return tools;
+      // 报告与发布共用此边界：远端反射凭据时拒绝整个工具，不保留名称或 Schema。
+      return tools.map((tool) =>
+        credentialEchoes(tool, credential)
+          ? {
+              accepted: false,
+              reason: "MCP_UNSAFE_METADATA",
+              reasonMessage: "远端工具元数据不允许展示或发布",
+            }
+          : tool,
+      );
+    } finally {
+      release();
+    }
   }
 }
 
@@ -414,12 +540,3 @@ const probeFailure = {
   code: "EXTERNAL_TOOL_UNAVAILABLE",
   message: "无法连接 MCP Server 或响应不符合协议",
 } as const;
-
-/** 检查原始字符串而不是序列化 JSON，避免凭据中的引号、反斜线被转义后漏检。 */
-function containsCredential(value: unknown, credential: string): boolean {
-  if (typeof value === "string") return value.includes(credential);
-  if (value === null || typeof value !== "object") return false;
-  return Object.entries(value).some(
-    ([key, item]) => key.includes(credential) || containsCredential(item, credential),
-  );
-}

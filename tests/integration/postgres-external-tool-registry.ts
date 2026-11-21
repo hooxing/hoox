@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { normalizeExternalToolSchema } from "@hoox/domain";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ExternalToolAdminService,
   type McpProbePort,
@@ -12,6 +12,10 @@ import {
 } from "../../runtime-ts/packages/persistence/src/external-tool-credential.js";
 import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
 import { PgExternalToolAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-external-tool-admin.js";
+import {
+  migrateDown,
+  type MigrationDownOptions,
+} from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
   type Pool,
   withTenantTransaction,
@@ -56,22 +60,31 @@ async function actor(db: Pool, suffix: string, role: "admin" | "operator") {
   return userId;
 }
 
-export function externalToolRegistryTests(pools: () => { db: Pool; control: Pool }) {
+export function externalToolRegistryTests(
+  pools: () => { db: Pool; control: Pool },
+  migrationSecurity: Pick<
+    MigrationDownOptions,
+    | "runtimeRole"
+    | "migratorRole"
+    | "skillPublisherRole"
+    | "workerCoordinatorRole"
+    | "teamCoordinatorRole"
+    | "adminControlRole"
+    | "schema"
+  >,
+) {
   async function fixture(suffix: string, probe: McpProbePort = async () => tools) {
     const { db, control } = pools();
     const actorUserId = await actor(db, suffix, "admin");
     const root = randomBytes(32).toString("hex");
-    const service = new ExternalToolAdminService(
-      new PgExternalToolAdminRepository(
-        control,
-        new ExternalToolCredentialCipher(root),
-        new ExternalToolDraftCredentialCipher(root),
-      ),
-      probe,
-      () => {
-        throw new Error("该用例不应调用 HTTP 预览");
-      },
+    const repository = new PgExternalToolAdminRepository(
+      control,
+      new ExternalToolCredentialCipher(root),
+      new ExternalToolDraftCredentialCipher(root),
     );
+    const service = new ExternalToolAdminService(repository, probe, () => {
+      throw new Error("该用例不应调用 HTTP 预览");
+    });
     const draft = { actorUserId, draftId: `draft_${suffix}`, expectedGeneration: 0 };
     const create = { ...draft, idempotencyKey: "create-draft", settings };
     const publish = { ...draft, idempotencyKey: "publish-batch" };
@@ -357,6 +370,7 @@ export function externalToolRegistryTests(pools: () => { db: Pool; control: Pool
             "external_tool_draft_credentials",
             "external_tool_publish_batches",
             "external_tool_publish_batch_versions",
+            "external_tool_admin_publish_claims",
             "external_tool_admin_commands",
             "external_tool_admin_audits",
           ]) {
@@ -477,5 +491,260 @@ export function externalToolRegistryTests(pools: () => { db: Pool; control: Pool
         ).toBe("draft");
       },
     );
+
+    it("跨连接同键并发发布只探测并提交一次，异摘要冲突", async () => {
+      let probeCount = 0;
+      let releaseProbe!: () => void;
+      const probeGate = new Promise<void>((resolve) => {
+        releaseProbe = resolve;
+      });
+      const probe: McpProbePort = async () => {
+        probeCount++;
+        if (probeCount === 1) await probeGate;
+        return tools;
+      };
+      const { db, control, service, create, publish } = await fixture("claim_parallel", probe);
+      await service.createMcpDraft(create);
+      const before = await publicationState(db);
+      const root = randomBytes(32).toString("hex");
+      const secondService = new ExternalToolAdminService(
+        new PgExternalToolAdminRepository(
+          control,
+          new ExternalToolCredentialCipher(root),
+          new ExternalToolDraftCredentialCipher(root),
+        ),
+        probe,
+        () => {
+          throw new Error("该用例不应调用 HTTP 预览");
+        },
+      );
+      const first = service.publish(publish);
+      await vi.waitFor(() => expect(probeCount).toBe(1));
+      const second = secondService.publish(publish);
+      try {
+        await expect(
+          secondService.publish({ ...publish, draftId: "different_draft" }),
+        ).rejects.toMatchObject({ code: "CONFLICT" });
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        expect(probeCount).toBe(1);
+      } finally {
+        releaseProbe();
+      }
+      const [firstBatch, replayedBatch] = await Promise.all([first, second]);
+      expect(firstBatch.batchId).toBe(replayedBatch.batchId);
+      expect(probeCount).toBe(1);
+      expect(Number((await publicationState(db)).batches)).toBe(Number(before.batches) + 1);
+      await expect(
+        secondService.publish({ ...publish, draftId: "different_draft" }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    });
+
+    it("明确失败释放执行权但保留摘要，同键可恢复且异请求不能复用", async () => {
+      const probe = vi.fn<McpProbePort>().mockRejectedValueOnce(new Error("受控失败"));
+      const { db, service, create, publish } = await fixture("claim_retry", probe);
+      await service.createMcpDraft(create);
+      await expect(service.publish(publish)).rejects.toMatchObject({ code: "PROBE_UNAVAILABLE" });
+      await expect(service.publish({ ...publish, expectedGeneration: 1 })).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+      await expect(service.updateMcpDraft({ ...publish, settings })).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+      expect(probe).toHaveBeenCalledTimes(1);
+      probe.mockResolvedValue(tools);
+      await service.publish(publish);
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(
+        (
+          await db.query(
+            "SELECT lease_expires_at <= clock_timestamp() AS settled FROM external_tool_admin_publish_claims WHERE actor_user_id=$1 AND idempotency_key=$2",
+            [publish.actorUserId, publish.idempotencyKey],
+          )
+        ).rows,
+      ).toEqual([{ settled: true }]);
+    });
+
+    it("超时声明可由另一连接接管，旧执行者不能提交或释放新声明", async () => {
+      const releases: (() => void)[] = [];
+      const probe: McpProbePort = async () => {
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return tools;
+      };
+      const { db, control, service, create, publish } = await fixture("claim_expired", probe);
+      await service.createMcpDraft(create);
+      const before = await publicationState(db);
+      const first = service.publish(publish);
+      const firstResult = expect(first).rejects.toMatchObject({ code: "CONFLICT" });
+      await vi.waitFor(() => expect(releases).toHaveLength(1));
+      await db.query(
+        "UPDATE external_tool_admin_publish_claims SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE actor_user_id=$1 AND idempotency_key=$2",
+        [publish.actorUserId, publish.idempotencyKey],
+      );
+      const root = randomBytes(32).toString("hex");
+      const successor = new ExternalToolAdminService(
+        new PgExternalToolAdminRepository(
+          control,
+          new ExternalToolCredentialCipher(root),
+          new ExternalToolDraftCredentialCipher(root),
+        ),
+        probe,
+        () => {
+          throw new Error("不使用 HTTP 预览");
+        },
+      );
+      const second = successor.publish(publish);
+      try {
+        await vi.waitFor(() => expect(releases).toHaveLength(2));
+        releases[0]?.();
+        await firstResult;
+        expect(await publicationState(db)).toEqual(before);
+        expect(
+          (
+            await db.query(
+              "SELECT lease_expires_at > clock_timestamp() AS active FROM external_tool_admin_publish_claims WHERE actor_user_id=$1 AND idempotency_key=$2",
+              [publish.actorUserId, publish.idempotencyKey],
+            )
+          ).rows,
+        ).toEqual([{ active: true }]);
+      } finally {
+        for (const release of releases) release();
+      }
+      await second;
+      expect(Number((await publicationState(db)).batches)).toBe(Number(before.batches) + 1);
+    });
+
+    it.each(["before", "after"] as const)(
+      "COMMIT %s 断响应时精确读回，缺少回执则保留租约后恢复",
+      async (phase) => {
+        const probe = vi.fn<McpProbePort>().mockResolvedValue(tools);
+        const { db, control, service, create, publish } = await fixture(
+          `commit_unknown_${phase}`,
+          probe,
+        );
+        await service.createMcpDraft(create);
+        const before = await publicationState(db);
+        let dropped = false;
+        // 真实事务只在发布的 COMMIT 边界丢失响应，覆盖驱动异常到结果未知的完整映射。
+        const faultyControl = new Proxy(control, {
+          get(target, property, receiver) {
+            if (property !== "connect") return Reflect.get(target, property, receiver);
+            return async () => {
+              const client = await target.connect();
+              let publishing = false;
+              return new Proxy(client, {
+                get(connection, key, connectionReceiver) {
+                  if (key !== "query") return Reflect.get(connection, key, connectionReceiver);
+                  return async (...args: unknown[]) => {
+                    if (
+                      typeof args[0] === "string" &&
+                      args[0].includes("INSERT INTO external_tool_publish_batches")
+                    )
+                      publishing = true;
+                    const drop = args[0] === "COMMIT" && publishing && !dropped;
+                    const fail = () => {
+                      dropped = true;
+                      throw Object.assign(new Error("测试提交响应丢失"), { code: "ECONNRESET" });
+                    };
+                    if (drop && phase === "before") fail();
+                    const result: unknown = await Reflect.apply(connection.query, connection, args);
+                    if (drop) fail();
+                    return result;
+                  };
+                },
+              });
+            };
+          },
+        });
+        const root = randomBytes(32).toString("hex");
+        const faultyService = new ExternalToolAdminService(
+          new PgExternalToolAdminRepository(
+            faultyControl,
+            new ExternalToolCredentialCipher(root),
+            new ExternalToolDraftCredentialCipher(root),
+          ),
+          probe,
+          () => {
+            throw new Error("不使用 HTTP 预览");
+          },
+        );
+        let batch: Awaited<ReturnType<ExternalToolAdminService["publish"]>> | undefined;
+        if (phase === "before") {
+          await expect(faultyService.publish(publish)).rejects.toMatchObject({
+            code: "PUBLISH_RESULT_UNKNOWN",
+          });
+          expect(await publicationState(db)).toEqual(before);
+          expect(
+            (
+              await db.query(
+                "SELECT lease_expires_at > clock_timestamp() AS active FROM external_tool_admin_publish_claims WHERE actor_user_id=$1 AND idempotency_key=$2",
+                [publish.actorUserId, publish.idempotencyKey],
+              )
+            ).rows,
+          ).toEqual([{ active: true }]);
+          await db.query(
+            "UPDATE external_tool_admin_publish_claims SET lease_expires_at=clock_timestamp() WHERE actor_user_id=$1 AND idempotency_key=$2",
+            [publish.actorUserId, publish.idempotencyKey],
+          );
+        } else batch = await faultyService.publish(publish);
+        const successor = new ExternalToolAdminService(
+          new PgExternalToolAdminRepository(
+            control,
+            new ExternalToolCredentialCipher(root),
+            new ExternalToolDraftCredentialCipher(root),
+          ),
+          probe,
+          () => {
+            throw new Error("不使用 HTTP 预览");
+          },
+        );
+        const recovered = await successor.publish(publish);
+        if (batch !== undefined) expect(recovered).toEqual(batch);
+        expect(dropped).toBe(true);
+        expect(probe).toHaveBeenCalledTimes(phase === "before" ? 2 : 1);
+        expect(Number((await publicationState(db)).batches)).toBe(Number(before.batches) + 1);
+      },
+    );
+
+    it("注册与审计数据存在时拒绝回退且数据和迁移记录不变", async () => {
+      const { db, service, create, publish } = await fixture("rollback_guard");
+      await service.createMcpDraft(create);
+      await service.publish(publish);
+      const beforeData = await db.query(`SELECT
+        (SELECT count(*)::text FROM external_tool_registration_drafts) AS drafts,
+        (SELECT count(*)::text FROM external_tool_draft_credentials) AS draft_credentials,
+        (SELECT count(*)::text FROM external_tool_publish_batches) AS batches,
+        (SELECT count(*)::text FROM external_tool_admin_commands) AS commands,
+        (SELECT count(*)::text FROM external_tool_admin_audits) AS audits`);
+      const beforeMigrations = await db.query(
+        "SELECT version,name,checksum FROM runtime_schema_migrations ORDER BY version",
+      );
+      const migration = beforeMigrations.rows.find((row) => row.name === "external_tool_admin");
+      if (!migration) throw new Error("缺少外部工具注册迁移");
+      await expect(
+        migrateDown(db, {
+          targetVersion: Number(migration.version) - 1,
+          allowDestructive: true,
+          environment: "test",
+          ...migrationSecurity,
+        }),
+      ).rejects.toMatchObject({ code: "UNEXPECTED", cause: { code: "P0001" } });
+      expect(
+        (
+          await db.query(`SELECT
+        (SELECT count(*)::text FROM external_tool_registration_drafts) AS drafts,
+        (SELECT count(*)::text FROM external_tool_draft_credentials) AS draft_credentials,
+        (SELECT count(*)::text FROM external_tool_publish_batches) AS batches,
+        (SELECT count(*)::text FROM external_tool_admin_commands) AS commands,
+        (SELECT count(*)::text FROM external_tool_admin_audits) AS audits`)
+        ).rows,
+      ).toEqual(beforeData.rows);
+      expect(
+        (
+          await db.query(
+            "SELECT version,name,checksum FROM runtime_schema_migrations ORDER BY version",
+          )
+        ).rows,
+      ).toEqual(beforeMigrations.rows);
+    });
   });
 }

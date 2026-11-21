@@ -5157,4 +5157,7 @@ describe("PostgreSQL Runtime 模型与模式快照", () => {
   });
 });
 
-externalToolRegistryTests(() => ({ control: adminControlPool, db: migratorPool }));
+externalToolRegistryTests(
+  () => ({ control: adminControlPool, db: migratorPool }),
+  migrationSecurity,
+);

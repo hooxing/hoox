@@ -44,6 +44,16 @@ CREATE TABLE external_tool_publish_batch_versions (
   tool_version_id text NOT NULL UNIQUE REFERENCES external_tool_versions(tool_version_id) ON DELETE RESTRICT,
   PRIMARY KEY (batch_id, tool_version_id)
 );
+-- 发布探测跨越网络请求，使用有租约的持久声明协调多个 API 进程；成功命令仍以 commands 回执为准。
+CREATE TABLE external_tool_admin_publish_claims (
+  actor_user_id text NOT NULL REFERENCES app_users(id) ON DELETE RESTRICT,
+  idempotency_key text NOT NULL CHECK (octet_length(idempotency_key) BETWEEN 8 AND 128),
+  request_digest text NOT NULL CHECK (request_digest ~ '^[0-9a-f]{64}$'),
+  lease_owner text NOT NULL CHECK (lease_owner ~ '^[0-9a-f]{32}$'),
+  lease_expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (actor_user_id,idempotency_key)
+);
 CREATE TABLE external_tool_admin_commands (
   actor_user_id text NOT NULL REFERENCES app_users(id) ON DELETE RESTRICT,
   idempotency_key text NOT NULL CHECK (octet_length(idempotency_key) BETWEEN 8 AND 128),
@@ -66,11 +76,11 @@ DO $$
 DECLARE control_role text := current_setting('app.admin_control_role'); table_name text;
 BEGIN
   IF control_role !~ '^[a-z_][a-z0-9_]{0,62}$' THEN RAISE EXCEPTION 'app.admin_control_role 无效'; END IF;
-  FOREACH table_name IN ARRAY ARRAY['external_tool_registration_drafts','external_tool_draft_credentials','external_tool_publish_batches','external_tool_publish_batch_versions','external_tool_admin_commands','external_tool_admin_audits'] LOOP
+  FOREACH table_name IN ARRAY ARRAY['external_tool_registration_drafts','external_tool_draft_credentials','external_tool_publish_batches','external_tool_publish_batch_versions','external_tool_admin_publish_claims','external_tool_admin_commands','external_tool_admin_audits'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY',table_name);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY',table_name);
     EXECUTE format('CREATE POLICY %I ON %I FOR ALL TO %I USING (true) WITH CHECK (true)',table_name||'_migrator_policy',table_name,current_user);
-    IF table_name IN ('external_tool_admin_commands','external_tool_admin_audits') THEN
+    IF table_name IN ('external_tool_admin_commands','external_tool_admin_audits','external_tool_admin_publish_claims') THEN
       EXECUTE format('CREATE POLICY %I ON %I FOR ALL TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND actor.status=''active'' AND actor.role=''admin'')) WITH CHECK (actor_user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND actor.status=''active'' AND actor.role=''admin''))',table_name||'_admin_policy',table_name,control_role);
     ELSE
       EXECUTE format('CREATE POLICY %I ON %I FOR ALL TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND actor.status=''active'' AND actor.role=''admin'')) WITH CHECK (EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND actor.status=''active'' AND actor.role=''admin''))',table_name||'_admin_policy',table_name,control_role);
@@ -96,6 +106,8 @@ DO $$ DECLARE control_role text := current_setting('app.admin_control_role'); BE
   EXECUTE format('GRANT UPDATE(display_name,server_name,endpoint,timeout_ms,max_response_bytes,side_effect,idempotent,credential_configured,generation,updated_by,updated_at) ON external_tool_registration_drafts TO %I',control_role);
   EXECUTE format('GRANT SELECT,INSERT,DELETE ON external_tool_draft_credentials TO %I',control_role);
   EXECUTE format('GRANT SELECT,INSERT ON external_tool_publish_batches,external_tool_publish_batch_versions,external_tool_admin_commands,external_tool_admin_audits TO %I',control_role);
+  EXECUTE format('GRANT SELECT,INSERT ON external_tool_admin_publish_claims TO %I',control_role);
+  EXECUTE format('GRANT UPDATE(lease_owner,lease_expires_at) ON external_tool_admin_publish_claims TO %I',control_role);
   EXECUTE format('GRANT USAGE ON SEQUENCE external_tool_admin_audits_audit_id_seq TO %I',control_role);
   EXECUTE format('GRANT SELECT ON external_tool_selectable_versions TO %I',control_role);
 END $$;

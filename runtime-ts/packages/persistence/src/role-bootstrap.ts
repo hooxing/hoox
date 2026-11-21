@@ -1119,6 +1119,7 @@ async function hasExternalToolAdminState(client: PoolClient, schema: string): Pr
             AND to_regclass(format('%I.external_tool_draft_credentials',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.external_tool_publish_batches',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.external_tool_publish_batch_versions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_admin_publish_claims',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.external_tool_admin_commands',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.external_tool_admin_audits',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.external_tool_selectable_versions',$1::text)) IS NOT NULL AS present`,
@@ -2435,6 +2436,7 @@ async function assertAdminControlBoundary(
     for (const table of [
       "external_tool_publish_batches",
       "external_tool_publish_batch_versions",
+      "external_tool_admin_publish_claims",
       "external_tool_admin_commands",
       "external_tool_admin_audits",
     ])
@@ -2523,6 +2525,11 @@ async function assertAdminControlBoundary(
   if (agentDefinitionsEnabled) updatePolicy.set("agent_revisions", new Set(["status"]));
   if (externalToolAdminEnabled)
     updatePolicy.set("external_tool_registration_drafts", new Set(externalToolDraftUpdateColumns));
+  if (externalToolAdminEnabled)
+    updatePolicy.set(
+      "external_tool_admin_publish_claims",
+      new Set(["lease_owner", "lease_expires_at"]),
+    );
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
@@ -3135,6 +3142,7 @@ const externalToolAdminTables = Object.freeze([
   "external_tool_draft_credentials",
   "external_tool_publish_batches",
   "external_tool_publish_batch_versions",
+  "external_tool_admin_publish_claims",
   "external_tool_admin_commands",
   "external_tool_admin_audits",
 ] as const);
@@ -3531,6 +3539,8 @@ async function grantAdminControlAccess(
        GRANT UPDATE(${externalToolDraftUpdateColumns.join(",")})
          ON TABLE ${schema}.external_tool_registration_drafts TO ${control};
        GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.external_tool_draft_credentials TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_admin_publish_claims TO ${control};
+       GRANT UPDATE(lease_owner,lease_expires_at) ON TABLE ${schema}.external_tool_admin_publish_claims TO ${control};
        GRANT SELECT,INSERT ON TABLE ${schema}.external_tool_publish_batches,
          ${schema}.external_tool_publish_batch_versions,${schema}.external_tool_admin_commands,
          ${schema}.external_tool_admin_audits TO ${control};

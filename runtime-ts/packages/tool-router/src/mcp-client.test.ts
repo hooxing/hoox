@@ -639,3 +639,46 @@ it("逐工具检查原始声明：被丢弃的字段也不能反射凭据，拒�
   for (const tool of report) expect(tool).not.toHaveProperty("remoteToolName");
   expect(deadlines.size).toBe(1);
 });
+
+it("探测响应累计超过总预算时在分页完成前拒绝", async () => {
+  const target = {
+    url: new URL("https://example.invalid/"),
+    hostname: "example.invalid",
+    servername: "example.invalid",
+    hostHeader: "example.invalid",
+    address: "8.8.8.8",
+    addresses: ["8.8.8.8"],
+  };
+  let page = 0;
+  const client = new McpStreamableHttpClient(async ({ body }) => {
+    const { id, method } = JSON.parse(new TextDecoder().decode(body));
+    if (method === "notifications/initialized")
+      return { status: 200, contentType: "application/json", body: new Uint8Array() };
+    let result: Record<string, unknown>;
+    if (method === "initialize") result = { protocolVersion: "2025-06-18", capabilities: {} };
+    else {
+      page++;
+      result = {
+        tools: [
+          { name: `tool${page}`, description: "x".repeat(90), inputSchema: { type: "object" } },
+        ],
+        ...(page === 1 ? { nextCursor: "next" } : {}),
+      };
+    }
+    return {
+      status: 200,
+      contentType: "application/json",
+      body: new TextEncoder().encode(JSON.stringify({ jsonrpc: "2.0", id, result })),
+    };
+  });
+  await expect(
+    probeMcpServerReport({
+      client,
+      target,
+      serverName: "srv",
+      timeoutMs: 1000,
+      maxResponseBytes: 500,
+    }),
+  ).rejects.toThrow("EXTERNAL_TOOL_RESULT_UNKNOWN");
+  expect(page).toBe(2);
+});

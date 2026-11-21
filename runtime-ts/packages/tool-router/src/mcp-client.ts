@@ -199,6 +199,16 @@ function jsonRpcBody(id: number, method: string, params: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
 }
 
+interface McpProbeBudget {
+  used: number;
+  readonly maximum: number;
+}
+function accountProbeBytes(budget: McpProbeBudget | undefined, bytes: number): void {
+  if (!budget) return;
+  budget.used += bytes;
+  if (budget.used > budget.maximum) throw resultUnknown();
+}
+
 export class McpStreamableHttpClient {
   private readonly exchange: McpExchange;
   constructor(exchange: McpExchange = exchangeMcpHttp) {
@@ -217,6 +227,7 @@ export class McpStreamableHttpClient {
       signal?: AbortSignal;
       callContext?: ExternalToolCallContext;
       idempotencyKey?: string;
+      budget?: McpProbeBudget;
     },
     id: number,
   ): Promise<Record<string, unknown>> {
@@ -240,6 +251,7 @@ export class McpStreamableHttpClient {
       throw resultUnknown();
     }
     if (response.body.byteLength > options.maxResponseBytes) throw resultUnknown();
+    accountProbeBytes(options.budget, response.body.byteLength);
     if (response.status < 200 || response.status >= 300) {
       if (response.status >= 300 && response.status < 500) throw respondedFailure();
       throw resultUnknown();
@@ -272,6 +284,7 @@ export class McpStreamableHttpClient {
       deadlineAt?: number;
       maxResponseBytes: number;
       credential?: string;
+      budget?: McpProbeBudget;
     },
   ): Promise<void> {
     const result = await this.rpc(
@@ -309,6 +322,7 @@ export class McpStreamableHttpClient {
       throw resultUnknown();
     }
     if (response.body.byteLength > options.maxResponseBytes) throw resultUnknown();
+    accountProbeBytes(options.budget, response.body.byteLength);
     if (response.status >= 300 && response.status < 500) throw respondedFailure();
     if (response.status < 200 || response.status >= 500) throw resultUnknown();
   }
@@ -320,6 +334,7 @@ export class McpStreamableHttpClient {
       deadlineAt?: number;
       maxResponseBytes: number;
       credential?: string;
+      budget?: McpProbeBudget;
     },
   ): Promise<readonly Record<string, unknown>[]> {
     const tools: Record<string, unknown>[] = [];
@@ -533,6 +548,7 @@ export async function probeMcpServerReport(input: {
     deadlineAt: Math.min(input.deadlineAt ?? Infinity, Date.now() + input.timeoutMs),
     timeoutMs: input.timeoutMs,
     maxResponseBytes: input.maxResponseBytes,
+    budget: { used: 0, maximum: input.maxResponseBytes },
     ...(input.credential === undefined ? {} : { credential: input.credential }),
   };
   await client.initialize(input.target, options);

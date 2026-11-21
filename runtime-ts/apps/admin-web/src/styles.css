@@ -4411,3 +4411,57 @@ td:first-child {
   border-radius: 8px;
   font: inherit;
 }
+
+.playground-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 384px) minmax(0, 1fr);
+  align-items: start;
+  gap: 24px;
+}
+
+.playground-workspace h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  overflow-wrap: anywhere;
+}
+
+.playground-form header p,
+.playground-note {
+  margin: 0;
+  color: #4d5c54;
+  line-height: 1.5;
+}
+
+.playground-note {
+  font-size: 13px;
+}
+
+.playground-form button[type="submit"] {
+  justify-self: start;
+}
+
+.playground-trace {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.playground-trace .run-detail {
+  padding: 0;
+}
+
+@media (max-width: 1080px) {
+  .playground-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .playground-workspace .control-panel {
+    margin-bottom: 0;
+  }
+}
+
+.playground-trace-caption {
+  margin: 0 0 8px;
+  color: #415b4c;
+  font-size: 14px;
+  font-weight: 600;
+}

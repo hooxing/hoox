@@ -38,6 +38,12 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 
 角色属于整个 PostgreSQL 集群；同一集群的开发、预览和生产数据库使用不同角色集合。迁移在任何 DDL 前校验全部角色、Schema owner、`search_path` 与跨数据库依赖，并在同一事务中完成 Schema 迁移、迁移记录、策略重绑定和最小 ACL 重建。readiness 探测的是实际连接身份，而不是配置文件中的声明。
 
+## Playground 持久化边界
+
+`runs.origin` 是服务端受理路径写入的可信来源；客户端字段不能覆盖它。普通 Runtime 受理策略拒绝 Playground Thread/Run，专用 Playground 事务只有在有效 `operator`/`admin`、活动 Membership、本人个人 Tenant 均成立时才能插入草稿 Revision 快照。该路径不放宽普通已发布 Revision 的策略。
+
+`run_playground_mocks` 通过包含来源值的复合外键只能关联 Playground Run，并按 Tenant RLS 隔离。Worker 领取快照仅在持久化 `origin=playground` 时读取 Mock；其余来源强制投影空配置。当前受理端口只写入空 Mock，任何请求级 Mock 输入均被拒绝，工具执行调用尚未接入读取该快照。统计视图与用户目录显式排除 Playground 数据。
+
 ## 事务与幂等
 
 - 命令式写入使用显式幂等键，并以 canonical JSON 摘要绑定完整请求；同键异摘要稳定冲突。

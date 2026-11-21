@@ -37,7 +37,10 @@ export interface WebhookDispatcherOptions {
   /** DNS、连接、TLS 与响应共用的单次绝对时限，必须明显短于领取租约。 */
   readonly deadlineMs?: number;
   /** 仅测试注入：替换公网目标校验与解析。 */
-  readonly resolveTarget?: (url: string) => Promise<WebhookTarget>;
+  readonly resolveTarget?: (
+    url: string,
+    options?: { readonly signal?: AbortSignal },
+  ) => Promise<WebhookTarget>;
   /** 仅私有 CA 部署与测试使用。 */
   readonly ca?: TrustAnchors;
 }
@@ -129,9 +132,13 @@ export class WebhookDispatcher {
     const deadlineAt = Date.now() + this.#deadlineMs;
     let settlement: WebhookSettlement;
     try {
+      const dnsAbort = new AbortController();
       const target = await withDeadline(
-        (this.#options.resolveTarget ?? validateExternalHttpsTarget)(delivery.endpointUrl),
+        (this.#options.resolveTarget ?? validateExternalHttpsTarget)(delivery.endpointUrl, {
+          signal: dnsAbort.signal,
+        }),
         deadlineAt,
+        () => dnsAbort.abort(),
       );
       if (isIP(target.address) === 0) throw new WebhookDeliveryError("target_rejected");
       const permit = await this.#store.permitSend(
@@ -182,10 +189,17 @@ export class WebhookDispatcher {
 }
 
 // 目标校验（含 DNS）受同一截止时间约束；超时后不再等待底层解析，也不发送请求。
-function withDeadline<T>(operation: Promise<T>, deadlineAt: number): Promise<T> {
+function withDeadline<T>(
+  operation: Promise<T>,
+  deadlineAt: number,
+  onTimeout?: () => void,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new WebhookDeliveryError("timeout")),
+      () => {
+        onTimeout?.();
+        reject(new WebhookDeliveryError("timeout"));
+      },
       Math.max(0, deadlineAt - Date.now()),
     );
     operation.then(

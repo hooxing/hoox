@@ -371,7 +371,7 @@ function samePtcScope(row: PtcDispatchRow, context: TrustedRolloutContext): bool
   );
 }
 
-function assertPtcReceipt(
+export function assertPtcReceipt(
   body: Readonly<Record<string, unknown>>,
   blob: RolloutEntryDraft["blob"],
   isTruncated: boolean,
@@ -380,11 +380,16 @@ function assertPtcReceipt(
   const receipt = body.receipt;
   if (
     typeof receipt.toolName !== "string" ||
-    (receipt.outcome !== "succeeded" && receipt.outcome !== "failed")
+    (receipt.outcome !== "succeeded" && receipt.outcome !== "failed") ||
+    (receipt.executionMode !== undefined && receipt.executionMode !== "playground_mock")
   ) {
     throw new TypeError("PTC 结果不是固定受控回执");
   }
-  const encoded = encodeControlledToolReceipt(receipt.toolName, receipt.outcome);
+  const encoded = encodeControlledToolReceipt(
+    receipt.toolName,
+    receipt.outcome,
+    receipt.executionMode as "playground_mock" | undefined,
+  );
   if (blob === undefined) {
     // schemaVersion 3：未截断的固定回执完整内联，不引用 Blob；截断观察必须保留完整 Blob。
     if (

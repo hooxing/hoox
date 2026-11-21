@@ -177,7 +177,11 @@ export function assertControlledToolObservation(input: {
   readonly modelVisibleBytes: number;
   readonly reason?: string;
 }): void {
-  const encoded = encodeControlledToolReceipt(input.receipt.toolName, input.receipt.outcome);
+  const encoded = encodeControlledToolReceipt(
+    input.receipt.toolName,
+    input.receipt.outcome,
+    input.receipt.executionMode,
+  );
   const encodedBytes = Buffer.byteLength(encoded, "utf8");
   if (
     Buffer.byteLength(input.observation, "utf8") !== input.modelVisibleBytes ||

@@ -35,6 +35,21 @@ describe("Playground 客户端工具 Mock", () => {
     expect(persistStarted).toHaveBeenCalledOnce();
   });
 
+  it("Playground 客户端工具缺少 Mock 时失败关闭并记录失败回执", async () => {
+    const recordReceipt = vi.fn(async () => undefined);
+    const persistStarted = vi.fn(async () => undefined);
+    const tool = createPlaygroundClientToolMocks(definitions, {
+      origin: "playground",
+      mocks: {},
+      recordReceipt,
+      persistStarted,
+    })[0];
+    const result = await tool?.execute("missing", { key: "x" });
+    expect(result?.details).toEqual({ error: "PLAYGROUND_MOCK_NOT_CONFIGURED" });
+    expect(recordReceipt).toHaveBeenCalledWith("missing", "client_lookup", "failed");
+    expect(persistStarted).toHaveBeenCalledOnce();
+  });
+
   it.each(["normal", "evaluation", "api"] as const)("%s Run 不读取 Mock", async (origin) => {
     let mockReads = 0;
     const mocks = new Proxy(

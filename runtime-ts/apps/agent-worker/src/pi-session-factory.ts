@@ -486,13 +486,18 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       readonly toolCallId: string;
       readonly toolName: string;
     }) => {
+      const ptcParentId = ptcParents.get(call.toolCallId);
       if (
         invalidToolCalls.has(call.toolCallId) ||
-        durableToolCalls.has(call.toolCallId) ||
-        startedToolCalls.get(call.toolCallId) !== call.toolName
+        startedToolCalls.get(call.toolCallId) !== call.toolName ||
+        (durableToolCalls.has(call.toolCallId) &&
+          (ptcParentId === undefined ||
+            !durableToolCalls.has(ptcParentId) ||
+            startedToolCalls.get(ptcParentId) !== "run_code"))
       ) {
         throw new Error("Pi 工具缺少唯一且匹配的 tool.started");
       }
+      if (durableToolCalls.has(call.toolCallId)) return;
       // 先占住 callId；写入结果未知时必须转恢复，不得在本 Attempt 重放。
       durableToolCalls.add(call.toolCallId);
       let recorded: ToolObservationResult["outcome"] | undefined;

@@ -59,8 +59,9 @@ function controlledResultEntry(
   sequence: number,
   toolCallId: string,
   toolName = "sandbox_read_file",
+  executionMode?: "playground_mock",
 ): RuntimeRolloutEntry {
-  const receipt = encodeControlledToolReceipt(toolName, "succeeded");
+  const receipt = encodeControlledToolReceipt(toolName, "succeeded", executionMode);
   const receiptSha256 = createHash("sha256").update(receipt).digest("hex");
   return {
     ...entry(
@@ -215,6 +216,40 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
             body: fullReceiptMarkedTruncated,
             bodyDigest: digest(fullReceiptMarkedTruncated),
           },
+        ]),
+      ),
+    ).toThrow(new RuntimeRecoveryError("MALFORMED_FACTS"));
+  });
+
+  it("恢复保留白名单中的 Playground Mock 标记，仍拒绝未知回执字段", () => {
+    const projected = projectLoadedRuntimeRecovery(
+      loaded([
+        entry(0, "tool_call", { toolName: "sandbox_read_file" }, "mock-call"),
+        controlledResultEntry(1, "mock-call", "sandbox_read_file", "playground_mock"),
+      ]),
+    );
+    expect(projected).toMatchObject({
+      outcome: "ready",
+      projection: {
+        items: [
+          {
+            kind: "tool_receipt",
+            outcome: "succeeded",
+            observation: expect.stringContaining('"executionMode":"playground_mock"'),
+          },
+        ],
+      },
+    });
+    const valid = controlledResultEntry(1, "mock-call", "sandbox_read_file", "playground_mock");
+    const body = {
+      ...valid.body,
+      receipt: { ...(valid.body.receipt as object), unexpected: true },
+    };
+    expect(() =>
+      projectLoadedRuntimeRecovery(
+        loaded([
+          entry(0, "tool_call", { toolName: "sandbox_read_file" }, "mock-call"),
+          { ...valid, body, bodyDigest: digest(body) },
         ]),
       ),
     ).toThrow(new RuntimeRecoveryError("MALFORMED_FACTS"));

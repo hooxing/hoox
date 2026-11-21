@@ -91,6 +91,8 @@ interface FakeRecord {
   rolloutProjection: ControlledRolloutProjection;
   readonly agent?: RunAgentSnapshot | RunAgentStopCode;
   readonly skills?: RunSkillSnapshot;
+  readonly origin: "normal" | "playground" | "evaluation" | "api";
+  readonly playgroundMocks: Readonly<Record<string, unknown>>;
   projectionVersion: number;
   contextNextSequence: number;
   attempt: ExecutionAttemptSnapshot | undefined;
@@ -189,6 +191,8 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       rolloutProjection: seed.rolloutProjection,
       agent: seed.agent ?? fakeAgentSnapshot(),
       ...(seed.skills === undefined ? {} : { skills: seed.skills }),
+      origin: seed.origin ?? "normal",
+      playgroundMocks: seed.playgroundMocks ?? {},
       projectionVersion: 0,
       contextNextSequence: 1,
       attempt: undefined,
@@ -254,8 +258,8 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       snapshot: {
         agent: record.agent ?? "AGENT_SNAPSHOT_INVALID",
         run: record.run,
-        origin: "normal",
-        playgroundMocks: {},
+        origin: record.origin,
+        playgroundMocks: record.origin === "playground" ? record.playgroundMocks : {},
         tenantKind: record.tenantKind,
         memorySubjectUserId: record.memorySubjectUserId,
         requestedByUserId: record.requestedByUserId,
@@ -1474,6 +1478,8 @@ export interface FakeSeed {
   readonly rolloutProjection: ControlledRolloutProjection;
   readonly agent?: RunAgentSnapshot | RunAgentStopCode;
   readonly skills?: RunSkillSnapshot;
+  readonly origin?: "normal" | "playground" | "evaluation" | "api";
+  readonly playgroundMocks?: Readonly<Record<string, unknown>>;
 }
 
 export function fakeSeed(prefix = "worker", id = runId(`run-${prefix}`)): FakeSeed {

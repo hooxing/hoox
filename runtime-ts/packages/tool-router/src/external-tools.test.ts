@@ -70,6 +70,58 @@ describe("外部工具运行骨架", () => {
     });
   });
 
+  it.each(["http", "mcp"] as const)(
+    "Playground 的 %s 工具缺少 Mock 时失败关闭，不做 DNS、许可消费或 Transport",
+    async (source) => {
+      const invoke = vi.fn(async () => ({
+        body: new TextEncoder().encode("real"),
+        contentType: "text/plain",
+      }));
+      const resolveAddresses = vi.fn(async () => ["8.8.8.8"]);
+      const authorizeAndConsume = vi.fn(consumePermit);
+      const persistStarted = vi.fn(async () => undefined);
+      const receipts: string[] = [];
+      const selected: ExternalToolVersion =
+        source === "http"
+          ? toolVersion
+          : {
+              toolVersionId: "tv1",
+              source: "mcp",
+              endpoint: "https://8.8.8.8/mcp",
+              modelToolName: "mcp__catalog__lookup",
+              remoteToolName: "catalog.lookup",
+              description: toolVersion.description,
+              inputSchema: toolVersion.inputSchema,
+              inputSchemaDigest: toolVersion.inputSchemaDigest,
+              timeoutMs: toolVersion.timeoutMs,
+              maxResponseBytes: toolVersion.maxResponseBytes,
+              sideEffect: toolVersion.sideEffect,
+              idempotent: toolVersion.idempotent,
+              credentialRef: null,
+            };
+      const tool = createExternalToolAgentTool(selected, {
+        runOrigin: "playground",
+        playgroundMocks: {},
+        resolveAddresses,
+        getCallContext: () => ({ tenantId: "tenant", threadId: "thread", runId: "run" }),
+        persistStarted,
+        authorizeAndConsume,
+        transport: { invoke },
+        recordReceipt: async ({ receipt }) => {
+          receipts.push(receipt);
+        },
+        requireRecovery: async () => undefined,
+      });
+      const result = await tool.execute("unmocked-call", { value: "q" });
+      expect(result.details).toEqual({ error: "PLAYGROUND_MOCK_NOT_CONFIGURED" });
+      expect(persistStarted).toHaveBeenCalledOnce();
+      expect(resolveAddresses).not.toHaveBeenCalled();
+      expect(authorizeAndConsume).not.toHaveBeenCalled();
+      expect(invoke).not.toHaveBeenCalled();
+      expect(parseControlledToolReceipt(receipts[0] ?? "")).toMatchObject({ outcome: "failed" });
+    },
+  );
+
   it.each(["normal", "evaluation", "api"] as const)(
     "%s Run 忽略同名持久 Mock 并走真实外部调用边界",
     async (runOrigin) => {

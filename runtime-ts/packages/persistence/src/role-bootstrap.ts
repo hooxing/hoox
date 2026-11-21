@@ -1148,6 +1148,22 @@ async function hasInstallationState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasRunExternalToolSnapshotView(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.worker_run_external_tool_snapshots',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_external_tool_permit_gate',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.run_agent_snapshots',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_versions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_credentials',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.external_tool_revocations',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunAgentSnapshotState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.run_agent_snapshots',$1::text)) IS NOT NULL AS present`,
@@ -3059,6 +3075,17 @@ async function assertActiveRuntimeWhitelist(
       `Runtime 不得持有 sequence 权限：${grantedSequences.sort().join(",")}`,
     );
   }
+  const externalSnapshotView = await hasRunExternalToolSnapshotView(client, context.schema);
+  if (externalSnapshotView) {
+    const privileges = await client.query<{ valid: boolean }>(
+      `SELECT NOT has_any_column_privilege($1,format('%I.worker_run_external_tool_snapshots',$3::text),'SELECT')
+              AND has_table_privilege($2,format('%I.worker_run_external_tool_snapshots',$3::text),'SELECT')
+              AND has_table_privilege($1,format('%I.runtime_external_tool_permit_gate',$3::text),'SELECT') AS valid`,
+      [context.runtimeRole, context.workerCoordinatorRole, context.schema],
+    );
+    if (!privileges.rows[0]?.valid)
+      throw new PersistenceError("CONSTRAINT_VIOLATION", "外部工具密文与许可视图权限偏离白名单");
+  }
   await assertDatabaseAndSchemaBoundary(client, context, true);
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
@@ -4187,6 +4214,12 @@ export async function bootstrapRuntimeAccessOnClient(
     ]) {
       await client.query(`ALTER POLICY playground_${policy} ON ${schema}.${table} TO ${role}`);
     }
+  }
+  if (await hasRunExternalToolSnapshotView(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT ON TABLE ${schema}.worker_run_external_tool_snapshots TO ${coordinatorRole};
+       GRANT SELECT ON TABLE ${schema}.runtime_external_tool_permit_gate TO ${role}`,
+    );
   }
   if (await hasAgentDefinitionState(client, context.schema)) {
     await client.query(

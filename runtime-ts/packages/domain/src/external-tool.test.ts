@@ -34,6 +34,7 @@ describe("外部工具领域契约", () => {
       validateExternalToolVersion({
         ...base,
         source: "http",
+        httpMethod: "POST",
         modelToolName: "http__lookup",
         remoteToolName: "lookup",
       }),

@@ -19,6 +19,7 @@ import type {
 } from "@hoox/domain";
 import type { RunSkillSnapshot } from "@hoox/skill";
 import type { WorkspaceManifest } from "@hoox/workspace";
+import type { ExternalToolSnapshotError } from "./external-tool.js";
 import type { ControlledRolloutProjection } from "./rollout-projection.js";
 import type { RunAgentSnapshot, RunAgentStopCode } from "./run-agent-snapshot.js";
 import type { RuntimeAgentEvent } from "./runtime-agent-event.js";
@@ -100,6 +101,8 @@ export interface AgentControlPort {
     readonly callId: string;
     readonly task: string;
     readonly tools: readonly DelegableAgentToolName[];
+    /** 精确版本授权；省略或空数组都不下放外部工具。 */
+    readonly externalToolVersionIds?: readonly string[];
     readonly forkTurns: AgentForkTurns;
   }): Promise<AgentSummary>;
   sendMessage(input: {
@@ -129,6 +132,7 @@ export interface AgentThreadPersistenceSnapshot {
   readonly canonicalPath: string;
   readonly task: string;
   readonly tools: readonly DelegableAgentToolName[];
+  readonly externalToolVersionIds?: readonly string[];
   readonly toolManifestDigest: Sha256Digest;
   readonly forkTurns: AgentForkTurns;
   readonly turnId: string;
@@ -143,6 +147,7 @@ export interface SubAgentConversationSnapshot {
   readonly task: string;
   readonly currentTask: string;
   readonly tools: readonly DelegableAgentToolName[];
+  readonly externalToolVersionIds?: readonly string[];
   readonly toolManifestDigest: Sha256Digest;
   readonly forkTurns: AgentForkTurns;
   readonly turnOrdinal: number;
@@ -383,6 +388,7 @@ export interface ExternalEffectPermit {
   readonly effect: "model_start" | "model_continue" | "agent_model_start" | "tool_execution";
   readonly callId: string;
   readonly toolName: string;
+  readonly toolVersionId?: string;
   readonly argsDigest: Sha256Digest;
   readonly issuedAt: IsoTimestamp;
   readonly expiresAt: IsoTimestamp;
@@ -391,6 +397,7 @@ export interface ExternalEffectPermit {
 export interface ExternalEffectCall {
   readonly callId: string;
   readonly toolName: string;
+  readonly toolVersionId?: string;
   readonly argsDigest: Sha256Digest;
 }
 
@@ -432,6 +439,9 @@ export type ClaimExecutionResult =
 export type StableWorkerErrorCode =
   | RunAgentStopCode
   | "AGENT_CONFIGURATION_UNSUPPORTED"
+  | "EXTERNAL_TOOL_RESULT_UNKNOWN"
+  | "EXTERNAL_TOOL_REVOKED"
+  | "EXTERNAL_TOOL_SNAPSHOT_INVALID"
   | "CANCELLED"
   | "CONTEXT_TOO_LARGE"
   | "TIMEOUT"
@@ -761,6 +771,8 @@ export interface ExecutionPersistencePort {
           | "expired"
           | "cancelled"
           | "agent_revision_revoked"
+          | "external_tool_revoked"
+          | "external_tool_snapshot_invalid"
           | "fence_lost"
           | "conflict"
           | "unavailable"
@@ -1022,7 +1034,12 @@ export type AgentTurnOutcome =
   | {
       /** Tool Observation 未形成可恢复的 durable 事实；本 Attempt 不能继续成功。 */
       readonly kind: "recovery_required";
-      readonly code: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT" | "SANDBOX_FAILED";
+      readonly code:
+        | "PERSISTENCE_UNAVAILABLE"
+        | "IDEMPOTENCY_CONFLICT"
+        | "SANDBOX_FAILED"
+        | "EXTERNAL_TOOL_RESULT_UNKNOWN"
+        | "EXTERNAL_TOOL_REVOKED";
     }
   | {
       readonly kind: "waiting";
@@ -1088,6 +1105,8 @@ export interface AgentSessionFactoryPort {
     readonly agent?: AgentExecutionIdentity;
     /** 仅对子 Session 生效；工具集合已经由 AgentSupervisor 与父 Agent 能力取交集。 */
     readonly enabledToolNames?: readonly DelegableAgentToolName[];
+    /** 子 Agent 只能获得父 Session 显式选中的 Run 快照版本。 */
+    readonly enabledExternalToolVersionIds?: readonly string[];
     /** 只向 root Session 注册协作工具，子 Session 不得递归获得该能力。 */
     readonly agentControl?: AgentControlPort;
     /**
@@ -1127,6 +1146,9 @@ export interface AgentSessionFactoryPort {
         readonly attachments?: readonly UserInputAttachmentReference[];
       }[];
     }>;
+    readonly onExternalToolSnapshotFailure?: (code: ExternalToolSnapshotError["code"]) => void;
+    /** 根、子 Session 共用根 Attempt 的待对账边界；返回前必须停止后续副作用并持久化恢复事实。 */
+    readonly onExternalToolResultUnknown?: () => Promise<void>;
     readonly authorizeToolEffect: (
       call: ExternalEffectCall,
     ) => Promise<ConsumedExternalEffectAuthorization>;
@@ -1190,7 +1212,14 @@ export interface RecoveryMetricsPort {
   recordOrphanCleanup(input: {
     readonly scope: ExecutionScope;
     readonly registryId: string;
-    readonly reason: RuntimeMutationResult["outcome"] | "cancelled" | "timeout" | "shutdown";
+    readonly reason:
+      | RuntimeMutationResult["outcome"]
+      | "cancelled"
+      | "timeout"
+      | "shutdown"
+      | "external_tool_revoked"
+      | "external_tool_snapshot_invalid"
+      | "external_tool_result_unknown";
     readonly cleanupOutcome: "settled" | "unknown" | "failed";
   }): Promise<void>;
 }

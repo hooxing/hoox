@@ -41,6 +41,9 @@ export interface ExecutionContext {
   readonly sandboxIdleAction: "pause" | "kill";
   stopped?:
     | "agent_revision_revoked"
+    | "external_tool_revoked"
+    | "external_tool_snapshot_invalid"
+    | "external_tool_result_unknown"
     | "cancelled"
     | "shutdown"
     | "timeout"
@@ -48,6 +51,7 @@ export interface ExecutionContext {
     | "unavailable"
     | "scope_mismatch";
   agentFailure?: StableWorkerErrorCode;
+  externalToolRecovery?: Promise<RuntimeMutationResult>;
   modelCompleted: boolean;
   modelStopReason?: "stop" | "length" | "toolUse";
   eventAcceptanceOpen: boolean;

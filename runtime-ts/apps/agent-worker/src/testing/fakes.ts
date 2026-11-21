@@ -443,6 +443,9 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       effect: input.effect,
       callId: input.call.callId,
       toolName: input.call.toolName,
+      ...(input.call.toolVersionId === undefined
+        ? {}
+        : { toolVersionId: input.call.toolVersionId }),
       argsDigest: input.call.argsDigest,
       issuedAt: now,
       expiresAt: this.after(input.permitDurationMs),
@@ -1473,7 +1476,7 @@ export interface FakeSeed {
   readonly skills?: RunSkillSnapshot;
 }
 
-export function fakeSeed(prefix = "worker"): FakeSeed {
+export function fakeSeed(prefix = "worker", id = runId(`run-${prefix}`)): FakeSeed {
   const now = isoTimestamp("2026-07-26T00:00:00.000Z");
   const user = createUser(userId(`user-${prefix}`), now);
   const { tenant, ownerMembership } = createPersonalTenant({
@@ -1491,7 +1494,7 @@ export function fakeSeed(prefix = "worker"): FakeSeed {
     now,
   });
   return {
-    run: createRun({ id: runId(`run-${prefix}`), thread, now }),
+    run: createRun({ id, thread, now }),
     memorySubjectUserId: user.id,
     workspace: createWorkspace({ id: workspaceId(`workspace-${prefix}`), thread, now }),
     input: "执行任务",
@@ -1606,6 +1609,7 @@ function samePermit(left: ExternalEffectPermit, right: ExternalEffectPermit): bo
     left.effect === right.effect &&
     left.callId === right.callId &&
     left.toolName === right.toolName &&
+    left.toolVersionId === right.toolVersionId &&
     left.argsDigest === right.argsDigest &&
     left.issuedAt === right.issuedAt &&
     left.expiresAt === right.expiresAt

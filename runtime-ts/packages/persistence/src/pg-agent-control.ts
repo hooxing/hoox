@@ -38,12 +38,19 @@ function parseTools(value: unknown): readonly DelegableAgentToolName[] {
   return Object.freeze([...new Set(value as DelegableAgentToolName[])]);
 }
 
+function parseExternalToolVersionIds(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.some((id) => typeof id !== "string" || id.length > 128))
+    throw new TypeError("SubAgent 外部工具授权无效");
+  return Object.freeze([...new Set(value as string[])].sort());
+}
+
 interface ConversationRow {
   readonly agent_thread_id: string;
   readonly canonical_path: string;
   readonly task: string;
   readonly current_task: string;
   readonly enabled_tools: unknown;
+  readonly external_tool_version_ids: unknown;
   readonly tool_manifest_digest: string;
   readonly fork_turns: string;
   readonly turn_ordinal: number;
@@ -65,6 +72,7 @@ function conversationSnapshot(row: ConversationRow): SubAgentConversationSnapsho
     task: row.task,
     currentTask: row.current_task,
     tools: parseTools(row.enabled_tools),
+    externalToolVersionIds: parseExternalToolVersionIds(row.external_tool_version_ids),
     toolManifestDigest: sha256Digest(row.tool_manifest_digest),
     forkTurns: parseForkValue(row.fork_turns),
     turnOrdinal: row.turn_ordinal,
@@ -151,7 +159,7 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           }
           const conversations = await client.query<ConversationRow>(
             `SELECT agent_thread_id,canonical_path,task,current_task,enabled_tools,tool_manifest_digest,
-                    fork_turns,turn_ordinal,history,history_digest
+                    external_tool_version_ids,fork_turns,turn_ordinal,history,history_digest
                FROM runtime_subagent_conversations
               WHERE tenant_id=$1 AND thread_id=$2
               ORDER BY canonical_path`,
@@ -251,8 +259,8 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           const conversation = await client.query(
             `INSERT INTO runtime_subagent_conversations(
                tenant_id,thread_id,agent_thread_id,canonical_path,task,current_task,enabled_tools,
-               tool_manifest_digest,fork_turns,turn_ordinal,history,history_digest
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11::jsonb,$12)
+               external_tool_version_ids,tool_manifest_digest,fork_turns,turn_ordinal,history,history_digest
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12::jsonb,$13)
              ON CONFLICT DO NOTHING`,
             [
               input.fence.scope.tenantId,
@@ -262,6 +270,7 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
               snapshot.task,
               snapshot.task,
               JSON.stringify(snapshot.tools),
+              JSON.stringify(snapshot.externalToolVersionIds ?? []),
               snapshot.toolManifestDigest,
               forkValue(snapshot.forkTurns),
               snapshot.turnOrdinal,

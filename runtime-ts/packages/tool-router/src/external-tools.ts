@@ -12,10 +12,12 @@ import {
 } from "@hoox/domain";
 import {
   ExternalToolTransportError,
+  type ExternalEffectPermit,
   type ExternalToolCallContext,
   type ValidatedExternalTarget,
   type ExternalToolReconciliationPort,
   type ExternalToolTransport,
+  type ExternalToolTransportResponse,
 } from "@hoox/run-contracts";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
 
@@ -313,16 +315,15 @@ export interface ExternalToolExecutionPorts {
     readonly callId: string;
     readonly toolName: string;
   }) => Promise<void>;
-  /** 必须完成一次性 permit 领取和消费，返回后不得插入额外异步持久化操作。 */
+  /** 预检后领取并消费精确版本的一次性许可；返回后 Router 不再等待其他端口。 */
   readonly authorizeAndConsume: (input: {
     readonly callId: string;
     readonly toolName: string;
     readonly argsDigest: Sha256Digest;
-  }) => Promise<void>;
+    readonly toolVersionId: string;
+  }) => Promise<{ readonly permit: Pick<ExternalEffectPermit, "toolVersionId"> }>;
   readonly transport: ExternalToolTransport;
   readonly getCallContext: (callId: string) => ExternalToolCallContext;
-  /** HTTP 工具版本绑定的方法；返回 undefined 或未提供时 HTTP Transport 在发包前拒绝。 */
-  readonly httpMethodForVersion?: (toolVersionId: string) => "GET" | "POST" | undefined;
   readonly reconciliation?: ExternalToolReconciliationPort;
   readonly recordReceipt: (input: {
     readonly callId: string;
@@ -369,7 +370,14 @@ export function createExternalToolAgentTool(
       const args = rawArgs;
       const serialized = canonicalJson(args);
       const argsDigest = sha256Digest(createHash("sha256").update(serialized).digest("hex"));
-      let wrote = false;
+      const failed = async (code: string) => {
+        await ports.recordReceipt({ callId, receipt: receipt("failed") });
+        return {
+          content: [{ type: "text" as const, text: "外部工具调用未完成。" }],
+          details: { error: code },
+        };
+      };
+      let invocation: Parameters<ExternalToolTransport["invoke"]>[0];
       try {
         const retry = ports.isExplicitlyReconciledRetry
           ? await ports.isExplicitlyReconciledRetry({
@@ -392,7 +400,6 @@ export function createExternalToolAgentTool(
             throw new Error("EXTERNAL_TOOL_RETRY_REJECTED");
         } else {
           await ports.persistStarted({ callId, toolName: tool.modelToolName });
-          await ports.authorizeAndConsume({ callId, toolName: tool.modelToolName, argsDigest });
         }
         // 总超时从 DNS 预检开始计算，Transport 共用同一绝对截止时间。
         const deadlineAt = Date.now() + tool.timeoutMs;
@@ -405,15 +412,12 @@ export function createExternalToolAgentTool(
           }),
           deadlineAt,
         );
-        const method =
-          tool.source === "http" ? ports.httpMethodForVersion?.(tool.toolVersionId) : undefined;
-        wrote = true;
-        const response = await ports.transport.invoke({
+        invocation = {
           tool,
           target,
           arguments: args,
           callContext: ports.getCallContext(callId),
-          ...(method === undefined ? {} : { method }),
+          ...(tool.httpMethod === undefined ? {} : { method: tool.httpMethod }),
           ...(credential === undefined ? {} : { credential }),
           idempotencyKey: callId,
           timeoutMs: tool.timeoutMs,
@@ -421,60 +425,131 @@ export function createExternalToolAgentTool(
           maxResponseBytes: tool.maxResponseBytes,
           redirect: "error",
           ...(signal === undefined ? {} : { signal }),
-        });
-        if (response.body.byteLength > tool.maxResponseBytes)
-          throw new Error("EXTERNAL_TOOL_RESPONSE_LIMIT");
-        // 模型只看到正文投影：凭据与签名、时间戳等认证材料在解析后逐值剔除。
-        const secrets = [credential, ...(response.authMaterial ?? [])].filter(
-          (value): value is string => typeof value === "string" && value.length > 0,
-        );
-        const raw = new TextDecoder().decode(response.body);
-        let visible = raw;
-        if (response.body.byteLength === 0) visible = "外部工具调用已成功，未返回内容。";
-        else if (/json/i.test(response.contentType)) {
-          try {
-            visible = JSON.stringify(redactJson(JSON.parse(raw), secrets));
-          } catch {
-            throw new Error("EXTERNAL_TOOL_RESPONSE_INVALID");
-          }
-        }
-        visible = redactText(visible, secrets);
-        const cap = Math.max(1, Math.min(8192, ports.maxModelVisibleBytes ?? 8192));
-        const bytes = new TextEncoder().encode(visible);
-        if (bytes.byteLength > cap) visible = decodeUtf8Prefix(bytes, cap);
-        await ports.recordReceipt({ callId, receipt: receipt("succeeded") });
-        return {
-          content: [{ type: "text", text: visible }],
-          details: { truncated: bytes.byteLength > cap },
         };
       } catch (error) {
-        if (
-          error instanceof ExternalToolTransportError &&
-          (error.disposition === "not_sent" || error.disposition === "responded_failure")
-        ) {
-          await ports.recordReceipt({ callId, receipt: receipt("failed") });
-          return {
-            content: [{ type: "text", text: "外部工具调用未完成。" }],
-            details: { error: error.safeCode },
-          };
-        }
-        if (wrote) {
-          recoveryRequired = true;
-          try {
-            await ports.requireRecovery({ callId, code: "EXTERNAL_TOOL_RESULT_UNKNOWN" });
-          } catch {
-            throw new Error("EXTERNAL_TOOL_RECOVERY_UNAVAILABLE");
-          }
-          throw new Error("EXTERNAL_TOOL_RESULT_UNKNOWN");
-        }
+        return failed(
+          error instanceof ExternalToolTransportError ? error.safeCode : "EXTERNAL_TOOL_FAILED",
+        );
+      }
+      // 对账只许可重试原调用，不替代本次发包许可。消费失败由 Worker 分类，不能变成可继续的模型结果。
+      try {
+        const consumed = await ports.authorizeAndConsume({
+          callId,
+          toolName: tool.modelToolName,
+          toolVersionId: tool.toolVersionId,
+          argsDigest,
+        });
+        if (consumed?.permit?.toolVersionId !== tool.toolVersionId)
+          throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+      } catch (error) {
         await ports.recordReceipt({ callId, receipt: receipt("failed") });
-        return {
-          content: [{ type: "text", text: "外部工具调用未完成。" }],
-          details: { error: "EXTERNAL_TOOL_FAILED" },
-        };
+        throw error;
+      }
+      try {
+        const response = await ports.transport.invoke(invocation);
+        if (response.body.byteLength > tool.maxResponseBytes)
+          throw new Error("EXTERNAL_TOOL_RESPONSE_LIMIT");
+        const result = projectExternalToolResult(
+          tool,
+          credential,
+          response,
+          ports.maxModelVisibleBytes,
+        );
+        await ports.recordReceipt({ callId, receipt: receipt("succeeded") });
+        return result;
+      } catch (error) {
+        if (error instanceof ExternalToolTransportError) return failed(error.safeCode);
+        recoveryRequired = true;
+        try {
+          await ports.requireRecovery({ callId, code: "EXTERNAL_TOOL_RESULT_UNKNOWN" });
+        } catch {
+          throw new Error("EXTERNAL_TOOL_RECOVERY_UNAVAILABLE");
+        }
+        throw new Error("EXTERNAL_TOOL_RESULT_UNKNOWN");
       }
     },
   };
+}
+
+function projectExternalToolResult(
+  tool: ExternalToolVersion,
+  credential: string | undefined,
+  response: ExternalToolTransportResponse,
+  maxModelVisibleBytes = 8192,
+) {
+  const content = (text: string) => [{ type: "text" as const, text }];
+  const bounded = (text: string) => {
+    const cap = Math.max(1, Math.min(8192, maxModelVisibleBytes));
+    const bytes = new TextEncoder().encode(text);
+    const truncated = bytes.byteLength > cap;
+    return {
+      content: content(truncated ? decodeUtf8Prefix(bytes, cap) : text),
+      details: { truncated },
+    };
+  };
+  if (response.body.byteLength === 0) return bounded("外部工具调用已成功，未返回内容。");
+
+  // 即使策略禁止投影正文，无法解释的成功响应仍须对账，不能提前结算为成功。
+  const raw = new TextDecoder().decode(response.body);
+  const isJson = /json/i.test(response.contentType);
+  const parsed: unknown = isJson ? JSON.parse(raw) : undefined;
+  const hasCredential = tool.credentialRef !== null || Boolean(credential);
+  const secrets = [credential, ...(response.authMaterial ?? [])].filter(
+    (value): value is string => value !== undefined && value.length > 0,
+  );
+  const representations = [...new Set(secrets.flatMap(credentialRepresentations))];
+  // 无可重用凭据时保留业务数据；先剔除单次认证材料，再检查剩余投影中的编码回显。
+  const json = !hasCredential && isJson ? redactJson(parsed, secrets) : parsed;
+  const visible = hasCredential ? raw : isJson ? JSON.stringify(json) : redactText(raw, secrets);
+  if (
+    representations.length &&
+    (containsCredentialEcho(visible, representations) ||
+      (isJson && containsCredentialEchoInJson(json, representations)))
+  ) {
+    return {
+      content: content("外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。"),
+      details: { withheld: "EXTERNAL_TOOL_CREDENTIAL_ECHO" },
+    };
+  }
+  // 检测不能穷尽任意编码；未命中也不是公开持凭据端点正文的许可。
+  return bounded(hasCredential ? "外部工具调用已成功，响应正文未向模型公开。" : visible);
+}
+
+function credentialRepresentations(secret: string): readonly string[] {
+  const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+  const encoded = Buffer.from(secret, "utf8");
+  const urlEncoded = encodeURIComponent(secret);
+  const base64 = encoded.toString("base64");
+  const base64Url = encoded.toString("base64url");
+  return [
+    secret,
+    [...secret].reverse().join(""),
+    urlEncoded,
+    urlEncoded.replace(/%[0-9a-f]{2}/giu, (part) => part.toLowerCase()),
+    base64,
+    base64.replace(/=+$/u, ""),
+    base64Url,
+    encoded.toString("hex"),
+    encoded.toString("hex").toUpperCase(),
+    jsonEscaped,
+  ].filter((value) => value.length > 0);
+}
+
+function containsCredentialEcho(value: string, representations: readonly string[]): boolean {
+  return representations.some((representation) => value.includes(representation));
+}
+
+function containsCredentialEchoInJson(value: unknown, representations: readonly string[]): boolean {
+  if (typeof value === "string") return containsCredentialEcho(value, representations);
+  if (Array.isArray(value))
+    return value.some((item) => containsCredentialEchoInJson(item, representations));
+  if (value !== null && typeof value === "object")
+    return Object.entries(value).some(
+      ([key, item]) =>
+        containsCredentialEcho(key, representations) ||
+        containsCredentialEchoInJson(item, representations),
+    );
+  return false;
 }
 
 function redactText(value: string, secrets: readonly string[]): string {

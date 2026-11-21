@@ -272,6 +272,7 @@ export function permitMatches(
     permit.effect === effect &&
     permit.callId === call.callId &&
     permit.toolName === call.toolName &&
+    permit.toolVersionId === call.toolVersionId &&
     permit.argsDigest === call.argsDigest &&
     sameScope(permit.scope, context.scope) &&
     permit.runClaimToken === context.fence.runClaim.token &&

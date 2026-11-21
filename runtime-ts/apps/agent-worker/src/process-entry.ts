@@ -35,6 +35,8 @@ import { createPostgresPool, probePostgres } from "@hoox/persistence/postgres";
 import {
   PgAgentControlRepository,
   PgBackedSandboxSessionRegistry,
+  ExternalToolCredentialDecryptor,
+  PgExternalToolSnapshotReader,
   PgExecutionPersistence,
   PgMemoryIngestionStore,
   PgModelWireTraceRepository,
@@ -226,6 +228,11 @@ const workerEnvironmentSchema = Object.freeze({
   }),
   MODEL_WIRE_TRACE_ENABLED: booleanEnvironmentField(),
   EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES: booleanEnvironmentField({ requiredIn: [] }),
+  EXTERNAL_TOOL_IDENTITY_ROOT_KEY: stringEnvironmentField({
+    requiredIn: ["production"],
+    secret: true,
+    maxLength: 4096,
+  }),
   MODEL_WIRE_TRACE_RETENTION_DAYS: integerEnvironmentField({ minimum: 1, maximum: 365 }),
   // 每个 request/response 原始字节独立上限；超过后保存精确前缀并标为 truncated。
   MODEL_WIRE_TRACE_MAX_BYTES: integerEnvironmentField({ minimum: 1, maximum: 8 * 1024 * 1024 }),
@@ -367,6 +374,7 @@ export interface WorkerProcessConfiguration {
     resourceVolumeDriver: string;
   }>;
   readonly externalToolsAllowPrivateAddresses: boolean;
+  readonly externalToolIdentityRootKey?: string;
   readonly model: Readonly<{
     baseUrl: string;
     apiKey: string;
@@ -458,6 +466,20 @@ export function parseWorkerProcessEnvironment(
   assertProductionInheritedEnvironment(source);
   const memory = parseMem0DevelopmentEnvironment(source);
   const parsed = parseStrictEnvironment(source, workerEnvironmentSchema);
+  const identityRootKey = parsed.values.EXTERNAL_TOOL_IDENTITY_ROOT_KEY;
+  // 身份派生不能使用公开样例，也不能与供应商鉴权或凭据加密共用密钥。
+  if (
+    identityRootKey !== undefined &&
+    (Buffer.byteLength(identityRootKey, "utf8") < 32 ||
+      identityRootKey.startsWith("replace-") ||
+      /^<[^>]+>$/u.test(identityRootKey) ||
+      identityRootKey === parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY ||
+      identityRootKey === parsed.values.MODEL_API_KEY)
+  ) {
+    throw new EnvironmentConfigurationError([
+      { code: "INVALID", key: "EXTERNAL_TOOL_IDENTITY_ROOT_KEY" },
+    ]);
+  }
   if (parsed.runtimeEnvironment === "production") {
     assertProductionHasNoDevelopmentIdentity(source);
   }
@@ -696,6 +718,7 @@ export function parseWorkerProcessEnvironment(
     }),
     externalToolsAllowPrivateAddresses:
       parsed.values.EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES ?? false,
+    ...(identityRootKey === undefined ? {} : { externalToolIdentityRootKey: identityRootKey }),
     model: Object.freeze({
       baseUrl: parsed.values.MODEL_BASE_URL ?? "https://unconfigured.invalid/v1",
       apiKey: parsed.values.MODEL_API_KEY ?? "",
@@ -1274,6 +1297,18 @@ async function assembleWorkerRuntime(
       undefined,
       undefined,
       telemetry,
+      {
+        snapshots: new PgExternalToolSnapshotReader(
+          coordinatorPool,
+          new ExternalToolCredentialDecryptor(configuration.model.credentialEncryptionKey),
+        ),
+        ...(configuration.externalToolIdentityRootKey === undefined
+          ? {}
+          : {
+              httpIdentityRootKey: Buffer.from(configuration.externalToolIdentityRootKey, "utf8"),
+            }),
+        allowPrivateAddresses: configuration.externalToolsAllowPrivateAddresses,
+      },
     );
     const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(
       pool,

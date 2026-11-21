@@ -20,3 +20,5 @@ export * from "../tool-observation-rollout-adapter.js";
 
 // 只供获得 Run 快照授权后的运行时凭据解析适配器使用。
 export * from "../external-tool-credential-reader.js";
+
+export * from "../pg-external-tool-snapshot-reader.js";

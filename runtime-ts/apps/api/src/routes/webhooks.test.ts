@@ -1,3 +1,4 @@
+import type { ValidatedExternalTarget } from "@hoox/run-contracts";
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import type { ApiDependencies } from "../dependencies.js";
@@ -61,4 +62,73 @@ describe("Webhook 管理路由", () => {
       await app.close();
     }
   });
+
+  it.each(["解析截止", "请求取消", "短 handler 时限"])(
+    "注册%s后即使 DNS 迟到返回也不创建订阅",
+    async (mode) => {
+      let finishResolution!: (target: ValidatedExternalTarget) => void;
+      let started!: () => void;
+      const resolutionStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const controller = new AbortController();
+      const create = vi.fn(async () => ({ id: "wh_late" }));
+      const app = Fastify({ handlerTimeout: mode === "短 handler 时限" ? 40 : 0 });
+      if (mode === "请求取消")
+        app.addHook("preHandler", async (request) => {
+          Object.defineProperty(request, "signal", { value: controller.signal });
+        });
+      registerWebhookRoutes(
+        app,
+        {
+          webhooks: { create, list: vi.fn(), rotate: vi.fn(), disable: vi.fn(), remove: vi.fn() },
+          webhookCipher: {
+            encrypt: vi.fn(() => ({ version: 1, nonce: "n", ciphertext: "c", authTag: "t" })),
+          },
+        } as unknown as Pick<ApiDependencies, "webhooks" | "webhookCipher">,
+        (async () => ({
+          principal: { kind: "user", userId: "user_a" },
+          scope: { tenantId: "tenant_a", userId: "user_a" },
+          tenant: { tenant: { id: "tenant_a", kind: "team" }, membership: { role: "owner" } },
+        })) as unknown as AuthenticateRequest,
+        {
+          resolutionDeadlineMs: mode === "解析截止" ? 10 : 3_000,
+          resolveTarget: () =>
+            new Promise((resolve) => {
+              finishResolution = resolve;
+              started();
+            }),
+        },
+      );
+      try {
+        const responsePromise = app.inject({
+          method: "POST",
+          url: "/v1/webhooks",
+          headers: { "content-type": "application/json" },
+          payload: {
+            name: "late",
+            endpointUrl: "https://late.example/hook",
+            eventTypes: ["run.succeeded"],
+          },
+        });
+        await resolutionStarted;
+        if (mode === "请求取消") controller.abort();
+        const response = await responsePromise;
+        expect(response.statusCode).toBeGreaterThanOrEqual(400);
+        expect(create).not.toHaveBeenCalled();
+        finishResolution({
+          url: new URL("https://late.example/hook"),
+          hostname: "late.example",
+          servername: "late.example",
+          hostHeader: "late.example",
+          address: "203.0.113.1",
+          addresses: ["203.0.113.1"],
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(create).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
 });

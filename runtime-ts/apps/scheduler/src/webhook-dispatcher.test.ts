@@ -376,17 +376,22 @@ describe("Webhook Dispatcher", () => {
 
   it("目标解析悬挂时同样受截止时间约束", async () => {
     const store = new FakeStore([delivery()]);
+    let resolutionSignal: AbortSignal | undefined;
     const instance = new WebhookDispatcher({
       store,
       cipher: { decrypt: () => secret },
       owner: "scheduler_test",
       deadlineMs: 200,
-      resolveTarget: () => new Promise<WebhookTarget>(() => undefined),
+      resolveTarget: (_url, options) => {
+        resolutionSignal = options?.signal;
+        return new Promise<WebhookTarget>(() => undefined);
+      },
     });
     const started = Date.now();
     await instance.pump();
     await instance.close();
     expect(Date.now() - started).toBeLessThan(2_000);
+    expect(resolutionSignal?.aborted).toBe(true);
     expect(store.settlements[0]?.settlement).toMatchObject({ kind: "retry", errorCode: "timeout" });
   });
 

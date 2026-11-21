@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lookup } from "node:dns/promises";
+import { Resolver } from "node:dns";
 import { isIP } from "node:net";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -20,6 +20,55 @@ import {
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
 
 export type ExternalAddressResolver = (hostname: string) => Promise<readonly string[]>;
+
+const maxConcurrentDnsResolutions = 16;
+let activeDnsResolutions = 0;
+
+/** 使用可取消的独立 DNS resolver，并限制悬挂解析占用的资源数；配额只在 A/AAAA 回调结束后释放。 */
+export function resolveExternalAddresses(
+  hostname: string,
+  signal?: AbortSignal,
+): Promise<readonly string[]> {
+  if (activeDnsResolutions >= maxConcurrentDnsResolutions)
+    return Promise.reject(new Error("EXTERNAL_DNS_CAPACITY_EXHAUSTED"));
+  if (signal?.aborted) return Promise.reject(new Error("EXTERNAL_DNS_CANCELLED"));
+  const resolver = new Resolver();
+  activeDnsResolutions += 1;
+  return new Promise((resolve, reject) => {
+    const addresses: string[] = [];
+    let remaining = 2;
+    let rejected = false;
+    const finish = (error?: NodeJS.ErrnoException) => {
+      remaining -= 1;
+      if (error && error.code !== "ENODATA" && error.code !== "ENOTFOUND" && !rejected) {
+        rejected = true;
+        reject(error);
+      }
+      if (remaining !== 0) return;
+      signal?.removeEventListener("abort", cancel);
+      activeDnsResolutions -= 1;
+      if (!rejected) {
+        if (signal?.aborted) reject(new Error("EXTERNAL_DNS_CANCELLED"));
+        else resolve(Object.freeze(addresses));
+      }
+    };
+    const cancel = () => resolver.cancel();
+    signal?.addEventListener("abort", cancel, { once: true });
+    for (const resolveFamily of [
+      resolver.resolve4.bind(resolver),
+      resolver.resolve6.bind(resolver),
+    ]) {
+      try {
+        resolveFamily(hostname, (error, values) => {
+          if (values) addresses.push(...values);
+          finish(error ?? undefined);
+        });
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error("EXTERNAL_DNS_FAILED"));
+      }
+    }
+  });
+}
 
 function ipv4Private(address: string): boolean {
   const n = address.split(".").map(Number);
@@ -109,7 +158,11 @@ function privateAddress(address: string): boolean {
 
 export async function validateExternalHttpsTarget(
   input: string,
-  options: { readonly allowPrivate?: boolean; readonly resolve?: ExternalAddressResolver } = {},
+  options: {
+    readonly allowPrivate?: boolean;
+    readonly resolve?: ExternalAddressResolver;
+    readonly signal?: AbortSignal;
+  } = {},
 ): Promise<ValidatedExternalTarget> {
   let url: URL;
   try {
@@ -120,13 +173,13 @@ export async function validateExternalHttpsTarget(
   if (url.protocol !== "https:" || url.username || url.password || url.hash)
     throw new Error("EXTERNAL_TARGET_REJECTED");
   const hostname = url.hostname.replace(/^\[|\]$/gu, "");
+  if (options.signal?.aborted) throw new Error("EXTERNAL_DNS_CANCELLED");
   const addresses = isIP(hostname)
     ? [hostname]
-    : await (
-        options.resolve ??
-        (async (host) =>
-          (await lookup(host, { all: true, verbatim: true })).map((item) => item.address))
-      )(hostname);
+    : await (options.resolve ?? ((host) => resolveExternalAddresses(host, options.signal)))(
+        hostname,
+      );
+  if (options.signal?.aborted) throw new Error("EXTERNAL_DNS_CANCELLED");
   if (
     addresses.length === 0 ||
     addresses.some(

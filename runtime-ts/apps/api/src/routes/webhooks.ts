@@ -40,6 +40,10 @@ export function registerWebhookRoutes(
   app: FastifyInstance,
   deps: Pick<ApiDependencies, "webhooks" | "webhookCipher">,
   authenticate: AuthenticateRequest,
+  options: {
+    readonly resolveTarget?: typeof validateExternalHttpsTarget;
+    readonly resolutionDeadlineMs?: number;
+  } = {},
 ): void {
   const repository = deps.webhooks;
   const cipher = deps.webhookCipher;
@@ -77,20 +81,44 @@ export function registerWebhookRoutes(
       )
         throw new ApiFailure("bad_request");
       let endpoint: string;
+      const handlerTimeout = request.routeOptions.handlerTimeout;
+      const deadline = AbortSignal.timeout(
+        Math.min(
+          options.resolutionDeadlineMs ?? 3_000,
+          handlerTimeout > 0 ? Math.max(1, Math.floor(handlerTimeout / 2)) : 3_000,
+        ),
+      );
+      const signal = AbortSignal.any([request.signal, deadline]);
+      let cancel!: () => void;
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        cancel = () => reject(new Error("WEBHOOK_REGISTRATION_CANCELLED"));
+        signal.addEventListener("abort", cancel, { once: true });
+        if (signal.aborted) cancel();
+      });
       try {
-        endpoint = (await validateExternalHttpsTarget(body.endpointUrl)).url.toString();
+        endpoint = (
+          await Promise.race([
+            (options.resolveTarget ?? validateExternalHttpsTarget)(body.endpointUrl, { signal }),
+            cancelled,
+          ])
+        ).url.toString();
+        if (signal.aborted) throw new Error("WEBHOOK_REGISTRATION_CANCELLED");
       } catch {
         throw new ApiFailure("bad_request");
+      } finally {
+        signal.removeEventListener("abort", cancel);
       }
       const raw = secret();
       const id = `wh_${randomUUID()}`;
+      const encrypted = cipher.encrypt(auth.scope.tenantId, id, raw);
+      if (signal.aborted) throw new ApiFailure("bad_request");
       const created = await repository.create({
         scope: auth.scope,
         id,
         name: body.name.trim(),
         endpointUrl: endpoint,
         eventTypes: [...new Set<WebhookEventType>(body.eventTypes)],
-        secret: cipher.encrypt(auth.scope.tenantId, id, raw),
+        secret: encrypted,
       });
       return success(request, { webhook: created, secret: raw });
     },

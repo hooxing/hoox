@@ -478,7 +478,7 @@ describe("外部工具运行骨架", () => {
     expect(visible).not.toContain("receipt");
     expect(receipt.mock.calls[0]?.[0]?.receipt).toContain("succeeded");
   });
-  it("服务端回显凭据时仍从模型可见结果删除", async () => {
+  it("服务端回显凭据时以受控错误扣留正文", async () => {
     const secret = "credential-echo-secret";
     const invoke = vi.fn(async (input: { readonly credential?: string }) => ({
       body: new TextEncoder().encode(JSON.stringify({ echo: input.credential })),
@@ -505,14 +505,16 @@ describe("外部工具运行骨架", () => {
     const visible = (result.content[0] as { text: string }).text;
     expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ credential: secret }));
     expect(visible).not.toContain(secret);
-    expect(visible).toBe("外部工具调用已成功，响应正文未向模型公开。");
+    expect(visible).toBe("外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。");
+    expect(result.details).toEqual({ withheld: "EXTERNAL_TOOL_CREDENTIAL_ECHO" });
   });
   it.each(
     [
       ["base64", Buffer.from('placeholder-credential+/="\\\n\t').toString("base64")],
       ["hex", Buffer.from('placeholder-credential+/="\\\n\t').toString("hex")],
       ["URL", encodeURIComponent('placeholder-credential+/="\\\n\t')],
-      ["JSON 转义", JSON.stringify('placeholder-credential+/="\\\n\t')],
+      ["反转", [...'placeholder-credential+/="\\\n\t'].reverse().join("")],
+      ["JSON 转义", JSON.stringify('placeholder-credential+/="\\\n\t').slice(1, -1)],
     ].flatMap(([encoding, echo]) => [
       { encoding, contentType: "text/plain", body: `不可信业务正文：${echo}` },
       {
@@ -521,7 +523,7 @@ describe("外部工具运行骨架", () => {
         body: JSON.stringify({ value: "不可信业务正文", echo }),
       },
     ]),
-  )("持凭据端点不投影 $contentType 中的 $encoding 回显", async ({ body, contentType }) => {
+  )("持凭据端点扣留 $contentType 中的 $encoding 回显", async ({ body, contentType }) => {
     const recordReceipt = vi.fn(async () => {});
     const requireRecovery = vi.fn();
     const agentTool = createExternalToolAgentTool(
@@ -540,8 +542,10 @@ describe("外部工具运行骨架", () => {
     );
     const result = await agentTool.execute("encoded-echo", { value: "x" });
     expect(result).toEqual({
-      content: [{ type: "text", text: "外部工具调用已成功，响应正文未向模型公开。" }],
-      details: { truncated: false },
+      content: [
+        { type: "text", text: "外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。" },
+      ],
+      details: { withheld: "EXTERNAL_TOOL_CREDENTIAL_ECHO" },
     });
     expect(recordReceipt).toHaveBeenCalledExactlyOnceWith({
       callId: "encoded-echo",
@@ -549,7 +553,7 @@ describe("外部工具运行骨架", () => {
     });
     expect(requireRecovery).not.toHaveBeenCalled();
   });
-  it.each(["不可信业务正文", ""])("仅有凭据引用时也不开放正文投影：%j", async (body) => {
+  it.each(["不可信业务正文", ""])("只有凭据引用但没有可检测凭据时保留正文：%j", async (body) => {
     const agentTool = createExternalToolAgentTool(
       { ...toolVersion, credentialRef: "placeholder-credential-ref" },
       {
@@ -559,7 +563,7 @@ describe("外部工具运行骨架", () => {
         transport: {
           invoke: async () => ({
             body: new TextEncoder().encode(body),
-            contentType: "application/json",
+            contentType: "text/plain",
           }),
         },
         recordReceipt: async () => {},
@@ -569,14 +573,33 @@ describe("外部工具运行骨架", () => {
     expect((await agentTool.execute("credential-ref-only", { value: "x" })).content).toEqual([
       {
         type: "text",
-        text:
-          body.length === 0
-            ? "外部工具调用已成功，未返回内容。"
-            : "外部工具调用已成功，响应正文未向模型公开。",
+        text: body.length === 0 ? "外部工具调用已成功，未返回内容。" : body,
       },
     ]);
   });
-  it("无凭据工具解析 JSON 后仍剔除含引号、反斜线与控制字符的认证材料", async () => {
+  it("持凭据工具未命中检测时正常向模型返回业务正文", async () => {
+    const agentTool = createExternalToolAgentTool(
+      { ...toolVersion, credentialRef: "placeholder-credential-ref" },
+      {
+        getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
+        persistStarted: async () => {},
+        authorizeAndConsume: consumePermit,
+        transport: {
+          invoke: async () => ({
+            body: new TextEncoder().encode(JSON.stringify({ status: "ready", count: 3 })),
+            contentType: "application/json",
+          }),
+        },
+        recordReceipt: async () => {},
+        requireRecovery: async () => {},
+      },
+      "known-secret-value",
+    );
+    expect((await agentTool.execute("normal-result", { value: "x" })).content).toEqual([
+      { type: "text", text: '{"status":"ready","count":3}' },
+    ]);
+  });
+  it("含引号、反斜线与控制字符的认证材料 JSON 回显也会被扣留", async () => {
     const secret = 'quote" slash\\ control\n\t';
     const agentTool = createExternalToolAgentTool(toolVersion, {
       getCallContext: () => ({
@@ -600,7 +623,8 @@ describe("外部工具运行骨架", () => {
     const result = await agentTool.execute("complex-secret", { value: "x" });
     const visible = (result.content[0] as { text: string }).text;
     expect(visible).not.toContain(secret);
-    expect(visible).toContain('["[凭据已隐藏]"]');
+    expect(visible).toBe("外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。");
+    expect(result.details).toEqual({ withheld: "EXTERNAL_TOOL_CREDENTIAL_ECHO" });
   });
   it("显式对账才允许幂等重试，原幂等键被复用", async () => {
     const invoke = vi.fn(async () => ({
@@ -731,13 +755,13 @@ describe("外部工具运行骨架", () => {
     const echoed = (await agentTool.execute("echo-json", { value: "x" })).content[0] as {
       text: string;
     };
-    expect(echoed.text).not.toContain(signature);
-    expect(echoed.text).not.toContain(timestamp);
+    expect(echoed.text).toBe("外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。");
+    expect(receipts.at(-1)).toContain("succeeded");
     body = new TextEncoder().encode(`sig=${signature} ts=${timestamp}`);
     contentType = "text/plain";
     const text = (await agentTool.execute("echo-text", { value: "x" })).content[0] as {
       text: string;
     };
-    expect(text.text).toBe("sig=[凭据已隐藏] ts=[凭据已隐藏]");
+    expect(text.text).toBe("外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。");
   });
 });

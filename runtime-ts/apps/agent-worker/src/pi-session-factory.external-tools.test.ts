@@ -276,7 +276,7 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
     onRequest = () => {};
     disconnect = false;
   });
-  it("MCP 与 HTTP 隐藏不可信正文并写入独立受控回执，签名身份来自 ExecutionScope", async () => {
+  it("MCP 与 HTTP 凭据回显均被扣留，签名身份来自 ExecutionScope", async () => {
     requests.length = 0;
     onRequest = () => {};
     const versions = [version("mcp", origin), version("http", origin)];
@@ -325,14 +325,19 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
       {
         toolCallId: "call-mcp",
         isError: false,
-        content: [{ type: "text", text: "外部工具调用已成功，响应正文未向模型公开。" }],
+        content: [
+          { type: "text", text: "外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。" },
+        ],
       },
       {
         toolCallId: "call-http",
         isError: false,
-        content: [{ type: "text", text: "外部工具调用已成功，响应正文未向模型公开。" }],
+        content: [
+          { type: "text", text: "外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。" },
+        ],
       },
     ]);
+    expect(JSON.stringify(results)).not.toContain(credential);
     expect(receipts).toEqual([
       {
         callId: "call-mcp",

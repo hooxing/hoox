@@ -59,7 +59,8 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 ## Routine 与迁移
 
 - 业务 Schema 不得存在自定义函数、过程或聚合，迁移 runner 在迁移前后均以严格 routine 检查失败关闭。API Key 撤销不使用数据库 routine：Runtime 的列级 UPDATE 权限受 Runtime 专属 RESTRICTIVE RLS 策略进一步约束，只能将集成 Membership 从 active 改为 revoked，不能改人类成员或恢复已吊销 Membership。由于 `SELECT ... FOR SHARE/UPDATE` 同样施加 UPDATE 策略的 USING，Membership 策略的 USING 只限定当前 Tenant 的 active 行，使人类成员的授权加锁与 `lock_marker` 自更新继续命中；集成身份与目标状态只在 WITH CHECK 中约束，因此 Runtime 也无法锁定或更新已吊销 Membership；API Key 仅允许更新未吊销行，且新状态必须仍处于当前 Tenant，因此已吊销 Key 不可恢复。Key 与 Membership 在同一事务中更新，任一更新未命中预期行则整体回滚。这些策略随 API Key 表在同一迁移中创建与回退。
-- 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。2026-11 起全部历史迁移已合并为 `0001_baseline`；基线及之后的迁移一经提交不可修改，新变化只能追加 `0002` 起的递增版本。压缩前建立的数据库会因迁移记录不一致而失败关闭，必须清空 Schema 后重建，见[开发环境准备](../development.md#迁移基线重置)。
+- 迁移文件位于 `runtime-ts/packages/persistence/migrations`，以 `NNNN_name.up.sql` / `.down.sql` 成对出现，runner 按版本顺序在单一事务中执行，并以 checksum 校验已应用记录。2026-11 起全部历史迁移已合并为 `0001_baseline`；基线及之后的迁移一经合并到 `main` 或执行即不可修改，新变化只能追加 `0002` 起的递增版本。压缩前建立的数据库会因迁移记录不一致而失败关闭，必须清空 Schema 后重建，见[开发环境准备](../development.md#迁移基线重置)。
+- 开发时使用 `pnpm migration:new <名称>` 创建成对的迁移文件。并行分支合并前，先同步 `origin/main` 并将其迁移纳入工作区，再用 `pnpm migration:renumber` 将分支新增、尚未执行的迁移顺延到基准之后，并同步更新对文件名主干的引用。若工作区或 Git 索引缺少基准迁移或与基准内容不符，命令拒绝重编号。两个命令只操作文件和 Git，不连接数据库；重编号会改变 checksum，不能用于已执行的迁移。
 - 基线 down 删除基线创建的全部表、视图与函数，不按数据内容阻止回退；新增迁移的 down 若可能丢失不可恢复事实，应自行失败关闭。
 - `pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作。
 

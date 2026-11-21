@@ -18,7 +18,7 @@ Worker 首次为 Run 解析运行配置时持久化快照；尚未建立快照�
 
 工具开关不是沙箱文件 ACL：保留 `exec_command` 时仍可通过命令读写文件，关闭文件工具不能替代沙箱隔离。后台显示该限制。共享工具目录、规范化规则和数据库约束拒绝未知、重复及非数组选择；选择顺序不改变能力缓存或模型 Schema。工具新增必须同步目录、受控执行和[用户展示契约](#用户可见工具信息与错误处理)；已显式保存的名单不自动启用新增工具。
 
-B1 已提供外部工具版本到 Pi `AgentTool` 的工厂和经 Tool Router 执行的共同路径，但尚未接入 Session 注册；可用名单只能来自后续接入的 RunAgentSnapshot，不能按请求临时发现。出站地址校验只接受 HTTPS、拒绝 URL 凭据，并对 DNS 解析结果逐个检查；Transport 必须连接到已校验的地址并禁止重定向。`EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES` 默认关闭，只有部署显式启用才放行私有地址。
+Worker 按 [RunAgentSnapshot 的受限读取边界](agent-definition.md#外部工具快照读取)获取外部工具版本，按规范工具名的字典序注册 MCP/HTTP 工具；这些工具进入能力清单、Schema 摘要与上下文预算，不按请求临时发现。子 Agent 默认不获得外部工具，显式授权绑定精确版本 ID。MCP/HTTP 调用、授权与结果出口见[外部工具装配边界](#外部工具装配边界)。
 
 ## 模型与执行边界
 
@@ -72,7 +72,26 @@ try {
 - 后台切回正常模式仅影响之后首次建立快照的 Run。已有 PTC Run 需保留 PTC 运行时代码和 `runtime_ptc_dispatches` journal，直到安全排空和核对完成；切回正常模式不等于删除历史事实。
 - 运行设置的模式字段与 `enabledTools` 名单由内联 CHECK 约束校验，不依赖数据库 routine；重新全选工具不删除历史配置，回滚代码必须保留这两个字段的支持。
 
-
 ## 外部工具装配边界
 
-MCP 与 HTTP 外部工具共用不可变版本、受控 Schema、一次性许可、Tool Router 与有界结果回执。Transport 仅负责协议调用，不能绕过 Router 或自行重试。工具定义由固定 Run 快照提供；未接入 Agent 快照授权之前，Worker 不读取外部工具版本或凭据。请求写出后的不确定结果按 UNKNOWN 进入恢复，不自动重放。
+MCP 与 HTTP 外部工具共用不可变版本、受控 Schema、一次性许可、Tool Router 与有界结果回执。Transport 仅负责协议调用，不能绕过 Router 或自行重试。工具定义由固定 Run 快照提供；凭据读取的角色、执行栅栏与错误分类以[外部工具快照读取](agent-definition.md#外部工具快照读取)为准。
+
+### 最终发包许可
+
+一次性许可绑定精确 `toolVersionId`。消费事务复核该版本确实被当前 Run 快照引用且未撤销，通过与撤销操作冲突的锁建立提交顺序。撤销先于消费提交时必须拒绝消费且不发包；已经发出的请求不能撤回。
+
+DNS 预检必须在最终消费之前完成。出站地址只接受 HTTPS、拒绝 URL 凭据，并逐个校验 DNS 解析结果；Transport 连接到已校验的地址且禁止重定向，不能在消费后再次异步等待 DNS。`EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES` 默认关闭，只有部署显式启用才放行私有地址，完整地址限制见[配置参考](../reference/configuration.md#外部工具出站地址)。
+
+PTC 内部外部工具调用复用已验证、已持久化且绑定同一工具的 `tool.started` 前驱，不重复登记同一 `callId`。复用前驱不等于复用许可：每个真实子调用仍独立签发并一次性消费自己的许可，不能重复消费或绕过版本核验。
+
+### UNKNOWN 与恢复
+
+根或子 Session 一旦发现外部副作用结果未知，立即通知根 Worker，通过既有 runtime mutation 将根 Attempt 持久化为 `recovery_required`，原因为 `EXTERNAL_TOOL_RESULT_UNKNOWN`，并停止父子 Session 的后续副作用。不等待父 Agent 正常收口或下一 turn；Supervisor 不把该结果降级为普通 `SUBAGENT_FAILED`，也不允许父 Agent 因此继续执行或让 Run 成功。
+
+撤销只能阻止新调用，不能覆盖既有 UNKNOWN 待对账事实，即使在同一次调用后的安全点立即观察到撤销也不能改写为撤销终态。不确定调用不能自动重放；核对与恢复仍沿既有持久化恢复协议执行。
+
+### 模型可见结果
+
+外部工具成功响应只由 Tool Router 投影，Pi 工厂不处理正文。快照声明凭据引用或传输携带可重用凭据时，模型只能收到固定提示。Router 检查凭据及本次认证材料的原文、反转、URL 编码、Base64/Base64URL、十六进制和 JSON 转义表示，包括 JSON 的字符串键和值。命中时记录成功回执，模型收到 `details.withheld: EXTERNAL_TOOL_CREDENTIAL_ECHO` 和“外部工具调用已成功，但响应疑似包含凭据，正文已扣留，请勿重试。”。检测无法穷尽任意变换，因此即使未命中，也不公开这类端点的正文。
+
+无可重用凭据的端点可返回有界业务正文。Router 先对本次签名、时间戳等认证材料做字面脱敏；剩余投影若仍命中已知回显表示，同样整体扣留。合法空响应返回固定成功提示；响应超限或无法解析时按 UNKNOWN 待对账，不能以扣留正文代替恢复。

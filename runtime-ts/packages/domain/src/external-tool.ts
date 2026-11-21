@@ -10,6 +10,7 @@ export interface ExternalToolVersion {
   readonly endpoint: string;
   readonly modelToolName: string;
   readonly remoteToolName?: string | null;
+  readonly httpMethod?: "GET" | "POST";
   readonly description: string;
   readonly inputSchema: ExternalToolJsonSchema;
   readonly inputSchemaDigest: string;
@@ -205,6 +206,12 @@ export function validateExternalToolVersion(input: ExternalToolVersion): Externa
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.credentialRef))
   )
     throw new TypeError("EXTERNAL_TOOL_CREDENTIAL_REF_INVALID");
+  if (
+    input.source === "http"
+      ? input.httpMethod !== "GET" && input.httpMethod !== "POST"
+      : input.httpMethod !== undefined
+  )
+    throw new TypeError("EXTERNAL_TOOL_HTTP_METHOD_INVALID");
   if (input.source === "mcp") {
     if (
       typeof input.remoteToolName !== "string" ||

@@ -27,6 +27,7 @@ import type {
   ExecutionPersistencePort,
   ExecutionScope,
   ExternalEffectCall,
+  ExternalToolSnapshotError,
   ExternalEffectPermit,
   OrphanSandboxCleanupPort,
   RecoveryMetricsPort,
@@ -116,6 +117,14 @@ export interface RunWorkerOptions {
 }
 
 type AgentTurnResult = Awaited<ReturnType<WorkerAgentSessionPort["runPrompt"]>>;
+type WorkerMutationInput = Omit<
+  RuntimeMutation,
+  | "schemaVersion"
+  | "commandDigest"
+  | "fence"
+  | "expectedAttemptVersion"
+  | "expectedProjectionVersion"
+>;
 
 /** 单次 execute 的阶段间共享状态；只活在本次 Attempt 内，不是恢复事实源。 */
 interface ActiveRun {
@@ -454,7 +463,13 @@ export class RunWorker {
     shutdown?.addEventListener("abort", onShutdown, { once: true });
     if (shutdown?.aborted) onShutdown();
     const timeout = this.dependencies.clock.schedule(this.#runTimeoutMs, () => {
-      if (context.stopped === "shutdown" || context.stopped === "agent_revision_revoked") return;
+      if (
+        context.stopped === "shutdown" ||
+        context.stopped === "agent_revision_revoked" ||
+        context.stopped === "external_tool_revoked" ||
+        context.stopped === "external_tool_snapshot_invalid"
+      )
+        return;
       context.stopped = "timeout";
       executionAbort.abort("run_timeout");
       void requestAbort();
@@ -499,8 +514,7 @@ export class RunWorker {
     const { content } = snapshot.agent;
     if (
       content.sandboxTemplateId !== undefined ||
-      (content.tools.mode === "configured" &&
-        (content.tools.externalTools.length > 0 || content.tools.clientTools.length > 0))
+      (content.tools.mode === "configured" && content.tools.clientTools.length > 0)
     ) {
       return await this.finalizeWithoutRevision(
         context,
@@ -625,6 +639,47 @@ export class RunWorker {
     return await this.#finishSucceeded(run, settled.workspaceChange);
   }
 
+  #stopForSnapshotFailure(run: ActiveRun, code: ExternalToolSnapshotError["code"]): void {
+    // Session 初始化和 turn 检查都不持有 durable lane；首个停止原因不能被并发的子 Session 改写。
+    run.context.stopped ??=
+      code === "EXTERNAL_TOOL_REVOKED"
+        ? "external_tool_revoked"
+        : code === "EXTERNAL_TOOL_SNAPSHOT_INVALID"
+          ? "external_tool_snapshot_invalid"
+          : "unavailable";
+    run.executionAbort.abort(run.context.stopped);
+    void run.requestAbort().catch(() => undefined);
+  }
+
+  async #requireExternalToolReconciliation(run: ActiveRun): Promise<void> {
+    const { context } = run;
+    if (context.externalToolRecovery === undefined) {
+      // UNKNOWN 先同步关闸，再在 durable lane 线性化；不能等待可能正等待 Session abort 的事件队列。
+      context.stopped = "external_tool_result_unknown";
+      closeEventAcceptance(context);
+      context.externalToolRecovery = this.applyMutation(context, () => ({
+        idempotencyKey: `${context.attemptId}/recovery/EXTERNAL_TOOL_RESULT_UNKNOWN`,
+        nextAttemptStatus: "recovery_required",
+        events: terminalFailureEvents(
+          context,
+          "recovery_required",
+          context.actualCommittedStage,
+          "EXTERNAL_TOOL_RESULT_UNKNOWN",
+          false,
+        ),
+        outbox: [
+          ...recoveryCleanupOutbox(context, run.sandboxes?.current),
+          alertOutbox(context, "EXTERNAL_TOOL_RESULT_UNKNOWN"),
+        ],
+        releaseFences: true,
+      }));
+      run.executionAbort.abort("external_tool_result_unknown");
+      void run.requestAbort().catch(() => undefined);
+    }
+    if (!isApplied(await context.externalToolRecovery))
+      throw new Error("EXTERNAL_TOOL_RECOVERY_UNAVAILABLE");
+  }
+
   #createAgentSupervisor(
     run: ActiveRun,
     ensureSandboxReady: EnsureSandboxReady,
@@ -641,6 +696,11 @@ export class RunWorker {
       rootAgentThreadId: rootAgentThreadId(context.attemptId),
       attemptId: context.attemptId,
       fence: context.fence,
+      allowedExternalToolVersionIds:
+        agentSnapshot.content.tools.mode === "configured"
+          ? agentSnapshot.content.tools.externalTools.map((tool) => tool.versionId)
+          : [],
+      onExternalToolResultUnknown: () => this.#requireExternalToolReconciliation(run),
       createSession: async (child) =>
         await this.dependencies.sessions.create({
           scope,
@@ -648,6 +708,7 @@ export class RunWorker {
           fence: context.fence,
           agent: child.identity,
           enabledToolNames: child.tools,
+          enabledExternalToolVersionIds: child.externalToolVersionIds,
           ensureSandboxReady,
           rolloutProjection: Object.freeze({
             schemaVersion: 2 as const,
@@ -658,6 +719,8 @@ export class RunWorker {
           ...(snapshot.skills === undefined ? {} : { skillSnapshot: snapshot.skills }),
           ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
           ...(child.history === undefined ? {} : { threadActiveHistory: child.history }),
+          onExternalToolSnapshotFailure: (code) => this.#stopForSnapshotFailure(run, code),
+          onExternalToolResultUnknown: () => this.#requireExternalToolReconciliation(run),
           authorizeToolEffect: (call) =>
             this.authorizeToolEffectAfterStarted(context, cancellation, call),
           writeTodo: async () => {
@@ -704,6 +767,8 @@ export class RunWorker {
       ...(this.options.threadContextWriteEnabled !== true
         ? {}
         : { onTurnSafePoint: (event) => run.events.commitTurnSafePoint(event) }),
+      onExternalToolSnapshotFailure: (code) => this.#stopForSnapshotFailure(run, code),
+      onExternalToolResultUnknown: () => this.#requireExternalToolReconciliation(run),
       authorizeToolEffect: (call) =>
         this.authorizeToolEffectAfterStarted(context, cancellation, call),
       writeTodo: (call) => this.writeTodoAfterStarted(context, cancellation, call),
@@ -761,6 +826,8 @@ export class RunWorker {
       context.modelCompleted = false;
       delete context.modelStopReason;
       const turn = await session.runPrompt(preparedInput, modelAuthorization);
+      if (turn.kind === "recovery_required" && turn.code === "EXTERNAL_TOOL_RESULT_UNKNOWN")
+        await this.#requireExternalToolReconciliation(run);
       await run.events.drained;
       if (context.abortPromise) await context.abortPromise;
       // SubAgent 在 drain 前仍可能触发 Sandbox 懒准备，因此每次收口都实时读取当前 Sandbox。
@@ -1086,7 +1153,7 @@ export class RunWorker {
   }
 
   /**
-   * 任意阶段抛出后的统一收敛。优先级：Sandbox 准备已得出的终态 > 本地停止原因 >
+   * 任意阶段抛出后的统一收敛。优先级：外部工具待对账事实 > Sandbox 准备已得出的终态 > 本地停止原因 >
    * Agent 失败码 > 固定模型不可用 > INTERNAL；有 Sandbox 时必须走带清理的恢复路径。
    */
   async #failAttempt(run: ActiveRun, pinnedModelUnavailable: boolean): Promise<RunWorkerResult> {
@@ -1095,6 +1162,8 @@ export class RunWorker {
     await run.events.drained.catch(() => undefined);
     await run.requestAbort();
     const sandbox = run.sandboxes?.current;
+    if (context.externalToolRecovery !== undefined)
+      return this.finishStopped(context, "external_tool_result_unknown", sandbox);
     const preparationResult = run.sandboxes?.failureResult;
     if (preparationResult !== undefined) return preparationResult;
     if (context.stopped) return await this.finishStopped(context, context.stopped, sandbox);
@@ -1409,7 +1478,10 @@ export class RunWorker {
       ) {
         if (context.stopped === undefined) {
           context.stopped =
-            consumed.outcome === "cancelled" || consumed.outcome === "agent_revision_revoked"
+            consumed.outcome === "cancelled" ||
+            consumed.outcome === "agent_revision_revoked" ||
+            consumed.outcome === "external_tool_revoked" ||
+            consumed.outcome === "external_tool_snapshot_invalid"
               ? consumed.outcome
               : consumed.outcome === "unavailable"
                 ? "unavailable"
@@ -1473,18 +1545,15 @@ export class RunWorker {
 
   private async applyMutation(
     context: ExecutionContext,
-    input: Omit<
-      RuntimeMutation,
-      | "schemaVersion"
-      | "commandDigest"
-      | "fence"
-      | "expectedAttemptVersion"
-      | "expectedProjectionVersion"
-    >,
+    mutation: WorkerMutationInput | (() => WorkerMutationInput),
   ): Promise<RuntimeMutationResult> {
-    for (const event of input.events) assertProtocolSize(event);
-    for (const outbox of input.outbox) assertProtocolSize(outbox);
+    let recordedEvents: RuntimeMutation["events"] = [];
     const result = await context.durableLane.run<RuntimeMutationResult>(async () => {
+      // 跨 Session 的恢复事实必须在前驱事务提交后才读取事件序号和阶段。
+      const input = typeof mutation === "function" ? mutation() : mutation;
+      for (const event of input.events) assertProtocolSize(event);
+      for (const outbox of input.outbox) assertProtocolSize(outbox);
+      recordedEvents = input.events;
       const unsigned: Omit<RuntimeMutation, "commandDigest"> = {
         schemaVersion: 1,
         ...input,
@@ -1558,9 +1627,9 @@ export class RunWorker {
       }
       return result;
     });
-    if (isApplied(result) && input.events.length > 0) {
+    if (isApplied(result) && recordedEvents.length > 0) {
       await Promise.allSettled(
-        input.events.map((event) =>
+        recordedEvents.map((event) =>
           this.dependencies.runEventDiagnostics?.persist({
             context: {
               tenantId: context.scope.tenantId,
@@ -1944,7 +2013,18 @@ export class RunWorker {
   ): Promise<RunWorkerResult> {
     closeEventAcceptance(context);
     if (context.abortPromise) await context.abortPromise;
-    if (stopped === "cancelled" || stopped === "agent_revision_revoked") {
+    if (context.externalToolRecovery !== undefined) {
+      const persisted = await context.externalToolRecovery;
+      return isApplied(persisted)
+        ? { outcome: "recovery_required", code: "EXTERNAL_TOOL_RESULT_UNKNOWN" }
+        : this.handleMutationFailure(persisted);
+    }
+    if (
+      stopped === "cancelled" ||
+      stopped === "agent_revision_revoked" ||
+      stopped === "external_tool_revoked" ||
+      stopped === "external_tool_snapshot_invalid"
+    ) {
       const retainedThreadSandbox =
         sandbox !== undefined && context.threadSandboxLease !== undefined ? sandbox : undefined;
       const deferredCleanupOutbox =
@@ -1955,7 +2035,13 @@ export class RunWorker {
       return await this.finalizeWithoutRevision(
         context,
         stopped === "cancelled" ? "cancelled" : "failed",
-        stopped === "cancelled" ? "CANCELLED" : "AGENT_REVISION_REVOKED",
+        stopped === "cancelled"
+          ? "CANCELLED"
+          : stopped === "agent_revision_revoked"
+            ? "AGENT_REVISION_REVOKED"
+            : stopped === "external_tool_snapshot_invalid"
+              ? "EXTERNAL_TOOL_SNAPSHOT_INVALID"
+              : "EXTERNAL_TOOL_REVOKED",
         retainedThreadSandbox,
         false,
         deferredCleanupOutbox,

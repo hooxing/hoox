@@ -1,5 +1,7 @@
 import type { ExternalToolVersion, Sha256Digest } from "@hoox/domain";
 
+import type { ExecutionFence } from "./ports.js";
+
 export interface ValidatedExternalTarget {
   readonly url: URL;
   readonly hostname: string;
@@ -69,10 +71,22 @@ export interface ExternalToolRuntimeSnapshot {
   readonly credential?: string;
 }
 
-/** 快照接入前只允许假实现；生产实现须按 RunAgentSnapshot 限定版本并处理密文。 */
+export class ExternalToolSnapshotError extends Error {
+  readonly code:
+    | "EXTERNAL_TOOL_REVOKED"
+    | "EXTERNAL_TOOL_SNAPSHOT_INVALID"
+    | "EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE";
+
+  constructor(code: ExternalToolSnapshotError["code"]) {
+    super(code);
+    this.code = code;
+  }
+}
+
+/** 仅为持有当前执行栅栏的 Worker 返回快照内版本；读取故障不构成撤销证据。 */
 export interface ExternalToolSnapshotReader {
   read(input: {
-    readonly runId: string;
+    readonly fence: ExecutionFence;
     readonly toolVersionIds: readonly string[];
   }): Promise<readonly ExternalToolRuntimeSnapshot[]>;
 }

@@ -52,6 +52,42 @@ describe("production 部署配置契约", () => {
     expect(expectedProductionEnvironmentKeys).toContain("MODEL_CREDENTIAL_ENCRYPTION_KEY");
   });
 
+  it("生产样例必须提供占位身份根，拒绝非占位密钥且不回显", () => {
+    const root = "EXTERNAL_TOOL_IDENTITY_ROOT_KEY";
+    const withoutRoot = example
+      .split("\n")
+      .filter((line) => !line.startsWith(`${root}=`))
+      .join("\n");
+    expect(validateProductionEnvironmentExample(withoutRoot)).toEqual([`缺少环境变量：${root}`]);
+    for (const placeholder of [
+      "replace-with-production-external-tool-identity-root-key-at-least-32-bytes",
+      "<external-tool-identity-root-key-placeholder>",
+    ]) {
+      expect(
+        validateProductionEnvironmentExample(`${withoutRoot}\n${root}=${placeholder}`),
+      ).toEqual([]);
+    }
+    const secret = "test-only-identity-root-canary-at-least-32-bytes";
+    const issues = validateProductionEnvironmentExample(`${withoutRoot}\n${root}=${secret}`);
+    expect(issues).toEqual([`示例配置疑似包含真实凭据：${root}`]);
+    expect(JSON.stringify(issues).includes(secret)).toBe(false);
+  });
+
+  it("生产外部工具私网开关为可选布尔值", () => {
+    const flag = "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES";
+    const withoutFlag = example
+      .split("\n")
+      .filter((line) => !line.startsWith(`${flag}=`))
+      .join("\n");
+    expect(validateProductionEnvironmentExample(withoutFlag)).toEqual([]);
+    for (const value of ["true", "false"]) {
+      expect(validateProductionEnvironmentExample(`${withoutFlag}\n${flag}=${value}`)).toEqual([]);
+    }
+    expect(validateProductionEnvironmentExample(`${withoutFlag}\n${flag}=yes`)).toEqual([
+      `${flag} 必须为 true 或 false`,
+    ]);
+  });
+
   it("AGS 示例凭据必须使用占位值且诊断不回显密钥", () => {
     const secret = "ags-private-canary";
     const issues = validateProductionEnvironmentExample(

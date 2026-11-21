@@ -148,6 +148,34 @@ function completedSession(
 const authorization = {} as ConsumedExternalEffectAuthorization;
 
 describe("AgentSupervisor", () => {
+  it("子 Agent UNKNOWN 上提到根恢复边界，不降级为 SUBAGENT_FAILED", async () => {
+    const control = persistence();
+    const settled = vi.spyOn(control, "settleTurn");
+    const mailbox = vi.spyOn(control, "appendMailbox");
+    const recovery = vi.fn(async () => undefined);
+    const supervisor = new AgentSupervisor({
+      persistence: control,
+      rootAgentThreadId: agentThreadId("root_agent_unknown"),
+      attemptId: "attempt_agent_unknown",
+      fence,
+      createSession: async () => ({
+        ...completedSession("不应成功"),
+        runPrompt: async () => ({
+          kind: "recovery_required",
+          code: "EXTERNAL_TOOL_RESULT_UNKNOWN",
+        }),
+      }),
+      authorizeModelStart: async () => authorization,
+      onToolEvent: async () => undefined,
+      onExternalToolResultUnknown: recovery,
+    });
+    await supervisor.initialize();
+    await supervisor.spawn({ callId: "spawn-unknown", task: "写入", tools: [], forkTurns: "none" });
+    await supervisor.drain();
+    expect(recovery).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    expect(mailbox).not.toHaveBeenCalled();
+  });
   it("按父 Agent 选择的工具和最近 N turn 创建独立 Session，并通过 mailbox 交付", async () => {
     const created: Parameters<
       ConstructorParameters<typeof AgentSupervisor>[0]["createSession"]
@@ -190,6 +218,49 @@ describe("AgentSupervisor", () => {
     expect(created).toHaveLength(1);
     expect(created[0]?.history?.messages.map((message) => message.sequence)).toEqual([3, 4]);
     expect((await supervisor.list())[0]?.status).toBe("idle");
+  });
+
+  it("子 Agent 外部工具默认不下放，显式授权固定精确版本且拒绝快照外版本", async () => {
+    const created: Parameters<
+      ConstructorParameters<typeof AgentSupervisor>[0]["createSession"]
+    >[0][] = [];
+    const supervisor = new AgentSupervisor({
+      persistence: persistence(),
+      rootAgentThreadId: agentThreadId("root_external_tool_delegation"),
+      attemptId: "attempt_external_tool_delegation",
+      fence,
+      allowedExternalToolVersionIds: ["tool-version-a", "tool-version-b"],
+      createSession: async (input) => {
+        created.push(input);
+        return completedSession("完成");
+      },
+      authorizeModelStart: async () => authorization,
+      onToolEvent: async () => undefined,
+    });
+    await supervisor.initialize();
+    supervisor.setParentHistory(parentHistory());
+
+    await supervisor.spawn({ callId: "default", task: "默认", tools: [], forkTurns: "none" });
+    await supervisor.spawn({
+      callId: "explicit",
+      task: "显式",
+      tools: [],
+      externalToolVersionIds: ["tool-version-b"],
+      forkTurns: "none",
+    });
+    expect(created.map((session) => session.externalToolVersionIds)).toEqual([
+      [],
+      ["tool-version-b"],
+    ]);
+    await expect(
+      supervisor.spawn({
+        callId: "unauthorized",
+        task: "越权",
+        tools: [],
+        externalToolVersionIds: ["tool-version-c"],
+        forkTurns: "none",
+      }),
+    ).rejects.toThrow("AGENT_TOOLS_INVALID");
   });
 
   it("follow-up 复用 Agent 历史，而 send_message 不会为闲置 Agent 自动启动 turn", async () => {

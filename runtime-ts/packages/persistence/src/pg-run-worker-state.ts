@@ -1402,6 +1402,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     if (
       !boundedIdentifier(input.call.callId) ||
       !boundedIdentifier(input.call.toolName) ||
+      (input.effect === "tool_execution" && /^(?:http|mcp)__/u.test(input.call.toolName)) !==
+        (input.call.toolVersionId !== undefined) ||
+      (input.call.toolVersionId !== undefined &&
+        !boundedIdentifier(input.call.toolVersionId, 128)) ||
       !/^[0-9a-f]{64}$/.test(input.call.argsDigest)
     ) {
       return { outcome: "conflict" };
@@ -1527,8 +1531,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
              INSERT INTO external_effect_permits(
                tenant_id,permit_id,attempt_id,effect,call_id,tool_name,args_digest,
                attempt_version,run_claim_token,run_claim_epoch,workspace_root_run_id,
-               workspace_lease_epoch,issued_at,expires_at
-             ) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+               workspace_lease_epoch,tool_version_id,issued_at,expires_at
+             ) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$14,
                       permit_clock.issued_at,
                       permit_clock.issued_at + ($13::bigint * interval '1 millisecond')
                  FROM permit_clock
@@ -1547,6 +1551,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               input.fence.workspaceLease.rootRunId,
               input.fence.workspaceLease.epoch,
               permitDurationMs,
+              input.call.toolVersionId ?? null,
             ],
           );
           const permitRow = inserted.rows[0];
@@ -1565,6 +1570,9 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               callId: input.call.callId,
               toolName: input.call.toolName,
               argsDigest: input.call.argsDigest,
+              ...(input.call.toolVersionId === undefined
+                ? {}
+                : { toolVersionId: input.call.toolVersionId }),
               issuedAt: dbTimestamp(permitRow.issued_at),
               expiresAt: dbTimestamp(permitRow.expires_at),
             },
@@ -1643,13 +1651,45 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     readonly expectedAttemptVersion: number;
     readonly permit: ExternalEffectPermit;
   }): ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]> {
+    const externalTool =
+      input.permit.effect === "tool_execution" && /^(?:http|mcp)__/u.test(input.permit.toolName);
+    if (
+      externalTool !== (input.permit.toolVersionId !== undefined) ||
+      (input.permit.toolVersionId !== undefined &&
+        !boundedIdentifier(input.permit.toolVersionId, 128))
+    ) {
+      return { outcome: "external_tool_snapshot_invalid" };
+    }
     let commitOutcomeUnknown = false;
     for (let retry = 0; ; retry += 1) {
       try {
-        const result = await withRetriedSerializableTenantTransaction(
+        const transact =
+          input.permit.toolVersionId === undefined
+            ? withRetriedSerializableTenantTransaction
+            : withTenantTransaction;
+        const result = await transact(
           this.pool,
           { tenantId: input.fence.scope.tenantId },
           async (client) => {
+            if (input.permit.toolVersionId !== undefined) {
+              // 撤销插入的外键检查必须拿同一版本的 KEY SHARE。先取得冲突行锁，再用
+              // READ COMMITTED 的新语句快照观察撤销；不能复用等待前的 SERIALIZABLE 快照。
+              const gate = `SELECT revoked FROM runtime_external_tool_permit_gate
+                  WHERE tenant_id=$1 AND run_id=$2 AND tool_version_id=$3 AND model_tool_name=$4`;
+              const binding = [
+                input.fence.scope.tenantId,
+                input.fence.scope.runId,
+                input.permit.toolVersionId,
+                input.permit.toolName,
+              ];
+              const locked = await client.query(gate, binding);
+              if (locked.rows.length !== 1)
+                return { outcome: "external_tool_snapshot_invalid" } as const;
+              const status = await client.query<{ revoked: boolean }>(gate, binding);
+              if (status.rows.length !== 1)
+                return { outcome: "external_tool_snapshot_invalid" } as const;
+              if (status.rows[0]?.revoked) return { outcome: "external_tool_revoked" } as const;
+            }
             const row = await this.lockFenceState(client, input.fence.scope);
             const fenceOutcome = await this.validateLockedFence(client, row, input.fence);
             if (fenceOutcome !== "active") return { outcome: fenceOutcome } as const;
@@ -3375,6 +3415,7 @@ function storedPermitMatches(
     permitRow.effect === permit.effect &&
     permitRow.call_id === permit.callId &&
     permitRow.tool_name === permit.toolName &&
+    (permitRow.tool_version_id ?? undefined) === permit.toolVersionId &&
     permitRow.args_digest === permit.argsDigest &&
     Number(permitRow.attempt_version) === input.expectedAttemptVersion &&
     permit.attemptVersion === input.expectedAttemptVersion &&

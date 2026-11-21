@@ -64,10 +64,20 @@ export type Thread = {
   readonly id: string;
   readonly tenantId?: string;
   readonly createdByUserId?: string;
+  readonly agentDefinitionId?: string;
   readonly title: string;
   readonly status: "active" | "archived";
   readonly createdAt: string;
   readonly updatedAt: string;
+};
+
+export type AvailableAgent = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description: string;
+  readonly avatarRef?: string;
+  readonly welcomeMessage?: string;
+  readonly suggestedQuestions: readonly string[];
 };
 
 export type ScheduledTask = {
@@ -855,8 +865,23 @@ export class RuntimeApi {
       throw error;
     }
   }
-  createThread(title: string): Promise<Thread> {
-    return this.request("/v1/threads", { method: "POST", body: JSON.stringify({ title }) });
+  listAvailableAgents(
+    tenantId: string | undefined = this.activeTenantId,
+  ): Promise<readonly AvailableAgent[]> {
+    return this.request<Readonly<{ items: readonly AvailableAgent[] }>>(
+      "/v1/agents",
+      {},
+      tenantId ?? null,
+    ).then((result) => result.items);
+  }
+  createThread(title: string, agentDefinitionId?: string): Promise<Thread> {
+    return this.request("/v1/threads", {
+      method: "POST",
+      body: JSON.stringify({
+        title,
+        ...(agentDefinitionId === undefined ? {} : { agentDefinitionId }),
+      }),
+    });
   }
   forkThread(threadId: string, targetTeamId?: string): Promise<Thread> {
     return this.request(`/v1/threads/${encodeURIComponent(threadId)}/forks`, {

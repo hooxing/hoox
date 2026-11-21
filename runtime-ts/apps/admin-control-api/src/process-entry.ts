@@ -103,6 +103,7 @@ const environmentSchema = Object.freeze({
     secret: true,
     maxLength: 512,
   }),
+  EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES: booleanEnvironmentField({ requiredIn: optional }),
   MODEL_API_KEY: stringEnvironmentField({ requiredIn: optional, secret: true, maxLength: 8_192 }),
   MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
     requiredIn: production,
@@ -125,6 +126,7 @@ export const adminControlApiProcessEnvironmentKeys = Object.freeze(Object.keys(e
 
 export interface AdminControlApiProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
+  readonly externalToolsAllowPrivateAddresses: boolean;
   readonly databaseUrl: string;
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly skillPublisherDatabaseUrl: string;
@@ -277,6 +279,8 @@ export function parseAdminControlApiProcessEnvironment(
   }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
+    externalToolsAllowPrivateAddresses:
+      parsed.values.EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES ?? false,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
     skillPublisherDatabaseUrl:

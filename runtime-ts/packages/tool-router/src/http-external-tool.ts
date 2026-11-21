@@ -9,7 +9,7 @@ import {
   type ExternalToolTransportResponse,
   type ValidatedExternalTarget,
 } from "@hoox/run-contracts";
-import { normalizeExternalToolSchema } from "@hoox/domain";
+import { normalizeExternalToolName, normalizeExternalToolSchema } from "@hoox/domain";
 
 export interface HttpToolDefinition {
   readonly endpoint: string;
@@ -495,7 +495,7 @@ export function importOpenApiOperation(input: unknown): HttpToolDefinition {
     if (op.requestBody !== undefined) return fail();
     const parameters = op.parameters;
     if (parameters !== undefined && !Array.isArray(parameters)) return fail();
-    const properties: Record<string, unknown> = {};
+    const properties: Record<string, unknown> = Object.create(null);
     const required: string[] = [];
     for (const parameter of (parameters ?? []) as unknown[]) {
       const item = object(parameter, PARAMETER_KEYS);
@@ -528,5 +528,108 @@ export function importOpenApiOperation(input: unknown): HttpToolDefinition {
     sideEffect: method === "GET" ? "read_only" : "write",
     idempotent: method === "GET",
     credentialRef: null,
+  });
+}
+
+export type HttpToolDeclarationInput =
+  | {
+      readonly mode: "endpoint";
+      readonly toolName: string;
+      readonly description: string;
+      readonly endpoint: string;
+      readonly method: "GET" | "POST";
+      readonly inputSchema: unknown;
+    }
+  | {
+      readonly mode: "openapi";
+      readonly toolName: string;
+      readonly description: string;
+      readonly document: unknown;
+    };
+
+export interface HttpToolDeclarationPreview extends HttpToolDefinition {
+  readonly modelToolName: string;
+  readonly description: string;
+  readonly inputSchemaDigest: string;
+}
+
+/**
+ * HTTP 工具预览：单端点声明先转成单个 OpenAPI operation，再与 OpenAPI 片段共用同一导入器，
+ * 保证两种入口的地址、方法与 Schema 约束完全一致。预览不产生可发布的版本。
+ */
+export function previewHttpToolDeclaration(
+  input: HttpToolDeclarationInput,
+): HttpToolDeclarationPreview {
+  const fail = (): never => {
+    throw new TypeError("HTTP_TOOL_DECLARATION_UNSUPPORTED");
+  };
+  if (typeof input.description !== "string" || Buffer.byteLength(input.description) > 2048)
+    return fail();
+  let document: unknown;
+  if (input.mode === "openapi") document = input.document;
+  else {
+    let url: URL;
+    try {
+      url = new URL(input.endpoint);
+    } catch {
+      return fail();
+    }
+    if (
+      !SERVER_PATTERN.test(input.endpoint) ||
+      /\/\.{1,2}(?=[/?]|$)/u.test(input.endpoint.slice("https://".length))
+    )
+      return fail();
+    const server = `${url.origin}${url.search ? `/${url.search}` : ""}`;
+    const schema = input.inputSchema as Record<string, unknown> | null;
+    if (!schema || typeof schema !== "object" || Array.isArray(schema)) return fail();
+    let operation: Record<string, unknown>;
+    if (input.method === "POST")
+      operation = { requestBody: { content: { "application/json": { schema } } } };
+    else {
+      const properties = schema.properties === undefined ? {} : schema.properties;
+      const required = schema.required === undefined ? [] : schema.required;
+      if (
+        schema.type !== "object" ||
+        schema.additionalProperties !== false ||
+        properties === null ||
+        typeof properties !== "object" ||
+        Array.isArray(properties) ||
+        !Array.isArray(required) ||
+        required.some((name) => typeof name !== "string" || !Object.hasOwn(properties, name)) ||
+        new Set(required).size !== required.length ||
+        Object.keys(schema).some(
+          (key) => !["type", "properties", "required", "additionalProperties"].includes(key),
+        )
+      )
+        return fail();
+      operation = {
+        parameters: Object.entries(properties as Record<string, unknown>).map(([name, item]) => ({
+          name,
+          in: "query",
+          required: required.includes(name),
+          schema: item,
+        })),
+      };
+    }
+    document = { openapi: "3.1.0", server, path: url.pathname, method: input.method, operation };
+  }
+  const definition = importOpenApiOperation(document);
+  // 预览 DTO 会展示完整端点，不能将查询中的认证参数作为可展示配置。
+  const endpoint = new URL(definition.endpoint);
+  if (
+    endpoint.href.length > 2048 ||
+    [...endpoint.searchParams.keys()].some((name) =>
+      /(?:key|token|secret|passw(?:or)?d|signature|credential|authorization|^sig$|^auth$)/iu.test(
+        name,
+      ),
+    )
+  )
+    return fail();
+  const normalized = normalizeExternalToolSchema(definition.inputSchema);
+  return Object.freeze({
+    ...definition,
+    modelToolName: normalizeExternalToolName("http", "http", input.toolName),
+    description: input.description,
+    inputSchemaDigest: normalized.digest,
   });
 }

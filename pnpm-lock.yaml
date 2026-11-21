@@ -109,6 +109,9 @@ importers:
       '@hoox/skill-admin-api':
         specifier: workspace:*
         version: link:../skill-admin-api
+      '@hoox/tool-router':
+        specifier: workspace:*
+        version: link:../../packages/tool-router
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52

@@ -1280,6 +1280,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
   readonly agentControls: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["agentControl"]> =
     [];
   readonly agentSnapshots: RunAgentSnapshot[] = [];
+  readonly skillSnapshots: Array<RunSkillSnapshot | undefined> = [];
   readonly agentIdentities: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["agent"]> = [];
   readonly initialInputTexts: Array<
     Parameters<AgentSessionFactoryPort["create"]>[0]["initialInputText"]
@@ -1308,6 +1309,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     this.agentControls.push(input.agentControl);
     this.agentIdentities.push(input.agent);
     this.agentSnapshots.push(input.agentSnapshot);
+    this.skillSnapshots.push(input.skillSnapshot);
     this.initialInputTexts.push(input.initialInputText);
     this.personalizationSnapshots.push(input.personalizationSnapshot);
     let safePointChain = Promise.resolve();

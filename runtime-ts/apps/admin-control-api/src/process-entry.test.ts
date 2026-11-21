@@ -165,3 +165,23 @@ describe("后台控制 API 进程入口", () => {
     ).toThrow("FORBIDDEN_IN_PRODUCTION:DEV_ADMIN_CONTROL_TOKEN");
   });
 });
+
+it("开发和生产管理探测沿用现有私网开关，默认关闭", () => {
+  for (const env of [productionEnvironment(), developmentEnvironment()]) {
+    expect(parseAdminControlApiProcessEnvironment(env).externalToolsAllowPrivateAddresses).toBe(
+      false,
+    );
+    expect(
+      parseAdminControlApiProcessEnvironment({
+        ...env,
+        EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES: "true",
+      }).externalToolsAllowPrivateAddresses,
+    ).toBe(true);
+    expect(() =>
+      parseAdminControlApiProcessEnvironment({
+        ...env,
+        EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES: "yes",
+      }),
+    ).toThrow();
+  }
+});

@@ -1,3 +1,4 @@
+import { PinnedRunModelUnavailableError } from "@hoox/admin-control";
 import {
   applyTodoWrite,
   measureExecutionPhase,
@@ -315,8 +316,8 @@ export class RunWorker {
 
     try {
       return await this.#runAttempt(run);
-    } catch {
-      return await this.#failAttempt(run);
+    } catch (error) {
+      return await this.#failAttempt(run, error instanceof PinnedRunModelUnavailableError);
     } finally {
       timings.startup?.publish();
       await stopSignals.dispose();
@@ -497,7 +498,6 @@ export class RunWorker {
       return await this.finalizeWithoutRevision(context, "failed", snapshot.agent);
     const { content } = snapshot.agent;
     if (
-      content.model.mode === "pinned" ||
       content.sandboxTemplateId !== undefined ||
       (content.tools.mode === "configured" &&
         (content.tools.externalTools.length > 0 || content.tools.clientTools.length > 0))
@@ -1087,9 +1087,9 @@ export class RunWorker {
 
   /**
    * 任意阶段抛出后的统一收敛。优先级：Sandbox 准备已得出的终态 > 本地停止原因 >
-   * Agent 失败码 > INTERNAL；有 Sandbox 时必须走带清理的恢复路径。
+   * Agent 失败码 > 固定模型不可用 > INTERNAL；有 Sandbox 时必须走带清理的恢复路径。
    */
-  async #failAttempt(run: ActiveRun): Promise<RunWorkerResult> {
+  async #failAttempt(run: ActiveRun, pinnedModelUnavailable: boolean): Promise<RunWorkerResult> {
     const { context, cancellation } = run;
     closeEventAcceptance(context);
     await run.events.drained.catch(() => undefined);
@@ -1105,6 +1105,11 @@ export class RunWorker {
       return sandbox === undefined
         ? await this.requireRecovery(context, context.agentFailure, [])
         : await this.recoverWithCleanup(context, sandbox, context.agentFailure, cancellation);
+    }
+    if (pinnedModelUnavailable) {
+      return sandbox === undefined
+        ? await this.finalizeWithoutRevision(context, "failed", "PROVIDER")
+        : await this.recoverWithCleanup(context, sandbox, "PROVIDER", cancellation);
     }
     return sandbox
       ? await this.recoverWithCleanup(context, sandbox, "INTERNAL", cancellation)

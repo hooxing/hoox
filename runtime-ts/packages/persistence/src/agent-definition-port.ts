@@ -57,6 +57,13 @@ export interface AgentDefinitionRepositoryPort {
   publish(input: PublishAgentRevisionInput): Promise<StoredAgentDefinition>;
   deactivate(input: AgentDefinitionCommandInput): Promise<StoredAgentDefinition>;
   revoke(input: RevokeAgentRevisionInput): Promise<StoredAgentDefinition>;
+  readVisibleCurrent(
+    tenantId: string,
+    definitionId: string,
+  ): Promise<
+    | { readonly definition: StoredAgentDefinition; readonly revision?: StoredAgentRevision }
+    | undefined
+  >;
   listAvailable(tenantId: string): Promise<
     readonly {
       readonly definition: StoredAgentDefinition;
@@ -68,4 +75,54 @@ export interface AgentDefinitionRepositoryPort {
     definitionId: string,
   ): Promise<StoredAgentRevision | undefined>;
   readRevisionById(tenantId: string, revisionId: string): Promise<StoredAgentRevision | undefined>;
+}
+
+export interface SetAgentAvailabilityInput extends AgentDefinitionCommandInput {
+  readonly availability: AgentAvailability;
+}
+
+export interface StoredAgentRevisionSummary extends Omit<StoredAgentRevision, "content"> {
+  readonly displayName: string;
+}
+
+export interface AgentDefinitionAdminRepositoryPort
+  extends Pick<
+    AgentDefinitionRepositoryPort,
+    "createDraft" | "createDraftRevision" | "publish" | "deactivate" | "revoke"
+  > {
+  listDefinitions(actorUserId: string): Promise<{
+    readonly canManage: boolean;
+    readonly builtinToolLimit: readonly string[];
+    readonly pinnedModelOptions: readonly Extract<
+      AgentRevisionContent["model"],
+      { mode: "pinned" }
+    >[];
+    readonly externalToolOptions: readonly {
+      readonly toolVersionId: string;
+      readonly source: "mcp" | "http";
+      readonly modelToolName: string;
+      readonly description: string;
+      readonly batchName: string;
+    }[];
+    readonly items: readonly {
+      readonly definition: StoredAgentDefinition;
+      readonly revision?: StoredAgentRevisionSummary;
+    }[];
+  }>;
+  listRevisions(
+    actorUserId: string,
+    definitionId: string,
+  ): Promise<
+    | {
+        readonly definition: StoredAgentDefinition;
+        readonly items: readonly StoredAgentRevisionSummary[];
+      }
+    | undefined
+  >;
+  readAdminRevision(
+    actorUserId: string,
+    definitionId: string,
+    revisionId: string,
+  ): Promise<StoredAgentRevision | undefined>;
+  setAvailability(input: SetAgentAvailabilityInput): Promise<StoredAgentDefinition>;
 }

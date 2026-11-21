@@ -2,6 +2,7 @@ import { createAdminSessionAuthResolver } from "./session-auth.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   AdminControlService,
+  ExternalToolAdminService,
   type DeploymentSettingDescriptor,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
@@ -12,8 +13,12 @@ import { userId } from "@hoox/domain";
 import { type AuthContextResolver, createProductionJwtAuthResolver } from "@hoox/identity/auth";
 import {
   ModelProviderCredentialCipher,
+  ExternalToolCredentialCipher,
+  ExternalToolDraftCredentialCipher,
+  PgExternalToolAdminRepository,
   PgAdminControlRepository,
   PgAdminRunExplorerRepository,
+  PgAgentDefinitionRepository,
   PgIdentityConfigurationRepository,
   PgSandboxControlRepository,
   PgSkillPublicationAuthorization,
@@ -30,6 +35,7 @@ import {
   startServiceProcess,
 } from "@hoox/process-runtime";
 import { probeConfiguredSandbox } from "@hoox/sandbox";
+import { previewHttpToolDeclaration, probeMcpEndpoint } from "@hoox/tool-router";
 import { SkillPublicationService } from "@hoox/skill";
 import { type AdminControlApiAppOptions, createAdminControlApiApp } from "./app.js";
 import { createIdentityAdminService } from "./identity-configuration.js";
@@ -170,6 +176,23 @@ async function assembleRealService(
             }),
           ),
       },
+      externalTools: new ExternalToolAdminService(
+        new PgExternalToolAdminRepository(
+          controlPool,
+          new ExternalToolCredentialCipher(
+            configuration.providerSecrets.modelCredentialEncryptionKey,
+          ),
+          new ExternalToolDraftCredentialCipher(
+            configuration.providerSecrets.modelCredentialEncryptionKey,
+          ),
+        ),
+        (input) => probeMcpEndpoint(input, configuration.externalToolsAllowPrivateAddresses),
+        (input) => {
+          const { credentialRef: _credentialRef, ...preview } = previewHttpToolDeclaration(input);
+          return { ...preview, publishable: false };
+        },
+      ),
+      agents: new PgAgentDefinitionRepository(controlPool),
       runs: new RunExplorerService(
         new PgAdminRunExplorerRepository(controlPool),
         () => `run_content_${randomUUID().replaceAll("-", "")}`,

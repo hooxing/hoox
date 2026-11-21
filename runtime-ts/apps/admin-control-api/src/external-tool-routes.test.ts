@@ -52,6 +52,9 @@ function fixture() {
     setDraftCredential: vi.fn(async () => ({ ...draft, credentialConfigured: false })),
     loadDraftForProbe: vi.fn(async () => ({ draft })),
     replayPublish: vi.fn(),
+    withPublishClaim: vi.fn<ExternalToolAdminRepositoryPort["withPublishClaim"]>(
+      async (_input, execute) => execute("test-lease-owner"),
+    ),
     recordProbeAudit: vi.fn(),
     publishMcpBatch: vi.fn(async () => batch),
     revokeBatch: vi.fn(async () => ({ ...batch, revoked: true })),
@@ -218,6 +221,7 @@ describe("统一后台外部工具 API", () => {
         ["CONFLICT", 409],
         ["NOT_FOUND", 404],
         ["PROBE_UNAVAILABLE", 503],
+        ["PUBLISH_RESULT_UNKNOWN", 503],
         ["PUBLISH_REJECTED", 400],
       ] as const) {
         repository.overview.mockRejectedValueOnce(new ExternalToolAdminError(code, "受控错误"));
@@ -227,6 +231,29 @@ describe("统一后台外部工具 API", () => {
       const error = await app.inject({ url: base, headers });
       expect(error.statusCode).toBe(500);
       expect(error.body.includes("write-only-test")).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+  it("发布结果未知返回 503 并要求使用原幂等键查询，不重复写入", async () => {
+    const { app, repository } = fixture();
+    const message = "发布结果暂时无法确认；请使用相同幂等键查询或重试";
+    repository.publishMcpBatch.mockRejectedValueOnce(
+      new ExternalToolAdminError("PUBLISH_RESULT_UNKNOWN", message),
+    );
+    try {
+      const response = await app.inject({
+        url: `${base}/mcp-drafts/${draft.draftId}/publish`,
+        method: "POST",
+        headers,
+        payload: { expectedGeneration: 1 },
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({ error: { message } });
+      expect(repository.publishMcpBatch).toHaveBeenCalledTimes(1);
+      expect(repository.publishMcpBatch).toHaveBeenCalledWith(
+        expect.objectContaining({ leaseOwner: "test-lease-owner" }),
+      );
     } finally {
       await app.close();
     }

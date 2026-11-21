@@ -20,7 +20,7 @@ import type {
   ExternalToolDraftCredentialCipher,
 } from "./external-tool-credential.js";
 import type { Pool, PoolClient } from "./postgres.js";
-import { withTransaction } from "./postgres.js";
+import { TransactionCommitUnknownError, withTransaction } from "./postgres.js";
 
 import {
   insertExternalToolVersion,
@@ -165,6 +165,11 @@ async function resolveAdmin(client: PoolClient, actorUserId: string): Promise<vo
 
 function translate(error: unknown, action: string): Error {
   if (error instanceof ExternalToolAdminError) return error;
+  if (error instanceof TransactionCommitUnknownError)
+    return new ExternalToolAdminError(
+      "PUBLISH_RESULT_UNKNOWN",
+      "操作结果暂时无法确认；请使用相同幂等键查询或重试，不要创建新请求",
+    );
   const code =
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
@@ -243,7 +248,15 @@ async function readCommand(
     [context.actorUserId, context.idempotencyKey],
   );
   const prior = found.rows[0];
-  if (prior === undefined) return undefined;
+  if (prior === undefined) {
+    const claim = await client.query<{ request_digest: string }>(
+      "SELECT request_digest FROM external_tool_admin_publish_claims WHERE actor_user_id=$1 AND idempotency_key=$2",
+      [context.actorUserId, context.idempotencyKey],
+    );
+    if (claim.rows[0] !== undefined && claim.rows[0].request_digest !== digest(request))
+      throw new ExternalToolAdminError("CONFLICT", "幂等键已用于不同请求");
+    return undefined;
+  }
   if (prior.request_digest !== digest(request))
     throw new ExternalToolAdminError("CONFLICT", "幂等键已用于不同请求");
   return prior.response;
@@ -532,6 +545,91 @@ export class PgExternalToolAdminRepository implements ExternalToolAdminRepositor
     );
   }
 
+  async withPublishClaim(
+    input: ExternalToolCommandContext & {
+      readonly draftId: string;
+      readonly expectedGeneration: number;
+    },
+    execute: (leaseOwner: string) => Promise<AdminExternalToolBatchDto>,
+  ): Promise<AdminExternalToolBatchDto> {
+    const request = publishRequest(input);
+    const requestDigest = digest(request);
+    const owner = randomBytes(16).toString("hex");
+    const waitUntil = Date.now() + 170_000;
+    let acquired = false;
+
+    while (!acquired) {
+      const claim = await this.admin(input.actorUserId, "协调外部工具发布", async (client) => {
+        const replay = await lockCommand(client, input, request);
+        if (replay !== undefined)
+          return { kind: "completed" as const, result: replay as AdminExternalToolBatchDto };
+        const inserted = await client.query(
+          `INSERT INTO external_tool_admin_publish_claims
+             (actor_user_id,idempotency_key,request_digest,lease_owner,lease_expires_at)
+           VALUES($1,$2,$3,$4,clock_timestamp()+interval '150 seconds')
+           ON CONFLICT(actor_user_id,idempotency_key) DO NOTHING RETURNING lease_owner`,
+          [input.actorUserId, input.idempotencyKey, requestDigest, owner],
+        );
+        if (inserted.rowCount === 1) return { kind: "acquired" as const };
+        const current = await client.query<{
+          request_digest: string;
+          expired: boolean;
+        }>(
+          `SELECT request_digest,lease_expires_at <= clock_timestamp() AS expired FROM external_tool_admin_publish_claims
+            WHERE actor_user_id=$1 AND idempotency_key=$2 FOR UPDATE`,
+          [input.actorUserId, input.idempotencyKey],
+        );
+        const row = current.rows[0];
+        if (!row) return { kind: "retry" as const };
+        if (row.request_digest !== requestDigest)
+          throw new ExternalToolAdminError("CONFLICT", "幂等键已用于不同请求");
+        if (row.expired) {
+          await client.query(
+            `UPDATE external_tool_admin_publish_claims
+                SET lease_owner=$3,lease_expires_at=clock_timestamp()+interval '150 seconds'
+              WHERE actor_user_id=$1 AND idempotency_key=$2`,
+            [input.actorUserId, input.idempotencyKey, owner],
+          );
+          return { kind: "acquired" as const };
+        }
+        return { kind: "waiting" as const };
+      });
+      if (claim.kind === "completed") return claim.result;
+      acquired = claim.kind === "acquired";
+      if (!acquired) {
+        if (Date.now() >= waitUntil)
+          throw new ExternalToolAdminError(
+            "PUBLISH_RESULT_UNKNOWN",
+            "同一发布请求仍在处理中；请使用相同幂等键查询或重试",
+          );
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+
+    let resultUnknown = false;
+    try {
+      return await execute(owner);
+    } catch (error) {
+      resultUnknown =
+        error instanceof ExternalToolAdminError && error.code === "PUBLISH_RESULT_UNKNOWN";
+      throw error;
+    } finally {
+      // 未知结果保留租约等待对账；明确失败只释放执行权，保留摘要以拒绝异请求复用键。
+      try {
+        if (!resultUnknown)
+          await this.admin(input.actorUserId, "结算外部工具发布协调", async (client) => {
+            await client.query(
+              `UPDATE external_tool_admin_publish_claims SET lease_expires_at=clock_timestamp()
+              WHERE actor_user_id=$1 AND idempotency_key=$2 AND lease_owner=$3`,
+              [input.actorUserId, input.idempotencyKey, owner],
+            );
+          });
+      } catch {
+        // 保留租约作为崩溃恢复边界。
+      }
+    }
+  }
+
   async replayPublish(
     input: ExternalToolCommandContext & {
       readonly draftId: string;
@@ -566,12 +664,21 @@ export class PgExternalToolAdminRepository implements ExternalToolAdminRepositor
       readonly draftId: string;
       readonly expectedGeneration: number;
       readonly tools: readonly AcceptedMcpProbeTool[];
+      readonly leaseOwner: string;
     },
   ): Promise<AdminExternalToolBatchDto> {
     const request = publishRequest(input);
     return this.admin(input.actorUserId, "发布外部工具批次", async (client) => {
       const replay = await lockCommand(client, input, request);
       if (replay !== undefined) return replay as AdminExternalToolBatchDto;
+      // 租约被超时接管后，旧执行者不得提交；声明行锁与发布事务一起持有至 COMMIT。
+      const claim = await client.query<{ lease_owner: string }>(
+        `SELECT lease_owner FROM external_tool_admin_publish_claims
+          WHERE actor_user_id=$1 AND idempotency_key=$2 AND request_digest=$3 FOR UPDATE`,
+        [input.actorUserId, input.idempotencyKey, digest(request)],
+      );
+      if (claim.rows[0]?.lease_owner !== input.leaseOwner)
+        throw new ExternalToolAdminError("CONFLICT", "发布已被接管，请使用原幂等键重试");
       // 锁住草稿并复核 generation：探测期间草稿或凭据被修改时整批放弃。
       const draft = await requireDraft(client, input.draftId, input.expectedGeneration, true);
       if (input.tools.length === 0 || input.tools.length > 64)

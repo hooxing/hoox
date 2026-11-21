@@ -724,6 +724,7 @@ function failureKind(error: unknown, request: FastifyRequest): FailureKind {
       case "CONFLICT":
         return "conflict";
       case "PROBE_UNAVAILABLE":
+      case "PUBLISH_RESULT_UNKNOWN":
         return "dependency_unavailable";
       case "INVALID":
       case "PUBLISH_REJECTED":

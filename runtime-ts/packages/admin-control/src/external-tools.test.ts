@@ -19,6 +19,20 @@ const accepted = {
   inputSchemaDigest: "a".repeat(64),
   inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
 } as const;
+const batch = {
+  batchId: "batch_one",
+  draftId: context.draftId,
+  sequence: 1,
+  displayName: "测试",
+  source: "mcp" as const,
+  serverName: "srv",
+  endpoint: "https://example.invalid/mcp",
+  draftGeneration: 2,
+  createdAt: new Date(0).toISOString(),
+  createdBy: context.actorUserId,
+  revoked: false,
+  tools: [],
+};
 function fixture() {
   const draft = {
     draftId: context.draftId,
@@ -44,6 +58,9 @@ function fixture() {
     setDraftCredential: vi.fn(),
     revokeBatch: vi.fn(),
     replayPublish: vi.fn<ExternalToolAdminRepositoryPort["replayPublish"]>(),
+    withPublishClaim: vi.fn<ExternalToolAdminRepositoryPort["withPublishClaim"]>(
+      async (_input, execute) => execute("test-lease-owner"),
+    ),
     loadDraftForProbe: vi.fn(async () => ({ draft, credential })),
     recordProbeAudit: vi.fn<ExternalToolAdminRepositoryPort["recordProbeAudit"]>(),
     publishMcpBatch: vi.fn(),
@@ -94,6 +111,26 @@ describe("外部工具管理服务", () => {
       ]);
     },
   );
+  it.each([
+    Buffer.from(credential, "utf8").toString("base64"),
+    Buffer.from(credential, "utf8").toString("base64url"),
+    Buffer.from(credential, "utf8").toString("hex"),
+    Buffer.from(credential, "utf8").toString("hex").toUpperCase(),
+    encodeURIComponent(credential),
+    [...credential].reverse().join(""),
+  ])("拒绝以常见可逆编码反射凭据的元数据", async (encoded) => {
+    const { service, repository, probe } = fixture();
+    probe.mockResolvedValue([{ ...accepted, description: `opaque:${encoded}` }]);
+    const report = await service.probe(context);
+    expect(report.publishable).toBe(false);
+    expect(report.tools[0]).toEqual({
+      accepted: false,
+      reason: "MCP_UNSAFE_METADATA",
+      reasonMessage: "远端工具元数据不允许展示或发布",
+    });
+    expect(repository.publishMcpBatch).not.toHaveBeenCalled();
+  });
+
   it("不记录远端异常消息；空清单不能发布", async () => {
     const { repository, service, probe } = fixture();
     probe.mockRejectedValue(new Error(credential));
@@ -122,25 +159,83 @@ describe("外部工具管理服务", () => {
     probe.mockResolvedValue([next]);
     await service.publish(command);
     const { accepted: _accepted, ...tool } = next;
-    expect(repository.publishMcpBatch).toHaveBeenCalledWith({ ...command, tools: [tool] });
-    const batch = {
-      batchId: "batch_one",
-      draftId: context.draftId,
-      sequence: 1,
-      displayName: "测试",
-      source: "mcp" as const,
-      serverName: "srv",
-      endpoint: "https://example.invalid/mcp",
-      draftGeneration: 2,
-      createdAt: new Date(0).toISOString(),
-      createdBy: context.actorUserId,
-      revoked: false,
-      tools: [],
-    };
+    expect(repository.publishMcpBatch).toHaveBeenCalledWith({
+      ...command,
+      leaseOwner: "test-lease-owner",
+      tools: [tool],
+    });
     repository.replayPublish.mockResolvedValue(batch);
     await expect(service.publish(command)).resolves.toEqual(batch);
     expect(probe).toHaveBeenCalledTimes(2);
     expect(repository.publishMcpBatch).toHaveBeenCalledTimes(1);
+  });
+  it.each(["failed", "rejected", "commit_unknown"] as const)(
+    "%s 后精确读回已提交结果，不返回失败或再写一次",
+    async (failure) => {
+      const { repository, service, probe } = fixture();
+      repository.replayPublish.mockResolvedValueOnce(undefined).mockResolvedValueOnce(batch);
+      if (failure === "failed") probe.mockRejectedValue(new Error("不可回显的远端原文"));
+      if (failure === "rejected") probe.mockResolvedValue([]);
+      if (failure === "commit_unknown")
+        repository.publishMcpBatch.mockRejectedValue(
+          new ExternalToolAdminError("PUBLISH_RESULT_UNKNOWN", "结果未知"),
+        );
+      await expect(service.publish(command)).resolves.toEqual(batch);
+      expect(repository.replayPublish).toHaveBeenNthCalledWith(2, command);
+      expect(repository.recordProbeAudit).not.toHaveBeenCalled();
+      expect(repository.publishMcpBatch).toHaveBeenCalledTimes(
+        failure === "commit_unknown" ? 1 : 0,
+      );
+    },
+  );
+  it.each(["absent", "unavailable"] as const)(
+    "COMMIT 结果未知且回执 %s 时不自动重写",
+    async (receipt) => {
+      const { repository, service } = fixture();
+      repository.publishMcpBatch.mockRejectedValue(
+        new ExternalToolAdminError("PUBLISH_RESULT_UNKNOWN", "结果未知"),
+      );
+      if (receipt === "unavailable")
+        repository.replayPublish
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error("数据库不可用"));
+      await expect(service.publish(command)).rejects.toMatchObject({
+        code: "PUBLISH_RESULT_UNKNOWN",
+      });
+      expect(repository.publishMcpBatch).toHaveBeenCalledTimes(1);
+    },
+  );
+  it("探测和发布跨服务实例共享全局及目标并发预算，并在失败后释放", async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const fixtures = Array.from({ length: 14 }, (_, index) => {
+      const item = fixture();
+      item.draft.endpoint = `https://target${Math.floor(index / 3)}.example.invalid/mcp`;
+      item.probe.mockImplementation(async () => {
+        await gate;
+        throw new Error("受控失败");
+      });
+      return item;
+    });
+    const pending = fixtures.map(({ service }, index) =>
+      index % 2 === 0 ? service.probe(context) : service.publish(command).catch(() => undefined),
+    );
+    try {
+      await vi.waitFor(() => {
+        expect(fixtures.reduce((count, item) => count + item.probe.mock.calls.length, 0)).toBe(8);
+      });
+      expect(
+        fixtures.slice(0, 3).reduce((count, item) => count + item.probe.mock.calls.length, 0),
+      ).toBe(2);
+    } finally {
+      finish();
+      await Promise.all(pending);
+    }
+    expect(fixtures.every((item) => item.probe.mock.calls.length === 1)).toBe(true);
+    await fixtures[0]?.service.probe(context);
+    expect(fixtures[0]?.probe).toHaveBeenCalledTimes(2);
   });
   it("非管理员不能预览或带凭据探测", async () => {
     for (const role of [undefined, "viewer", "operator"] as const)

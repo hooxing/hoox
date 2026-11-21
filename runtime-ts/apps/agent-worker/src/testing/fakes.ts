@@ -441,6 +441,9 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       effect: input.effect,
       callId: input.call.callId,
       toolName: input.call.toolName,
+      ...(input.call.toolVersionId === undefined
+        ? {}
+        : { toolVersionId: input.call.toolVersionId }),
       argsDigest: input.call.argsDigest,
       issuedAt: now,
       expiresAt: this.after(input.permitDurationMs),
@@ -1604,6 +1607,7 @@ function samePermit(left: ExternalEffectPermit, right: ExternalEffectPermit): bo
     left.effect === right.effect &&
     left.callId === right.callId &&
     left.toolName === right.toolName &&
+    left.toolVersionId === right.toolVersionId &&
     left.argsDigest === right.argsDigest &&
     left.issuedAt === right.issuedAt &&
     left.expiresAt === right.expiresAt

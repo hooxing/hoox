@@ -2,7 +2,7 @@ import { normalizeRuntimeToolSelection, type RuntimeToolName } from "@hoox/proto
 import { measureExecutionPhase } from "@hoox/domain";
 import { createHash } from "node:crypto";
 import { createExternalToolFactory } from "@hoox/pi-adapter";
-import type { ExternalToolExecutionPorts } from "@hoox/tool-router";
+import { ExternalToolSnapshotError } from "@hoox/run-contracts";
 import type {
   ExternalToolRuntimeSnapshot,
   ExternalToolSnapshotReader,
@@ -513,6 +513,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       }
     };
     const authorizeStartedTool = async (call: {
+      readonly toolVersionId?: string;
       readonly callId: string;
       readonly toolName: string;
       readonly argsDigest: string;
@@ -716,38 +717,62 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         });
       },
     };
-    const configuredExternalToolIds =
-      input.agentSnapshot.content.tools.mode === "configured"
-        ? input.agentSnapshot.content.tools.externalTools.map((tool) => tool.versionId).sort()
-        : [];
-    const allowedExternalToolIds =
-      input.agent?.agentKind === "subagent"
-        ? [...(input.enabledExternalToolVersionIds ?? [])].sort()
-        : configuredExternalToolIds;
-    const externalSnapshots =
-      allowedExternalToolIds.length === 0
-        ? Object.freeze([])
-        : await (async () => {
-            const configuration = this.externalToolConfiguration;
-            if (configuration === undefined) throw new Error("EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE");
-            const snapshots = await configuration.snapshots.read({
-              tenantId: input.scope.tenantId,
-              runId: input.scope.runId,
-              toolVersionIds: allowedExternalToolIds,
-            });
-            const actual = snapshots.map((snapshot) => snapshot.tool.toolVersionId).sort();
-            if (
-              actual.length !== allowedExternalToolIds.length ||
-              actual.some((id, index) => id !== allowedExternalToolIds[index])
-            )
-              throw new Error("EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE");
-            return snapshots;
-          })();
+    const configuredTools = input.agentSnapshot.content.tools;
+    const configuredVersions = new Map(
+      configuredTools.mode === "configured"
+        ? configuredTools.externalTools.map(({ versionId, kind }) => [versionId, kind] as const)
+        : [],
+    );
+    const allowedExternalToolIds = [
+      ...(input.agent?.agentKind === "subagent"
+        ? (input.enabledExternalToolVersionIds ?? [])
+        : configuredVersions.keys()),
+    ].sort();
+    const snapshotFailure = (code: ExternalToolSnapshotError["code"]): never => {
+      toolEffectRejected = true;
+      input.onExternalToolSnapshotFailure?.(code);
+      throw new ExternalToolSnapshotError(code);
+    };
+    const readExternalSnapshots = async (): Promise<readonly ExternalToolRuntimeSnapshot[]> => {
+      if (!allowedExternalToolIds.length) return [];
+      if (
+        allowedExternalToolIds.some((id) => !configuredVersions.has(id)) ||
+        new Set(allowedExternalToolIds).size !== allowedExternalToolIds.length
+      ) {
+        return snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_INVALID");
+      }
+      const reader = this.externalToolConfiguration?.snapshots;
+      if (reader === undefined) return snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE");
+      let snapshots: readonly ExternalToolRuntimeSnapshot[];
+      try {
+        snapshots = await reader.read({
+          fence: input.fence,
+          toolVersionIds: allowedExternalToolIds,
+        });
+      } catch (error) {
+        return snapshotFailure(
+          error instanceof ExternalToolSnapshotError
+            ? error.code
+            : "EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE",
+        );
+      }
+      const remaining = new Set(allowedExternalToolIds);
+      for (const { tool } of snapshots) {
+        if (
+          !remaining.delete(tool.toolVersionId) ||
+          configuredVersions.get(tool.toolVersionId) !== tool.source
+        )
+          return snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_INVALID");
+      }
+      if (remaining.size) return snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_INVALID");
+      return snapshots;
+    };
+    const externalSnapshots = await readExternalSnapshots();
     if (
       externalSnapshots.some((snapshot) => snapshot.tool.source === "http") &&
       this.externalToolConfiguration?.httpIdentityRootKey === undefined
     )
-      throw new Error("EXTERNAL_TOOL_IDENTITY_ROOT_KEY_UNAVAILABLE");
+      snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_UNAVAILABLE");
     const externalTransport: ExternalToolTransport | undefined =
       this.externalToolConfiguration === undefined
         ? undefined
@@ -765,43 +790,28 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       externalSnapshots.length === 0 || externalTransport === undefined
         ? undefined
         : createExternalToolFactory({
-            allowPrivateAddresses: this.externalToolConfiguration?.allowPrivateAddresses,
+            ...(this.externalToolConfiguration?.allowPrivateAddresses === undefined
+              ? {}
+              : { allowPrivateAddresses: this.externalToolConfiguration.allowPrivateAddresses }),
             transport: externalTransport,
             getCallContext: () => ({
               tenantId: input.scope.tenantId,
               threadId: input.scope.threadId,
               runId: input.scope.runId,
             }),
-            httpMethodForVersion: (id) =>
-              externalSnapshots.find((item) => item.tool.toolVersionId === id)?.tool.httpMethod,
             persistStarted: async (call) => {
+              // PTC 在内部工具开始时已持久化前驱；最终的撤销检查由消费许可事务完成。
+              if (durableToolCalls.has(call.callId) && ptcParents.has(call.callId)) {
+                if (
+                  invalidToolCalls.has(call.callId) ||
+                  startedToolCalls.get(call.callId) !== call.toolName
+                )
+                  throw new Error("EXTERNAL_TOOL_PREDECESSOR_INVALID");
+                return;
+              }
               await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
-              let current: readonly ExternalToolRuntimeSnapshot[] | undefined;
-              try {
-                current = await this.externalToolConfiguration?.snapshots.read({
-                  tenantId: input.scope.tenantId,
-                  runId: input.scope.runId,
-                  toolVersionIds: [
-                    externalSnapshots.find((item) => item.tool.modelToolName === call.toolName)
-                      ?.tool.toolVersionId ?? "",
-                  ],
-                });
-              } catch {
-                input.onExternalToolRevoked?.();
-                throw new Error("EXTERNAL_TOOL_REVOKED");
-              }
-              if (current?.length !== 1) {
-                input.onExternalToolRevoked?.();
-                throw new Error("EXTERNAL_TOOL_REVOKED");
-              }
             },
-            authorizeAndConsume: async (call) => {
-              await authorizeStartedTool({
-                callId: call.callId,
-                toolName: call.toolName,
-                argsDigest: call.argsDigest,
-              });
-            },
+            authorizeAndConsume: authorizeStartedTool,
             recordReceipt: async ({ callId, receipt }) => {
               const parsed = JSON.parse(receipt) as { readonly outcome?: "succeeded" | "failed" };
               const name = startedToolCalls.get(callId);
@@ -814,11 +824,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             },
             requireRecovery: async () => {
               observationRecoveryCode = "EXTERNAL_TOOL_RESULT_UNKNOWN";
+              await input.onExternalToolResultUnknown?.();
+              void controller?.abort().catch(() => undefined);
             },
-            failClosed: () => {
-              input.onExternalToolRevoked?.();
-            },
-          } as ExternalToolExecutionPorts);
+          });
     let externalReceiptWriter:
       | ((callId: string, name: string, outcome: "succeeded" | "failed") => Promise<unknown>)
       | undefined;
@@ -1068,21 +1077,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                   { type: "turn.completed" }
                 >,
               ) => {
-                if (externalSnapshots.length > 0) {
-                  try {
-                    const current = await this.externalToolConfiguration?.snapshots.read({
-                      tenantId: input.scope.tenantId,
-                      runId: input.scope.runId,
-                      toolVersionIds: externalSnapshots.map(
-                        (snapshot) => snapshot.tool.toolVersionId,
-                      ),
-                    });
-                    if (current?.length !== externalSnapshots.length) throw new Error();
-                  } catch {
-                    input.onExternalToolRevoked?.();
-                    throw new Error("EXTERNAL_TOOL_REVOKED");
-                  }
-                }
+                if (externalSnapshots.length > 0) await readExternalSnapshots();
                 const persisted = await input.onTurnSafePoint?.(event);
                 if (persisted === undefined) return undefined;
                 let replacement: ThreadActiveHistoryV1 | undefined;

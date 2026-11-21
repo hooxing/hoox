@@ -181,6 +181,7 @@ const placeholderOnlyKeys = new Set([
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
   "MODEL_CREDENTIAL_ENCRYPTION_KEY",
+  "EXTERNAL_TOOL_IDENTITY_ROOT_KEY",
   "MODEL_ID",
   "THREAD_CURSOR_SIGNING_KEYS",
   "RESOURCE_FILESYSTEM_SIGNING_KEY",
@@ -260,6 +261,7 @@ export function validateEnvironmentExample(source) {
     if (!expected.has(key)) issues.push(`未登记的环境变量：${key}`);
   }
   issues.push(...validateOtelEnvironmentExample(values));
+  issues.push(...validateExternalToolsPrivateAddressesExample(values));
   for (const key of placeholderOnlyKeys) {
     const value = values.get(key);
     if (
@@ -272,6 +274,13 @@ export function validateEnvironmentExample(source) {
   }
 
   return issues;
+}
+
+export function validateExternalToolsPrivateAddressesExample(values) {
+  const value = values.get("EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES");
+  return value === undefined || value === "false" || value === "true"
+    ? []
+    : ["EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES 必须为 true 或 false"];
 }
 
 export function validateOtelEnvironmentExample(values) {

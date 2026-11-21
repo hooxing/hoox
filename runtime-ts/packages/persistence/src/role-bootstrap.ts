@@ -1135,7 +1135,8 @@ async function hasRunExternalToolSnapshotView(
   schema: string,
 ): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
-    `SELECT to_regclass(format('%I.runtime_run_external_tool_snapshots',$1::text)) IS NOT NULL
+    `SELECT to_regclass(format('%I.worker_run_external_tool_snapshots',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_external_tool_permit_gate',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.run_agent_snapshots',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.external_tool_versions',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.external_tool_credentials',$1::text)) IS NOT NULL
@@ -2979,16 +2980,15 @@ async function assertActiveRuntimeWhitelist(
     );
   }
   const externalSnapshotView = await hasRunExternalToolSnapshotView(client, context.schema);
-  const externalSnapshotViewPrivilege = await client.query<{ allowed: boolean }>(
-    `SELECT CASE WHEN to_regclass(format('%I.runtime_run_external_tool_snapshots',$2::text)) IS NULL
-                 THEN false ELSE has_table_privilege($1,format('%I.runtime_run_external_tool_snapshots',$2::text),'SELECT') END AS allowed`,
-    [context.runtimeRole, context.schema],
-  );
-  if (externalSnapshotViewPrivilege.rows[0]?.allowed !== externalSnapshotView) {
-    throw new PersistenceError(
-      "CONSTRAINT_VIOLATION",
-      "Runtime 外部工具快照受限视图权限偏离白名单",
+  if (externalSnapshotView) {
+    const privileges = await client.query<{ valid: boolean }>(
+      `SELECT NOT has_any_column_privilege($1,format('%I.worker_run_external_tool_snapshots',$3::text),'SELECT')
+              AND has_table_privilege($2,format('%I.worker_run_external_tool_snapshots',$3::text),'SELECT')
+              AND has_table_privilege($1,format('%I.runtime_external_tool_permit_gate',$3::text),'SELECT') AS valid`,
+      [context.runtimeRole, context.workerCoordinatorRole, context.schema],
     );
+    if (!privileges.rows[0]?.valid)
+      throw new PersistenceError("CONSTRAINT_VIOLATION", "外部工具密文与许可视图权限偏离白名单");
   }
   await assertDatabaseAndSchemaBoundary(client, context, true);
   await assertNoPublicRelationPrivileges(client);
@@ -3752,7 +3752,8 @@ export async function bootstrapRuntimeAccessOnClient(
   }
   if (await hasRunExternalToolSnapshotView(client, context.schema)) {
     await client.query(
-      `GRANT SELECT ON TABLE ${schema}.runtime_run_external_tool_snapshots TO ${role}`,
+      `GRANT SELECT ON TABLE ${schema}.worker_run_external_tool_snapshots TO ${coordinatorRole};
+       GRANT SELECT ON TABLE ${schema}.runtime_external_tool_permit_gate TO ${role}`,
     );
   }
   if (await hasAgentDefinitionState(client, context.schema)) {

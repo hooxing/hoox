@@ -45,6 +45,7 @@ export function terminalFailureMessage(
     AGENT_CONFIGURATION_UNSUPPORTED: "此 Agent 版本要求当前 Worker 不支持的配置，任务未执行。",
     EXTERNAL_TOOL_RESULT_UNKNOWN:
       "外部工具调用结果无法确认，任务已进入恢复；系统不会自动重放该调用。",
+    EXTERNAL_TOOL_SNAPSHOT_INVALID: "此任务固定的外部工具版本与快照不符，任务已停止。",
     EXTERNAL_TOOL_REVOKED: "此任务使用的外部工具版本已被撤销，任务已停止。",
     CANCELLED: "任务已取消；未完成或未提交的工作不视为成功。",
     CONTEXT_TOO_LARGE: "上下文仍然超出模型窗口，本次任务未能完成。",

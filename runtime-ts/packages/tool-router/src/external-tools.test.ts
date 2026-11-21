@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { normalizeExternalToolSchema, type ExternalToolVersion } from "@hoox/domain";
 import { ExternalToolTransportError } from "@hoox/run-contracts";
+import { encodeControlledToolReceipt } from "@hoox/context-policy";
 import {
   createExternalToolAgentTool,
   externalTargetConnection,
@@ -29,6 +30,10 @@ const toolVersion: ExternalToolVersion = {
   idempotent: true,
   credentialRef: null,
 };
+
+const consumePermit = async ({ toolVersionId }: { readonly toolVersionId: string }) => ({
+  permit: { toolVersionId },
+});
 
 describe("外部工具运行骨架", () => {
   it("拒绝私网 IP 和 DNS 解析到私网的目标，并允许部署开关", async () => {
@@ -116,7 +121,7 @@ describe("外部工具运行骨架", () => {
           runId: "run-fake",
         }),
         persistStarted: async () => {},
-        authorizeAndConsume: async () => {},
+        authorizeAndConsume: consumePermit,
         resolveAddresses,
         transport: {
           invoke: async ({ target }) => {
@@ -140,7 +145,7 @@ describe("外部工具运行骨架", () => {
     expect(validateExternalToolArguments(toolVersion, { value: "ok" })).toBe(true);
     expect(validateExternalToolArguments(toolVersion, { value: 3 })).toBe(false);
     const persistStarted = vi.fn(async () => undefined);
-    const authorizeAndConsume = vi.fn(async () => undefined);
+    const authorizeAndConsume = vi.fn(consumePermit);
     const invoke = vi.fn(async () => {
       throw new Error("secret server text");
     });
@@ -171,6 +176,7 @@ describe("外部工具运行骨架", () => {
       expect.objectContaining({
         callId: "call-1",
         toolName: "http__lookup",
+        toolVersionId: "tv1",
         argsDigest: expect.any(String),
       }),
     );
@@ -184,10 +190,187 @@ describe("外部工具运行骨架", () => {
       "EXTERNAL_TOOL_RECOVERY_REQUIRED",
     );
     expect(invoke).toHaveBeenCalledOnce();
+    expect(authorizeAndConsume).toHaveBeenCalledOnce();
     expect(requireRecovery).toHaveBeenCalledWith({
       callId: "call-1",
       code: "EXTERNAL_TOOL_RESULT_UNKNOWN",
     });
+  });
+  it("DNS 校验通过后消费失败，先写固定失败回执再原样透传，不发包或转 UNKNOWN", async () => {
+    const order: string[] = [];
+    const denied = new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+    const invoke = vi.fn();
+    const requireRecovery = vi.fn();
+    const agentTool = createExternalToolAgentTool(
+      { ...toolVersion, endpoint: "https://tools.example/api" },
+      {
+        persistStarted: async () => {
+          order.push("started");
+        },
+        resolveAddresses: async () => {
+          order.push("dns");
+          return ["8.8.8.8"];
+        },
+        getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
+        authorizeAndConsume: async () => {
+          order.push("consume");
+          throw denied;
+        },
+        transport: { invoke },
+        recordReceipt: async ({ receipt }) => {
+          order.push(receipt);
+        },
+        requireRecovery,
+      },
+    );
+    await expect(agentTool.execute("denied", { value: "x" })).rejects.toBe(denied);
+    expect(order).toEqual([
+      "started",
+      "dns",
+      "consume",
+      encodeControlledToolReceipt(toolVersion.modelToolName, "failed"),
+    ]);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(requireRecovery).not.toHaveBeenCalled();
+  });
+  it("DNS 预检完成后才消费精确版本许可，随后不再等待其他端口而单次发包", async () => {
+    const order: string[] = [];
+    const dnsStarted = Promise.withResolvers<void>();
+    const dns = Promise.withResolvers<readonly string[]>();
+    const authorizeAndConsume = vi.fn(async (input: { readonly toolVersionId: string }) => {
+      order.push("consume");
+      return consumePermit(input);
+    });
+    const invoke = vi.fn(async () => {
+      order.push("invoke");
+      return { body: new Uint8Array(), contentType: "" };
+    });
+    const agentTool = createExternalToolAgentTool(
+      { ...toolVersion, endpoint: "https://tools.example/api" },
+      {
+        persistStarted: async () => {
+          order.push("started");
+        },
+        resolveAddresses: async () => {
+          order.push("dns:start");
+          dnsStarted.resolve();
+          const addresses = await dns.promise;
+          order.push("dns:complete");
+          return addresses;
+        },
+        httpMethodForVersion: () => {
+          order.push("method");
+          return "POST";
+        },
+        getCallContext: () => {
+          order.push("context");
+          return { tenantId: "t", threadId: "th", runId: "r" };
+        },
+        authorizeAndConsume,
+        transport: { invoke },
+        recordReceipt: async () => {
+          order.push("receipt");
+        },
+        requireRecovery: async () => {},
+      },
+    );
+    const execution = agentTool.execute("ordered-call", { value: "x" });
+    await dnsStarted.promise;
+    expect(authorizeAndConsume).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+    dns.resolve(["8.8.8.8"]);
+    await execution;
+    expect(order).toEqual([
+      "started",
+      "dns:start",
+      "dns:complete",
+      "method",
+      "context",
+      "consume",
+      "invoke",
+      "receipt",
+    ]);
+    expect(authorizeAndConsume).toHaveBeenCalledOnce();
+    expect(authorizeAndConsume).toHaveBeenCalledWith({
+      callId: "ordered-call",
+      toolName: toolVersion.modelToolName,
+      toolVersionId: toolVersion.toolVersionId,
+      argsDigest: expect.any(String),
+    });
+    expect(invoke).toHaveBeenCalledOnce();
+  });
+  it("DNS 等待期间先完成撤销，最终消费拒绝后不发包或重放", async () => {
+    const dnsStarted = Promise.withResolvers<void>();
+    const dns = Promise.withResolvers<readonly string[]>();
+    let revoked = false;
+    const denied = new Error("EXTERNAL_TOOL_REVOKED");
+    const authorizeAndConsume = vi.fn(async (input: { readonly toolVersionId: string }) => {
+      if (revoked) throw denied;
+      return consumePermit(input);
+    });
+    const invoke = vi.fn();
+    const recordReceipt = vi.fn(async () => {});
+    const requireRecovery = vi.fn();
+    const agentTool = createExternalToolAgentTool(
+      { ...toolVersion, endpoint: "https://tools.example/api", sideEffect: "write" },
+      {
+        persistStarted: async () => {},
+        resolveAddresses: () => {
+          dnsStarted.resolve();
+          return dns.promise;
+        },
+        getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
+        authorizeAndConsume,
+        transport: { invoke },
+        recordReceipt,
+        requireRecovery,
+      },
+    );
+    const execution = agentTool.execute("revoked-before-consume", { value: "x" });
+    await dnsStarted.promise;
+    expect(authorizeAndConsume).not.toHaveBeenCalled();
+    revoked = true;
+    dns.resolve(["8.8.8.8"]);
+    await expect(execution).rejects.toBe(denied);
+    expect(authorizeAndConsume).toHaveBeenCalledOnce();
+    expect(invoke).not.toHaveBeenCalled();
+    expect(requireRecovery).not.toHaveBeenCalled();
+    expect(recordReceipt).toHaveBeenCalledExactlyOnceWith({
+      callId: "revoked-before-consume",
+      receipt: encodeControlledToolReceipt(toolVersion.modelToolName, "failed"),
+    });
+  });
+  it.each([
+    ["缺少版本", {}, false],
+    ["同名不同版本", { toolVersionId: "tv2" }, false],
+    ["已显式对账但许可版本不符", { toolVersionId: "tv2" }, true],
+  ] as const)("许可%s 时拒绝发包", async (_case, permit, retry) => {
+    const invoke = vi.fn();
+    const recordReceipt = vi.fn();
+    const requireRecovery = vi.fn();
+    const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
+      persistStarted: async () => {},
+      authorizeAndConsume: async () => ({ permit }),
+      transport: { invoke },
+      recordReceipt,
+      requireRecovery,
+      reconciliation: { authorizeRetry: async () => "authorized" },
+      isExplicitlyReconciledRetry: async () => retry,
+    });
+    await expect(agentTool.execute("wrong-version", { value: "x" })).rejects.toThrow(
+      "EXTERNAL_EFFECT_NOT_AUTHORIZED",
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(requireRecovery).not.toHaveBeenCalled();
+    expect(recordReceipt.mock.calls).toEqual([
+      [
+        {
+          callId: "wrong-version",
+          receipt: encodeControlledToolReceipt(toolVersion.modelToolName, "failed"),
+        },
+      ],
+    ]);
   });
   it("Transport 已收到可归一化失败响应时写失败回执且不进入恢复", async () => {
     const requireRecovery = vi.fn(async () => undefined);
@@ -198,7 +381,7 @@ describe("外部工具运行骨架", () => {
         runId: "run-fake",
       }),
       persistStarted: async () => {},
-      authorizeAndConsume: async () => {},
+      authorizeAndConsume: consumePermit,
       transport: {
         invoke: async () => {
           throw new ExternalToolTransportError("responded_failure", "EXTERNAL_TOOL_REJECTED");
@@ -220,7 +403,7 @@ describe("外部工具运行骨架", () => {
         runId: "run-fake",
       }),
       persistStarted: async () => {},
-      authorizeAndConsume: async () => {},
+      authorizeAndConsume: consumePermit,
       transport: {
         invoke: async () => {
           throw new Error("transport disconnected");
@@ -247,7 +430,7 @@ describe("外部工具运行骨架", () => {
         runId: "run-fake",
       }),
       persistStarted: async () => {},
-      authorizeAndConsume: async () => {},
+      authorizeAndConsume: consumePermit,
       transport: {
         invoke: async () => {
           throw new ExternalToolTransportError("not_sent", "EXTERNAL_TOOL_REJECTED");
@@ -260,36 +443,38 @@ describe("外部工具运行骨架", () => {
     expect(result.details).toMatchObject({ error: "EXTERNAL_TOOL_REJECTED" });
     expect(requireRecovery).not.toHaveBeenCalled();
   });
-  it("截断模型可见结果并且不回显传输凭据", async () => {
+  it("无凭据工具保留有界正文投影，UTF-8 截断不越过字节上限", async () => {
     const body = new TextEncoder().encode(JSON.stringify({ value: "中".repeat(100) }));
-    const transportInvoke = vi.fn(async () => ({ body, contentType: "application/json" }));
+    const transportInvoke = vi.fn(async (_input: { readonly credential?: string }) => ({
+      body,
+      contentType: "application/json",
+    }));
     const receipt = vi.fn(
       async (_input: { readonly callId: string; readonly receipt: string }) => undefined,
     );
-    const agentTool = createExternalToolAgentTool(
-      toolVersion,
-      {
-        getCallContext: () => ({
-          tenantId: "tenant-fake",
-          endUserId: "user-fake",
-          threadId: "thread-fake",
-          runId: "run-fake",
-        }),
-        persistStarted: async () => {},
-        authorizeAndConsume: async () => {},
-        transport: { invoke: transportInvoke },
-        recordReceipt: receipt,
-        requireRecovery: async () => {},
-        maxModelVisibleBytes: 12,
-      },
-      "very-secret",
-    );
+    const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({
+        tenantId: "tenant-fake",
+        endUserId: "user-fake",
+        threadId: "thread-fake",
+        runId: "run-fake",
+      }),
+      persistStarted: async () => {},
+      authorizeAndConsume: consumePermit,
+      transport: { invoke: transportInvoke },
+      recordReceipt: receipt,
+      requireRecovery: async () => {},
+      maxModelVisibleBytes: 12,
+    });
     const result = await agentTool.execute("bounded-call", { value: "ok" });
     const visible = JSON.stringify(result);
     expect(
       new TextEncoder().encode((result.content[0] as { text: string }).text).byteLength,
     ).toBeLessThanOrEqual(12);
-    expect(visible).not.toContain("very-secret");
+    expect(result.details).toEqual({ truncated: true });
+    expect((result.content[0] as { text: string }).text).toContain('{"value":"');
+    expect(transportInvoke).toHaveBeenCalledOnce();
+    expect(transportInvoke.mock.calls[0]?.[0]).not.toHaveProperty("credential");
     expect(visible).not.toContain("receipt");
     expect(receipt.mock.calls[0]?.[0]?.receipt).toContain("succeeded");
   });
@@ -309,7 +494,7 @@ describe("外部工具运行骨架", () => {
           runId: "run-fake",
         }),
         persistStarted: async () => {},
-        authorizeAndConsume: async () => {},
+        authorizeAndConsume: consumePermit,
         transport: { invoke },
         recordReceipt: async () => {},
         requireRecovery: async () => {},
@@ -320,32 +505,98 @@ describe("外部工具运行骨架", () => {
     const visible = (result.content[0] as { text: string }).text;
     expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ credential: secret }));
     expect(visible).not.toContain(secret);
-    expect(visible).toContain("[凭据已隐藏]");
+    expect(visible).toBe("外部工具调用已成功，响应正文未向模型公开。");
   });
-  it("解析 JSON 后脱敏含引号、反斜线与控制字符的凭据", async () => {
-    const secret = 'quote" slash\\ control\n\t';
-    const agentTool = createExternalToolAgentTool(
-      toolVersion,
+  it.each(
+    [
+      ["base64", Buffer.from('placeholder-credential+/="\\\n\t').toString("base64")],
+      ["hex", Buffer.from('placeholder-credential+/="\\\n\t').toString("hex")],
+      ["URL", encodeURIComponent('placeholder-credential+/="\\\n\t')],
+      ["JSON 转义", JSON.stringify('placeholder-credential+/="\\\n\t')],
+    ].flatMap(([encoding, echo]) => [
+      { encoding, contentType: "text/plain", body: `不可信业务正文：${echo}` },
       {
-        getCallContext: () => ({
-          tenantId: "tenant-fake",
-          endUserId: "user-fake",
-          threadId: "thread-fake",
-          runId: "run-fake",
-        }),
+        encoding,
+        contentType: "application/json",
+        body: JSON.stringify({ value: "不可信业务正文", echo }),
+      },
+    ]),
+  )("持凭据端点不投影 $contentType 中的 $encoding 回显", async ({ body, contentType }) => {
+    const recordReceipt = vi.fn(async () => {});
+    const requireRecovery = vi.fn();
+    const agentTool = createExternalToolAgentTool(
+      { ...toolVersion, credentialRef: "placeholder-credential-ref" },
+      {
+        getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
         persistStarted: async () => {},
-        authorizeAndConsume: async () => {},
+        authorizeAndConsume: consumePermit,
+        transport: {
+          invoke: async () => ({ body: new TextEncoder().encode(body), contentType }),
+        },
+        recordReceipt,
+        requireRecovery,
+      },
+      'placeholder-credential+/="\\\n\t',
+    );
+    const result = await agentTool.execute("encoded-echo", { value: "x" });
+    expect(result).toEqual({
+      content: [{ type: "text", text: "外部工具调用已成功，响应正文未向模型公开。" }],
+      details: { truncated: false },
+    });
+    expect(recordReceipt).toHaveBeenCalledExactlyOnceWith({
+      callId: "encoded-echo",
+      receipt: encodeControlledToolReceipt(toolVersion.modelToolName, "succeeded"),
+    });
+    expect(requireRecovery).not.toHaveBeenCalled();
+  });
+  it.each(["不可信业务正文", ""])("仅有凭据引用时也不开放正文投影：%j", async (body) => {
+    const agentTool = createExternalToolAgentTool(
+      { ...toolVersion, credentialRef: "placeholder-credential-ref" },
+      {
+        getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
+        persistStarted: async () => {},
+        authorizeAndConsume: consumePermit,
         transport: {
           invoke: async () => ({
-            body: new TextEncoder().encode(JSON.stringify({ echo: secret, nested: [secret] })),
+            body: new TextEncoder().encode(body),
             contentType: "application/json",
           }),
         },
         recordReceipt: async () => {},
         requireRecovery: async () => {},
       },
-      secret,
     );
+    expect((await agentTool.execute("credential-ref-only", { value: "x" })).content).toEqual([
+      {
+        type: "text",
+        text:
+          body.length === 0
+            ? "外部工具调用已成功，未返回内容。"
+            : "外部工具调用已成功，响应正文未向模型公开。",
+      },
+    ]);
+  });
+  it("无凭据工具解析 JSON 后仍剔除含引号、反斜线与控制字符的认证材料", async () => {
+    const secret = 'quote" slash\\ control\n\t';
+    const agentTool = createExternalToolAgentTool(toolVersion, {
+      getCallContext: () => ({
+        tenantId: "tenant-fake",
+        endUserId: "user-fake",
+        threadId: "thread-fake",
+        runId: "run-fake",
+      }),
+      persistStarted: async () => {},
+      authorizeAndConsume: consumePermit,
+      transport: {
+        invoke: async () => ({
+          body: new TextEncoder().encode(JSON.stringify({ echo: secret, nested: [secret] })),
+          contentType: "application/json",
+          authMaterial: [secret],
+        }),
+      },
+      recordReceipt: async () => {},
+      requireRecovery: async () => {},
+    });
     const result = await agentTool.execute("complex-secret", { value: "x" });
     const visible = (result.content[0] as { text: string }).text;
     expect(visible).not.toContain(secret);
@@ -357,6 +608,7 @@ describe("外部工具运行骨架", () => {
       contentType: "application/json",
     }));
     const authorizeRetry = vi.fn(async () => "authorized" as const);
+    const authorizeAndConsume = vi.fn(consumePermit);
     const agentTool = createExternalToolAgentTool(toolVersion, {
       getCallContext: () => ({
         tenantId: "tenant-fake",
@@ -365,7 +617,7 @@ describe("外部工具运行骨架", () => {
         runId: "run-fake",
       }),
       persistStarted: vi.fn(),
-      authorizeAndConsume: vi.fn(),
+      authorizeAndConsume,
       transport: { invoke },
       reconciliation: { authorizeRetry },
       isExplicitlyReconciledRetry: async () => true,
@@ -377,6 +629,8 @@ describe("外部工具运行骨架", () => {
       expect.objectContaining({ idempotencyKey: "same-key", idempotent: true }),
     );
     expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "same-key" }));
+    expect(authorizeAndConsume).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledOnce();
   });
   it("HTTP 方法只来自版本绑定，缺失时不向 Transport 补默认方法", async () => {
     const invoke = vi.fn(async (_input: { readonly method?: string }) => ({
@@ -386,7 +640,7 @@ describe("外部工具运行骨架", () => {
     const ports = {
       getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
       persistStarted: async () => {},
-      authorizeAndConsume: async () => {},
+      authorizeAndConsume: consumePermit,
       transport: { invoke },
       recordReceipt: async () => {},
       requireRecovery: async () => {},
@@ -408,10 +662,11 @@ describe("外部工具运行骨架", () => {
     }));
     const requireRecovery = vi.fn(async () => undefined);
     const receipts: string[] = [];
+    const authorizeAndConsume = vi.fn(consumePermit);
     const base = {
       getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
       persistStarted: async () => {},
-      authorizeAndConsume: async () => {},
+      authorizeAndConsume,
       transport: { invoke },
       recordReceipt: async ({ receipt }: { readonly receipt: string }) => {
         receipts.push(receipt);
@@ -425,6 +680,7 @@ describe("外部工具运行骨架", () => {
     }).execute("dns-timeout", { value: "x" });
     expect(stalled.details).toMatchObject({ error: "EXTERNAL_TOOL_UNAVAILABLE" });
     expect(receipts.at(-1)).toContain("failed");
+    expect(authorizeAndConsume).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
     expect(requireRecovery).not.toHaveBeenCalled();
     const started = Date.now();
@@ -438,6 +694,7 @@ describe("外部工具运行骨架", () => {
         },
       },
     ).execute("dns-shared", { value: "x" });
+    expect(authorizeAndConsume).toHaveBeenCalledOnce();
     const deadlineAt = invoke.mock.calls[0]?.[0].deadlineAt ?? Infinity;
     expect(deadlineAt).toBeLessThanOrEqual(started + 1000 + 5);
     expect(deadlineAt - Date.now()).toBeLessThan(1000 - 40);
@@ -451,7 +708,7 @@ describe("外部工具运行骨架", () => {
     const agentTool = createExternalToolAgentTool(toolVersion, {
       getCallContext: () => ({ tenantId: "t", threadId: "th", runId: "r" }),
       persistStarted: async () => {},
-      authorizeAndConsume: async () => {},
+      authorizeAndConsume: consumePermit,
       transport: {
         invoke: async () => ({ body, contentType, authMaterial: [signature, timestamp] }),
       },

@@ -231,7 +231,6 @@ const workerEnvironmentSchema = Object.freeze({
   EXTERNAL_TOOL_IDENTITY_ROOT_KEY: stringEnvironmentField({
     requiredIn: ["production"],
     secret: true,
-    minLength: 32,
     maxLength: 4096,
   }),
   MODEL_WIRE_TRACE_RETENTION_DAYS: integerEnvironmentField({ minimum: 1, maximum: 365 }),
@@ -467,6 +466,20 @@ export function parseWorkerProcessEnvironment(
   assertProductionInheritedEnvironment(source);
   const memory = parseMem0DevelopmentEnvironment(source);
   const parsed = parseStrictEnvironment(source, workerEnvironmentSchema);
+  const identityRootKey = parsed.values.EXTERNAL_TOOL_IDENTITY_ROOT_KEY;
+  // 身份派生不能使用公开样例，也不能与供应商鉴权或凭据加密共用密钥。
+  if (
+    identityRootKey !== undefined &&
+    (Buffer.byteLength(identityRootKey, "utf8") < 32 ||
+      identityRootKey.startsWith("replace-") ||
+      /^<[^>]+>$/u.test(identityRootKey) ||
+      identityRootKey === parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY ||
+      identityRootKey === parsed.values.MODEL_API_KEY)
+  ) {
+    throw new EnvironmentConfigurationError([
+      { code: "INVALID", key: "EXTERNAL_TOOL_IDENTITY_ROOT_KEY" },
+    ]);
+  }
   if (parsed.runtimeEnvironment === "production") {
     assertProductionHasNoDevelopmentIdentity(source);
   }
@@ -705,9 +718,7 @@ export function parseWorkerProcessEnvironment(
     }),
     externalToolsAllowPrivateAddresses:
       parsed.values.EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES ?? false,
-    ...(parsed.values.EXTERNAL_TOOL_IDENTITY_ROOT_KEY === undefined
-      ? {}
-      : { externalToolIdentityRootKey: parsed.values.EXTERNAL_TOOL_IDENTITY_ROOT_KEY }),
+    ...(identityRootKey === undefined ? {} : { externalToolIdentityRootKey: identityRootKey }),
     model: Object.freeze({
       baseUrl: parsed.values.MODEL_BASE_URL ?? "https://unconfigured.invalid/v1",
       apiKey: parsed.values.MODEL_API_KEY ?? "",
@@ -1288,7 +1299,7 @@ async function assembleWorkerRuntime(
       telemetry,
       {
         snapshots: new PgExternalToolSnapshotReader(
-          pool,
+          coordinatorPool,
           new ExternalToolCredentialDecryptor(configuration.model.credentialEncryptionKey),
         ),
         ...(configuration.externalToolIdentityRootKey === undefined

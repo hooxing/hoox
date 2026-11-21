@@ -11,6 +11,7 @@ function validExample(): string {
   return [...expectedEnvironmentKeys, ...optionalEnvironmentKeys]
     .map((key) => {
       switch (key) {
+        case "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES":
         case "OTEL_EXPORT_ENABLED":
         case "OTEL_EXPORT_CONTENT_ENABLED":
           return `${key}=false`;
@@ -49,6 +50,7 @@ function validExample(): string {
         key.endsWith("TOKEN") ||
         key.endsWith("TEMPLATE_ID") ||
         key === "MODEL_CREDENTIAL_ENCRYPTION_KEY" ||
+        key === "EXTERNAL_TOOL_IDENTITY_ROOT_KEY" ||
         key === "RESOURCEFS_PROXY_TLS_KEY_PATH" ||
         key === "RESOURCEFS_PROXY_TLS_CERT_PATH" ||
         key === "MINIO_ROOT_USER" ||
@@ -97,6 +99,8 @@ describe("环境变量示例契约", () => {
       "MEM0_API_KEY",
       "AGENT_WORKER_MAX_CONCURRENT_RUNS",
       "THREAD_CONTEXT_COMPACTION_TIMEOUT_MS",
+      "EXTERNAL_TOOL_IDENTITY_ROOT_KEY",
+      "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES",
     ]) {
       expect(expectedEnvironmentKeys).not.toContain(key);
       expect(optionalEnvironmentKeys).toContain(key);
@@ -109,6 +113,36 @@ describe("环境变量示例契约", () => {
         "POSTGRES_BOOTSTRAP_PASSWORD",
       ]),
     );
+  });
+
+  it("根样例身份根只允许占位值，拒绝非占位密钥且不回显", async () => {
+    const source = await readFile(new URL("../.env.example", import.meta.url), "utf8");
+    const root = "EXTERNAL_TOOL_IDENTITY_ROOT_KEY";
+    for (const placeholder of [
+      "replace-with-at-least-32-byte-external-tool-identity-root-key",
+      "<external-tool-identity-root-key-placeholder>",
+    ]) {
+      expect(
+        validateEnvironmentExample(
+          source.replace(/^EXTERNAL_TOOL_IDENTITY_ROOT_KEY=.*$/mu, `${root}=${placeholder}`),
+        ),
+      ).toEqual([]);
+    }
+    const secret = "test-only-identity-root-canary-at-least-32-bytes";
+    const issues = validateEnvironmentExample(
+      source.replace(/^EXTERNAL_TOOL_IDENTITY_ROOT_KEY=.*$/mu, `${root}=${secret}`),
+    );
+    expect(issues).toEqual([`示例配置疑似包含真实凭据：${root}`]);
+    expect(JSON.stringify(issues).includes(secret)).toBe(false);
+  });
+
+  it("外部工具私网开关按布尔值而非凭据校验", () => {
+    const source = validExample();
+    const flag = "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES";
+    expect(validateEnvironmentExample(source.replace(`${flag}=false`, `${flag}=true`))).toEqual([]);
+    expect(validateEnvironmentExample(source.replace(`${flag}=false`, `${flag}=yes`))).toEqual([
+      `${flag} 必须为 true 或 false`,
+    ]);
   });
 
   it("AGS 示例凭据必须使用占位值且诊断不回显密钥", () => {

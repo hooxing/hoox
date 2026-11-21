@@ -12,6 +12,7 @@ import {
 } from "@hoox/domain";
 import {
   ExternalToolTransportError,
+  type ExternalEffectPermit,
   type ExternalToolCallContext,
   type ValidatedExternalTarget,
   type ExternalToolReconciliationPort,
@@ -260,12 +261,13 @@ export interface ExternalToolExecutionPorts {
     readonly callId: string;
     readonly toolName: string;
   }) => Promise<void>;
-  /** 必须完成一次性 permit 领取和消费，返回后不得插入额外异步持久化操作。 */
+  /** 预检后领取并消费精确版本的一次性许可；返回后 Router 不再等待其他端口。 */
   readonly authorizeAndConsume: (input: {
     readonly callId: string;
     readonly toolName: string;
     readonly argsDigest: Sha256Digest;
-  }) => Promise<void>;
+    readonly toolVersionId: string;
+  }) => Promise<{ readonly permit: Pick<ExternalEffectPermit, "toolVersionId"> }>;
   readonly transport: ExternalToolTransport;
   readonly getCallContext: (callId: string) => ExternalToolCallContext;
   /** HTTP 工具版本绑定的方法；返回 undefined 或未提供时 HTTP Transport 在发包前拒绝。 */
@@ -317,7 +319,14 @@ export function createExternalToolAgentTool(
       const args = rawArgs;
       const serialized = canonicalJson(args);
       const argsDigest = sha256Digest(createHash("sha256").update(serialized).digest("hex"));
-      let wrote = false;
+      const failed = async (code: string) => {
+        await ports.recordReceipt({ callId, receipt: receipt("failed") });
+        return {
+          content: [{ type: "text" as const, text: "外部工具调用未完成。" }],
+          details: { error: code },
+        };
+      };
+      let invocation: Parameters<ExternalToolTransport["invoke"]>[0];
       try {
         const retry = ports.isExplicitlyReconciledRetry
           ? await ports.isExplicitlyReconciledRetry({
@@ -340,7 +349,6 @@ export function createExternalToolAgentTool(
             throw new Error("EXTERNAL_TOOL_RETRY_REJECTED");
         } else {
           await ports.persistStarted({ callId, toolName: tool.modelToolName });
-          await ports.authorizeAndConsume({ callId, toolName: tool.modelToolName, argsDigest });
         }
         // 总超时从 DNS 预检开始计算，Transport 共用同一绝对截止时间。
         const deadlineAt = Date.now() + tool.timeoutMs;
@@ -355,8 +363,7 @@ export function createExternalToolAgentTool(
         );
         const method =
           tool.source === "http" ? ports.httpMethodForVersion?.(tool.toolVersionId) : undefined;
-        wrote = true;
-        const response = await ports.transport.invoke({
+        invocation = {
           tool,
           target,
           arguments: args,
@@ -369,24 +376,48 @@ export function createExternalToolAgentTool(
           maxResponseBytes: tool.maxResponseBytes,
           redirect: "error",
           ...(signal === undefined ? {} : { signal }),
+        };
+      } catch (error) {
+        return failed(
+          error instanceof ExternalToolTransportError ? error.safeCode : "EXTERNAL_TOOL_FAILED",
+        );
+      }
+      // 对账只许可重试原调用，不替代本次发包许可。消费失败由 Worker 分类，不能变成可继续的模型结果。
+      try {
+        const consumed = await ports.authorizeAndConsume({
+          callId,
+          toolName: tool.modelToolName,
+          toolVersionId: tool.toolVersionId,
+          argsDigest,
         });
+        if (consumed?.permit?.toolVersionId !== tool.toolVersionId)
+          throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+      } catch (error) {
+        await ports.recordReceipt({ callId, receipt: receipt("failed") });
+        throw error;
+      }
+      try {
+        const response = await ports.transport.invoke(invocation);
         if (response.body.byteLength > tool.maxResponseBytes)
           throw new Error("EXTERNAL_TOOL_RESPONSE_LIMIT");
-        // 模型只看到正文投影：凭据与签名、时间戳等认证材料在解析后逐值剔除。
-        const secrets = [credential, ...(response.authMaterial ?? [])].filter(
-          (value): value is string => typeof value === "string" && value.length > 0,
-        );
-        const raw = new TextDecoder().decode(response.body);
-        let visible = raw;
+        let visible: string;
         if (response.body.byteLength === 0) visible = "外部工具调用已成功，未返回内容。";
-        else if (/json/i.test(response.contentType)) {
-          try {
-            visible = JSON.stringify(redactJson(JSON.parse(raw), secrets));
-          } catch {
-            throw new Error("EXTERNAL_TOOL_RESPONSE_INVALID");
+        // 尚无已持久化的可信字段投影契约；持凭据端点只能返回固定回执，字面脱敏不能阻断任意编码回显。
+        else if (tool.credentialRef !== null || (credential !== undefined && credential.length > 0))
+          visible = "外部工具调用已成功，响应正文未向模型公开。";
+        else {
+          const secrets = (response.authMaterial ?? []).filter((value) => value.length > 0);
+          const raw = new TextDecoder().decode(response.body);
+          visible = raw;
+          if (/json/i.test(response.contentType)) {
+            try {
+              visible = JSON.stringify(redactJson(JSON.parse(raw), secrets));
+            } catch {
+              throw new Error("EXTERNAL_TOOL_RESPONSE_INVALID");
+            }
           }
+          visible = redactText(visible, secrets);
         }
-        visible = redactText(visible, secrets);
         const cap = Math.max(1, Math.min(8192, ports.maxModelVisibleBytes ?? 8192));
         const bytes = new TextEncoder().encode(visible);
         if (bytes.byteLength > cap) visible = decodeUtf8Prefix(bytes, cap);
@@ -396,30 +427,14 @@ export function createExternalToolAgentTool(
           details: { truncated: bytes.byteLength > cap },
         };
       } catch (error) {
-        if (
-          error instanceof ExternalToolTransportError &&
-          (error.disposition === "not_sent" || error.disposition === "responded_failure")
-        ) {
-          await ports.recordReceipt({ callId, receipt: receipt("failed") });
-          return {
-            content: [{ type: "text", text: "外部工具调用未完成。" }],
-            details: { error: error.safeCode },
-          };
+        if (error instanceof ExternalToolTransportError) return failed(error.safeCode);
+        recoveryRequired = true;
+        try {
+          await ports.requireRecovery({ callId, code: "EXTERNAL_TOOL_RESULT_UNKNOWN" });
+        } catch {
+          throw new Error("EXTERNAL_TOOL_RECOVERY_UNAVAILABLE");
         }
-        if (wrote) {
-          recoveryRequired = true;
-          try {
-            await ports.requireRecovery({ callId, code: "EXTERNAL_TOOL_RESULT_UNKNOWN" });
-          } catch {
-            throw new Error("EXTERNAL_TOOL_RECOVERY_UNAVAILABLE");
-          }
-          throw new Error("EXTERNAL_TOOL_RESULT_UNKNOWN");
-        }
-        await ports.recordReceipt({ callId, receipt: receipt("failed") });
-        return {
-          content: [{ type: "text", text: "外部工具调用未完成。" }],
-          details: { error: "EXTERNAL_TOOL_FAILED" },
-        };
+        throw new Error("EXTERNAL_TOOL_RESULT_UNKNOWN");
       }
     },
   };

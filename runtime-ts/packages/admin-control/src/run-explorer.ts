@@ -190,11 +190,13 @@ export interface RunTrajectoryReaderPort {
     readonly afterCursor?: Readonly<{
       occurredAt: string;
       agentThreadId: string;
+      agentTurnId: string;
       sequence: number;
     }>;
   }): Promise<{
     readonly records: readonly (InternalTrajectoryEventV1 & {
       readonly agentThreadId: string;
+      readonly agentTurnId: string;
       readonly truncated?: boolean;
     })[];
     readonly hasMore: boolean;
@@ -206,6 +208,7 @@ export interface RunTrajectoryReaderPort {
 export interface RunTrajectoryPage {
   readonly events: readonly (InternalTrajectoryEventV1 & {
     readonly agentThreadId: string;
+    readonly agentTurnId: string;
     readonly truncated?: boolean;
   })[];
   readonly bytes: number;
@@ -514,6 +517,8 @@ function decodeTrajectoryCursor(value: string | undefined) {
       typeof parsed.occurredAt === "string" &&
       "agentThreadId" in parsed &&
       typeof parsed.agentThreadId === "string" &&
+      "agentTurnId" in parsed &&
+      typeof parsed.agentTurnId === "string" &&
       "sequence" in parsed &&
       typeof parsed.sequence === "number" &&
       Number.isSafeInteger(parsed.sequence) &&
@@ -522,6 +527,7 @@ function decodeTrajectoryCursor(value: string | undefined) {
       return {
         occurredAt: isoTimestamp(parsed.occurredAt, "轨迹游标时间") as string,
         agentThreadId: parsed.agentThreadId,
+        agentTurnId: parsed.agentTurnId,
         sequence: parsed.sequence,
       };
     }

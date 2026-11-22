@@ -314,6 +314,7 @@ describe("运行详情", () => {
     ].map((event) => ({
       ...event,
       agentThreadId: "agent-a",
+      agentTurnId: "turn-a",
     })) as unknown as RunTrajectoryPageDto["events"];
     const api = {
       ...apiFixture(true),
@@ -351,7 +352,7 @@ describe("运行详情", () => {
     expect(container.textContent).toContain("第 1 轮");
     expect(container.textContent).toContain("30.0 tok/s");
     expect(container.textContent).toContain("20%");
-    const bar = container.querySelector<HTMLButtonElement>('[aria-label^="bash"]');
+    const bar = container.querySelector<HTMLButtonElement>('[aria-label*="bash"]');
     if (bar === null) throw new Error("缺少轨迹泳道记录");
     act(() => bar.click());
     expect(container.querySelector(".trajectory-entry.selected")?.textContent).toContain("bash");
@@ -413,6 +414,7 @@ describe("运行详情", () => {
       type,
       event: body as InternalTrajectoryEventV1["event"],
       agentThreadId: "agent-a",
+      agentTurnId: "turn-a",
     });
     const pages = [
       {
@@ -488,6 +490,72 @@ describe("运行详情", () => {
     expect(partialView.textContent).toContain("汇总仅覆盖已加载部分");
   });
 
+  it("主 Agent 与子 Agent 按独立 Session 投影并以统一时间排序", async () => {
+    const makeEvent = (
+      sequence: number,
+      agentThreadId: string,
+      agentTurnId: string,
+      occurredAt: string,
+      type: string,
+      body: unknown,
+    ) => ({
+      schemaVersion: 1 as const,
+      sequence,
+      occurredAt,
+      monotonicOffsetMs: sequence,
+      source: "pi" as const,
+      type,
+      event: body as InternalTrajectoryEventV1["event"],
+      agentThreadId,
+      agentTurnId,
+    });
+    const events = [
+      makeEvent(1, "", "", "2026-11-19T00:00:01.000Z", "message_start", {
+        type: "message_start",
+        message: { role: "assistant" },
+      }),
+      makeEvent(2, "", "", "2026-11-19T00:00:02.000Z", "message_end", {
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "主回复" }] },
+      }),
+      makeEvent(1, "child-a", "turn-a", "2026-11-19T00:00:03.000Z", "message_start", {
+        type: "message_start",
+        message: { role: "assistant" },
+      }),
+      makeEvent(2, "child-a", "turn-a", "2026-11-19T00:00:04.000Z", "message_end", {
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "子回复" }] },
+      }),
+    ];
+    const trajectory = await loadTrajectoryPages(
+      async () => ({ events, bytes: 100, hasMore: false }),
+      "tenant_a",
+      "run_a",
+      "attempt_a",
+      () => undefined,
+    );
+    expect(new Set(trajectory.records.map((record) => record.id)).size).toBe(
+      trajectory.records.length,
+    );
+    expect(trajectory.records.map((record) => record.sessionLabel)).toContain(
+      "子 Agent child-a · turn-a",
+    );
+    expect(trajectory.records.map((record) => record.monotonicOffsetMs)).toEqual(
+      [...trajectory.records.map((record) => record.monotonicOffsetMs)].sort((a, b) => a - b),
+    );
+    const view = render(<DeepSeekTrajectoryDebugger trajectory={trajectory} />);
+    const entries = [...view.querySelectorAll<HTMLElement>(".trajectory-entry")];
+    expect(entries).toHaveLength(2);
+    const toggles = [...view.querySelectorAll<HTMLButtonElement>(".trajectory-entry-toggle")];
+    act(() => toggles[0]?.click());
+    expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
+    expect(toggles[1]?.getAttribute("aria-expanded")).toBe("false");
+    act(() => toggles[1]?.click());
+    expect(toggles.every((toggle) => toggle.getAttribute("aria-expanded") === "true")).toBe(true);
+    expect(view.querySelectorAll(".trajectory-entry.selected")).toHaveLength(1);
+    expect(view.querySelectorAll(".trajectory-entry.selected")[0]).toBe(entries[1]);
+  });
+
   it("长轨迹仅挂载当前窗口，未展开的详情不会被序列化", async () => {
     const base = await loadTrajectoryPages(
       async () => ({ events: [], bytes: 0, hasMore: false }),
@@ -499,6 +567,8 @@ describe("运行详情", () => {
     const toJSON = vi.fn(() => "详情");
     const records = Array.from({ length: 25_000 }, (_, n) => ({
       id: String(n),
+      sessionId: "main/",
+      sessionLabel: "主 Agent",
       turn: 1,
       lane: "tools" as const,
       kind: "tool",
@@ -533,6 +603,7 @@ describe("运行详情", () => {
       type: "large_event",
       event: { $cubeInternalType: "truncated", originalSize: 3_000_000 },
       agentThreadId: "agent-a",
+      agentTurnId: "turn-a",
       truncated: true,
     };
     const trajectory = await loadTrajectoryPages(

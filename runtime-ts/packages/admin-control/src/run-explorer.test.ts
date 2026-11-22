@@ -284,7 +284,7 @@ describe("Run 列表查询", () => {
     };
     const reader = {
       readPage: vi.fn(async () => ({
-        records: [{ ...event, agentThreadId: "agent_a" }],
+        records: [{ ...event, agentThreadId: "agent_a", agentTurnId: "turn_a" }],
         bytes: 128,
         hasMore: true,
         nextCursor: "stable-cursor",
@@ -294,7 +294,7 @@ describe("Run 列表查询", () => {
     await expect(
       service.readTrajectory("user_admin", "tenant_a", "run_1", "attempt_2"),
     ).resolves.toEqual({
-      events: [{ ...event, agentThreadId: "agent_a" }],
+      events: [{ ...event, agentThreadId: "agent_a", agentTurnId: "turn_a" }],
       bytes: 128,
       hasMore: true,
       nextCursor: "stable-cursor",

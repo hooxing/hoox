@@ -63,6 +63,38 @@ describe("PgRunTrajectoryStore", () => {
     expect(queries.some((sql) => sql.includes("persistence_status='unavailable'"))).toBe(false);
   });
 
+  it("同一子 Agent 不同 followUp Session 的同序号事件使用不同索引与 Blob 幂等键", async () => {
+    const inserts: { values?: readonly unknown[]; sql: string }[] = [];
+    const { pool } = poolFixture(async (sql, values) => {
+      if (sql.startsWith("INSERT INTO run_trajectory_entries"))
+        inserts.push({ sql, ...(values === undefined ? {} : { values }) });
+      return { rowCount: 1, rows: [] };
+    });
+    const traceBlobs = {
+      persistTrace: vi.fn(
+        async (input: { idempotencyKey: string; body: Buffer; sha256: string }) => ({
+          outcome: "persisted" as const,
+          referenceId: `reference-${traceBlobs.persistTrace.mock.calls.length}`,
+          blob: { size: input.body.byteLength, sha256: input.sha256 },
+        }),
+      ),
+    };
+    const store = new PgRunTrajectoryStore(pool, {} as never, traceBlobs as never);
+    for (const agentTurnId of ["turn-first", "turn-follow-up"]) {
+      await store.persist({
+        ...event,
+        context: { ...event.context, agentThreadId: "child-a", agentTurnId },
+      });
+    }
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0]?.values?.[5]).toBe("turn-first");
+    expect(inserts[1]?.values?.[5]).toBe("turn-follow-up");
+    const keys = traceBlobs.persistTrace.mock.calls.map(([input]) => input.idempotencyKey);
+    expect(new Set(keys).size).toBe(2);
+    expect(keys[0]).toMatch(/^run-trajectory:[0-9a-f]{64}$/u);
+    expect(keys[1]).toMatch(/^run-trajectory:[0-9a-f]{64}$/u);
+  });
+
   it("保留期清理只删除到期索引并回收对应 Blob", async () => {
     const statements: string[] = [];
     const { pool } = poolFixture(async (sql) => {

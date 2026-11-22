@@ -54,10 +54,111 @@ export async function loadTrajectoryPages(
     if (!hasNextPage) break;
     cursor = page.nextCursor;
   }
-  const projection = projectInternalTrajectory(
-    events.map(({ agentThreadId: _agentThreadId, ...event }) => event),
+  const sessions = new Map<string, typeof events>();
+  for (const event of events) {
+    const sessionId = JSON.stringify([event.agentThreadId, event.agentTurnId]);
+    const session = sessions.get(sessionId) ?? [];
+    session.push(event);
+    sessions.set(sessionId, session);
+  }
+  const projected = [...sessions.entries()].map(([sessionId, sessionEvents]) => {
+    const projection = projectInternalTrajectory(
+      sessionEvents.map(({ agentThreadId: _thread, agentTurnId: _turn, ...event }) => event),
+    );
+    const main = sessionEvents[0]?.agentThreadId === "";
+    const sessionLabel = main
+      ? "主 Agent"
+      : `子 Agent ${sessionEvents[0]?.agentThreadId} · ${sessionEvents[0]?.agentTurnId}`;
+    return { sessionId, sessionLabel, projection };
+  });
+  const timestamps = events.map((event) => Date.parse(event.occurredAt)).filter(Number.isFinite);
+  const firstTimestamp = timestamps.length > 0 ? Math.min(...timestamps) : 0;
+  const projections = projected
+    .flatMap(({ sessionId, sessionLabel, projection }) =>
+      projection.records.map((record) => ({
+        ...record,
+        id: `${encodeURIComponent(sessionId)}:${record.id}`,
+        sessionId,
+        sessionLabel,
+        monotonicOffsetMs: Math.max(0, Date.parse(record.startedAt) - firstTimestamp),
+      })),
+    )
+    .sort(
+      (left, right) =>
+        left.monotonicOffsetMs - right.monotonicOffsetMs || left.id.localeCompare(right.id),
+    );
+  const sessionStats = projected.map(({ projection }) => projection.stats);
+  const recordsByTurn = new Map<string, typeof projections>();
+  for (const record of projections) {
+    const key = JSON.stringify([record.sessionId, record.turn]);
+    const group = recordsByTurn.get(key) ?? [];
+    group.push(record);
+    recordsByTurn.set(key, group);
+  }
+  const turns = projected.flatMap(({ sessionId, sessionLabel, projection }) =>
+    projection.turns.map((turn) => ({
+      ...turn,
+      sessionId,
+      sessionLabel,
+      records: recordsByTurn.get(JSON.stringify([sessionId, turn.turn])) ?? [],
+    })),
   );
-  return { ...projection, partial, loadedEvents: events.length, loadedBytes, truncatedEvents };
+  const stats =
+    sessionStats.length === 1 && sessionStats[0] !== undefined
+      ? sessionStats[0]
+      : (() => {
+          const totals = sessionStats.reduce(
+            (total, item) => ({
+              events: total.events + item.events,
+              records: total.records + item.records,
+              turns: total.turns + item.turns,
+              calls: total.calls + item.calls,
+              failedCalls: total.failedCalls + item.failedCalls,
+              inputTokens: total.inputTokens + item.inputTokens,
+              outputTokens: total.outputTokens + item.outputTokens,
+              cacheReadTokens: total.cacheReadTokens + item.cacheReadTokens,
+              cacheWriteTokens: total.cacheWriteTokens + item.cacheWriteTokens,
+              modelDurationMs: total.modelDurationMs + item.modelDurationMs,
+              modelWaitDurationMs:
+                total.modelWaitDurationMs === null || item.modelWaitDurationMs === null
+                  ? null
+                  : total.modelWaitDurationMs + item.modelWaitDurationMs,
+              durationMs: Math.max(total.durationMs, item.durationMs),
+            }),
+            {
+              events: 0,
+              records: 0,
+              turns: 0,
+              calls: 0,
+              failedCalls: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              modelDurationMs: 0,
+              modelWaitDurationMs: 0 as number | null,
+              durationMs: 0,
+            },
+          );
+          const cacheDenominator = totals.inputTokens + totals.cacheReadTokens;
+          return {
+            ...totals,
+            outputTokensPerSecond:
+              totals.modelDurationMs > 0
+                ? (totals.outputTokens / totals.modelDurationMs) * 1_000
+                : null,
+            cacheHitRate: cacheDenominator > 0 ? totals.cacheReadTokens / cacheDenominator : null,
+          };
+        })();
+  return {
+    turns,
+    records: projections,
+    stats,
+    partial,
+    loadedEvents: events.length,
+    loadedBytes,
+    truncatedEvents,
+  };
 }
 
 export const runStatusLabels: Readonly<Record<RunStatus, string>> = {
@@ -704,16 +805,17 @@ export function DeepSeekTrajectoryDebugger({
   const lastPage = Math.max(0, Math.ceil(records.length / trajectoryWindowSize) - 1);
   const start = Math.min(page, lastPage) * trajectoryWindowSize;
   const visibleRecords = records.slice(start, start + trajectoryWindowSize);
-  const groups = new Map<number, RunTrajectoryRecordDto[]>();
+  const groups = new Map<string, RunTrajectoryRecordDto[]>();
   for (const record of visibleRecords) {
-    const group = groups.get(record.turn) ?? [];
+    const groupKey = `${record.sessionId}:${record.turn}`;
+    const group = groups.get(groupKey) ?? [];
     group.push(record);
-    groups.set(record.turn, group);
+    groups.set(groupKey, group);
   }
-  const origin = Math.min(...visibleRecords.map((record) => record.monotonicOffsetMs));
+  const origin = records[0]?.monotonicOffsetMs ?? 0;
   const maxOffset = Math.max(
     1,
-    ...visibleRecords.map((record) => record.monotonicOffsetMs - origin + (record.durationMs ?? 0)),
+    ...records.map((record) => record.monotonicOffsetMs - origin + (record.durationMs ?? 0)),
   );
   const usage = trajectory.stats;
   const tokenTotal =
@@ -816,7 +918,8 @@ export function DeepSeekTrajectoryDebugger({
                   <button
                     type="button"
                     key={record.id}
-                    aria-label={`${record.label} ${record.summary}`}
+                    aria-label={`${record.sessionLabel} ${record.label} ${record.summary}`}
+                    title={`${record.sessionLabel} · ${record.label}: ${record.summary}`}
                     aria-pressed={selectedId === record.id}
                     className={`trajectory-bar ${record.kind} ${selectedId === record.id ? "selected" : ""}`}
                     style={{
@@ -831,9 +934,13 @@ export function DeepSeekTrajectoryDebugger({
         ))}
       </section>
       <div className="trajectory-ledger">
-        {[...groups].map(([turn, turnRecords]) => (
-          <section className="trajectory-turn" key={turn}>
-            {showTurns && <h3>第 {turn} 轮</h3>}
+        {[...groups].map(([groupKey, turnRecords]) => (
+          <section className="trajectory-turn" key={groupKey}>
+            {showTurns && (
+              <h3>
+                {turnRecords[0]?.sessionLabel} · 第 {turnRecords[0]?.turn} 轮
+              </h3>
+            )}
             {turnRecords.map((record) => {
               const isExpanded = expanded.has(record.id);
               return (
@@ -855,7 +962,9 @@ export function DeepSeekTrajectoryDebugger({
                       });
                     }}
                   >
-                    <span className={`trajectory-kind ${record.kind}`}>{record.label}</span>
+                    <span className={`trajectory-kind ${record.kind}`}>
+                      {record.sessionLabel} · {record.label}
+                    </span>
                     <span className="trajectory-summary">{record.summary}</span>
                     <span className="trajectory-duration">
                       {record.durationMs === null ? "—" : formatDuration(record.durationMs)}

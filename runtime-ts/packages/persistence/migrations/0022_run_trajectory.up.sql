@@ -4,6 +4,7 @@ CREATE TABLE run_trajectory_entries (
   run_id text NOT NULL,
   attempt_id text NOT NULL,
   agent_thread_id text NOT NULL DEFAULT '',
+  agent_turn_id text NOT NULL DEFAULT '',
   sequence bigint NOT NULL CHECK (sequence BETWEEN 1 AND 9007199254740991),
   source text NOT NULL CHECK (source IN ('pi','runtime')),
   event_type text NOT NULL CHECK (octet_length(event_type) BETWEEN 1 AND 256),
@@ -17,20 +18,23 @@ CREATE TABLE run_trajectory_entries (
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, attempt_id, agent_thread_id, sequence),
+  PRIMARY KEY (tenant_id, attempt_id, agent_thread_id, agent_turn_id, sequence),
   FOREIGN KEY (tenant_id, attempt_id, run_id, thread_id)
     REFERENCES execution_attempts(tenant_id, attempt_id, run_id, thread_id) ON DELETE RESTRICT,
   FOREIGN KEY (tenant_id, blob_reference_id)
     REFERENCES blob_references(tenant_id, reference_id) ON DELETE RESTRICT,
+  CONSTRAINT run_trajectory_agent_session_shape_check CHECK (
+    (agent_thread_id='' AND agent_turn_id='') OR (agent_thread_id<>'' AND agent_turn_id<>'')
+  ),
   CONSTRAINT run_trajectory_blob_shape_check CHECK (
     (persistence_status='stored' AND blob_reference_id IS NOT NULL)
     OR (persistence_status IN ('pending','unavailable') AND blob_reference_id IS NULL)
   )
 );
 CREATE INDEX run_trajectory_attempt_sequence_idx
-  ON run_trajectory_entries(tenant_id, run_id, attempt_id, occurred_at, agent_thread_id, sequence);
+  ON run_trajectory_entries(tenant_id, run_id, attempt_id, occurred_at, agent_thread_id, agent_turn_id, sequence);
 CREATE INDEX run_trajectory_expiry_idx
-  ON run_trajectory_entries(tenant_id, (GREATEST(expires_at,updated_at)), attempt_id, agent_thread_id, sequence);
+  ON run_trajectory_entries(tenant_id, (GREATEST(expires_at,updated_at)), attempt_id, agent_thread_id, agent_turn_id, sequence);
 
 ALTER TABLE run_trajectory_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE run_trajectory_entries FORCE ROW LEVEL SECURITY;
@@ -74,7 +78,7 @@ END $$;
 REVOKE ALL ON run_trajectory_cleanup_tenants FROM PUBLIC;
 
 CREATE VIEW admin_run_trajectory_directory WITH (security_barrier=true) AS
-SELECT entry.tenant_id, entry.thread_id, entry.run_id, entry.attempt_id, entry.agent_thread_id, entry.sequence,
+SELECT entry.tenant_id, entry.thread_id, entry.run_id, entry.attempt_id, entry.agent_thread_id, entry.agent_turn_id, entry.sequence,
        entry.source, entry.event_type, entry.occurred_at, entry.monotonic_offset_ms,
        entry.sha256, entry.size, entry.persistence_status, entry.blob_reference_id,
        reference.purpose AS blob_purpose, reference.state AS blob_state,

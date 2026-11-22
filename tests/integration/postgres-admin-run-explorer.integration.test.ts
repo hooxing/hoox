@@ -286,6 +286,32 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
     }
   });
 
+  it("相同 Agent Thread 的 followUp Session 可各自保存相同 sequence", async () => {
+    for (const [turn, digest] of [
+      ["turn-first", "a".repeat(64)],
+      ["turn-follow-up", "b".repeat(64)],
+    ] as const) {
+      await administrator.query(
+        `INSERT INTO "${schema}".run_trajectory_entries(
+           tenant_id,thread_id,run_id,attempt_id,agent_thread_id,agent_turn_id,sequence,
+           source,event_type,occurred_at,monotonic_offset_ms,sha256,size,persistence_status,
+           blob_operation_id,expires_at
+         ) VALUES('tenant_a','thread_1','run_a2','run_a2_attempt','agent_child',$1,1,
+           'runtime','session_event',now(),0,$2,1,'pending',$3,now()+interval '1 day')`,
+        [turn, digest, `trace-${digest}`],
+      );
+    }
+    const result = await administrator.query(
+      `SELECT agent_thread_id,agent_turn_id,sequence FROM "${schema}".run_trajectory_entries
+        WHERE tenant_id='tenant_a' AND attempt_id='run_a2_attempt' AND agent_thread_id='agent_child'
+        ORDER BY agent_turn_id`,
+    );
+    expect(result.rows).toEqual([
+      { agent_thread_id: "agent_child", agent_turn_id: "turn-first", sequence: "1" },
+      { agent_thread_id: "agent_child", agent_turn_id: "turn-follow-up", sequence: "1" },
+    ]);
+  });
+
   it("stage_verified 后取消保留 pending 锚点，重启的清理器先删除 staging 再删除索引", async () => {
     const controller = new AbortController();
     const repository = new PgBlobLifecycleRepository(runtime);

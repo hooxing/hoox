@@ -101,6 +101,8 @@ export interface RunDetailDto {
 
 export interface RunTrajectoryRecordDto {
   readonly id: string;
+  readonly sessionId: string;
+  readonly sessionLabel: string;
   readonly turn: number;
   readonly lane: "input" | "model" | "tools";
   readonly kind: string;
@@ -123,6 +125,7 @@ export interface RunTrajectoryRecordDto {
 export interface RunTrajectoryPageDto {
   readonly events: readonly (InternalTrajectoryEventV1 & {
     readonly agentThreadId: string;
+    readonly agentTurnId: string;
     readonly truncated?: boolean;
   })[];
   readonly bytes: number;

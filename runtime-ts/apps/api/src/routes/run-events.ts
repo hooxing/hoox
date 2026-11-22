@@ -179,6 +179,7 @@ const publicAgentEventTypes = new Set([
 
 /** 仅透传已由 RuntimeAgentEvent 协议声明的 agent 子类型，未知 payload 不能伪造公开事件类型。 */
 function publicEventType(kind: string, payload: Readonly<Record<string, unknown>>): string {
+  if (kind === "run_waiting" && typeof payload.callId === "string") return "requires_action";
   if (kind !== "agent_event") return kind;
   const candidate = payload.type;
   return typeof candidate === "string" && publicAgentEventTypes.has(candidate) ? candidate : kind;

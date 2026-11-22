@@ -51,6 +51,7 @@ interface Attempt {
   readonly attributes: Attributes;
   readonly tools?: Map<string, Tool>;
   readonly closeModelSpans?: Set<Span>;
+  suppressContent?: true;
   terminal?: TerminalRun;
   lastToolSequence: number;
   closed: boolean;
@@ -277,10 +278,16 @@ export class WorkerTelemetry {
     });
   }
 
+  /** 含客户端工具的调用参数和回执可能带业务秘密；即使部署启用正文遥测，也只导出元数据。 */
+  suppressAttemptContent(attemptId: string): void {
+    const attempt = this.#current(attemptId);
+    if (attempt) attempt.suppressContent = true;
+  }
+
   captureToolBody(attemptId: string, callId: string, kind: "args" | "result", body: unknown): void {
     if (!this.contentEnabled) return;
     const attempt = this.#current(attemptId);
-    if (!attempt?.tools) return;
+    if (!attempt?.tools || attempt.suppressContent) return;
     safely(() => {
       const tool = this.#tool(attempt, callId);
       if (tool === undefined) return;
@@ -338,7 +345,8 @@ export class WorkerTelemetry {
         : undefined;
       if (child !== undefined) {
         attempt.closeModelSpans?.add(child);
-        if (this.contentEnabled) safely(() => captureModelInput(child, context));
+        if (this.contentEnabled && !attempt.suppressContent)
+          safely(() => captureModelInput(child, context));
       }
       return child;
     });
@@ -378,7 +386,8 @@ export class WorkerTelemetry {
             span.setAttribute("gen_ai.usage.cache_read.input_tokens", usage.cacheRead);
           if (usage.cacheWrite > 0)
             span.setAttribute("gen_ai.usage.cache_write.input_tokens", usage.cacheWrite);
-          if (this.contentEnabled) safely(() => captureModelOutput(span, message, finishReason));
+          if (this.contentEnabled && !attempt.suppressContent)
+            safely(() => captureModelOutput(span, message, finishReason));
         }
       }
       if (span !== undefined) {

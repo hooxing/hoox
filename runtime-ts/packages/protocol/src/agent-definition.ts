@@ -60,6 +60,7 @@ export const AgentRevisionContentSchema = Type.Object(
                 name: boundedText(100),
                 description: boundedText(1000),
                 inputSchema: Type.Record(Type.String(), Type.Unknown()),
+                waitTimeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 86_400_000 })),
               },
               strict,
             ),

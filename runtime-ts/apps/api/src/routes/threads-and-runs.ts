@@ -15,6 +15,9 @@ import {
   type RunPath,
   RunPathSchema,
   RunSuccessEnvelopeSchema,
+  type SubmitToolResult,
+  SubmitToolResultSchema,
+  ToolResultSuccessEnvelopeSchema,
   type ThreadContextListQuery,
   ThreadContextListQuerySchema,
   ThreadContextPageSuccessEnvelopeSchema,
@@ -49,13 +52,50 @@ export function registerThreadAndRunRoutes(
   app: FastifyInstance,
   dependencies: Pick<
     ApiDependencies,
-    "resourceAttachments" | "threadContext" | "threadContinuity" | "threadForks"
+    | "clientToolResults"
+    | "resourceAttachments"
+    | "threadContext"
+    | "threadContinuity"
+    | "threadForks"
   >,
   createCapability: ApiCreateCapability | undefined,
   service: ApiService,
   authenticate: AuthenticateRequest,
   authenticateSelectedTenant: AuthenticateSelectedTenant,
 ): void {
+  app.post<{ Params: RunPath; Body: SubmitToolResult }>(
+    "/v1/threads/:threadId/runs/:runId/tool-results",
+    {
+      preValidation: async (request) => requireJsonContentType(request),
+      schema: {
+        params: RunPathSchema,
+        body: SubmitToolResultSchema,
+        response: {
+          200: ToolResultSuccessEnvelopeSchema,
+          400: ErrorEnvelopeSchema,
+          401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
+          404: ErrorEnvelopeSchema,
+          409: ErrorEnvelopeSchema,
+          415: ErrorEnvelopeSchema,
+          500: ErrorEnvelopeSchema,
+          503: ErrorEnvelopeSchema,
+        },
+      },
+    },
+    async (request) => {
+      const auth = await authenticate(request, "tool-results:submit");
+      if (!auth.apiKey) throw new ApiFailure("forbidden");
+      if (!dependencies.clientToolResults) throw new ApiFailure("dependency_unavailable");
+      const outcome = await dependencies.clientToolResults.submit({
+        scope: auth.scope,
+        ...request.params,
+        ...request.body,
+      });
+      if (outcome !== "accepted") throw new ApiFailure(outcome);
+      return success(request, { callId: request.body.callId, accepted: true });
+    },
+  );
   if (createCapability !== undefined) {
     app.post<{ Body: CreateThreadRequest }>(
       "/v1/threads",

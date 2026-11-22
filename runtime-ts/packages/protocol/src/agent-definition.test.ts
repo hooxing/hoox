@@ -80,6 +80,26 @@ describe("AgentDefinition 协议 Schema", () => {
       }),
     ).toBe(true);
   });
+  it("接受可选客户端等待时限并拒绝越界值", () => {
+    const clientTool = {
+      name: "send_order",
+      description: "创建订单",
+      inputSchema: { type: "object", properties: {} },
+      waitTimeoutMs: 30_000,
+    };
+    expect(
+      Value.Check(AgentRevisionContentSchema, {
+        ...content,
+        tools: { ...content.tools, clientTools: [clientTool] },
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(AgentRevisionContentSchema, {
+        ...content,
+        tools: { ...content.tools, clientTools: [{ ...clientTool, waitTimeoutMs: 999 }] },
+      }),
+    ).toBe(false);
+  });
   it("拒绝未声明的 Revision 和请求字段", () => {
     expect(Value.Check(AgentRevisionContentSchema, { ...content, credential: "secret" })).toBe(
       false,

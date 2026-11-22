@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHmac, hkdfSync } from "node:crypto";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import type { IncomingHttpHeaders } from "node:http";
 import { createServer } from "node:https";
@@ -406,9 +406,75 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
     ).toBe(false);
   });
 
-  it("PTC 客户端 Mock 复用已验证前驱，不重复写入开始事实", async () => {
+  it("根 Session 在完整 turn 后挂起，重建 Worker 只消费回执且保持模型前缀字节稳定", async () => {
     const persistence = new FakeExecutionPersistence();
-    const base = seed("client-mock-ptc", [], [], undefined, "ptc");
+    const scope = persistence.addSeed({
+      ...seed("client-wait", []),
+      agent: fakeAgentSnapshot({
+        tools: {
+          mode: "configured",
+          toolCallingMode: "native",
+          builtinTools: [],
+          externalTools: [],
+          clientTools: [
+            {
+              name: "client_lookup",
+              description: "客户端查询",
+              inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            },
+          ],
+        },
+      }),
+    });
+    const first = await pi(reader([]));
+    const material = (ctx: Context) => JSON.stringify([ctx.systemPrompt, ctx.tools]);
+    let prefix = "";
+    first.faux.setResponses([
+      (ctx) => {
+        prefix = material(ctx);
+        return fauxAssistantMessage(
+          [
+            fauxToolCall("client_lookup", {}, { id: "lookup-a" }),
+            fauxToolCall("client_lookup", {}, { id: "lookup-b" }),
+          ],
+          { stopReason: "toolUse" },
+        );
+      },
+    ]);
+    expect(await worker(persistence, first.sessions).execute(scope)).toEqual({
+      outcome: "waiting",
+    });
+    expect(first.starts.map((c) => c.toolCallId).sort()).toEqual(["lookup-a", "lookup-b"]);
+    const resumed = await pi(reader([]));
+    expect(await worker(persistence, resumed.sessions).execute(scope)).toMatchObject({
+      reason: "waiting_for_answer",
+    });
+    persistence.setAnswer(
+      scope,
+      '{"type":"client_tool_results","results":[{"result":"来自客户端"}]}',
+    );
+    let nextPrefix = "",
+      received = false;
+    resumed.faux.setResponses([
+      (ctx) => {
+        nextPrefix = material(ctx);
+        received = JSON.stringify(ctx.messages).includes("来自客户端");
+        return fauxAssistantMessage("完成");
+      },
+    ]);
+    expect(await worker(persistence, resumed.sessions).execute(scope)).toEqual({
+      outcome: "succeeded",
+    });
+    expect(received).toBe(true);
+    expect(nextPrefix).toBe(prefix);
+    expect(createHash("sha256").update(prefix).digest("hex")).toMatchInlineSnapshot(
+      `"03ce944eb30dbdf224a62545f0eca9419c6d2f3d34783bbb71f994d4a4712c63"`,
+    );
+    expect(resumed.starts).toHaveLength(0);
+  });
+  it("native 客户端 Mock 只回传本地结果，不创建等待", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const base = seed("client-mock-native", []);
     const scope = persistence.addSeed({
       ...base,
       origin: "playground",
@@ -430,17 +496,13 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
               },
             },
           ],
-          toolCallingMode: "ptc",
+          toolCallingMode: "native",
         },
       }),
     });
-    const { faux, sessions, starts, receipts } = await pi(reader([]), "ptc");
+    const { faux, sessions, starts, receipts } = await pi(reader([]), "native");
     faux.setResponses([
-      toolCall(
-        "run_code",
-        { code: 'return await tools.client_lookup({key: "ptc"});' },
-        "client-program",
-      ),
+      toolCall("client_lookup", { key: "test" }, "client-call"),
       fauxAssistantMessage("完成"),
     ]);
     expect(await worker(persistence, sessions).execute(scope)).toEqual({ outcome: "succeeded" });

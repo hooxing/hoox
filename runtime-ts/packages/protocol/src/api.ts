@@ -12,6 +12,19 @@ export type ThreadPath = Static<typeof ThreadPathSchema>;
 export const RunPathSchema = Type.Object({ threadId: IdSchema, runId: IdSchema }, strict);
 export type RunPath = Static<typeof RunPathSchema>;
 
+export const SubmitToolResultSchema = Type.Object(
+  {
+    callId: Type.String({ minLength: 1, maxLength: 200 }),
+    outcome: Type.Union([Type.Literal("succeeded"), Type.Literal("failed")]),
+    result: Type.String({ maxLength: 1_048_576 }),
+  },
+  strict,
+);
+export type SubmitToolResult = Static<typeof SubmitToolResultSchema>;
+export const ToolResultSuccessEnvelopeSchema = successEnvelopeSchema(
+  Type.Object({ callId: Type.String(), accepted: Type.Literal(true) }, strict),
+);
+
 export const ThreadInputReceiptPathSchema = Type.Object(
   { threadId: IdSchema, receiptId: Type.String({ minLength: 1, maxLength: 200 }) },
   strict,

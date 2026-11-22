@@ -118,13 +118,23 @@ export function AgentDefinitionEditor({
   ) => Promise<void>;
   readonly onCancel: () => void;
 }) {
+  const formId = useId();
   const [content, setContent] = useState(initial ?? initialContent);
+  const [clientToolSchemaDrafts, setClientToolSchemaDrafts] = useState(() =>
+    (initial?.tools.mode === "configured" ? initial.tools.clientTools : []).map((tool) =>
+      JSON.stringify(tool.inputSchema, null, 2),
+    ),
+  );
   const [questions, setQuestions] = useState(content.suggestedQuestions.join("\n"));
+  const [clientToolRowIds, setClientToolRowIds] = useState(() =>
+    (initial?.tools.mode === "configured" ? initial.tools.clientTools : []).map(() =>
+      crypto.randomUUID(),
+    ),
+  );
   const [versionNotes, setVersionNotes] = useState("");
   const [scope, setScope] = useState("all_tenants");
   const [tenantIds, setTenantIds] = useState("");
   const [error, setError] = useState<string>();
-  const formId = useId();
   const instructionsHelpId = `${formId}-instructions-status`;
   const instructionBytes = byteLength(content.operatorInstructions);
   const instructionError =
@@ -182,8 +192,32 @@ export function AgentDefinitionEditor({
         throw new Error("请重新选择或移除已不可选的 Skill 版本。");
       }
       if (Array.from(versionNotes).length > 2000) throw new Error("版本说明不得超过 2000 字符。");
+      if (configured?.toolCallingMode === "ptc" && configured.clientTools.length)
+        throw new Error("客户端工具需要 native 工具调用模式。");
+      const tools =
+        content.tools.mode !== "configured"
+          ? content.tools
+          : {
+              ...content.tools,
+              clientTools: content.tools.clientTools.map((tool, index) => {
+                let inputSchema: unknown;
+                try {
+                  inputSchema = JSON.parse(clientToolSchemaDrafts[index] ?? "");
+                } catch {
+                  throw new Error("客户端工具参数 Schema 必须是有效 JSON 对象。");
+                }
+                if (
+                  typeof inputSchema !== "object" ||
+                  inputSchema === null ||
+                  Array.isArray(inputSchema)
+                ) {
+                  throw new Error("客户端工具参数 Schema 必须是有效 JSON 对象。");
+                }
+                return { ...tool, inputSchema: inputSchema as Record<string, unknown> };
+              }),
+            };
       await onSave(
-        { ...content, suggestedQuestions },
+        { ...content, tools, suggestedQuestions },
         initial === undefined ? parseAvailability(scope, tenantIds) : undefined,
         versionNotes,
       );
@@ -304,11 +338,11 @@ export function AgentDefinitionEditor({
             <span>工具配置</span>
             <select
               value={content.tools.mode}
-              onChange={(event) =>
-                change(
-                  "tools",
-                  event.target.value === "configured"
-                    ? initial?.tools.mode === "configured"
+              onChange={(event) => {
+                const tools: AgentRevisionContentDto["tools"] =
+                  event.target.value !== "configured"
+                    ? { mode: "platform_default" }
+                    : initial?.tools.mode === "configured"
                       ? initial.tools
                       : {
                           mode: "configured",
@@ -316,10 +350,14 @@ export function AgentDefinitionEditor({
                           externalTools: [],
                           clientTools: [],
                           toolCallingMode: "native",
-                        }
-                    : { mode: "platform_default" },
-                )
-              }
+                        };
+                const definitions = tools.mode === "configured" ? tools.clientTools : [];
+                setClientToolSchemaDrafts(
+                  definitions.map((t) => JSON.stringify(t.inputSchema, null, 2)),
+                );
+                setClientToolRowIds(definitions.map(() => crypto.randomUUID()));
+                change("tools", tools);
+              }}
             >
               <option value="platform_default">跟随平台运行设置</option>
               <option value="configured">显式选择工具</option>
@@ -374,6 +412,143 @@ export function AgentDefinitionEditor({
                   <option value="ptc">程序化工具调用</option>
                 </select>
               </label>
+              <fieldset className="agent-tool-list">
+                <legend>客户端工具</legend>
+                {configured.clientTools.map((tool, index) => (
+                  <div className="agent-fields" key={clientToolRowIds[index]}>
+                    <div className="agent-field">
+                      <span>工具名称</span>
+                      <Input
+                        aria-label="客户端工具名称"
+                        value={tool.name}
+                        maxLength={100}
+                        onChange={(event) =>
+                          change("tools", {
+                            ...configured,
+                            clientTools: configured.clientTools.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, name: event.target.value } : item,
+                            ),
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="agent-field">
+                      <span>描述</span>
+                      <Input
+                        aria-label="客户端工具描述"
+                        value={tool.description}
+                        maxLength={1000}
+                        onChange={(event) =>
+                          change("tools", {
+                            ...configured,
+                            clientTools: configured.clientTools.map((item, itemIndex) =>
+                              itemIndex === index
+                                ? { ...item, description: event.target.value }
+                                : item,
+                            ),
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="agent-field">
+                      <span>参数 Schema（JSON）</span>
+                      <Input.TextArea
+                        aria-label="客户端工具参数 Schema"
+                        rows={4}
+                        value={clientToolSchemaDrafts[index] ?? ""}
+                        onChange={(event) =>
+                          setClientToolSchemaDrafts((previous) =>
+                            previous.map((schema, schemaIndex) =>
+                              schemaIndex === index ? event.target.value : schema,
+                            ),
+                          )
+                        }
+                      />
+                    </div>
+                    <div className="agent-field">
+                      <span>等待时限（毫秒，可选；默认 300000）</span>
+                      <Input
+                        aria-label="客户端工具等待时限"
+                        type="number"
+                        min={1000}
+                        max={86400000}
+                        value={tool.waitTimeoutMs ?? ""}
+                        onChange={(event) =>
+                          change("tools", {
+                            ...configured,
+                            clientTools: configured.clientTools.map((item, itemIndex) =>
+                              itemIndex === index
+                                ? event.target.value === ""
+                                  ? (() => {
+                                      const { waitTimeoutMs: _waitTimeoutMs, ...rest } = item;
+                                      return rest;
+                                    })()
+                                  : { ...item, waitTimeoutMs: Number(event.target.value) }
+                                : item,
+                            ),
+                          })
+                        }
+                      />
+                    </div>
+                    <Button
+                      htmlType="button"
+                      onClick={() => {
+                        change("tools", {
+                          ...configured,
+                          clientTools: configured.clientTools.filter(
+                            (_, itemIndex) => itemIndex !== index,
+                          ),
+                        });
+                        setClientToolSchemaDrafts((previous) =>
+                          previous.filter((_, itemIndex) => itemIndex !== index),
+                        );
+                        setClientToolRowIds((previous) =>
+                          previous.filter((_, itemIndex) => itemIndex !== index),
+                        );
+                      }}
+                    >
+                      移除客户端工具
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  htmlType="button"
+                  disabled={configured.clientTools.length >= 64}
+                  onClick={() => {
+                    change("tools", {
+                      ...configured,
+                      clientTools: [
+                        ...configured.clientTools,
+                        {
+                          name: "",
+                          description: "",
+                          inputSchema: {
+                            type: "object",
+                            properties: {},
+                            additionalProperties: false,
+                          },
+                        },
+                      ],
+                    });
+                    setClientToolSchemaDrafts((previous) => [
+                      ...previous,
+                      JSON.stringify(
+                        { type: "object", properties: {}, additionalProperties: false },
+                        null,
+                        2,
+                      ),
+                    ]);
+                    setClientToolRowIds((previous) => [...previous, crypto.randomUUID()]);
+                  }}
+                >
+                  添加客户端工具
+                </Button>
+                {configured.clientTools.length > 0 && configured.toolCallingMode === "ptc" && (
+                  <Typography.Text type="danger">
+                    首版不支持 PTC 模式与客户端工具同时启用，请改用原生工具调用。
+                  </Typography.Text>
+                )}
+              </fieldset>
             </>
           )}
           {configured && (

@@ -215,10 +215,14 @@ class PiSessionControllerImpl implements PiSessionController {
     providerFailure: DeferredProviderFailure,
     checkpoint: () => { readonly messages: readonly AgentMessage[] },
     rollback: (checkpoint: { readonly messages: readonly AgentMessage[] }) => void,
+    suspended: () => boolean,
     subscribeToolEvents: (listener: (event: PtcToolEvent) => void) => () => void,
   ) {
     this.#agent = agent;
-    this.#stopAgentEvents = agent.subscribe((event) => this.#emit(event));
+    this.#stopAgentEvents = agent.subscribe((event) => {
+      // Pi 将主动退出 turn hook 也包装为 assistant error；只屏蔽本地挂起之后的合成尾事件。
+      if (!suspended()) this.#emit(event);
+    });
     this.#stopToolEvents = subscribeToolEvents((event) =>
       this.#emit({ type: "runtime_tool_event", event }),
     );
@@ -484,7 +488,7 @@ export interface CreateSafePiSessionOptions {
       executionMode?: "playground_mock",
     ) => Promise<unknown>;
   }) => readonly AgentTool[];
-  /** 客户端工具当前只有 Playground Mock 执行器，不提供真实副作用端口。 */
+  /** 客户端工具只能暂存调用或命中 Playground Mock，不向执行器提供宿主能力。 */
   clientTools?: (ports: {
     readonly recordControlledReceipt: (
       callId: string,
@@ -505,6 +509,7 @@ export interface CreateSafePiSessionOptions {
   createToolObservationRecorder: Parameters<typeof createObservedSandboxTools>[2];
   /** durable Tool 配对失败后，在 Pi 发起下一次 Provider 请求前同步失败关闭。 */
   assertModelRequestAllowed?: () => void;
+  suspendAfterTurn?: () => boolean;
   /** Runtime 独占的 turn_end 安全点；Pi 自带 compaction 仍保持关闭。 */
   prepareNextTurnHistory?: (
     event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
@@ -589,7 +594,8 @@ export async function createSafePiSession(
     expected: builtPrompt.manifest,
     dispose: () => agent.abort(),
   });
-  if (options.prepareNextTurnHistory !== undefined) {
+  let suspended = false;
+  if (options.prepareNextTurnHistory !== undefined || options.suspendAfterTurn !== undefined) {
     agent.prepareNextTurnWithContext = async (turn) => {
       const mapped = mapPiEvent({
         type: "turn_end",
@@ -598,6 +604,11 @@ export async function createSafePiSession(
       });
       if (mapped?.type !== "turn.completed") throw new TypeError("Pi turn 安全点事件无效");
       const replacement = await options.prepareNextTurnHistory?.(mapped);
+      if (options.suspendAfterTurn?.()) {
+        // 同一 assistant turn 可混合多个工具；完整 turn 已提交后、下一次 Provider 请求前退出。
+        suspended = true;
+        throw new Error("PI_TURN_SUSPENDED");
+      }
       if (replacement === undefined) return undefined;
       assertThreadActiveHistory(replacement);
       if (
@@ -653,6 +664,7 @@ export async function createSafePiSession(
       agent.clearAllQueues();
       agent.state.messages = [...checkpoint.messages];
     },
+    () => suspended,
     material.subscribeToolEvents,
   );
 }

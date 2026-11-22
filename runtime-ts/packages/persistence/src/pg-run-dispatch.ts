@@ -1,3 +1,4 @@
+import { expireClientToolCalls } from "./pg-client-tool-calls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT } from "@hoox/admin-control";
 import { isoTimestamp, type Run, rehydrateRun } from "@hoox/domain";
@@ -391,6 +392,7 @@ export class PgRunDispatchOutbox {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [
         `${input.tenantId}\u001frun-dispatch-scheduling`,
       ]);
+      await expireClientToolCalls(client, input.tenantId, input.limit);
       const rows = await client.query<QueryResultRow>(
         `WITH active_user_runs AS (
            SELECT DISTINCT active.user_id,active.run_id
@@ -441,6 +443,11 @@ export class PgRunDispatchOutbox {
            LEFT JOIN thread_execution_heads head
              ON head.tenant_id=outbox.tenant_id AND head.thread_id=outbox.thread_id
           WHERE outbox.tenant_id=$1
+            AND NOT EXISTS (
+              SELECT 1 FROM client_tool_calls call JOIN runs waiting
+                ON waiting.tenant_id=call.tenant_id AND waiting.id=call.run_id AND waiting.status='waiting'
+               WHERE call.tenant_id=outbox.tenant_id AND call.run_id=outbox.run_id AND call.outcome IS NULL
+            )
             AND COALESCE(active.active_run_count,0)<$2
             AND (queue.run_id IS NULL OR (queue.state='active' AND head.active_run_id=outbox.run_id))
             AND NOT EXISTS (

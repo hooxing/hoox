@@ -552,6 +552,7 @@ function fixture(
     readonly personalizations?: ApiDependencies["personalizations"];
     readonly threadForks?: ApiDependencies["threadForks"];
     readonly localAccounts?: ApiDependencies["localAccounts"];
+    readonly clientToolResults?: ApiDependencies["clientToolResults"];
     readonly apiKeys?: ApiDependencies["apiKeys"];
     readonly installation?: ApiDependencies["installation"];
     readonly demoAdminUserId?: string;
@@ -627,6 +628,7 @@ function fixture(
       },
     },
     ...(options.localAccounts === undefined ? {} : { localAccounts: options.localAccounts }),
+    ...(options.clientToolResults ? { clientToolResults: options.clientToolResults } : {}),
     ...(options.apiKeys === undefined ? {} : { apiKeys: options.apiKeys }),
     ...(options.installation === undefined ? {} : { installation: options.installation }),
     ...(options.demoAdminUserId === undefined ? {} : { demoAdminUserId: options.demoAdminUserId }),
@@ -1383,6 +1385,61 @@ describe("API Key 路由授权", () => {
         })
       ).statusCode,
     ).toBe(404);
+  });
+
+  it("客户端回执校验专用作用域并以映射后的空间提交", async () => {
+    const token = createApiKeyToken();
+    const owner = personalBundle("owner_a"),
+      mapped = personalBundle("owner_b");
+    let scopes = ["end-users:represent", "runs:create"];
+    const mapEndUser = vi.fn(async () => ({ tenantId: mapped.tenant.id, userId: mapped.user.id }));
+    const submit = vi
+      .fn<NonNullable<ApiDependencies["clientToolResults"]>["submit"]>()
+      .mockResolvedValue("accepted");
+    const { app } = fixture({
+      apiKeys: {
+        authenticateKey: async () => ({
+          tenantId: owner.tenant.id,
+          userId: owner.user.id,
+          apiKeyId: "key_tools",
+          scopes,
+        }),
+        mapEndUser,
+      } as unknown as NonNullable<ApiDependencies["apiKeys"]>,
+      clientToolResults: { submit },
+    });
+    openApps.push(app);
+    const request = () =>
+      app.inject({
+        method: "POST",
+        url: "/v1/threads/thread_1/runs/run_1/tool-results",
+        headers: { authorization: `Bearer ${token}`, "hoox-end-user": "customer:42" },
+        payload: { callId: "call-1", outcome: "succeeded", result: "ok" },
+      });
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/v1/threads/thread_1/runs/run_1/tool-results",
+          headers: { authorization: "Bearer token-a" },
+          payload: { callId: "call-1", outcome: "succeeded", result: "ok" },
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect((await request()).statusCode).toBe(403);
+    expect(submit).not.toHaveBeenCalled();
+    expect(mapEndUser).not.toHaveBeenCalled();
+    scopes = ["tool-results:submit", "end-users:represent"];
+    expect((await request()).json().data).toEqual({ callId: "call-1", accepted: true });
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: expect.objectContaining({ tenantId: mapped.tenant.id, userId: mapped.user.id }),
+      }),
+    );
+    submit.mockResolvedValueOnce("conflict");
+    expect((await request()).statusCode).toBe(409);
+    submit.mockResolvedValueOnce("not_found");
+    expect((await request()).statusCode).toBe(404);
   });
 
   it("公开路由先校验作用域与终端用户声明，再切换到映射用户的个人空间", async () => {
@@ -2985,6 +3042,52 @@ describe("Fastify API 契约", () => {
         })
       ).statusCode,
     ).toBe(400);
+  });
+
+  it("SSE 在 waiting 结束帧前交付可提交的 requires_action", async () => {
+    const base = fixture({ enableExperience: true });
+    openApps.push(base.app);
+    const experience = base.dependencies.experience;
+    if (!experience) throw new Error("缺少事件夹具");
+    const payload = {
+      callId: "lookup",
+      toolName: "client_lookup",
+      arguments: { key: "sample" },
+      deadline: baseTime,
+    };
+    const app = createApiApp(
+      {
+        ...base.dependencies,
+        experience: {
+          ...experience,
+          listEvents: async () => ({
+            outcome: "found",
+            attemptId: "attempt_1",
+            hasMore: false,
+            events: [{ sequence: 1, kind: "run_waiting", payload, occurredAt: baseTime }],
+          }),
+        },
+      },
+      { logger: false },
+    );
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const entry = [...base.state.runs.entries()][0];
+    if (!entry) throw new Error("缺少 Run");
+    const [key, stored] = entry;
+    base.state.runs.set(key, {
+      ...stored,
+      entity: transitionRun(transitionRun(stored.entity, "running", baseTime), "waiting", baseTime),
+    });
+    const stream = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/events/stream",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(stream.statusCode).toBe(200);
+    expect(stream.body).toContain('"type":"requires_action"');
+    expect(stream.body).toContain('"callId":"lookup"');
+    expect(stream.body).toContain("event: end");
   });
 
   it("真实 HTTP 在 Run 结束前交付增量，撤销身份后停止推送并清理订阅", async () => {

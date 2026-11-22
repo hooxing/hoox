@@ -1,3 +1,4 @@
+import { persistClientAction, scheduleClientWait } from "./pg-client-tool-calls.js";
 import { randomUUID } from "node:crypto";
 import {
   artifactWebhookPayload,
@@ -525,6 +526,10 @@ export class PgRunExecutionSetup {
             WHERE run.tenant_id=$1 AND run.id=$2 AND input.thread_id=$3
               AND input.workspace_id=$4 AND input.root_run_id=$5
               AND input.base_revision_id IS NOT DISTINCT FROM $6
+              AND NOT EXISTS (
+                SELECT 1 FROM client_tool_calls call JOIN rollout_projections USING(tenant_id,run_id,attempt_id)
+                 WHERE call.tenant_id=run.tenant_id AND call.run_id=run.id
+              )
             FOR UPDATE OF run,input`,
           [
             input.scope.tenantId,
@@ -1116,7 +1121,25 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               throw new TypeError("Thread writer claim 冲突");
             }
           }
+          const clientResume =
+            row.run_status === "waiting" &&
+            (
+              await client.query(
+                `SELECT 1 FROM client_tool_calls JOIN rollout_projections USING(tenant_id,run_id,attempt_id)
+                      WHERE tenant_id=$1 AND run_id=$2 LIMIT 1`,
+                [input.scope.tenantId, input.scope.runId],
+              )
+            ).rowCount === 1;
+          let contextThroughSequence = row.context_through_sequence;
           if (this.options.threadContextWriteEnabled === true) {
+            if (clientResume)
+              contextThroughSequence =
+                (
+                  await client.query(
+                    `SELECT next_sequence-1 AS cursor FROM thread_context_streams WHERE tenant_id=$1 AND thread_id=$2`,
+                    [input.scope.tenantId, input.scope.threadId],
+                  )
+                ).rows[0]?.cursor ?? contextThroughSequence;
             if (queueRow === undefined) return { outcome: "recovery_required" } as const;
             const userText = String(row.answer_text ?? row.input_text);
             const startedBody = {
@@ -1225,9 +1248,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               ...(row.answer_text === null ? {} : { answer: String(row.answer_text) }),
               rolloutProjection: projection,
               skills,
-              ...(row.context_through_sequence === null
+              ...(clientResume ? { clientToolResume: true as const } : {}),
+              ...(contextThroughSequence === null
                 ? {}
-                : { contextThroughSequence: Number(row.context_through_sequence) }),
+                : { contextThroughSequence: Number(contextThroughSequence) }),
             },
             fence,
             databaseNow,
@@ -2433,7 +2457,49 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       );
     }
 
+    const actionCount = command.events.filter(
+      (e) => e.kind === "run_waiting" && e.payload.action !== undefined,
+    ).length;
+    const waitTools =
+      actionCount > 0
+        ? (await readRunAgentSnapshot(client, command.fence.scope))?.content.tools
+        : undefined;
+    if (
+      actionCount > 0 &&
+      (actionCount > 8 ||
+        row.run_origin === "playground" ||
+        waitTools?.mode !== "configured" ||
+        waitTools.toolCallingMode !== "native" ||
+        command.nextRunStatus !== "waiting" ||
+        command.nextAttemptStatus !== "waiting" ||
+        command.releaseFences !== true)
+    )
+      throw new RuntimeWriteAbort("protocol_invalid");
     for (const event of command.events) {
+      let payload: unknown = event.payload;
+      if (event.kind === "run_waiting" && event.payload.action !== undefined) {
+        const { action, ...waiting } = event.payload;
+        const declared =
+          waitTools?.mode === "configured"
+            ? waitTools.clientTools.find((t) => t.name === action.toolName)
+            : undefined;
+        if (
+          !declared ||
+          action.waitTimeoutMs !== (declared.waitTimeoutMs ?? 300_000) ||
+          Buffer.byteLength(JSON.stringify(action.arguments)) > 16_384
+        )
+          throw new RuntimeWriteAbort("protocol_invalid");
+        payload = {
+          ...waiting,
+          ...(await persistClientAction(
+            client,
+            command.fence.scope,
+            String(row.attempt_id),
+            action,
+            databaseNow,
+          )),
+        };
+      }
       await client.query(
         `WITH inserted AS (INSERT INTO run_events(
            tenant_id,attempt_id,sequence,schema_version,kind,payload,occurred_at
@@ -2445,7 +2511,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           event.sequence,
           event.schemaVersion,
           event.kind,
-          JSON.stringify(event.payload),
+          JSON.stringify(payload),
           databaseNow,
           RUN_EVENT_WAKE_CHANNEL,
           runEventWakeKey(command.fence.scope.tenantId, command.fence.scope.runId),
@@ -2453,6 +2519,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       );
     }
 
+    if (actionCount > 0)
+      await scheduleClientWait(client, command.fence.scope.tenantId, command.fence.scope.runId);
     const outboxReceipts: RuntimeOutboxReceiptV1[] = [];
     for (const item of command.outbox) {
       outboxReceipts.push(

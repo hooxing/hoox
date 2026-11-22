@@ -342,6 +342,44 @@ describe("Worker OpenTelemetry", () => {
     }
   });
 
+  it("配置客户端工具时即便打开正文遥测也只导出元数据", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        seed: {
+          agent: fakeAgentSnapshot({
+            tools: {
+              mode: "configured",
+              toolCallingMode: "native",
+              builtinTools: ["exec_command"],
+              externalTools: [],
+              clientTools: [
+                {
+                  name: "lookup",
+                  description: "客户端查询",
+                  inputSchema: { type: "object", additionalProperties: false, properties: {} },
+                },
+              ],
+            },
+          }),
+        },
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      const spans = traces.getFinishedSpans();
+      expect(spans.length).toBeGreaterThan(1);
+      for (const { attributes } of spans)
+        for (const key of [
+          "gen_ai.input.messages",
+          "gen_ai.output.messages",
+          "gen_ai.tool.call.arguments",
+          "gen_ai.tool.call.result",
+        ])
+          expect(attributes[key]).toBeUndefined();
+    } finally {
+      await telemetry.close();
+    }
+  });
   it("Agent 快照无效时只记录失败的 Attempt 根 Span，不执行模型或工具", async () => {
     const { telemetry, traces } = memoryTelemetry();
     try {

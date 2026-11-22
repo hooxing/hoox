@@ -146,9 +146,40 @@ export class PgWebhookRepository {
 /** 投递载荷：顶层与 `data` 字段均为封闭白名单，新增字段必须同步更新参考契约与白名单测试。 */
 export interface RunWebhookPayload {
   readonly id: string;
-  readonly type: Exclude<WebhookEventType, "artifact.published">;
+  readonly type: Exclude<WebhookEventType, "artifact.published" | "run.requires_action">;
   readonly createdAt: string;
   readonly data: { readonly runId: string; readonly status: string };
+}
+interface ClientActionData {
+  readonly runId: string;
+  readonly threadId: string;
+  readonly callId: string;
+  readonly toolName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  readonly deadline: string;
+}
+interface ClientActionPayload {
+  readonly id: string;
+  readonly type: "run.requires_action";
+  readonly createdAt: string;
+  readonly data: ClientActionData;
+}
+export async function enqueueClientActionWebhook(
+  client: PoolClient,
+  tenantId: string,
+  data: ClientActionData,
+  createdAt: string,
+) {
+  await enqueueWebhookEvent({
+    client,
+    tenantId,
+    payload: {
+      id: deterministicEventId(["client-tool-v1", tenantId, data.runId, data.callId]),
+      type: "run.requires_action",
+      createdAt,
+      data,
+    },
+  });
 }
 export interface ArtifactWebhookPayload {
   readonly id: string;
@@ -217,7 +248,7 @@ export function artifactWebhookPayload(input: {
 export async function enqueueWebhookEvent(input: {
   readonly client: PoolClient;
   readonly tenantId: string;
-  readonly payload: RunWebhookPayload | ArtifactWebhookPayload;
+  readonly payload: RunWebhookPayload | ArtifactWebhookPayload | ClientActionPayload;
 }): Promise<void> {
   await input.client.query(
     `INSERT INTO webhook_outbox(

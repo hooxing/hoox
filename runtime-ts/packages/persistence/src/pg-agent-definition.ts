@@ -245,6 +245,24 @@ async function validateDraft(client: PoolClient, value: AgentRevisionContent) {
   }
   const selectedTools = content.tools;
   if (selectedTools.mode === "configured") {
+    const reserved = new Set([
+      ...agentBuiltinToolLimit(undefined),
+      "collapse_process_for_final_answer",
+      "run_code",
+    ]);
+    if (
+      selectedTools.clientTools.some((t) => reserved.has(t.name) || /^(?:http|mcp)__/u.test(t.name))
+    )
+      throw new AgentDefinitionValidationError("客户端工具不能占用平台或外部工具名");
+    if (
+      selectedTools.clientTools.length &&
+      selectedTools.builtinTools.length +
+        selectedTools.externalTools.length +
+        selectedTools.clientTools.length +
+        1 >
+        64
+    )
+      throw new AgentDefinitionValidationError("模型可见工具数量不得超过 64");
     const externalIds = selectedTools.externalTools.map((tool) => tool.versionId);
     if (externalIds.length > 0) {
       // 与外部工具撤销的排他锁互斥：校验通过后到提交前，所选版本不会被并发撤销。

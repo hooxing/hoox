@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   createModels,
   fauxAssistantMessage,
+  fauxToolCall,
   fauxProvider,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
@@ -13,6 +14,7 @@ import {
   createWorkspace,
   isoTimestamp,
   membershipId,
+  rehydrateThread,
   resourceId,
   resourceVersionId,
   runId,
@@ -40,13 +42,18 @@ import {
 } from "@hoox/run-contracts/mutation-protocol";
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createPgDurableObservationSession } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
+import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
+import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
+import { fakeAgentSnapshot } from "../../runtime-ts/apps/agent-worker/src/testing/agent-snapshot.js";
 import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
 import {
   FakeCancellationPort,
   FakeClock,
   FakeRecoveryMetrics,
   FakeRevisionVerifier,
+  FakeThreadContextBodies,
 } from "../../runtime-ts/apps/agent-worker/src/testing/fakes.js";
 import { performWorkerMaintenance } from "../../runtime-ts/apps/agent-worker/src/worker-maintenance.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
@@ -114,6 +121,7 @@ import {
   withTenantTransaction,
   withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { PgClientToolResults } from "../../runtime-ts/packages/persistence/src/pg-client-tool-calls.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
 import { PgThreadSandboxSessionLifecycle } from "../../runtime-ts/packages/persistence/src/thread-sandbox-session.js";
@@ -190,7 +198,10 @@ interface SerialQueueFixture {
   readonly workspace: ReturnType<typeof createWorkspace>;
 }
 
-async function serialQueueFixture(label: string): Promise<SerialQueueFixture> {
+async function serialQueueFixture(
+  label: string,
+  clientTimeoutMs?: number,
+): Promise<SerialQueueFixture> {
   const now = isoTimestamp("2099-07-26T00:00:00.000Z");
   const user = createUser(userId(`serial-user-${label}`), now);
   const personal = createPersonalTenant({
@@ -207,7 +218,7 @@ async function serialQueueFixture(label: string): Promise<SerialQueueFixture> {
       membership: personal.ownerMembership,
     }),
   ).toEqual({ outcome: "created" });
-  const thread = createThread({
+  let thread = createThread({
     id: threadId(`serial-thread-${label}`),
     tenant: personal.tenant,
     user,
@@ -215,6 +226,46 @@ async function serialQueueFixture(label: string): Promise<SerialQueueFixture> {
     title: "Thread 串行队列集成测试",
     now,
   });
+  if (clientTimeoutMs !== undefined) {
+    const id = `agent-${label}`;
+    const snapshot = fakeAgentSnapshot({
+      tools: {
+        mode: "configured",
+        toolCallingMode: "native",
+        builtinTools: [],
+        externalTools: [],
+        clientTools: [
+          {
+            name: "client_lookup",
+            description: "客户端查询",
+            inputSchema: {
+              type: "object",
+              properties: { city: { type: "string" } },
+              required: ["city"],
+              additionalProperties: false,
+            },
+            waitTimeoutMs: clientTimeoutMs,
+          },
+        ],
+      },
+    });
+    await withTransaction(admin, async (client) => {
+      await client.query(
+        `INSERT INTO "${schema}".agent_definitions(id,status,availability_mode,current_revision_id) VALUES($1,'published','all_tenants',$2)`,
+        [id, `${id}-rev`],
+      );
+      await client.query(
+        `INSERT INTO "${schema}".agent_revisions(id,definition_id,revision,status,content,content_digest,created_by) VALUES($1,$2,1,'published',$3,$4,$5)`,
+        [`${id}-rev`, id, snapshot.content, snapshot.revisionDigest, user.id],
+      );
+    });
+    thread = rehydrateThread(
+      { ...thread, agentDefinitionId: id },
+      personal.tenant,
+      user,
+      personal.ownerMembership,
+    );
+  }
   expect(await repositories.threads.create(tenantScope, thread)).toMatchObject({
     outcome: "created",
   });
@@ -4665,6 +4716,248 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ),
     ).resolves.toEqual({ outcome: "protocol_invalid" });
   });
+
+  it.each(["submit", "timeout", "cancel"] as const)(
+    "客户端工具 %s 与 waiting、持久事件和再次投递共享同一状态机",
+    async (mode) => {
+      const label = `client-${mode}-${suffix}`;
+      const base = await serialQueueFixture(label, mode === "timeout" ? 1000 : 300_000);
+      const run = createRun({
+        id: runId(`run-${label}`),
+        thread: base.thread,
+        now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+      });
+      const scope: ExecutionScope = {
+        tenantId: base.tenantScope.tenantId,
+        threadId: base.thread.id,
+        runId: run.id,
+        rootRunId: run.id,
+        workspaceId: base.workspace.id,
+      };
+      const f = { ...base, scope };
+      const actor = base.tenantScope;
+      await subscribeWebhook(f, ["run.waiting", "run.requires_action"]);
+      await new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true }).createQueuedRun({
+        scope: actor,
+        run,
+        thread: base.thread,
+        origin: "api",
+        inputText: "查询指定城市",
+        idempotency: { key: label, requestHash: requestDigest(label) },
+      });
+      const dispatch = () =>
+        runDispatchOutbox.claim({
+          tenantId: scope.tenantId,
+          dispatcherId: "client-test",
+          limit: 1,
+          leaseMilliseconds: 30_000,
+        });
+      const first = (await dispatch())[0];
+      if (!first) throw new Error("未领取投递");
+      const toolName = "client_lookup";
+      const faux = fauxProvider({
+        api: `client-${mode}`,
+        provider: `client-${mode}`,
+        tokensPerSecond: 100_000,
+      });
+      const credentials = new InMemoryCredentialStore();
+      await credentials.modify(faux.provider.id, async () => ({
+        type: "api_key",
+        key: "placeholder-key",
+      }));
+      const models = createModels({ credentials });
+      models.setProvider(faux.provider);
+      const gateway = new FakeSandboxGateway();
+      const execute = () => {
+        const registry = new PgBackedSandboxSessionRegistry(runtime, {
+          acquire: async () => {
+            const sandbox = await gateway.create({ templateId: "client-test", ttlSeconds: 120 });
+            const id = randomUUID();
+            return {
+              outcome: "ready",
+              session: {
+                registryId: id,
+                providerKey: "cube",
+                providerSandboxId: id,
+                mode: "created",
+                sandbox,
+              },
+            };
+          },
+          settle: async () => ({ outcome: "settled" }),
+        });
+        const blobs = {} as BlobStore; // 本用例的受控回执和 Thread 历史均为内联正文。
+        const observations = createPgDurableObservationSession({
+          blobRepository: new PgBlobLifecycleRepository(runtime),
+          blobs,
+          rolloutRepository: new PgRuntimeRolloutRepository(runtime),
+          policy: { maxModelObservationBytes: 4096 },
+        });
+        return new RunWorker(
+          {
+            persistence: new PgExecutionPersistence(runtime, { threadContextWriteEnabled: true }),
+            threadContextBodies: new FakeThreadContextBodies(),
+            revisions: new FakeRevisionVerifier(),
+            sandboxes: registry,
+            orphanSandboxes: registry,
+            sessions: new PiWorkerSessionFactory(
+              faux.getModel(),
+              models,
+              observations.createRecorder,
+              undefined,
+              observations.prepare,
+              undefined,
+              undefined,
+              mode !== "submit"
+                ? undefined
+                : async (input, compatibility) => {
+                    const history = await new PgThreadContextHistoryRepository(
+                      runtime,
+                      blobs,
+                    ).readActiveHistory({
+                      scope: input.scope,
+                      attemptId: input.attemptId,
+                      throughSequence: input.contextThroughSequence ?? 0,
+                      compatibilityDigest: digestCanonical(compatibility),
+                      mode: "read",
+                    });
+                    if (history.outcome !== "ready") throw new Error("无法从 Thread 事实重建会话");
+                    return history.history;
+                  },
+            ),
+            cancellation: new FakeCancellationPort(),
+            clock: new FakeClock(),
+            metrics: new FakeRecoveryMetrics(),
+          },
+          {
+            threadContextWriteEnabled: true,
+            workerId: `client-${randomUUID()}`,
+            leaseDurationMs: 30_000,
+            heartbeatMs: 10_000,
+          },
+        ).execute(scope);
+      };
+      faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxToolCall(toolName, { city: "上海" }, { id: "lookup-1" }),
+            ...(mode === "submit"
+              ? [fauxToolCall(toolName, { city: "上海" }, { id: "lookup-2" })]
+              : []),
+          ],
+          {
+            stopReason: "toolUse",
+          },
+        ),
+      ]);
+      expect(await execute()).toEqual({ outcome: "waiting" });
+      expect(await execute()).toMatchObject({ outcome: "ignored", reason: "waiting_for_answer" });
+      expect(await dispatch()).toHaveLength(0);
+      const outbox = await webhookOutbox(f);
+      expect(outbox).toHaveLength(mode === "submit" ? 3 : 2);
+      const data = outbox.find((e) => e.event_type === "run.requires_action")?.payload.data;
+      if (typeof data?.callId !== "string") throw new Error("未发布客户端调用");
+      const callId = data.callId;
+      expect(callId).toMatch(/^client_[a-f0-9]{64}$/u);
+      expect(data).toMatchObject({
+        threadId: scope.threadId,
+        runId: scope.runId,
+        callId,
+        toolName,
+        arguments: { city: "上海" },
+        deadline: expect.any(String),
+      });
+      const page = await new PgRunExperienceReadRepository(runtime).listEvents({
+        scope: actor,
+        runId: scope.runId,
+        after: 0,
+        limit: 100,
+      });
+      expect(page).toMatchObject({
+        events: expect.arrayContaining([
+          expect.objectContaining({ kind: "run_waiting", payload: expect.objectContaining(data) }),
+        ]),
+      });
+      const results = new PgClientToolResults(runtime);
+      const input = {
+        scope: actor,
+        threadId: scope.threadId,
+        runId: scope.runId,
+        callId,
+        outcome: "succeeded" as const,
+        result: "界".repeat(3000),
+      };
+      expect(await results.submit({ ...input, result: "界".repeat(349_526) })).toBe("bad_request");
+      const outsider = await fixture(`outside-${mode}-${suffix}`);
+      expect(
+        await results.submit({
+          ...input,
+          scope: { tenantId: outsider.scope.tenantId, userId: outsider.user.id },
+        }),
+      ).toBe("not_found");
+      if (mode === "cancel") {
+        const run = await repositories.runs.get(actor, scope.runId);
+        if (!run) throw new Error("缺少 Run");
+        await repositories.runs.update(
+          actor,
+          transitionRun(run.entity, "cancelled", isoTimestamp(new Date().toISOString())),
+          run.version,
+        );
+        expect(await results.submit(input)).toBe("conflict");
+        return;
+      }
+      if (mode === "timeout") {
+        await new Promise((resolve) => setTimeout(resolve, 1050));
+        expect(await results.submit(input)).toBe("conflict");
+      } else {
+        const alternatives = [`${input.result}A`, `${input.result}B`];
+        const accepted = await Promise.all(
+          alternatives.map((result) => results.submit({ ...input, result })),
+        );
+        expect(accepted.toSorted()).toEqual(["accepted", "conflict"]);
+        const result = alternatives[accepted.indexOf("accepted")];
+        if (result === undefined) throw new Error("没有接受结果");
+        const replay = { ...input, result };
+        expect(await results.submit(replay)).toBe("accepted");
+        expect(await results.submit({ ...replay, outcome: "failed" })).toBe("conflict");
+      }
+      if (mode === "submit") {
+        expect(await dispatch()).toHaveLength(0);
+        expect(await execute()).toMatchObject({ outcome: "ignored", reason: "waiting_for_answer" });
+        const other = outbox.find(
+          (e) => e.event_type === "run.requires_action" && e.payload.data.callId !== callId,
+        )?.payload.data.callId;
+        if (typeof other !== "string") throw new Error("缺少同轮第二条调用");
+        expect(
+          await results.submit({
+            ...input,
+            callId: other,
+            outcome: "failed",
+            result: "设备不可用",
+          }),
+        ).toBe("accepted");
+      }
+      // 原 Worker 的迟到确认不能抹掉最后一个回执或超时安排的恢复投递。
+      await runDispatchOutbox.acknowledge({ claim: first, outcome: "waiting" });
+      expect(await dispatch()).toHaveLength(1);
+      let resumeMessages = "";
+      faux.setResponses([
+        (ctx) => {
+          resumeMessages = JSON.stringify(ctx.messages);
+          return fauxAssistantMessage("完成");
+        },
+      ]);
+      expect(await execute()).toEqual({ outcome: "succeeded" });
+      expect(resumeMessages).toContain(callId);
+      expect(resumeMessages).toContain("lookup-1");
+      if (mode === "timeout") expect(resumeMessages).toContain("timeout");
+      else {
+        expect(resumeMessages).toContain("界".repeat(2730));
+        expect(resumeMessages).not.toContain("界".repeat(2731));
+      }
+      expect(await webhookOutbox(f)).toHaveLength(outbox.length);
+    },
+  );
 
   it("waiting 回答使用 Run version 与旧值 CAS，不能无条件覆盖", async () => {
     const f = await fixture(`answer-${suffix}`);

@@ -92,6 +92,10 @@ Playground 不对 Sandbox 禁网：`exec_command`、Skill 脚本等 Sandbox 命�
 
 ## 等待与恢复
 
+客户端工具不在宿主机或 Sandbox 中执行。根 Pi Session 在完整工具 turn 的安全点退出，不发起下一次模型请求；同轮最多暂存 8 个调用，每个参数对象的紧凑 JSON 最多 16 KiB。只有通过双栅栏的 waiting 收口事务才能发布调用：请求、截止时间、Rollout checkpoint、SSE 事件、Webhook Outbox 与 Run/Attempt 状态一起提交。提交前崩溃没有可执行的外部请求；提交后重启只读持久事实，不能再次发布。Playground 使用已固定的 Mock，未配置即返回受控失败，不创建待处理调用。
+
+回传、超时和取消以同一 Run 行锁串行化。Run 一旦取消，所有尚未完成的调用立即失效，以父 Run 状态作为唯一取消事实。数据库时钟决定是否越过截止时间；dispatch 调度在最近截止时唤醒并写 `timeout` 回执，不重放工具。最后一个回执到达后，事务把本轮有界结果写入恢复输入，重排原 dispatch 并使旧 claim token 失效；新 Attempt 以低信任回执继续模型循环，超时本身不使 Run 失败。外部副作用由订阅方按调用 ID 去重。
+
 - waiting 安全点持久化 scope、Rollout checkpoint、Workspace head、base revision 和可选 Sandbox 身份。Sandbox 只有在 Tenant、Thread、Workspace、base revision、session generation 全部匹配且生命周期明确为 `paused` 时才复用。
 - pause、connect、create、materialize 采用 intent/outbox Saga：持有有效租约时先提交意图，外部调用成功后才在同一事务线性化事件、Rollout 与决定事实。任何外部调用结果未知，或进程在意图后崩溃且没有成功证明，都持久化为 UNKNOWN 并停止自动重试。
 - 恢复输入只来自 PostgreSQL 与 stable Blob；Pi Session 内存与 Sandbox 内状态不是事实源。

@@ -96,6 +96,53 @@ function fixture(canManage: boolean) {
 }
 
 describe("后台 Agent 管理", () => {
+  it("增删客户端工具并保存编辑后的 Schema 与等待时限", async () => {
+    const onSave = vi.fn(async () => undefined);
+    const view = render(
+      <AgentDefinitionEditor
+        initial={current.content}
+        builtinToolLimit={[]}
+        pinnedModelOptions={[]}
+        saving={false}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+    select(field<HTMLSelectElement>(view, "工具配置"), "configured");
+    const add = () => act(() => button(view, "添加客户端工具").click());
+    add();
+    add();
+    act(() => button(view, "移除客户端工具").click());
+    const byLabel = (label: string) => {
+      const el = view.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        `[aria-label="${label}"]`,
+      );
+      if (!el) throw new Error("缺少客户端工具字段");
+      return el;
+    };
+    enter(byLabel("客户端工具名称"), "lookup");
+    enter(byLabel("客户端工具描述"), "客户端查询");
+    enter(byLabel("客户端工具等待时限"), "1500");
+    enter(byLabel("客户端工具参数 Schema"), "invalid");
+    act(() => button(view, "保存新草稿").click());
+    await settle();
+    expect(onSave).not.toHaveBeenCalled();
+    const schema = { type: "object", properties: {}, additionalProperties: false };
+    enter(byLabel("客户端工具参数 Schema"), JSON.stringify(schema));
+    act(() => button(view, "保存新草稿").click());
+    await settle();
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: expect.objectContaining({
+          clientTools: [
+            { name: "lookup", description: "客户端查询", waitTimeoutMs: 1500, inputSchema: schema },
+          ],
+        }),
+      }),
+      undefined,
+      "",
+    );
+  });
   it("viewer 只查看列表与版本差异，不提供管理操作", async () => {
     const api = fixture(false);
     const onOpen = vi.fn();

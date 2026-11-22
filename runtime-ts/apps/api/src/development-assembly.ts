@@ -184,6 +184,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             : { demoAdminUserId: configuration.demoAdminUserId }),
           repositories: persistence.repositories,
           agentDefinitions: persistence.agentDefinitions,
+          clientToolResults: persistence.clientToolResults,
           playground: persistence.playground,
           apiKeys: persistence.apiKeys,
           personalizations: persistence.personalizations,

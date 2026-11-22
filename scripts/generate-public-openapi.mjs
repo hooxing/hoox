@@ -11,6 +11,8 @@ import {
   RunEventPageSuccessEnvelopeSchema,
   RunEventListQuerySchema,
   RunEventStreamQuerySchema,
+  SubmitToolResultSchema,
+  ToolResultSuccessEnvelopeSchema,
   RunPathSchema,
   RunArtifactPathSchema,
   ResourceDownloadPathSchema,
@@ -28,6 +30,16 @@ import {
 const target = new URL("../docs/reference/openapi/public-v1.json", import.meta.url);
 const json = (schema) => ({ "application/json": { schema: cleanSchema(schema) } });
 const operations = [
+  {
+    method: "post",
+    path: "/v1/threads/{threadId}/runs/{runId}/tool-results",
+    id: "submitToolResult",
+    summary: "按调用 ID 幂等提交客户端工具结果",
+    scope: "tool-results:submit",
+    params: RunPathSchema,
+    body: SubmitToolResultSchema,
+    response: ToolResultSuccessEnvelopeSchema,
+  },
   {
     method: "get",
     path: "/v1/agents",
@@ -282,13 +294,13 @@ function operation(item) {
     500: { description: "内部错误", content: json(ErrorEnvelopeSchema) },
     503: { description: "依赖暂不可用", content: json(ErrorEnvelopeSchema) },
   };
-  if (item.idempotent) {
+  if (item.idempotent || item.id === "submitToolResult") {
     responses[409] = {
       description: "幂等键冲突或资源状态冲突",
       content: json(ErrorEnvelopeSchema),
     };
   }
-  if (["createThread", "createRun", "uploadResource"].includes(item.id)) {
+  if (["createThread", "createRun", "uploadResource", "submitToolResult"].includes(item.id)) {
     responses[415] = { description: "不支持的媒体类型", content: json(ErrorEnvelopeSchema) };
   }
   if (["cancelRun", "previewArtifact", "downloadArtifact"].includes(item.id)) {

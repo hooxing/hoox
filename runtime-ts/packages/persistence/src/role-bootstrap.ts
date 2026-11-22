@@ -1335,6 +1335,14 @@ async function hasManagedSandboxState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
+async function hasApiEndUserState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.api_end_users',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 export function formatTableSetDifference(
   expectedTables: readonly string[],
   actualTables: readonly string[],
@@ -1352,6 +1360,8 @@ export async function activeTablePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
+  if (await hasApiEndUserState(client, schema))
+    policy.set("api_end_users", new Set(["SELECT", "INSERT"]));
   if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
   if (!(await hasWebhookState(client, schema))) {
     policy.delete("tenant_webhooks");
@@ -2501,6 +2511,7 @@ async function assertAdminControlBoundary(
   const externalToolsEnabled = enabled && (await hasExternalToolState(client, context.schema));
   const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
   const integrationsEnabled = enabled && (await hasIntegrationAdminState(client, context.schema));
+  const endUsersEnabled = enabled && (await hasApiEndUserState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
     enabled
       ? [
@@ -2527,6 +2538,7 @@ async function assertAdminControlBoundary(
     allowed.set("tenant_webhooks", new Set(["INSERT"]));
     allowed.set("integration_admin_audits", new Set(["SELECT", "INSERT"]));
   }
+  if (endUsersEnabled) allowed.set("api_end_users", new Set(["SELECT"]));
   const externalToolAdminEnabled =
     enabled && (await hasExternalToolAdminState(client, context.schema));
   if (externalToolAdminEnabled) {
@@ -2641,6 +2653,7 @@ async function assertAdminControlBoundary(
   if (userOperationsEnabled) {
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
+  if (endUsersEnabled) updatePolicy.set("api_end_users", new Set(["status"]));
   if (updatePolicy.size > 0) {
     const updates = await client.query<{
       readonly table_name: string;
@@ -3370,6 +3383,13 @@ async function rebindRoleScopedPolicies(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const schema = quoteIdentifier(context.schema);
+  if (await hasApiEndUserState(client, context.schema)) {
+    await client.query(
+      `ALTER POLICY end_users_runtime ON ${schema}.api_end_users TO ${quoteIdentifier(context.runtimeRole)};
+       ALTER POLICY end_users_migrator ON ${schema}.api_end_users TO ${quoteIdentifier(context.migratorRole)};
+       ALTER POLICY end_users_control ON ${schema}.api_end_users TO ${quoteIdentifier(context.adminControlRole)}`,
+    );
+  }
   if (
     (await hasApiKeyState(client, context.schema)) &&
     (await hasApiKeyRevocationPolicyState(client, context.schema))
@@ -3708,6 +3728,11 @@ async function grantAdminControlAccess(
     );
   }
   if (await hasAdminUserOperationsState(client, context.schema)) {
+    if (await hasApiEndUserState(client, context.schema)) {
+      await client.query(
+        `GRANT SELECT ON TABLE ${schema}.api_end_users TO ${control}; GRANT UPDATE(status) ON TABLE ${schema}.api_end_users TO ${control}`,
+      );
+    }
     const identityEnabled = await hasEmbeddedIdentityState(client, context.schema);
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_user_account_audits TO ${control};
@@ -4162,6 +4187,9 @@ export async function bootstrapRuntimeAccessOnClient(
   );
   await rebindRoleScopedPolicies(client, context);
   await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
+  if (await hasApiEndUserState(client, context.schema)) {
+    await client.query(`GRANT SELECT,INSERT ON TABLE ${schema}.api_end_users TO ${role}`);
+  }
   await client.query(
     `GRANT SELECT, INSERT ON TABLE ${schema}.app_users, ${schema}.tenants, ${schema}.memberships TO ${role}`,
   );

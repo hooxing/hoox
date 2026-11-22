@@ -107,6 +107,7 @@ import {
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
 import { externalToolRegistryTests } from "./postgres-external-tool-registry.js";
+import { apiEndUserTests } from "./postgres-api-end-users.js";
 
 function skillSnapshotBlobRef(sha256: string, size: number, mediaType: string): string {
   const tenantId = "tenant_test_publisher";
@@ -207,6 +208,16 @@ let migratorCreated = false;
 let concurrentMigrationVersions: readonly number[] = [];
 let migrationContract!: PostgreSqlMigrationContract;
 let isolatedMigrationCounter = 0;
+
+apiEndUserTests(() => ({
+  administrativePool,
+  schema,
+  runtimePool,
+  migratorPool,
+  adminControlPool,
+  repositories,
+  createFixture,
+}));
 
 interface Fixture {
   readonly scope: TenantScope;

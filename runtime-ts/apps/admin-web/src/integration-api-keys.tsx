@@ -7,6 +7,7 @@ import { IntegrationSecret, IntegrationTenant, useIntegrationItems } from "./int
 const scopes: readonly CreateApiKeyRequest["scopes"][number][] = [
   "threads:read",
   "threads:create",
+  "end-users:represent",
   "runs:read",
   "runs:create",
   "tool-results:submit",

@@ -7,6 +7,7 @@ import {
   CreateRunRequestSchema,
   CreateThreadRequestSchema,
   ErrorEnvelopeSchema,
+  EndUserHeaderSchema,
   RunEventPageSuccessEnvelopeSchema,
   RunEventListQuerySchema,
   RunEventStreamQuerySchema,
@@ -214,6 +215,12 @@ function schemaParameters(schema, location) {
 
 function operation(item) {
   const parameters = [
+    {
+      name: "Hoox-End-User",
+      in: "header",
+      required: false,
+      schema: cleanSchema(EndUserHeaderSchema),
+    },
     ...schemaParameters(item.params, "path"),
     ...schemaParameters(item.query, "query"),
     ...(item.idempotent

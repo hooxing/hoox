@@ -35,7 +35,19 @@ Key 只以 `hoox_sk_` 前缀加高熵随机串交付；数据库只保存 SHA-25
 
 每个 Key 创建独立 `integration` User，并在所属 Tenant 创建 `member` Membership；集成身份不获得个人或团队空间管理权。该身份没有登录账号，不可登录工作台；创建者只作为审计元数据，离开 Tenant 不会改变 Key 身份。吊销不可恢复；后台复用持久化仓储，在同一事务内先将未吊销 Key 写入吊销时间，再将对应 `integration` Membership 从 active 改为 revoked，并写入管理审计。Admin Control 只有所需列级 UPDATE，专属 RESTRICTIVE RLS 进一步限制有效平台管理员、目标 Tenant、集成 Membership 和旧状态；不能撤销人类成员或恢复已吊销的身份。任一步失败都会回滚整个事务。之后请求同时无法通过凭据校验或 Membership 授权。该身份模型可供终端用户映射复用，但映射本身不属于此边界。
 
-API Key 认证成功后，API 仍使用该集成 User 从 Membership 重建 `TenantScope`，所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅公开 API 契约显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。公开路由与错误、分页、幂等和 SSE 契约见[公开 API v1](../reference/public-api.md)。登录会话、账号与团队成员管理不接受 API Key；API Key 与 Webhook 管理由后台平台管理员授权，已有 `webhooks:manage` 作用域不赋予后台管理权。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
+没有终端用户声明时，API Key 认证成功后仍使用集成 User 从 Membership 重建 `TenantScope`；声明终端用户时按下节切换到映射身份。所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅公开 API 契约显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。公开路由与错误、分页、幂等和 SSE 契约见[公开 API v1](../reference/public-api.md)。登录会话、账号与团队成员管理不接受 API Key；API Key 与 Webhook 管理由后台平台管理员授权，已有 `webhooks:manage` 作用域不赋予后台管理权。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
+
+## Headless 终端用户
+
+公开 API 可通过 `Hoox-End-User` 声明外部终端用户，要求 Key 同时具有 `end-users:represent` 及路由作用域。命名空间由 Key 原属 Tenant 构成，因此同一 Tenant 下不同 Key 与创建者共享稳定映射。协议、ID 格式和调用方责任见[公开 API v1](../reference/public-api.md#终端用户映射)。
+
+`api_end_users` 是映射与停用状态的唯一事实源，复合主键 `(integration_tenant_id, external_id)` 保证空间内外部 ID 稳定；创建映射的 Key 与集成身份仅作为审计来源。内部 User 和个人 Tenant 也各自唯一。首次映射在单事务内创建 User、个人 Tenant、Owner Membership 和映射；空间级事务 advisory lock 协调同一声明，并由数据库唯一约束兜底，不遗留竞争失败的孤立身份。每次映射仍重验当前 Key 的作用域、到期、吊销与集成 Membership，并锁定凭据及 Membership，避免吊销与首次创建交错。
+
+映射 User 不创建 `user_accounts` 或 Better Auth 身份，因此没有可交换的登录凭据。认证上下文保留 Key 的业务作用域，但 User 与 TenantScope 切换为映射身份，之后仍从 Membership/RLS 重建授权；不会给集成 User 添加映射个人空间的 Membership，也不复制原 Tenant 的成员关系。未声明终端用户时仍访问集成身份的原空间。
+
+Runtime 只可读取、插入映射，无状态更新权限；Admin Control 只可由有效平台管理员读取映射和更新 `status`，沿用用户治理的幂等命令及审计。后台目录以 `source=api_mapping` 标识，无登录邮箱且登录会话数为零。停用后的新请求失败关闭为 403；恢复重用原映射。已有 Run 与已签发文件交付不被追溯撤回。
+
+用户目录的活动与使用计数继续排除 Playground Thread。审计目标引用内部 User，覆盖登录账号与映射用户；若存在映射用户审计，回退到只支持登录账号的审计外键会失败并回滚整个迁移事务，不能通过删除生产审计绕过校验。
 
 ## 可配置登录方式
 

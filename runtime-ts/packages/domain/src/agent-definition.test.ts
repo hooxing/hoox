@@ -6,6 +6,7 @@ import {
   publishAgentRevision,
   revokeAgentRevision,
   validateAgentRevisionContent,
+  validateAgentVersionNotes,
   type AgentRevisionContent,
 } from "./agent-definition.js";
 import { tenantId } from "./ids.js";
@@ -29,6 +30,11 @@ const content: AgentRevisionContent = {
   memory: { mode: "configured", longTermEnabled: false },
 };
 describe("AgentDefinition 领域约束", () => {
+  it("版本说明可省略且最多 2000 字符", () => {
+    expect(() => validateAgentVersionNotes(undefined)).not.toThrow();
+    expect(() => validateAgentVersionNotes("说".repeat(2000))).not.toThrow();
+    expect(() => validateAgentVersionNotes("说".repeat(2001))).toThrow("2000 字符");
+  });
   it("允许默认 Agent 跟随平台工具设置，也保留显式工具配置", () => {
     expect(
       validateAgentRevisionContent({ ...content, tools: { mode: "platform_default" } }).tools,

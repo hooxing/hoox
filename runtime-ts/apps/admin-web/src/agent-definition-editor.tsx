@@ -8,6 +8,7 @@ import {
 } from "@hoox/protocol";
 import { Alert, Button, Card, Input, Space, Typography } from "antd";
 import { type FormEvent, useId, useState } from "react";
+import { AgentSkillSelector } from "./agent-skill-selector.js";
 
 export const allTenants = { mode: "all_tenants" } as const;
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
@@ -90,29 +91,6 @@ const initialContent: AgentRevisionContentDto = {
   memory: { mode: "platform_default" },
 };
 
-function skills(value: string): AgentRevisionContentDto["skillVersions"] {
-  const versions = lines(value).map((line) => {
-    const [skillId, version, ...rest] = line.split(/\s+/u);
-    if (
-      skillId === undefined ||
-      !idPattern.test(skillId) ||
-      version === undefined ||
-      byteLength(version) > 64 ||
-      rest.length > 0
-    ) {
-      throw new Error("请逐行填写 Skill ID 与精确版本，两者用空格分隔。");
-    }
-    return { skillId, version };
-  });
-  if (
-    versions.length > 64 ||
-    new Set(versions.map((item) => item.skillId)).size !== versions.length
-  ) {
-    throw new Error("最多可添加 64 个 Skill，每个 Skill 只能固定一个版本。");
-  }
-  return versions;
-}
-
 function pinnedModelKey(model: AgentPinnedModelReferenceDto): string {
   return JSON.stringify([model.providerKey, model.providerRevision, model.modelId]);
 }
@@ -122,6 +100,7 @@ export function AgentDefinitionEditor({
   builtinToolLimit,
   pinnedModelOptions,
   externalToolOptions = [],
+  skillOptions = [],
   saving,
   onSave,
   onCancel,
@@ -130,18 +109,18 @@ export function AgentDefinitionEditor({
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
   readonly externalToolOptions?: Readonly<AdminAgentDefinitionList["externalToolOptions"]>;
+  readonly skillOptions?: Readonly<AdminAgentDefinitionList["skillOptions"]>;
   readonly saving: boolean;
   readonly onSave: (
     content: AgentRevisionContentDto,
     availability?: AdminSetAgentAvailability["availability"],
+    versionNotes?: string,
   ) => Promise<void>;
   readonly onCancel: () => void;
 }) {
   const [content, setContent] = useState(initial ?? initialContent);
   const [questions, setQuestions] = useState(content.suggestedQuestions.join("\n"));
-  const [skillVersions, setSkillVersions] = useState(
-    content.skillVersions.map(({ skillId, version }) => `${skillId} ${version}`).join("\n"),
-  );
+  const [versionNotes, setVersionNotes] = useState("");
   const [scope, setScope] = useState("all_tenants");
   const [tenantIds, setTenantIds] = useState("");
   const [error, setError] = useState<string>();
@@ -192,9 +171,21 @@ export function AgentDefinitionEditor({
       }
       if (unavailableTools.length > 0) throw new Error("请移除平台已禁用的内置工具。");
       if (unavailableExternalTools.length) throw new Error("请移除已不可选的外部工具版本。");
+      if (
+        content.skillVersions.some(
+          (item) =>
+            !skillOptions.some(
+              (option) => option.skillId === item.skillId && option.versions.includes(item.version),
+            ),
+        )
+      ) {
+        throw new Error("请重新选择或移除已不可选的 Skill 版本。");
+      }
+      if (Array.from(versionNotes).length > 2000) throw new Error("版本说明不得超过 2000 字符。");
       await onSave(
-        { ...content, suggestedQuestions, skillVersions: skills(skillVersions) },
+        { ...content, suggestedQuestions },
         initial === undefined ? parseAvailability(scope, tenantIds) : undefined,
+        versionNotes,
       );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法保存草稿，请重试。");
@@ -443,15 +434,11 @@ export function AgentDefinitionEditor({
           <Typography.Text type="secondary">
             HTTP 工具尚不能发布或加入 Agent。管理员可在「外部工具」页预览端点声明或 OpenAPI 片段。
           </Typography.Text>
-          <label className="agent-field" htmlFor={`${formId}-skills`}>
-            <span>自带 Skill（每行填写 Skill ID 和版本）</span>
-            <Input.TextArea
-              id={`${formId}-skills`}
-              rows={3}
-              value={skillVersions}
-              onChange={(event) => setSkillVersions(event.target.value)}
-            />
-          </label>
+          <AgentSkillSelector
+            options={skillOptions}
+            value={content.skillVersions}
+            onChange={(value) => change("skillVersions", value)}
+          />
           <label>
             <input
               type="checkbox"
@@ -512,6 +499,23 @@ export function AgentDefinitionEditor({
           />
         </Card>
       )}
+      <Card title="版本说明">
+        <label className="agent-field" htmlFor={`${formId}-version-notes`}>
+          <span>版本说明（可选，最多 2000 字符）</span>
+          <Input.TextArea
+            id={`${formId}-version-notes`}
+            rows={4}
+            maxLength={2000}
+            showCount
+            value={versionNotes}
+            onChange={(event) => setVersionNotes(event.target.value)}
+            placeholder="这次改了什么？这个版本有什么特点？"
+          />
+        </label>
+        <Typography.Text type="secondary">
+          仅供后台管理，发布后不可修改，不会发送给模型。
+        </Typography.Text>
+      </Card>
       {error && <Alert type="error" showIcon title={error} />}
       <Space>
         <Button

@@ -7,6 +7,7 @@
 | 你要完成的任务 | 入口 |
 | --- | --- |
 | 判断仓库当前能做什么、离生产使用还缺什么 | [项目状态](project-status.md) |
+| 评估或升级首个公开版本，确认已知限制与兼容性 | [v0.1.0 版本说明](releases/v0.1.0.md) · [变更记录](../CHANGELOG.md) |
 | 理解系统边界、领域关系和主运行链路 | [架构总览](architecture/overview.md) · [架构文档索引](architecture/README.md) |
 | 理解 Run 执行、双栅栏、重试与恢复 | [Run 执行与恢复](architecture/run-execution-and-recovery.md) |
 | 理解数据库、RLS、角色与迁移边界 | [持久化与数据库边界](architecture/persistence-and-database.md) |
@@ -35,7 +36,7 @@
 | 目标规范 | `specs/` | 描述跨模块能力必须满足的目标与约束，并明确实现状态 |
 | 实施计划 | `plans/` | 只保存仍可能指导后续工作的草案、进行中或阻塞计划 |
 | 战略方向 | `roadmap.md` | 只保存尚未完成的方向和阶段 Gate，不维护任务账本 |
-| 时点证据 | `verification/`、`spikes/` | 记录特定提交、环境或时间点的实验与验收 |
+| 时点证据 | `verification/`、`spikes/`、`releases/` | 记录特定提交、环境或时间点的实验、验收与版本发布范围，不替代当前说明 |
 
 ## 分类入口
 

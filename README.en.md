@@ -42,13 +42,14 @@ Available today:
 
 ## Roadmap
 
+Admin-managed Agents and workbench selection, MCP tool publishing, draft runs in the Playground, API keys, Webhooks and OpenTelemetry export are implemented. See the [v0.1.0 release notes](docs/releases/v0.1.0.md) (Chinese) for release scope, limitations and upgrade guidance.
+
 The following is **not implemented yet** and is tracked in the [implementation plan](docs/plans/20261119-custom-agent-platform.md) (the target contract is in the [custom Agent platform spec](docs/specs/custom-agent-platform.md)); both documents are in Chinese:
 
-- Define multiple Agents in the admin console: edit instructions, choose a model, enable tools and Skills, and pick an Agent in the workbench.
-- Connect external tools without code changes through MCP or HTTP, with permissions and approvals.
-- A Playground to try an Agent and compare versions before publishing.
-- API keys and a public API, so you can use Hoox as the Agent backend of your own product.
-- Evaluation: regression-check Agent quality against sample sets.
+- Complete Headless integration: a stable public API v1, end-user mapping, client-side tools and a TypeScript SDK.
+- HTTP tool publishing in the admin console; imports currently provide previews only, not a publishing path.
+- Evaluation sets and revision comparisons, per-Agent operational metrics and cost dashboards, and end-user feedback.
+- Configuration as code, white-label customization and self-service Skill publishing for developers.
 
 ## Quick start
 

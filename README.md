@@ -43,13 +43,14 @@ Hoox 面向想把 Agent 交付给团队或用户的开发者与企业。Agent �
 
 ## 路线图
 
+后台 Agent 管理与工作台选择、MCP 工具发布、Playground 草稿试跑、API Key、Webhook 和 OpenTelemetry 导出已实现；`v0.1.0` 的发布范围、限制与升级方式见[版本说明](docs/releases/v0.1.0.md)。
+
 以下能力**尚未实现**，正在按[实施计划](docs/plans/20261119-custom-agent-platform.md)推进，目标契约见[可定制 Agent 平台规范](docs/specs/custom-agent-platform.md)：
 
-- 在后台定义多个 Agent：编辑指令、选择模型、启用工具与 Skill，并在工作台中选择使用。
-- 不改代码接入外部工具：通过 MCP 或 HTTP 接入自己的服务，并带有权限与审批。
-- Playground：发布前试跑 Agent 并对比版本。
-- API Key 与公开 API：把 Hoox 作为 Agent 后端，嵌入自己的产品。
-- 评测：用样例集回归检查 Agent 的质量。
+- 完整 Headless 接入：稳定公开 API v1、终端用户映射、客户端工具和 TypeScript SDK。
+- HTTP 工具后台发布；当前导入仅提供预览，签名与执行路径不等于发布入口。
+- 评测集与版本评测对比、按 Agent 的运营指标与成本面板、终端用户反馈。
+- 配置即代码、白标和开发者自助发布 Skill。
 
 ## 核心模型
 

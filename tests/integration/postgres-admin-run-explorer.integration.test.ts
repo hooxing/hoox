@@ -8,6 +8,7 @@ import {
   enqueueWebhookEvent,
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
+import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
 import {
   createPostgresPool,
   type Pool,
@@ -65,8 +66,18 @@ async function seed(): Promise<void> {
          ('user_viewer',now()),('user_admin',now()),('user_owner_a',now()),('user_owner_b',now())`,
     );
     await client.query(
-      `INSERT INTO tenants(id,kind,owner_user_id,created_at) VALUES
-         ('tenant_a','personal','user_owner_a',now()),('tenant_b','personal','user_owner_b',now())`,
+      `INSERT INTO tenants(id,kind,owner_user_id,display_name,created_by_user_id,created_at) VALUES
+         ('tenant_a','personal','user_owner_a',NULL,NULL,now()),
+         ('tenant_b','personal','user_owner_b',NULL,NULL,now()),
+         ('tenant_admin','personal','user_admin',NULL,NULL,now()),
+         ('tenant_team','team',NULL,'团队空间','user_admin',now())`,
+    );
+    await client.query(
+      `INSERT INTO user_accounts(user_id,personal_tenant_id,email,normalized_email,display_name,password_algorithm,password_salt,password_hash,created_at,updated_at)
+       VALUES('user_admin','tenant_admin','admin@example.invalid','admin@example.invalid','平台管理员','scrypt-v1',decode(repeat('11',16),'hex'),decode(repeat('22',32),'hex'),now(),now())`,
+    );
+    await client.query(
+      "UPDATE installation_state SET administrator_user_id='user_admin',initialized_at=now() WHERE singleton=true",
     );
     for (const [tenant, owner] of [
       ["tenant_a", "user_owner_a"],
@@ -88,6 +99,11 @@ async function seed(): Promise<void> {
         `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
          VALUES($1,$2,'thread_1',$3,$4::timestamptz,$4::timestamptz + interval '30 seconds')`,
         [tenant, run, status, createdAt],
+      );
+      await client.query(
+        `INSERT INTO run_execution_inputs(tenant_id,run_id,thread_id,workspace_id,root_run_id,input_text,initial_projection,initial_projection_digest)
+         VALUES($1,$2,'thread_1','workspace_1',$2,$3,'{}'::jsonb,repeat('a',64))`,
+        [tenant, run, `请分析 ${run} 的故障并给出原因`],
       );
       await client.query(
         `INSERT INTO execution_attempts(
@@ -220,6 +236,35 @@ async function auditRows() {
 }
 
 describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
+  it("管理员列表显示问题并支持关键词搜索，接入目录固定初始化管理员空间", async () => {
+    const explorer = service();
+    const allRuns = await explorer.listRuns("user_admin");
+    expect(allRuns.items).toHaveLength(3);
+    expect(allRuns.contentAccess).toBe(true);
+    expect(allRuns.items[0]).toMatchObject({
+      threadTitle: `${secret} 标题`,
+      userInput: expect.stringContaining("故障并给出原因"),
+    });
+    expect(allRuns.items.some((run) => run.userInput?.includes("run_a1"))).toBe(true);
+    const page = await explorer.listRuns("user_admin", { search: "run_a1" });
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]?.userInput).toContain("run_a1");
+    expect(page.items[0]?.threadTitle).toContain(`${secret} 标题`);
+
+    const integrations = new PgIntegrationAdminRepository(control);
+    const tenants = await integrations.listTenants("user_admin");
+    expect(tenants.find((item) => item.isDefault)).toMatchObject({
+      tenantId: "tenant_admin",
+      displayName: "admin@example.invalid",
+      kind: "personal",
+    });
+    expect(tenants.find((item) => item.tenantId === "tenant_team")).toMatchObject({
+      displayName: "团队空间",
+      kind: "team",
+      isDefault: false,
+    });
+  });
+
   it("Playground 来源受管理员个人空间约束，普通 Run 不能关联 Mock", async () => {
     const client = await runtime.connect();
     try {

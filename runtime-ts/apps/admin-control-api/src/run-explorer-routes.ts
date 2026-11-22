@@ -22,6 +22,7 @@ const RunListQuerySchema = Type.Object(
     agentDefinitionId: Type.Optional(IdentifierSchema),
     agentRevisionId: Type.Optional(IdentifierSchema),
     origin: Type.Optional(Type.Union(RUN_EXPLORER_ORIGINS.map((value) => Type.Literal(value)))),
+    search: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
     cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, default: 50 })),
   },
@@ -44,6 +45,11 @@ const summaryProperties = {
   tenantId: Type.String(),
   runId: Type.String(),
   threadId: Type.String(),
+  threadTitle: Type.String(),
+  userInput: Type.Optional(Type.String()),
+  userEmail: Type.Optional(Type.String()),
+  userDisplayName: Type.Optional(Type.String()),
+  agentDisplayName: Type.Optional(Type.String()),
   status: Type.String(),
   createdAt: Type.String(),
   updatedAt: Type.String(),
@@ -136,6 +142,7 @@ const detailProperties = {
   attemptId: Type.Optional(Type.String()),
   timeline: TimelineSchema,
   contentAccess: Type.Boolean(),
+  auditId: Type.Optional(Type.String()),
 };
 const RunDetailEnvelope = envelope(Type.Object(detailProperties, strict));
 const RunContentEnvelope = envelope(
@@ -166,6 +173,7 @@ interface RunListQuery {
   readonly agentDefinitionId?: string;
   readonly agentRevisionId?: string;
   readonly origin?: RunExplorerOrigin;
+  readonly search?: string;
   readonly cursor?: string;
   readonly limit?: number;
 }

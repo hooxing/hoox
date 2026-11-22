@@ -556,6 +556,49 @@ describe("运行详情", () => {
     expect(view.querySelectorAll(".trajectory-entry.selected")[0]).toBe(entries[1]);
   });
 
+  it("同一 Session 内同毫秒事件保持原有先后顺序", async () => {
+    const occurredAt = "2026-11-19T00:00:01.000Z";
+    const events = Array.from({ length: 12 }, (_, index) => index + 1).flatMap((n) => [
+      {
+        schemaVersion: 1 as const,
+        sequence: n * 2 - 1,
+        occurredAt,
+        monotonicOffsetMs: n * 2 - 1,
+        source: "pi" as const,
+        type: "message_start",
+        event: { type: "message_start", message: { role: "assistant" } } as InternalTrajectoryEventV1["event"],
+        agentThreadId: "",
+        agentTurnId: "",
+      },
+      {
+        schemaVersion: 1 as const,
+        sequence: n * 2,
+        occurredAt,
+        monotonicOffsetMs: n * 2,
+        source: "pi" as const,
+        type: "message_end",
+        event: {
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: `回复${n}号` }] },
+        } as InternalTrajectoryEventV1["event"],
+        agentThreadId: "",
+        agentTurnId: "",
+      },
+    ]);
+    const trajectory = await loadTrajectoryPages(
+      async () => ({ events, bytes: 100, hasMore: false }),
+      "tenant_a",
+      "run_a",
+      "attempt_a",
+      () => undefined,
+    );
+    const view = render(<DeepSeekTrajectoryDebugger trajectory={trajectory} />);
+    const text = view.textContent ?? "";
+    const positions = Array.from({ length: 12 }, (_, index) => text.indexOf(`回复${index + 1}号`));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
+
   it("长轨迹仅挂载当前窗口，未展开的详情不会被序列化", async () => {
     const base = await loadTrajectoryPages(
       async () => ({ events: [], bytes: 0, hasMore: false }),

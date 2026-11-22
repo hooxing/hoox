@@ -69,23 +69,32 @@ export async function loadTrajectoryPages(
     const sessionLabel = main
       ? "主 Agent"
       : `子 Agent ${sessionEvents[0]?.agentThreadId} · ${sessionEvents[0]?.agentTurnId}`;
-    return { sessionId, sessionLabel, projection };
+    const sessionTimestamps = sessionEvents
+      .map((event) => Date.parse(event.occurredAt))
+      .filter(Number.isFinite);
+    const sessionStart = sessionTimestamps.length > 0 ? Math.min(...sessionTimestamps) : 0;
+    return { sessionId, sessionLabel, projection, sessionStart };
   });
   const timestamps = events.map((event) => Date.parse(event.occurredAt)).filter(Number.isFinite);
   const firstTimestamp = timestamps.length > 0 ? Math.min(...timestamps) : 0;
   const projections = projected
-    .flatMap(({ sessionId, sessionLabel, projection }) =>
-      projection.records.map((record) => ({
+    .flatMap(({ sessionId, sessionLabel, projection, sessionStart }) =>
+      projection.records.map((record, order) => ({
         ...record,
         id: `${encodeURIComponent(sessionId)}:${record.id}`,
         sessionId,
         sessionLabel,
-        monotonicOffsetMs: Math.max(0, Date.parse(record.startedAt) - firstTimestamp),
+        // 会话内保留投影的单调相对时间，跨会话只用会话起点的墙钟差对齐，避免同毫秒事件乱序。
+        monotonicOffsetMs: Math.max(0, sessionStart - firstTimestamp) + record.monotonicOffsetMs,
+        order,
       })),
     )
     .sort(
       (left, right) =>
-        left.monotonicOffsetMs - right.monotonicOffsetMs || left.id.localeCompare(right.id),
+        left.monotonicOffsetMs - right.monotonicOffsetMs ||
+        (left.sessionId === right.sessionId
+          ? left.order - right.order
+          : left.sessionId.localeCompare(right.sessionId)),
     );
   const sessionStats = projected.map(({ projection }) => projection.stats);
   const recordsByTurn = new Map<string, typeof projections>();

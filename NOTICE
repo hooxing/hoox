@@ -3,3 +3,5 @@ Copyright 2026 Hoox contributors
 
 本产品包含适用不同许可证的第三方软件和 vendored 源码。
 详见 THIRD_PARTY_NOTICES.md，以及对应目录中的 LICENSE、SOURCE.md 和 PATCHES。
+文件类型图标使用 LicenseRef-Hoox-Iconfont-33437 受限授权，不适用项目 Apache-2.0 许可；
+Hoox 商用授权确认不构成对其他项目的开放许可，详见对应目录 LICENSE。

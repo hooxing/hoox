@@ -8,6 +8,7 @@ import {
   enqueueWebhookEvent,
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
+import { PgRunTrajectoryStore } from "../../runtime-ts/packages/persistence/src/run-trajectory-store.js";
 import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
 import {
   createPostgresPool,
@@ -593,5 +594,39 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
         "UPDATE platform_control_operators SET status='active' WHERE user_id='user_admin'",
       );
     }
+  });
+
+  it("完整轨迹分页仅允许管理员，且每次读取先写独立审计", async () => {
+    const store = new PgRunTrajectoryStore(control, {} as never, undefined);
+    const auditId = `trajectory_audit_${unique}`;
+    const auditCountBefore = (await auditRows()).length;
+    await expect(
+      store.readPage({
+        actorUserId: "user_admin",
+        auditId,
+        tenantId: "tenant_a",
+        runId: "run_a2",
+        attemptId: "run_a2_attempt",
+        limit: 50,
+      }),
+    ).resolves.toMatchObject({ events: [], bytes: 0, hasMore: false });
+    expect(await auditRows()).toContainEqual({
+      actor_user_id: "user_admin",
+      tenant_id: "tenant_a",
+      run_id: "run_a2",
+      attempt_id: "run_a2_attempt",
+    });
+
+    await expect(
+      store.readPage({
+        actorUserId: "user_viewer",
+        auditId: `trajectory_viewer_audit_${unique}`,
+        tenantId: "tenant_a",
+        runId: "run_a2",
+        attemptId: "run_a2_attempt",
+        limit: 50,
+      }),
+    ).rejects.toBeDefined();
+    expect(await auditRows()).toHaveLength(auditCountBefore + 1);
   });
 });

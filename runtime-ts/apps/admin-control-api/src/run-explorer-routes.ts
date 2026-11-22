@@ -30,6 +30,13 @@ const RunListQuerySchema = Type.Object(
 );
 const RunPathSchema = Type.Object({ tenantId: IdentifierSchema, runId: IdentifierSchema }, strict);
 const RunDetailQuerySchema = Type.Object({ attemptId: Type.Optional(IdentifierSchema) }, strict);
+const RunTrajectoryQuerySchema = Type.Object(
+  {
+    attemptId: IdentifierSchema,
+    cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })),
+  },
+  strict,
+);
 
 const UsageSchema = Type.Object(
   {
@@ -148,6 +155,17 @@ const RunDetailEnvelope = envelope(Type.Object(detailProperties, strict));
 const RunContentEnvelope = envelope(
   Type.Object({ ...detailProperties, auditId: Type.String() }, strict),
 );
+const RunTrajectoryEnvelope = envelope(
+  Type.Object(
+    {
+      events: Type.Array(Type.Object({}, { additionalProperties: true })),
+      bytes: Type.Integer({ minimum: 0 }),
+      hasMore: Type.Boolean(),
+      nextCursor: Type.Optional(Type.String()),
+    },
+    strict,
+  ),
+);
 
 function responses(success: TSchema) {
   return {
@@ -162,7 +180,7 @@ function responses(success: TSchema) {
 
 export type RunExplorerRouteService = Pick<
   RunExplorerService,
-  "listRuns" | "getRunDetail" | "readRunContent"
+  "listRuns" | "getRunDetail" | "readRunContent" | "readTrajectory"
 >;
 
 interface RunListQuery {
@@ -238,6 +256,30 @@ export function registerRunExplorerRoutes(
           request.params.tenantId,
           request.params.runId,
           request.query.attemptId,
+        ),
+      ),
+  );
+  app.get<{
+    Params: { readonly tenantId: string; readonly runId: string };
+    Querystring: { readonly attemptId: string; readonly cursor?: string };
+  }>(
+    "/v1/admin/control/runs/:tenantId/:runId/trajectory",
+    {
+      schema: {
+        params: RunPathSchema,
+        querystring: RunTrajectoryQuerySchema,
+        response: responses(RunTrajectoryEnvelope),
+      },
+    },
+    async (request) =>
+      helpers.success(
+        request,
+        await runs.readTrajectory(
+          await helpers.actor(request),
+          request.params.tenantId,
+          request.params.runId,
+          request.query.attemptId,
+          request.query.cursor,
         ),
       ),
   );

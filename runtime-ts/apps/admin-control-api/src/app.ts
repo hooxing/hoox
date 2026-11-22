@@ -768,7 +768,9 @@ function failureKind(error: unknown, request: FastifyRequest): FailureKind {
     if (error.code === "UNAVAILABLE") return "dependency_unavailable";
   }
   if (error instanceof RunExplorerError) {
-    return error.code === "NOT_AUTHORIZED" ? "unauthorized" : "not_found";
+    if (error.code === "NOT_AUTHORIZED") return "unauthorized";
+    if (error.code === "UNAVAILABLE") return "dependency_unavailable";
+    return "not_found";
   }
   if (error instanceof AdminControlServiceError) {
     if (error.code === "NOT_AUTHORIZED") return "unauthorized";

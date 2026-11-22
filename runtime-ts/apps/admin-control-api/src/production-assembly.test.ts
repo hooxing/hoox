@@ -20,6 +20,14 @@ const configuration: AdminControlApiProcessConfiguration = Object.freeze({
     secretAccessKey: "publisher-secret",
     forcePathStyle: true,
   }),
+  trajectoryObjectStorage: Object.freeze({
+    endpoint: "http://127.0.0.1:19000",
+    bucket: "runtime-trajectories",
+    region: "us-east-1",
+    accessKeyId: "trajectory",
+    secretAccessKey: "trajectory-secret",
+    forcePathStyle: true,
+  }),
   providerSecrets: Object.freeze({
     modelApiKey: "model-secret",
     modelCredentialEncryptionKey: "model-credential-encryption-key-at-least-32-bytes",

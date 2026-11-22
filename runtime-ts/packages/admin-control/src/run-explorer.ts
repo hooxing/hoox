@@ -3,6 +3,7 @@ import {
   type ObservedRuntimeEvent,
   outlineTrajectory,
   projectTrajectory,
+  type InternalTrajectoryEventV1,
   type TrajectoryProjection,
 } from "@hoox/trajectory";
 
@@ -178,8 +179,36 @@ export interface RunExplorerRepository {
   }): Promise<readonly RunExplorerEventRow[]>;
 }
 
+export interface RunTrajectoryReaderPort {
+  readPage(input: {
+    readonly actorUserId: string;
+    readonly auditId: string;
+    readonly tenantId: string;
+    readonly runId: string;
+    readonly attemptId: string;
+    readonly limit: number;
+    readonly afterCursor?: Readonly<{
+      occurredAt: string;
+      agentThreadId: string;
+      sequence: number;
+    }>;
+  }): Promise<{
+    readonly records: readonly (InternalTrajectoryEventV1 & { readonly agentThreadId: string })[];
+    readonly hasMore: boolean;
+    readonly nextCursor?: string;
+    readonly bytes: number;
+  }>;
+}
+
+export interface RunTrajectoryPage {
+  readonly events: readonly (InternalTrajectoryEventV1 & { readonly agentThreadId: string })[];
+  readonly bytes: number;
+  readonly hasMore: boolean;
+  readonly nextCursor?: string;
+}
+
 export class RunExplorerError extends Error {
-  constructor(readonly code: "NOT_AUTHORIZED" | "NOT_FOUND") {
+  constructor(readonly code: "NOT_AUTHORIZED" | "NOT_FOUND" | "UNAVAILABLE") {
     super(code);
     this.name = "RunExplorerError";
   }
@@ -274,6 +303,7 @@ export class RunExplorerService {
   constructor(
     private readonly repository: RunExplorerRepository,
     private readonly auditId: () => string,
+    private readonly trajectories?: RunTrajectoryReaderPort,
   ) {}
 
   private async capabilities(actorUserId: string): Promise<readonly ControlCapability[]> {
@@ -434,4 +464,63 @@ export class RunExplorerService {
       auditId,
     });
   }
+
+  async readTrajectory(
+    actorUserId: string,
+    tenantId: string,
+    runId: string,
+    attemptId: string,
+    cursor?: string,
+  ): Promise<RunTrajectoryPage> {
+    const capabilities = await this.capabilities(actorUserId);
+    if (!capabilities.includes("run_content.read")) throw new RunExplorerError("NOT_AUTHORIZED");
+    if (this.trajectories === undefined) throw new RunExplorerError("UNAVAILABLE");
+    const run = await this.requireRun(actorUserId, tenantId, runId, this.auditId());
+    const selected = selectAttempt(run, identifier(attemptId, "Attempt"));
+    if (selected === undefined) throw new RunExplorerError("NOT_FOUND");
+    const afterCursor = decodeTrajectoryCursor(cursor);
+    const page = await this.trajectories.readPage({
+      actorUserId,
+      auditId: this.auditId(),
+      tenantId: run.tenantId,
+      runId: run.runId,
+      attemptId: selected,
+      limit: 100,
+      ...(afterCursor === undefined ? {} : { afterCursor }),
+    });
+    return Object.freeze({
+      events: page.records,
+      bytes: page.bytes,
+      hasMore: page.hasMore,
+      ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+    });
+  }
+}
+
+function decodeTrajectoryCursor(value: string | undefined) {
+  if (value === undefined) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "occurredAt" in parsed &&
+      typeof parsed.occurredAt === "string" &&
+      "agentThreadId" in parsed &&
+      typeof parsed.agentThreadId === "string" &&
+      "sequence" in parsed &&
+      typeof parsed.sequence === "number" &&
+      Number.isSafeInteger(parsed.sequence) &&
+      parsed.sequence >= 0
+    ) {
+      return {
+        occurredAt: isoTimestamp(parsed.occurredAt, "轨迹游标时间") as string,
+        agentThreadId: parsed.agentThreadId,
+        sequence: parsed.sequence,
+      };
+    }
+  } catch {
+    throw new TypeError("轨迹分页游标无效");
+  }
+  throw new TypeError("轨迹分页游标无效");
 }

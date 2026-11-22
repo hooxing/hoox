@@ -89,6 +89,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "MODEL_WIRE_TRACE_ENABLED",
   "MODEL_WIRE_TRACE_RETENTION_DAYS",
   "MODEL_WIRE_TRACE_MAX_BYTES",
+  "RUN_TRAJECTORY_RETENTION_DAYS",
 ]);
 
 export const optionalProductionEnvironmentKeys = Object.freeze([
@@ -235,6 +236,14 @@ export function validateProductionEnvironmentExample(source) {
   }
   if (values.get("MODEL_WIRE_TRACE_ENABLED") !== "false") {
     issues.push("生产样例 MODEL_WIRE_TRACE_ENABLED 必须为 false");
+  }
+  const trajectoryRetentionDays = Number(values.get("RUN_TRAJECTORY_RETENTION_DAYS"));
+  if (
+    !Number.isSafeInteger(trajectoryRetentionDays) ||
+    trajectoryRetentionDays < 1 ||
+    trajectoryRetentionDays > 365
+  ) {
+    issues.push("RUN_TRAJECTORY_RETENTION_DAYS 必须为 1–365 天的整数");
   }
   if (values.get("THREAD_SERIAL_QUEUE_V2_ENABLED") !== "true") {
     issues.push("生产样例 THREAD_SERIAL_QUEUE_V2_ENABLED 必须为 true");

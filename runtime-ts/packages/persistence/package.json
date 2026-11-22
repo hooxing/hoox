@@ -31,6 +31,10 @@
     "./maintenance": {
       "types": "./src/entrypoints/maintenance.ts",
       "default": "./dist/entrypoints/maintenance.js"
+    },
+    "./trajectory": {
+      "types": "./src/entrypoints/trajectory.ts",
+      "default": "./dist/entrypoints/trajectory.js"
     }
   },
   "types": "./src/index.ts",

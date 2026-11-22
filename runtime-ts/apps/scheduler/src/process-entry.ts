@@ -5,6 +5,12 @@ import {
   PgRuntimeControlConfigurationRepository,
 } from "@hoox/persistence/admin";
 import {
+  createS3BlobStore,
+  createS3StableBlobGarbageCollector,
+  PgBlobLifecycleRepository,
+  RUNTIME_BLOB_OBJECT_PREFIX,
+} from "@hoox/persistence/blob";
+import {
   PgSandboxCleanupConsumerStore,
   PgThreadSandboxLifecycleConsumerStore,
 } from "@hoox/persistence/maintenance";
@@ -14,7 +20,9 @@ import {
   probePostgres,
   WebhookSecretCipher,
 } from "@hoox/persistence/postgres";
+import { PgRunTrajectoryStore } from "@hoox/persistence";
 import { WebhookDispatcher } from "./webhook-dispatcher.js";
+import { runRunTrajectoryRetentionPass } from "./run-trajectory-retention.js";
 import { PgThreadContinuityMetrics, PgThreadTitleGenerationStore } from "@hoox/persistence/thread";
 import {
   assertProductionInheritedEnvironment,
@@ -67,6 +75,24 @@ const schedulerEnvironmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
+  DATABASE_WORKER_COORDINATOR_URL: urlEnvironmentField({
+    secret: true,
+    protocols: ["postgres:", "postgresql:"],
+    allowCredentials: true,
+    maxLength: 8_192,
+  }),
+  DATABASE_WORKER_COORDINATOR_ROLE: stringEnvironmentField({ maxLength: 63 }),
+  S3_ENDPOINT: urlEnvironmentField(),
+  S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
+  S3_REGION: stringEnvironmentField({ maxLength: 128 }),
+  S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
+  S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
+  S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
+  RUN_TRAJECTORY_RETENTION_DAYS: integerEnvironmentField({
+    requiredIn: [],
+    minimum: 1,
+    maximum: 365,
+  }),
   WEBHOOK_SECRET_ENCRYPTION_KEY: stringEnvironmentField({
     secret: true,
     maxLength: 8192,
@@ -173,6 +199,18 @@ export interface SchedulerProcessConfiguration {
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   readonly databaseRuntimeRole: string;
+  readonly workerCoordinatorUrl: string;
+  readonly workerCoordinatorRole: string;
+  readonly workerCoordinatorSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
+  readonly objectStorage: Readonly<{
+    endpoint: string;
+    bucket: string;
+    region: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    forcePathStyle: boolean;
+  }>;
+  readonly trajectoryRetentionDays: number;
   readonly sandbox: Readonly<{
     defaultProviderKey: SandboxProviderKey;
     enabledProviderKeys: readonly SandboxProviderKey[];
@@ -277,6 +315,31 @@ export function parseSchedulerProcessEnvironment(
   const configuredRuntimeRole = readRequiredEnvironmentValue(parsed, "DATABASE_RUNTIME_ROLE");
   if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(configuredRuntimeRole)) {
     throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
+  }
+  const workerCoordinatorRole = readRequiredEnvironmentValue(
+    parsed,
+    "DATABASE_WORKER_COORDINATOR_ROLE",
+  );
+  const workerCoordinatorUrl = readRequiredEnvironmentValue(
+    parsed,
+    "DATABASE_WORKER_COORDINATOR_URL",
+  );
+  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(workerCoordinatorRole)) {
+    throw new TypeError("DATABASE_WORKER_COORDINATOR_ROLE 格式无效");
+  }
+  if (workerCoordinatorRole === configuredRuntimeRole) {
+    throw new TypeError("Worker Coordinator 角色必须与 Runtime 角色不同");
+  }
+  if (decodeURIComponent(new URL(workerCoordinatorUrl).username) !== workerCoordinatorRole) {
+    throw new TypeError("Worker Coordinator 连接用户名必须与数据库角色一致");
+  }
+  const productionCoordinatorDatabase =
+    parsed.runtimeEnvironment === "production"
+      ? parseProductionPostgresTransport(workerCoordinatorUrl)
+      : undefined;
+  const s3Endpoint = readRequiredEnvironmentValue(parsed, "S3_ENDPOINT");
+  if (parsed.runtimeEnvironment === "production") {
+    assertProductionHttpsEndpoint(s3Endpoint, "S3_ENDPOINT");
   }
   const defaultProviderKey = parseSandboxProviderKey(
     parsed.values.SANDBOX_DEFAULT_PROVIDER ?? "cube",
@@ -385,6 +448,20 @@ export function parseSchedulerProcessEnvironment(
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     databaseRuntimeRole: configuredRuntimeRole,
+    workerCoordinatorUrl: productionCoordinatorDatabase?.connectionString ?? workerCoordinatorUrl,
+    workerCoordinatorRole,
+    ...(productionCoordinatorDatabase === undefined
+      ? {}
+      : { workerCoordinatorSsl: productionCoordinatorDatabase.ssl }),
+    objectStorage: Object.freeze({
+      endpoint: s3Endpoint,
+      bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
+      region: readRequiredEnvironmentValue(parsed, "S3_REGION"),
+      accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
+      secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
+      forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
+    }),
+    trajectoryRetentionDays: parsed.values.RUN_TRAJECTORY_RETENTION_DAYS ?? 30,
     sandbox: Object.freeze({
       defaultProviderKey,
       enabledProviderKeys,
@@ -428,7 +505,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
   async assemble(configuration) {
     if (
       configuration.runtimeEnvironment === "production" &&
-      configuration.databaseSsl === undefined
+      (configuration.databaseSsl === undefined || configuration.workerCoordinatorSsl === undefined)
     ) {
       throw new Error("PRODUCTION_SCHEDULER_ASSEMBLY_FORBIDDEN");
     }
@@ -438,6 +515,16 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "hoox-scheduler-cleanup",
+    });
+    const coordinatorPool = createPostgresPool({
+      connectionString: configuration.workerCoordinatorUrl,
+      ...(configuration.workerCoordinatorSsl === undefined
+        ? {}
+        : { ssl: configuration.workerCoordinatorSsl }),
+      schema: configuration.databaseSchema,
+      expectedRuntimeRole: configuration.workerCoordinatorRole,
+      applicationName: "hoox-scheduler-trajectory-retention-coordinator",
+      maxConnections: 2,
     });
     const webhookPool =
       configuration.webhookDispatch === undefined
@@ -452,8 +539,48 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
             applicationName: "hoox-scheduler-webhook-dispatcher",
           });
     let webhookTimer: ReturnType<typeof setInterval> | undefined;
+    let trajectoryTimer: ReturnType<typeof setInterval> | undefined;
+    let trajectoryCleanupInFlight: Promise<number> | undefined;
     let webhookDispatcher: WebhookDispatcher | undefined;
     try {
+      await probePostgres(coordinatorPool, configuration.workerCoordinatorRole);
+      const blobRepository = new PgBlobLifecycleRepository(pool, {
+        objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX,
+      });
+      const s3Config = {
+        ...configuration.objectStorage,
+        prefix: RUNTIME_BLOB_OBJECT_PREFIX,
+        maxPresignTtlSeconds: 600,
+        maxBlobSizeBytes: 32 * 1024 * 1024,
+      } as const;
+      const blobs = createS3BlobStore(s3Config, blobRepository);
+      const gc = createS3StableBlobGarbageCollector(s3Config, blobRepository);
+      const trajectoryStore = new PgRunTrajectoryStore(
+        pool,
+        blobs,
+        undefined,
+        configuration.trajectoryRetentionDays,
+        gc,
+      );
+      const runTrajectoryCleanup = async () => {
+        if (trajectoryCleanupInFlight !== undefined) return trajectoryCleanupInFlight;
+        trajectoryCleanupInFlight = runRunTrajectoryRetentionPass(
+          coordinatorPool,
+          trajectoryStore,
+          () => console.error("运行轨迹保留清理失败"),
+        ).finally(() => {
+          trajectoryCleanupInFlight = undefined;
+        });
+        return trajectoryCleanupInFlight;
+      };
+      void runTrajectoryCleanup().catch(() => console.error("运行轨迹保留清理协调失败"));
+      trajectoryTimer = setInterval(
+        () => {
+          void runTrajectoryCleanup().catch(() => console.error("运行轨迹保留清理协调失败"));
+        },
+        24 * 60 * 60 * 1000,
+      );
+      trajectoryTimer.unref?.();
       if (webhookPool !== undefined && configuration.webhookDispatch !== undefined) {
         await probePostgres(webhookPool, configuration.webhookDispatch.role);
         const dispatcher = new WebhookDispatcher({
@@ -595,16 +722,22 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       const assembly = Object.freeze({
         stopAccepting: async () => {
           if (webhookTimer !== undefined) clearInterval(webhookTimer);
+          if (trajectoryTimer !== undefined) clearInterval(trajectoryTimer);
           await webhookDispatcher?.close();
           await Promise.all([
             loop.close(),
             threadSandboxLoop.close(),
             titleGenerationLoop?.close(),
+            trajectoryCleanupInFlight,
           ]);
         },
         // loop 必须先停止并等待在途远端调用，再关闭连接池。
         resources: Object.freeze([
           Object.freeze({ name: "postgres", close: () => pool.end() }),
+          Object.freeze({
+            name: "worker-coordinator-postgres",
+            close: () => coordinatorPool.end(),
+          }),
           ...(webhookPool === undefined
             ? []
             : [
@@ -618,6 +751,10 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
           Object.freeze({
             name: "postgres",
             probe: () => probePostgres(pool, configuration.databaseRuntimeRole),
+          }),
+          Object.freeze({
+            name: "worker-coordinator-postgres",
+            probe: () => probePostgres(coordinatorPool, configuration.workerCoordinatorRole),
           }),
           ...(webhookPool === undefined
             ? []
@@ -633,8 +770,10 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       return assembly;
     } catch (error) {
       if (webhookTimer !== undefined) clearInterval(webhookTimer);
+      if (trajectoryTimer !== undefined) clearInterval(trajectoryTimer);
       await webhookDispatcher?.close();
       await pool.end().catch(() => undefined);
+      await coordinatorPool.end().catch(() => undefined);
       await webhookPool?.end().catch(() => undefined);
       throw error;
     }

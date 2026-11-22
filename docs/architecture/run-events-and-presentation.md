@@ -31,7 +31,9 @@ Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交�
 ## 诊断数据
 
 - 模型网络请求诊断默认关闭，只有显式开启后才拦截与配置 Provider 匹配的 `chat/completions` 请求，保存最终请求正文；不保存 HTTP header、原始响应正文或 Sandbox/S3 等其他请求。诊断正文进入 trace Blob 生命周期，受保留期与 GC 约束。
-- 持久 Run 事件由后台“运行记录”统一投影；有效平台管理员可以查看正文，读取用户输入的列表请求、无 Attempt 详情与完整轨迹详情均写入访问审计，审计失败时不返回正文。列表筛选通过 POST 请求体传递，避免关键词进入 URL 访问日志。旧 `/trajectory/` 部署入口重定向到 `/admin/runs`。development 的 `@hoox/trajectory-web` 仍可读取本地 Worker 诊断镜像，不能部署为生产服务或作为 Run 事实来源。
+- Worker 将每个 Attempt 的逻辑轨迹事件（模型调用、上下文、助手思考/回复、工具参数/结果、子调用与阶段时序）写入现有 trace Blob 对象存储；PostgreSQL 只保存分页索引、内容摘要、Blob 引用和到期时间。保留原始模型 request body 的既有可选诊断，不采集原始 HTTP response/SSE；轨迹记录剥离 header 对象及凭据字段后再写对象。轨迹诊断写入失败只产生不含正文的观测日志，不改变 Run 结果。
+- 后台“运行记录”提供按 Run/Attempt 的完整逻辑轨迹，服务端按稳定游标分页返回原始事件；每页读取前在同一数据库事务写入内容访问审计，且只向有效平台管理员授权。前端自动读取 Attempt 的全部分页后统一投影和计算汇总，最多读取 50,000 条事件或 20 MiB；触及上限时展示已加载部分并明确标注汇总范围。审计、索引或对象读取失败时不返回轨迹正文。列表筛选通过 POST 请求体传递，避免关键词进入 URL 访问日志；旧 Run 没有轨迹时展示持久事件时间线并说明其早于完整轨迹记录。旧 `/trajectory/` 部署入口重定向到 `/admin/runs`。development 的 `@hoox/trajectory-web` 仍可读取本地 Worker 诊断镜像，不能部署为生产服务或作为 Run 事实来源。
+- 逻辑轨迹对象默认保留 30 天，由 `RUN_TRAJECTORY_RETENTION_DAYS` 配置；Scheduler 使用 Worker Coordinator 枚举租户，并以 Runtime Tenant RLS 逐租户清理到期索引。Blob 删除完成或确认仍有其他引用后才移除索引；对象删除失败保留索引供下次周期重试。过期轨迹立即从读取视图隐藏。Scheduler、Worker 和后台 API 必须使用同一对象存储 bucket 与兼容凭据。
 - 模型用量（未缓存输入、输出、缓存读取 Token 与生成时长）原子写入租户隔离的低基数指标账本，后台只读取跨 Tenant 聚合视图，不保存 Provider 身份或模型正文。
 - Worker 的 [OpenTelemetry 导出](../maintainers/diagnostics.md#导出到-opentelemetry)只旁听 Provider 流与通过持久化验证的 Run/工具事件。同一 Tool Call 的重复读回不生成新 Span；没有已确认的结束事实不猜测结果。导出默认不含正文，不复制持久账本，也不作为界面投影、恢复或计费依据。
 - 诊断数据可能包含用户内容，必须按敏感数据处理；配置错误、日志和测试失败不得输出秘密值。

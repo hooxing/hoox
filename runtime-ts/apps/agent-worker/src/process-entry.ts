@@ -10,6 +10,7 @@ import {
   SimpleArtifactDeliveryService,
 } from "@hoox/artifact";
 import { tenantId } from "@hoox/domain";
+import type { InternalTrajectoryDiagnosticRecord } from "@hoox/trajectory";
 import {
   type Mem0DevelopmentConfiguration,
   Mem0PlatformMemoryProvider,
@@ -32,6 +33,7 @@ import {
   RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@hoox/persistence/blob";
 import { createPostgresPool, probePostgres } from "@hoox/persistence/postgres";
+import { PgRunTrajectoryStore } from "@hoox/persistence";
 import {
   PgAgentControlRepository,
   PgBackedSandboxSessionRegistry,
@@ -234,6 +236,11 @@ const workerEnvironmentSchema = Object.freeze({
     maxLength: 4096,
   }),
   MODEL_WIRE_TRACE_RETENTION_DAYS: integerEnvironmentField({ minimum: 1, maximum: 365 }),
+  RUN_TRAJECTORY_RETENTION_DAYS: integerEnvironmentField({
+    requiredIn: [],
+    minimum: 1,
+    maximum: 365,
+  }),
   // 每个 request/response 原始字节独立上限；超过后保存精确前缀并标为 truncated。
   MODEL_WIRE_TRACE_MAX_BYTES: integerEnvironmentField({ minimum: 1, maximum: 8 * 1024 * 1024 }),
   MEM0_MEMORY_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
@@ -386,6 +393,7 @@ export interface WorkerProcessConfiguration {
     wireTraceMaxBytes: number;
     wireTraceEnabled: boolean;
     wireTraceRetentionDays: number;
+    trajectoryRetentionDays: number;
   }>;
   readonly worker: Readonly<{
     tenantId: string;
@@ -737,6 +745,7 @@ export function parseWorkerProcessEnvironment(
         parsed,
         "MODEL_WIRE_TRACE_RETENTION_DAYS",
       ),
+      trajectoryRetentionDays: parsed.values.RUN_TRAJECTORY_RETENTION_DAYS ?? 30,
     }),
     worker: Object.freeze({
       tenantId: configuredTenantId,
@@ -1032,10 +1041,39 @@ async function assembleWorkerRuntime(
       runtimeMode,
       configuration.model.wireTraceEnabled,
     );
-    const internalTrajectoryDiagnostics = createDevelopmentProjectInternalTrajectoryMirror(
+    const localInternalTrajectoryDiagnostics = createDevelopmentProjectInternalTrajectoryMirror(
       runtimeMode,
       configuration.model.wireTraceEnabled,
     );
+    const trajectoryStore = new PgRunTrajectoryStore(
+      pool,
+      blobs,
+      new DurableTraceBlobPersistenceAdapter(blobRepository, blobs),
+      configuration.model.trajectoryRetentionDays,
+    );
+    const internalTrajectoryDiagnostics = Object.freeze({
+      persist: async (record: InternalTrajectoryDiagnosticRecord) => {
+        const writes = [
+          trajectoryStore.persist(record),
+          ...(localInternalTrajectoryDiagnostics === undefined
+            ? []
+            : [localInternalTrajectoryDiagnostics.persist(record)]),
+        ];
+        const results = await Promise.allSettled(writes);
+        if (results.some((result) => result.status === "rejected")) {
+          throw new Error("RUN_TRAJECTORY_PERSISTENCE_FAILED");
+        }
+      },
+      onFailure: ({
+        attemptId,
+        sequence,
+      }: {
+        readonly attemptId: string;
+        readonly sequence: number;
+      }) => {
+        console.error("运行轨迹事件写入失败", { attemptId, sequence });
+      },
+    });
     const phaseTimingDiagnostics = createDevelopmentProjectRunPhaseTimingMirror(
       runtimeMode,
       configuration.model.wireTraceEnabled,

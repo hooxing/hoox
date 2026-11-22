@@ -6,3 +6,4 @@ export * from "./entrypoints/admin.js";
 export * from "./entrypoints/thread.js";
 export * from "./entrypoints/run-execution.js";
 export * from "./entrypoints/maintenance.js";
+export * from "./entrypoints/trajectory.js";

@@ -64,6 +64,7 @@ Agent 版本在受理 Run 时固定，见 [Agent 定义、版本与 Run 快照](
 - **管理员直接调试**：有效 `admin` 在列表和详情直接看到用户问题、思考、回复、工具参数/结果与错误；查看问题和标题不会替代正文审计。`viewer`、`operator` 可以查看结构指标，但不会收到问题、Thread 标题或事件正文，正文接口始终拒绝非管理员。
 - **正文读取必审计**：每次管理员详情加载、Attempt 切换或刷新正文时，服务端在同一读写事务内以本人身份写入 `admin_run_content_access_audits`（操作者、Tenant、Run、Attempt、时间与事务号），再读取 `admin_run_event_content`。该视图只放行“有效 `admin` + 本事务写入 + 审计号与 Tenant/Run/Attempt 全部匹配”的行；审计写入被 RLS 拒绝时整个读取失败，旧审计号在后续事务中读不到任何行。界面不要求额外点击，也不展示审计操作提示。
 - **审计独立保留**：正文访问审计不引用业务行，不阻塞 Run 数据的保留清理，也不随其删除。只有有效 `admin` 能写入或查看该表，Runtime 与 Team Coordinator 对其零 ACL。
+- **完整轨迹读取**：逻辑轨迹也受 `run_content.read` 保护。每个 Run/Attempt 分页请求都先写独立访问审计，再通过审计事务限定的目录视图读取 Blob 索引；对象正文只在审计提交后按引用读取。任何授权、审计、索引或对象读取失败均失败关闭，不输出轨迹正文、秘密或对象键。
 - **授权位置**：菜单和页面路由不参与授权；服务端在每个请求中重新解析角色，数据库视图与 RLS 再独立校验一次。操作者被停用后，列表、结构详情与正文读取均立即失败。
 - **来源与 Playground**：Run 目录的 `agent_definition_id`、`agent_revision_id` 与 `origin` 来自持久化快照和 Run 来源列。Playground 运行可在实时 Run 浏览器中查看，但不计入业务运行数、会话数及 Token 指标；个人目录与终端用户路径排除 Playground Thread/Run。
 - **耗时与用量口径**：耗时为 Run 创建到最新 Attempt 结束的端到端时间（含排队），未结束时缺省；模型调用次数与 Token 为该 Run 所有 Attempt 的用量账本汇总；工具调用、失败与错误计数只统计最新 Attempt 的持久事件。时间线默认展示最新 Attempt，可切换历史 Attempt。

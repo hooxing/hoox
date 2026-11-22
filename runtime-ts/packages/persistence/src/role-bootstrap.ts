@@ -222,6 +222,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["model_wire_trace_cleanup_items", new Set(["SELECT", "INSERT"])],
   ["model_wire_trace_expiry_tombstones", new Set(["SELECT", "INSERT"])],
   ["model_wire_trace_records", new Set(["SELECT", "INSERT", "DELETE"])],
+  ["run_trajectory_entries", new Set(["SELECT", "INSERT", "DELETE"])],
   ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["blob_lifecycles", new Set(["SELECT", "INSERT"])],
   ["blob_incarnations", new Set(["SELECT", "INSERT"])],
@@ -344,6 +345,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["api_keys", new Set(["last_used_at"])],
+  ["run_trajectory_entries", new Set(["persistence_status", "blob_reference_id", "updated_at"])],
   // Agent 定义、Run 浏览器审计和外部工具版本均不得由 Runtime 执行列级更新。
   [
     "threads",
@@ -876,6 +878,14 @@ async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   return result.rows[0]?.present === true;
 }
 
+async function hasRunTrajectoryState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.run_trajectory_entries',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunDispatchState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     // 允许迁移序号留孔，因此 ACL 以实际表及关键列为准，而不是“版本 >= 5”的猜测。
@@ -1225,6 +1235,14 @@ async function hasAdminRunExplorerState(client: PoolClient, schema: string): Pro
   return result.rows[0]?.present === true;
 }
 
+async function hasAdminRunTrajectoryState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.admin_run_trajectory_directory',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAdminIntegrationTenantDirectoryState(
   client: PoolClient,
   schema: string,
@@ -1252,6 +1270,7 @@ const adminRunExplorerViews = [
   "admin_run_directory",
   "admin_run_event_outline",
   "admin_run_event_content",
+  "admin_run_trajectory_directory",
 ] as const;
 
 async function hasRunCompactionSettingsState(client: PoolClient, schema: string): Promise<boolean> {
@@ -1366,6 +1385,7 @@ export async function activeTablePolicy(
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
   }
+  if (!(await hasRunTrajectoryState(client, schema))) policy.delete("run_trajectory_entries");
   if (!(await hasRunDispatchState(client, schema))) {
     for (const table of runDispatchTables) policy.delete(table);
   }
@@ -1555,6 +1575,7 @@ export async function activeColumnUpdatePolicy(
         ? new Set(["last_used_at", "revoked_at"])
         : new Set(["last_used_at"]),
     );
+  if (!(await hasRunTrajectoryState(client, schema))) policy.delete("run_trajectory_entries");
   if (await hasInstallationState(client, schema)) {
     policy.set("installation_state", new Set(["administrator_user_id", "initialized_at"]));
   }
@@ -2495,6 +2516,8 @@ async function assertAdminControlBoundary(
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
   const runExplorerEnabled = enabled && (await hasAdminRunExplorerState(client, context.schema));
+  const runTrajectoryEnabled =
+    enabled && (await hasAdminRunTrajectoryState(client, context.schema));
   const integrationTenantDirectoryEnabled =
     enabled && (await hasAdminIntegrationTenantDirectoryState(client, context.schema));
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
@@ -2736,7 +2759,9 @@ async function assertAdminControlBoundary(
             ? externalToolAdminEnabled
             : row.view_name === "admin_integration_tenant_directory"
               ? integrationTenantDirectoryEnabled
-              : runExplorerEnabled;
+              : row.view_name === "admin_run_trajectory_directory"
+                ? runTrajectoryEnabled
+                : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3713,9 +3738,15 @@ async function grantAdminControlAccess(
   }
   if (await hasAdminRunExplorerState(client, context.schema)) {
     // 只授予视图读取与审计写入；Run、Attempt、事件与指标底表仍对 Admin Control 零 ACL。
+    const trajectoryView = (await hasAdminRunTrajectoryState(client, context.schema))
+      ? `, ${schema}.admin_run_trajectory_directory`
+      : "";
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
-       GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
+       GRANT SELECT ON TABLE ${adminRunExplorerViews
+         .filter((view) => view !== "admin_run_trajectory_directory")
+         .map((view) => `${schema}.${view}`)
+         .join(",")}${trajectoryView} TO ${control}`,
     );
   }
   if (await hasAdminIntegrationTenantDirectoryState(client, context.schema)) {
@@ -4258,6 +4289,17 @@ export async function bootstrapRuntimeAccessOnClient(
        ${schema}.mutation_receipts
        TO ${role}`,
     );
+    if (await hasRunTrajectoryState(client, context.schema)) {
+      await client.query(
+        `GRANT UPDATE(persistence_status,blob_reference_id,updated_at)
+         ON TABLE ${schema}.run_trajectory_entries TO ${role}`,
+      );
+    }
+    if (await hasRunTrajectoryState(client, context.schema)) {
+      await client.query(
+        `GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.run_trajectory_entries TO ${role}`,
+      );
+    }
     if (await hasCleanupConsumerState(client)) {
       await client.query(
         `GRANT UPDATE(claim_token, claim_generation, claimed_by, claim_lease_expires_at, retry_at, attempt_count, remote_call_started_at) ON TABLE ${schema}.cleanup_outbox TO ${role}`,

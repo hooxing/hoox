@@ -41,9 +41,11 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 ### 对象存储
 
 - 本地 MinIO 由 Compose 管理，默认宿主端口为 `19000`，控制台为 `19001`。
-- API/Worker 使用的 S3 凭据与 Skill Publisher 凭据必须分离。
+- API/Worker 使用的 S3 凭据与 Skill Publisher 凭据必须分离。Admin Control API 读取后台运行轨迹时也须配置同 bucket 的 `S3_*` 端点与凭据。
 - 面向浏览器的 `S3_PUBLIC_ENDPOINT` 必须和 API/Web origin 隔离。
 - 不要执行 `docker compose down -v`，除非明确要删除本地 MinIO 数据。
+
+完整逻辑运行轨迹存入共享 trace Blob 存储，默认保留 30 天。`RUN_TRAJECTORY_RETENTION_DAYS` 可设为 1–365 天；Scheduler 使用 Worker Coordinator 枚举 Tenant，并逐租户清理到期索引与无引用 Blob。对象删除失败时保留索引供下次周期重试。轨迹仅含去除请求头和凭据字段后的逻辑事件，不含原始 HTTP response/SSE。模型原始 request body 诊断仍由 `MODEL_WIRE_TRACE_ENABLED` 独立控制。
 
 ### Sandbox Provider
 
@@ -94,8 +96,8 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 ### 诊断
 
 - 模型报文诊断默认关闭，因为请求和轨迹可能包含用户内容；只新增保存原始请求正文，不保存原始响应正文，详见[诊断指南](../maintainers/diagnostics.md)。
-- 轨迹和报文目录只允许写入被 Git 忽略的本地路径。
-- 保留天数和单条大小必须显式限制。
+- 旧版本地报文/轨迹镜像只允许写入被 Git 忽略的本地路径；后台逻辑轨迹写入 S3/MinIO trace Blob。
+- `RUN_TRAJECTORY_RETENTION_DAYS` 限制后台逻辑轨迹的保留期；`MODEL_WIRE_TRACE_RETENTION_DAYS` 与 `MODEL_WIRE_TRACE_MAX_BYTES` 独立限制原始 request body 诊断。
 
 ### 外部工具出站地址
 

@@ -92,8 +92,29 @@ describe("InternalTrajectoryAttemptRecorder", () => {
     ]);
   });
 
+  it("在诊断数据离开记录器前移除认证头和凭据字段", async () => {
+    const persist = vi.fn(async (_record: InternalTrajectoryDiagnosticRecord) => undefined);
+    const recorder = new InternalTrajectoryAttemptRecorder(
+      { tenantId: "tenant_1", threadId: "thread_1", runId: "run_1", attemptId: "attempt_1" },
+      { persist },
+    );
+    recorder.record("pi", "request", {
+      headers: { authorization: "Bearer secret", "x-api-key": "key-secret" },
+      apiKey: "provider-secret",
+      prompt: "保留请求逻辑内容",
+    });
+    await recorder.drain();
+    expect(persist.mock.calls[0]?.[0].event.event).toEqual({
+      apiKey: "[REDACTED]",
+      headers: "[REDACTED]",
+      prompt: "保留请求逻辑内容",
+    });
+    expect(JSON.stringify(persist.mock.calls)).not.toContain("secret");
+  });
+
   it("诊断失败不阻断后续事件", async () => {
     const persisted: number[] = [];
+    const failureObserver = vi.fn();
     const recorder = new InternalTrajectoryAttemptRecorder(
       {
         tenantId: "tenant_1",
@@ -106,11 +127,13 @@ describe("InternalTrajectoryAttemptRecorder", () => {
           if (record.event.sequence === 1) throw new Error("disk full");
           persisted.push(record.event.sequence);
         }),
+        onFailure: failureObserver,
       },
     );
     recorder.record("pi", "agent_start", { type: "agent_start" });
     recorder.record("pi", "turn_start", { type: "turn_start" });
     await recorder.drain();
     expect(persisted).toEqual([2]);
+    expect(failureObserver).toHaveBeenCalledWith({ attemptId: "attempt_1", sequence: 1 });
   });
 });

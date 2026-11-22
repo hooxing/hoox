@@ -29,7 +29,9 @@
 | API | PG、S3、JWT/身份、TLS、公开 origin | 模型、Sandbox 执行、迁移器、MinIO root |
 | Scheduler | PG、Cube/E2B 生命周期、可选标题模型 | S3、主模型、API JWT 私钥 |
 | Worker | PG、S3、Sandbox、主模型 | API 身份私钥、Admin 管理凭据 |
-| Admin API | 独立管理身份、Admin Control PG、Skill Publisher PG 与发布对象存储凭据 | 普通 Runtime 全量秘密 |
+| Admin API | 独立管理身份、Admin Control PG、Skill Publisher PG、发布对象存储凭据及读取 Run 轨迹所需的 S3 凭据 | 普通 Runtime 全量秘密 |
+
+Scheduler、Worker 与 Admin API 的轨迹存储配置必须指向同一个 bucket；Scheduler 使用 Worker Coordinator 身份枚举 Tenant，并通过 Runtime Tenant RLS 清理，不授予跨租户业务表访问。`RUN_TRAJECTORY_RETENTION_DAYS` 默认 30 天、允许 1–365 天。轨迹写入故障不影响 Run，但应监控不含正文的 `运行轨迹事件写入失败` 与 `运行轨迹保留清理失败` 日志。删除对象失败时保留到期索引并在下一周期重试；成功或确认其他引用仍存活后才移除索引。
 
 production 入口对非空 `NODE_*` 默认拒绝，只允许镜像固定的 `NODE_ENV`、`NODE_VERSION` 和私有 CA 通道 `NODE_EXTRA_CA_CERTS`；同时拒绝环境代理和 OpenSSL CA/config/provider 覆盖。该边界不能抵抗有权替换镜像 entrypoint 或 command 的部署者，必须由平台策略补足。
 

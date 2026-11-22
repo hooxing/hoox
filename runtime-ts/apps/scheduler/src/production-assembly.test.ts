@@ -7,6 +7,14 @@ const mocks = vi.hoisted(() => ({
   gatewayConstructed: vi.fn(),
   gatewayProbe: vi.fn(),
   loopStarted: vi.fn(),
+  retentionStarted: vi.fn(async () => 0),
+}));
+
+vi.mock("@hoox/persistence/blob", () => ({
+  createS3BlobStore: () => ({}),
+  createS3StableBlobGarbageCollector: () => ({}),
+  PgBlobLifecycleRepository: class {},
+  RUNTIME_BLOB_OBJECT_PREFIX: "agent-runtime",
 }));
 
 vi.mock("@hoox/persistence/admin", () => ({
@@ -76,6 +84,9 @@ vi.mock("./sandbox-cleanup-consumer.js", () => ({
     async close() {}
   },
 }));
+vi.mock("./run-trajectory-retention.js", () => ({
+  runRunTrajectoryRetentionPass: mocks.retentionStarted,
+}));
 
 import { startSchedulerProcess } from "./process-entry.js";
 
@@ -84,7 +95,17 @@ function environment(): Record<string, string> {
     RUNTIME_ENV: "production",
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_RUNTIME_ROLE: "runtime",
+    DATABASE_WORKER_COORDINATOR_URL:
+      "postgresql://worker_coordinator:credential@database:5432/runtime?sslmode=verify-full",
+    DATABASE_WORKER_COORDINATOR_ROLE: "worker_coordinator",
     DATABASE_SCHEMA: "runtime",
+    S3_ENDPOINT: "https://s3.invalid",
+    S3_BUCKET: "runtime-test",
+    S3_REGION: "us-east-1",
+    S3_ACCESS_KEY_ID: "test-access-key",
+    S3_SECRET_ACCESS_KEY: "test-secret-key",
+    S3_FORCE_PATH_STYLE: "false",
+    RUN_TRAJECTORY_RETENTION_DAYS: "30",
     CUBESANDBOX_API_URL: "https://cube-api.invalid",
     CUBESANDBOX_PROXY_SCHEME: "https",
     SCHEDULER_TENANT_ID: "tenant-production-scheduler",
@@ -116,7 +137,7 @@ describe("生产 Scheduler 装配顺序", () => {
     expect(mocks.gatewayConstructed).toHaveBeenCalledTimes(1);
     expect(mocks.gatewayProbe).toHaveBeenCalledTimes(1);
     expect(mocks.loopStarted).not.toHaveBeenCalled();
-    expect(mocks.pool.end).toHaveBeenCalledTimes(2);
+    expect(mocks.pool.end).toHaveBeenCalledTimes(3);
   });
 
   it("数据库角色探针失败时不构造远端 gateway，也不启动 cleanup loop", async () => {
@@ -133,9 +154,16 @@ describe("生产 Scheduler 装配顺序", () => {
         ssl: { rejectUnauthorized: true },
       }),
     );
+    expect(mocks.createPostgresPool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRuntimeRole: "worker_coordinator",
+        applicationName: "hoox-scheduler-trajectory-retention-coordinator",
+        ssl: { rejectUnauthorized: true },
+      }),
+    );
     expect(mocks.probePostgres).toHaveBeenCalledTimes(1);
     expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
     expect(mocks.loopStarted).not.toHaveBeenCalled();
-    expect(mocks.pool.end).toHaveBeenCalledTimes(2);
+    expect(mocks.pool.end).toHaveBeenCalledTimes(3);
   });
 });

@@ -35,6 +35,7 @@ export interface InternalTrajectoryDiagnosticRecord {
 /** 敏感内部诊断端口；实现失败不得改变 Agent 或 durable Run 语义。 */
 export interface InternalTrajectoryDiagnosticsPort {
   persist(record: InternalTrajectoryDiagnosticRecord): Promise<void>;
+  onFailure?(failure: { readonly attemptId: string; readonly sequence: number }): void;
 }
 
 export interface InternalTrajectoryClock {
@@ -137,6 +138,20 @@ function tagged(type: string, value?: string): InternalTrajectoryValue {
   return value === undefined ? { $cubeInternalType: type } : { $cubeInternalType: type, value };
 }
 
+const secretProperty =
+  /(?:authorization|proxy-authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|password|credential)/iu;
+
+function redactSensitiveValues(value: InternalTrajectoryValue): InternalTrajectoryValue {
+  if (Array.isArray(value)) return value.map(redactSensitiveValues);
+  if (typeof value !== "object" || value === null) return value;
+  const entries = Object.entries(value).map(([key, item]) => {
+    if (key.toLowerCase() === "headers") return [key, "[REDACTED]"] as const;
+    if (secretProperty.test(key)) return [key, "[REDACTED]"] as const;
+    return [key, redactSensitiveValues(item)] as const;
+  });
+  return Object.fromEntries(entries);
+}
+
 function propertyPath(parent: string, key: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(key)
     ? `${parent}.${key}`
@@ -176,13 +191,22 @@ export class InternalTrajectoryAttemptRecorder {
         monotonicOffsetMs: Math.max(0, this.#clock.monotonicNow() - this.#startedAtMonotonicMs),
         source,
         type,
-        event: snapshotInternalTrajectoryValue(event),
+        event: redactSensitiveValues(snapshotInternalTrajectoryValue(event)),
       },
     };
     this.#chain = this.#chain
       .catch(() => undefined)
       .then(() => this.#diagnostics.persist(record))
-      .catch(() => undefined);
+      .catch(() => {
+        try {
+          this.#diagnostics.onFailure?.({
+            attemptId: record.context.attemptId,
+            sequence: record.event.sequence,
+          });
+        } catch {
+          return;
+        }
+      });
   }
 
   async drain(): Promise<void> {

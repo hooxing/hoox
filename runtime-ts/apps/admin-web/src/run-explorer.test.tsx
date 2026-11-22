@@ -488,6 +488,41 @@ describe("运行详情", () => {
     expect(partialView.textContent).toContain("汇总仅覆盖已加载部分");
   });
 
+  it("长轨迹仅挂载当前窗口，未展开的详情不会被序列化", async () => {
+    const base = await loadTrajectoryPages(
+      async () => ({ events: [], bytes: 0, hasMore: false }),
+      "tenant_a",
+      "run_a",
+      "attempt_a",
+      () => undefined,
+    );
+    const toJSON = vi.fn(() => "详情");
+    const records = Array.from({ length: 25_000 }, (_, n) => ({
+      id: String(n),
+      turn: 1,
+      lane: "tools" as const,
+      kind: "tool",
+      label: "调用",
+      summary: `记录-${n}`,
+      startedAt: "",
+      monotonicOffsetMs: n,
+      durationMs: 1,
+      isError: false,
+      detail: { toJSON },
+    }));
+    const container = render(<DeepSeekTrajectoryDebugger trajectory={{ ...base, records }} />);
+    const rows = () => container.querySelectorAll<HTMLButtonElement>(".trajectory-entry-toggle");
+    const mounted = rows().length;
+    expect(mounted).toBeGreaterThan(0);
+    expect(mounted).toBeLessThan(50);
+    expect(container.querySelectorAll(".trajectory-bar")).toHaveLength(mounted);
+    act(() => button(container, "下一组").click());
+    expect(rows()[0]?.textContent).toContain(`记录-${mounted}`);
+    expect(toJSON).not.toHaveBeenCalled();
+    act(() => rows()[0]?.click());
+    expect(toJSON).toHaveBeenCalledTimes(1);
+  });
+
   it("超大事件占位明确标记部分汇总", async () => {
     const oversized = {
       schemaVersion: 1 as const,

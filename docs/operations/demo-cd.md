@@ -75,11 +75,11 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 
 | 文件 | 所需内容和关系 |
 | --- | --- |
-| `infra.env` | PostgreSQL 初始化账号、数据库及各独立角色和密码（含 Webhook Dispatcher），MinIO root、运行时与 Skill 发布账号，以及桶名；从 `infra.env.example` 起草。PostgreSQL 初始化脚本在新数据卷初始化时执行，每次发布也会幂等补齐缺失角色；已有角色不会被修改，修改此文件不会自动轮换已有数据库角色密码。 |
+| `infra.env` | PostgreSQL 初始化账号、数据库及各独立角色和密码（含 Webhook Dispatcher 与轨迹目录角色），MinIO root、运行时与 Skill 发布账号，以及桶名；从 `infra.env.example` 起草。PostgreSQL 初始化脚本在新数据卷初始化时执行，每次发布也会幂等补齐缺失角色；已有角色不会被修改，修改此文件不会自动轮换已有数据库角色密码。 |
 | `migration.env` | 迁移连接 `MIGRATION_DATABASE_URL`、schema 和迁移角色等迁移契约；连接指向宿主机回环 `127.0.0.1:15432`，身份与 `infra.env` 中的 migrator 一致。 |
 | `api.env` | 从 `api.env.example` 起草，补齐运行时数据库、身份、游标和 S3 等 API 必需配置；数据库和 S3 身份对应 `infra.env` 的运行时账号，S3 内部地址使用 `127.0.0.1:19000`。 |
 | `admin-control.env` | 从同名示例起草，使用独立 Admin Control、Skill Publisher 数据库角色和 Skill Publisher S3 账号；`BETTER_AUTH_SECRET` 与 API 相同，设置独立的 `DEV_ADMIN_CONTROL_TOKEN` 和稳定加密根。 |
-| `scheduler.env` | Scheduler 所需数据库角色、进程身份和稳定加密根，以及 Webhook Dispatcher 角色、连接与 `WEBHOOK_SECRET_ENCRYPTION_KEY`（从 `scheduler.env.example` 起草）；租户 ID 由发布脚本注入。不要注入 S3 或主模型调用密钥。 |
+| `scheduler.env` | Scheduler 所需数据库角色、进程身份和稳定加密根，以及 Webhook Dispatcher 角色、连接与 `WEBHOOK_SECRET_ENCRYPTION_KEY`（从 `scheduler.env.example` 起草）；租户 ID 由发布脚本注入。配置与 Worker 同 bucket 的轨迹清理 S3 凭据；禁止注入 Worker Coordinator 或主模型调用密钥。 |
 | `worker.env` | Worker 所需数据库角色、S3 运行时账号、进程身份和稳定加密根；租户 ID 由发布脚本注入。 |
 | `demo-account.env` | `DEMO_ACCOUNT_DISPLAY_NAME`、`DEMO_ACCOUNT_EMAIL`、`DEMO_ACCOUNT_PASSWORD`，供脚本创建或登录固定 Demo 管理员。文件由 shell `source` 读取，值须是有效 shell 赋值；已有账号不会因修改文件而自动改密码。 |
 
@@ -114,11 +114,11 @@ ls -l /opt/hoox-demo/shared/*.env
 
 PostgreSQL 数据卷保留时，Docker 不会重新执行初始化脚本。发布脚本因此在迁移前以容器内 `infra.env` 幂等执行 `postgres-init.sh`：只创建缺失的角色、授予 CONNECT 并确保 Schema 存在，不修改已有角色的密码或属性；角色安全属性仍由迁移前置检查失败关闭。
 
-引入新的受限角色（如 Webhook Dispatcher）时，发布前必须在服务器共享配置中补齐以下字段，否则发布在拉取镜像前以退出码 2 失败，不改动当前版本：
+发布前必须在服务器共享配置中补齐 Scheduler 的 Webhook 投递与轨迹目录身份，否则发布在拉取镜像前以退出码 2 失败，不改动当前版本：
 
-1. `infra.env`：`DATABASE_WEBHOOK_DISPATCHER_ROLE` 与 `DATABASE_WEBHOOK_DISPATCHER_PASSWORD`（随机强密码）。
-2. `migration.env`：与 `infra.env` 相同的 `DATABASE_WEBHOOK_DISPATCHER_ROLE`。
-3. `scheduler.env`：相同的 `DATABASE_WEBHOOK_DISPATCHER_ROLE`，用户名、密码和数据库名与 `infra.env` 一致、指向 `127.0.0.1:15432` 的 `WEBHOOK_DISPATCHER_DATABASE_URL`，以及不少于 32 字节的 `WEBHOOK_SECRET_ENCRYPTION_KEY`。
+1. `infra.env`：`DATABASE_WEBHOOK_DISPATCHER_ROLE` 与 `DATABASE_WEBHOOK_DISPATCHER_PASSWORD`（随机强密码），以及独立的 `DATABASE_TRAJECTORY_DIRECTORY_ROLE` 与 `DATABASE_TRAJECTORY_DIRECTORY_PASSWORD`。
+2. `migration.env`：与 `infra.env` 相同的 `DATABASE_WEBHOOK_DISPATCHER_ROLE` 和 `DATABASE_TRAJECTORY_DIRECTORY_ROLE`。
+3. `scheduler.env`：目录身份使用 `DATABASE_TRAJECTORY_DIRECTORY_ROLE` 和 `DATABASE_TRAJECTORY_DIRECTORY_URL`（与投递连接相同的主机和数据库，不同角色和口令）；移除 `DATABASE_WORKER_COORDINATOR_URL` 和 `DATABASE_WORKER_COORDINATOR_ROLE`。投递使用相同的 `DATABASE_WEBHOOK_DISPATCHER_ROLE`，用户名、密码和数据库名与 `infra.env` 一致、指向 `127.0.0.1:15432` 的 `WEBHOOK_DISPATCHER_DATABASE_URL`，以及不少于 32 字节的 `WEBHOOK_SECRET_ENCRYPTION_KEY`。
 4. `api.env`：与 `scheduler.env` 完全相同的 `WEBHOOK_SECRET_ENCRYPTION_KEY`。该加密根必须稳定并安全备份，更换会使已登记的 Webhook 密钥无法解密。
 
 发布成功后，可在工作台注册指向受控 HTTPS 接收端的 Webhook，触发一次 Run 并确认接收端收到可验签的事件，作为保留数据卷升级路径的投递烟测。

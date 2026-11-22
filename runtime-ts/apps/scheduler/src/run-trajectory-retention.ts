@@ -6,11 +6,11 @@ export interface RunTrajectoryRetentionStore {
 }
 
 export async function runRunTrajectoryRetentionPass(
-  coordinator: Pool,
+  directory: Pool,
   store: RunTrajectoryRetentionStore,
   onFailure: () => void = () => undefined,
 ): Promise<number> {
-  const tenants = await listRunTrajectoryCleanupTenants(coordinator);
+  const tenants = await listRunTrajectoryCleanupTenants(directory);
   let removed = 0;
   for (const tenantId of tenants) {
     try {

@@ -33,6 +33,7 @@ const runtimeRole = identifier("DATABASE_RUNTIME_ROLE");
 const migratorRole = identifier("DATABASE_MIGRATOR_ROLE");
 const skillPublisherRole = identifier("DATABASE_SKILL_PUBLISHER_ROLE");
 const workerCoordinatorRole = identifier("DATABASE_WORKER_COORDINATOR_ROLE");
+const trajectoryDirectoryRole = identifier("DATABASE_TRAJECTORY_DIRECTORY_ROLE");
 const teamCoordinatorRole = identifier("DATABASE_TEAM_COORDINATOR_ROLE");
 const adminControlRole = identifier("DATABASE_ADMIN_CONTROL_ROLE");
 const webhookDispatcherRole = identifier("DATABASE_WEBHOOK_DISPATCHER_ROLE");
@@ -41,6 +42,7 @@ const runtimePassword = required("M4_DATABASE_RUNTIME_PASSWORD");
 const migratorPassword = required("M4_DATABASE_MIGRATOR_PASSWORD");
 const skillPublisherPassword = required("M4_DATABASE_SKILL_PUBLISHER_PASSWORD");
 const workerCoordinatorPassword = required("M4_DATABASE_WORKER_COORDINATOR_PASSWORD");
+const trajectoryDirectoryPassword = required("M4_DATABASE_TRAJECTORY_DIRECTORY_PASSWORD");
 const teamCoordinatorPassword = required("M4_DATABASE_TEAM_COORDINATOR_PASSWORD");
 const adminControlPassword = required("M4_DATABASE_ADMIN_CONTROL_PASSWORD");
 const webhookDispatcherPassword = required("M4_DATABASE_WEBHOOK_DISPATCHER_PASSWORD");
@@ -68,6 +70,7 @@ try {
           migratorRole,
           skillPublisherRole,
           workerCoordinatorRole,
+          trajectoryDirectoryRole,
           teamCoordinatorRole,
           adminControlRole,
           webhookDispatcherRole,
@@ -87,6 +90,8 @@ try {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD ${literal(skillPublisherPassword)}
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${trajectoryDirectoryRole}" LOGIN PASSWORD ${literal(trajectoryDirectoryPassword)}
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD ${literal(workerCoordinatorPassword)}
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD ${literal(teamCoordinatorPassword)}
@@ -96,7 +101,7 @@ try {
        CREATE ROLE "${webhookDispatcherRole}" LOGIN PASSWORD ${literal(webhookDispatcherPassword)}
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}"
-         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}";
+         TO "${trajectoryDirectoryRole}", "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
     );
     const safety = await client.query<{

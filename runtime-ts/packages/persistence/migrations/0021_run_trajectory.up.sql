@@ -30,7 +30,7 @@ CREATE TABLE run_trajectory_entries (
 CREATE INDEX run_trajectory_attempt_sequence_idx
   ON run_trajectory_entries(tenant_id, run_id, attempt_id, occurred_at, agent_thread_id, sequence);
 CREATE INDEX run_trajectory_expiry_idx
-  ON run_trajectory_entries(tenant_id, expires_at, attempt_id, sequence);
+  ON run_trajectory_entries(tenant_id, (GREATEST(expires_at,updated_at)), attempt_id, agent_thread_id, sequence);
 
 ALTER TABLE run_trajectory_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE run_trajectory_entries FORCE ROW LEVEL SECURITY;
@@ -67,10 +67,9 @@ CREATE VIEW run_trajectory_cleanup_tenants WITH (security_barrier=true) AS
 SELECT DISTINCT tenant_id FROM run_trajectory_entries;
 DO $$
 BEGIN
-  EXECUTE format(
-    'GRANT SELECT ON run_trajectory_cleanup_tenants TO %I',
-    current_setting('app.runtime_role')
-  );
+  IF NULLIF(current_setting('app.trajectory_directory_role'), '') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT ON run_trajectory_cleanup_tenants TO %I', current_setting('app.trajectory_directory_role'));
+  END IF;
 END $$;
 REVOKE ALL ON run_trajectory_cleanup_tenants FROM PUBLIC;
 

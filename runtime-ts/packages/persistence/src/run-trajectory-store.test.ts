@@ -9,7 +9,7 @@ import {
 function poolFixture(query: (sql: string, values?: readonly unknown[]) => Promise<unknown>) {
   const client = {
     query: vi.fn(async (sql: string, values?: readonly unknown[]) => {
-      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK")
+      if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK")
         return { rowCount: null, rows: [] };
       if (sql.includes("set_config('app.tenant_id'")) return { rowCount: null, rows: [] };
       return (await query(sql, values)) as never;
@@ -38,7 +38,7 @@ const event: RunTrajectoryEventInput = {
 };
 
 describe("PgRunTrajectoryStore", () => {
-  it("对象写入失败时只标记诊断不可用，不抛出正文或凭据", async () => {
+  it("对象不可用时保留未终结的恢复锚点，不抛出正文或凭据", async () => {
     const queries: string[] = [];
     const { pool } = poolFixture(async (sql) => {
       queries.push(sql);
@@ -48,7 +48,7 @@ describe("PgRunTrajectoryStore", () => {
     const store = new PgRunTrajectoryStore(pool, {} as never, traceBlobs);
     await expect(store.persist(event)).rejects.toMatchObject({ code: "UNAVAILABLE" });
     expect(traceBlobs.persistTrace).toHaveBeenCalledTimes(1);
-    expect(queries.some((sql) => sql.includes("persistence_status='unavailable'"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("persistence_status='unavailable'"))).toBe(false);
   });
 
   it("对象写入结果未知时保留 pending operation 作为恢复锚点", async () => {
@@ -76,6 +76,7 @@ describe("PgRunTrajectoryStore", () => {
               attempt_id: "attempt_a",
               agent_thread_id: "",
               sequence: "1",
+              persistence_status: "stored",
               blob_reference_id: "reference_a",
               sha256: "a".repeat(64),
               size: "10",
@@ -86,7 +87,7 @@ describe("PgRunTrajectoryStore", () => {
           ],
         };
       }
-      return { rowCount: 2, rows: [] };
+      return { rowCount: 1, rows: [] };
     });
     const gc = { collectIfUnreachable: vi.fn(async () => "deleted" as const) };
     const store = new PgRunTrajectoryStore(pool, {} as never, undefined, 30, gc);
@@ -96,7 +97,7 @@ describe("PgRunTrajectoryStore", () => {
       expect.objectContaining({ purpose: "trace", sha256: "a".repeat(64) }),
     );
     expect(statements.find((sql) => sql.startsWith("SELECT entry.tenant_id"))).toContain(
-      "entry.expires_at<=clock_timestamp()",
+      "GREATEST(entry.expires_at,entry.updated_at)<=statement_timestamp()",
     );
   });
 
@@ -111,6 +112,7 @@ describe("PgRunTrajectoryStore", () => {
               attempt_id: "attempt_a",
               agent_thread_id: "",
               sequence: "1",
+              persistence_status: "stored",
               blob_reference_id: "reference_a",
               sha256: "b".repeat(64),
               size: "10",
@@ -140,48 +142,78 @@ describe("PgRunTrajectoryStore", () => {
     expect(gc.collectIfUnreachable).toHaveBeenCalledTimes(2);
   });
 
-  it("pending operation 在保留清理中恢复并释放后才删除索引", async () => {
-    let selected = 0;
-    const { pool } = poolFixture(async (sql) => {
-      if (sql.startsWith("SELECT entry.tenant_id")) {
-        selected += 1;
-        return {
-          rowCount: 1,
-          rows: [
-            {
-              tenant_id: "tenant_a",
-              attempt_id: "attempt_a",
-              agent_thread_id: "",
-              sequence: "1",
-              blob_reference_id: selected === 1 ? null : "reference_pending",
-              persistence_status: selected === 1 ? "pending" : "stored",
-              blob_operation_id: "trace-operation",
-              sha256: "c".repeat(64),
-              size: "10",
-              blob_media_type: "application/json",
-              incarnation_id: "incarnation_pending",
-              physical_object_key: "trace/object-pending",
-            },
-          ],
-        };
-      }
-      return { rowCount: 1, rows: [] };
-    });
-    const recovery = {
-      recoverForRetention: vi.fn(async () => "completed" as const),
-    };
-    const gc = { collectIfUnreachable: vi.fn(async () => "deleted" as const) };
-    const store = new PgRunTrajectoryStore(pool, {} as never, undefined, 30, gc, recovery);
-    await expect(store.cleanupExpired("tenant_a")).resolves.toBe(1);
-    expect(recovery.recoverForRetention).toHaveBeenCalledWith({
-      tenantId: "tenant_a",
-      operationId: "trace-operation",
-      sha256: "c".repeat(64),
-      size: 10,
-    });
-    expect(selected).toBe(2);
-    expect(gc.collectIfUnreachable).toHaveBeenCalledTimes(1);
-  });
+  it.each([true, false])(
+    "pending 恢复先绑定再释放；绑定未命中时不重试（命中 %s）",
+    async (matches) => {
+      const operations: string[] = [];
+      const { pool } = poolFixture(async (sql) => {
+        if (sql.startsWith("SELECT entry.tenant_id")) {
+          operations.push("select");
+          if (operations.length > 1) throw new Error("重复选择过期行");
+          return {
+            rows: [
+              {
+                attempt_id: "attempt_a",
+                sequence: "1",
+                agent_thread_id: "",
+                persistence_status: "pending",
+                blob_reference_id: null,
+                blob_operation_id: "trace-operation",
+                sha256: "c".repeat(64),
+                size: "10",
+              },
+            ],
+          };
+        }
+        if (sql.startsWith("UPDATE run_trajectory_entries SET updated_at")) {
+          operations.push("defer");
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.startsWith("UPDATE run_trajectory_entries")) {
+          operations.push("bind");
+          return {
+            rows: matches
+              ? [
+                  {
+                    blob_reference_id: "reference_a",
+                    blob_media_type: "application/json",
+                    incarnation_id: "incarnation_a",
+                    physical_object_key: "trace/object-a",
+                  },
+                ]
+              : [],
+          };
+        }
+        operations.push(sql.startsWith("UPDATE blob_references") ? "release" : "delete");
+        return { rowCount: 1, rows: [] };
+      });
+      const store = new PgRunTrajectoryStore(
+        pool,
+        {} as never,
+        undefined,
+        30,
+        {
+          collectIfUnreachable: async () => {
+            operations.push("gc");
+            return "deleted";
+          },
+        },
+        {
+          recoverForRetention: async () => {
+            operations.push("recover");
+            return "completed";
+          },
+        },
+      );
+      await expect(store.cleanupExpired("tenant_a", 1)).resolves.toBe(matches ? 1 : 0);
+      expect(operations).toEqual([
+        "select",
+        "recover",
+        "bind",
+        ...(matches ? ["release", "gc", "delete"] : ["defer"]),
+      ]);
+    },
+  );
 
   it("大于页预算的事件返回有界占位符且不下载正文", async () => {
     const { pool } = poolFixture(async (sql) => {

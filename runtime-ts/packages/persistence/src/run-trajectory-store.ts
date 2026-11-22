@@ -108,6 +108,21 @@ function parseTrajectoryEvent(value: unknown): StoredTrajectoryEvent {
   return value as StoredTrajectoryEvent;
 }
 
+interface ExpiredTrajectoryRow {
+  readonly tenant_id: string;
+  readonly attempt_id: string;
+  readonly agent_thread_id: string;
+  readonly sequence: string;
+  readonly blob_reference_id: string | null;
+  readonly persistence_status: "pending" | "stored" | "unavailable";
+  readonly blob_operation_id: string;
+  readonly sha256: string;
+  readonly size: string;
+  readonly blob_media_type: string | null;
+  readonly incarnation_id: string | null;
+  readonly physical_object_key: string | null;
+}
+
 export class PgRunTrajectoryStore {
   constructor(
     private readonly pool: Pool,
@@ -187,14 +202,7 @@ export class PgRunTrajectoryStore {
         ? await this.traceBlobs.persistTrace(traceInput)
         : await this.traceBlobs.persistTraceCancellable(traceInput);
     if (result.outcome !== "persisted" && result.outcome !== "replayed") {
-      if (result.outcome !== "unknown") {
-        await this.markUnavailable(
-          context.tenantId,
-          context.attemptId,
-          agentThreadId,
-          event.sequence,
-        );
-      }
+      // 端口失败（含取消）并不证明 Blob 已终结；只有恢复端能决定是否可以删除锚点。
       throw new PersistenceError("UNAVAILABLE", "运行轨迹对象写入失败");
     }
     if (result.blob.size !== body.byteLength || result.blob.sha256 !== sha256) {
@@ -356,127 +364,126 @@ export class PgRunTrajectoryStore {
       throw new TypeError("运行轨迹清理批次大小无效");
     }
     const expired = await withTenantTransaction(this.pool, { tenantId }, async (client) => {
-      const result = await client.query<{
-        readonly tenant_id: string;
-        readonly attempt_id: string;
-        readonly agent_thread_id: string;
-        readonly sequence: string;
-        readonly blob_reference_id: string | null;
-        readonly persistence_status: "pending" | "stored" | "unavailable";
-        readonly blob_operation_id: string;
-        readonly sha256: string;
-        readonly size: string;
-        readonly blob_media_type: string | null;
-        readonly incarnation_id: string | null;
-        readonly physical_object_key: string | null;
-      }>(
+      const result = await client.query<ExpiredTrajectoryRow>(
         `SELECT entry.tenant_id,entry.attempt_id,entry.agent_thread_id,entry.sequence::text,
-                COALESCE(entry.blob_reference_id,reference.reference_id) AS blob_reference_id,
+                entry.blob_reference_id,
                 entry.persistence_status,entry.blob_operation_id,entry.sha256,entry.size::text,
                 reference.media_type AS blob_media_type,reference.incarnation_id::text,
                 reference.physical_object_key
            FROM run_trajectory_entries entry
            LEFT JOIN blob_references reference
              ON reference.tenant_id=entry.tenant_id
-            AND (reference.reference_id=entry.blob_reference_id OR
-                 (entry.blob_reference_id IS NULL AND reference.operation_id=entry.blob_operation_id
-                  AND reference.state='stable' AND reference.purpose='trace'))
-          WHERE entry.tenant_id=$1 AND entry.expires_at<=clock_timestamp()
-          ORDER BY entry.expires_at,entry.attempt_id,entry.agent_thread_id,entry.sequence
+            AND reference.reference_id=entry.blob_reference_id
+          WHERE entry.tenant_id=$1 AND GREATEST(entry.expires_at,entry.updated_at)<=statement_timestamp()
+          ORDER BY GREATEST(entry.expires_at,entry.updated_at),entry.attempt_id,entry.agent_thread_id,entry.sequence
           LIMIT $2 FOR UPDATE OF entry SKIP LOCKED`,
         [tenantId, limit],
       );
-      const referenceIds = result.rows
-        .map((row) => row.blob_reference_id)
-        .filter((value): value is string => value !== null);
-      if (referenceIds.length > 0) {
-        await client.query(
-          `UPDATE blob_references SET state='released',updated_at=clock_timestamp()
-            WHERE tenant_id=$1 AND reference_id=ANY($2::text[]) AND state='stable'`,
-          [tenantId, referenceIds],
-        );
-      }
       return result.rows;
     });
     let removed = 0;
     for (const row of expired) {
-      if (row.persistence_status === "pending") {
-        if (this.retentionRecovery === undefined) continue;
-        const recovered = await this.retentionRecovery.recoverForRetention({
-          tenantId,
-          operationId: row.blob_operation_id,
-          sha256: row.sha256,
-          size: Number(row.size),
-        });
-        if (recovered === "deferred" || recovered === "retry" || recovered === "conflict") continue;
-        if (recovered === "completed") {
+      const entryKey = [tenantId, row.attempt_id, row.agent_thread_id, row.sequence];
+      let count = 0;
+      try {
+        count = await this.cleanupExpiredRow(tenantId, row, entryKey);
+        removed += count;
+      } finally {
+        if (count === 0) {
+          // 永久在途或暂时失败的提交仍保留锚点，但不能一直占据下一批的队首。
           await withTenantTransaction(this.pool, { tenantId }, async (client) => {
             await client.query(
-              `UPDATE run_trajectory_entries entry
-                  SET persistence_status='stored',blob_reference_id=reference.reference_id,
-                      updated_at=clock_timestamp()
-                 FROM blob_references reference
-                WHERE entry.tenant_id=$1 AND entry.attempt_id=$2 AND entry.agent_thread_id=$3
-                  AND entry.sequence=$4 AND entry.persistence_status='pending'
-                  AND reference.tenant_id=entry.tenant_id
-                  AND reference.operation_id=entry.blob_operation_id
-                  AND reference.state='stable' AND reference.purpose='trace'`,
-              [tenantId, row.attempt_id, row.agent_thread_id, row.sequence],
+              `UPDATE run_trajectory_entries SET updated_at=clock_timestamp()
+              WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND sequence=$4`,
+              entryKey,
             );
           });
-          removed += await this.cleanupExpired(tenantId, 1);
-          continue;
         }
       }
-      if (row.blob_reference_id !== null) {
-        if (
-          this.gc === undefined ||
-          row.blob_media_type === null ||
-          row.incarnation_id === null ||
-          row.physical_object_key === null
-        ) {
-          throw new PersistenceError("UNAVAILABLE", "运行轨迹对象清理未装配");
-        }
-        const outcome = await this.gc.collectIfUnreachable(
-          { tenantId },
-          {
-            kind: "stable",
-            tenantId,
-            purpose: "trace",
-            sha256: row.sha256,
-            size: Number(row.size),
-            mediaType: row.blob_media_type,
-            incarnationId: row.incarnation_id,
-            physicalObjectKey: row.physical_object_key,
-          },
-        );
-        if (outcome === "in_progress") continue;
-      }
-      await withTenantTransaction(this.pool, { tenantId }, async (client) => {
-        await client.query(
-          `DELETE FROM run_trajectory_entries
-            WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND sequence=$4
-              AND expires_at<=clock_timestamp()`,
-          [tenantId, row.attempt_id, row.agent_thread_id, row.sequence],
-        );
-      });
-      removed += 1;
     }
     return removed;
   }
 
-  private async markUnavailable(
+  private async cleanupExpiredRow(
     tenantId: string,
-    attemptId: string,
-    agentThreadId: string,
-    sequence: number,
-  ): Promise<void> {
-    await withTenantTransaction(this.pool, { tenantId }, async (client) => {
-      await client.query(
-        `UPDATE run_trajectory_entries SET persistence_status='unavailable',updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND sequence=$4 AND persistence_status='pending'`,
-        [tenantId, attemptId, agentThreadId, sequence],
+    row: ExpiredTrajectoryRow,
+    entryKey: string[],
+  ): Promise<number> {
+    type Reference = Pick<
+      typeof row,
+      "blob_reference_id" | "blob_media_type" | "incarnation_id" | "physical_object_key"
+    >;
+    let reference: Reference = row;
+    if (row.persistence_status !== "stored") {
+      if (this.retentionRecovery === undefined) return 0;
+      const recovered = await this.retentionRecovery.recoverForRetention({
+        tenantId,
+        operationId: row.blob_operation_id,
+        sha256: row.sha256,
+        size: Number(row.size),
+      });
+      if (recovered === "deferred" || recovered === "retry" || recovered === "conflict") return 0;
+      if (recovered === "completed") {
+        const bound = await withTenantTransaction(this.pool, { tenantId }, async (client) => {
+          const result = await client.query<Reference>(
+            `UPDATE run_trajectory_entries entry
+                  SET persistence_status='stored',blob_reference_id=reference.reference_id,
+                      updated_at=clock_timestamp()
+                 FROM blob_references reference
+                WHERE entry.tenant_id=$1 AND entry.attempt_id=$2 AND entry.agent_thread_id=$3
+                  AND entry.sequence=$4 AND entry.persistence_status<>'stored'
+                  AND reference.tenant_id=entry.tenant_id
+                  AND reference.operation_id=entry.blob_operation_id
+                  AND reference.state='stable' AND reference.purpose='trace'
+              RETURNING reference.reference_id AS blob_reference_id, reference.media_type AS blob_media_type,
+                        reference.incarnation_id::text, reference.physical_object_key`,
+            entryKey,
+          );
+          return result.rows[0];
+        });
+        if (bound === undefined) return 0;
+        reference = bound;
+      }
+    }
+    if (reference.blob_reference_id !== null) {
+      if (
+        this.gc === undefined ||
+        reference.blob_media_type === null ||
+        reference.incarnation_id === null ||
+        reference.physical_object_key === null
+      ) {
+        throw new PersistenceError("UNAVAILABLE", "运行轨迹对象清理未装配");
+      }
+      await withTenantTransaction(this.pool, { tenantId }, async (client) => {
+        await client.query(
+          `UPDATE blob_references SET state='released',updated_at=clock_timestamp()
+              WHERE tenant_id=$1 AND reference_id=$2 AND state='stable'`,
+          [tenantId, reference.blob_reference_id],
+        );
+      });
+      const outcome = await this.gc.collectIfUnreachable(
+        { tenantId },
+        {
+          kind: "stable",
+          tenantId,
+          purpose: "trace",
+          sha256: row.sha256,
+          size: Number(row.size),
+          mediaType: reference.blob_media_type,
+          incarnationId: reference.incarnation_id,
+          physicalObjectKey: reference.physical_object_key,
+        },
       );
+      if (outcome === "in_progress") return 0;
+    }
+    return await withTenantTransaction(this.pool, { tenantId }, async (client) => {
+      const result = await client.query(
+        `DELETE FROM run_trajectory_entries
+            WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND sequence=$4
+              AND expires_at<=clock_timestamp() AND blob_reference_id IS NOT DISTINCT FROM $5`,
+        [...entryKey, reference.blob_reference_id],
+      );
+      return result.rowCount ?? 0;
     });
   }
 }

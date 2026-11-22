@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { randomBytes, randomUUID } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { RunExplorerService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
@@ -12,6 +12,9 @@ import {
   listRunTrajectoryCleanupTenants,
   PgRunTrajectoryStore,
 } from "../../runtime-ts/packages/persistence/src/run-trajectory-store.js";
+import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
+import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
+import { DurableTraceBlobPersistenceAdapter } from "../../runtime-ts/packages/persistence/src/trace-blob-persistence-adapter.js";
 import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
 import {
   createPostgresPool,
@@ -31,6 +34,7 @@ const roles = {
   runtimeRole: `it_rex_runtime_${unique}`,
   migratorRole: `it_rex_migrator_${unique}`,
   skillPublisherRole: `it_rex_publisher_${unique}`,
+  trajectoryDirectoryRole: `it_rex_directory_${unique}`,
   workerCoordinatorRole: `it_rex_worker_${unique}`,
   teamCoordinatorRole: `it_rex_team_${unique}`,
   adminControlRole: `it_rex_control_${unique}`,
@@ -242,7 +246,7 @@ async function auditRows() {
 }
 
 describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
-  it("Runtime 清理身份只通过受限目录视图枚举有轨迹的 Tenant", async () => {
+  it("目录身份只通过受限目录视图枚举有轨迹的 Tenant", async () => {
     const client = await administrator.connect();
     try {
       await client.query("BEGIN");
@@ -261,7 +265,163 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
     } finally {
       client.release();
     }
-    await expect(listRunTrajectoryCleanupTenants(runtime)).resolves.toEqual(["tenant_a"]);
+    const directory = createPostgresPool({
+      connectionString: roleUrl(roles.trajectoryDirectoryRole),
+      schema,
+    });
+    try {
+      await expect(listRunTrajectoryCleanupTenants(directory)).resolves.toEqual(["tenant_a"]);
+      await expect(listRunTrajectoryCleanupTenants(runtime)).rejects.toMatchObject({
+        code: "42501",
+      });
+      for (const sql of [
+        "SELECT * FROM run_trajectory_entries",
+        "SELECT * FROM tenants",
+        "UPDATE worker_tenant_assignments SET generation=generation WHERE false",
+      ]) {
+        await expect(directory.query(sql)).rejects.toMatchObject({ code: "42501" });
+      }
+    } finally {
+      await directory.end();
+    }
+  });
+
+  it("stage_verified 后取消保留 pending 锚点，重启的清理器先删除 staging 再删除索引", async () => {
+    const controller = new AbortController();
+    const repository = new PgBlobLifecycleRepository(runtime);
+    const cas = repository.compareAndSet.bind(repository);
+    vi.spyOn(repository, "compareAndSet").mockImplementation(async (input) => {
+      const applied = await cas(input);
+      if (applied && input.next.status === "staged") controller.abort();
+      return applied;
+    });
+    const staging = new Set<string>();
+    const blobs = {
+      async putStaging(input) {
+        if (input.expectedSha256 === undefined) throw new Error("缺少 staging 摘要");
+        staging.add(input.uploadId);
+        return {
+          kind: "staging",
+          tenantId: input.scope.tenantId,
+          purpose: input.purpose,
+          uploadId: input.uploadId,
+          size: input.body.byteLength,
+          sha256: input.expectedSha256,
+          mediaType: input.mediaType,
+        };
+      },
+      async deleteStaging(_scope, ref) {
+        staging.delete(ref.uploadId);
+      },
+    } satisfies Pick<BlobStore, "putStaging" | "deleteStaging">;
+    const adapter = new DurableTraceBlobPersistenceAdapter(repository, blobs as BlobStore);
+    const store = new PgRunTrajectoryStore(runtime, blobs as BlobStore, adapter);
+    const context = {
+      tenantId: "tenant_a",
+      runId: "run_a2",
+      attemptId: "run_a2_attempt",
+      threadId: "thread_1",
+    };
+    const event = {
+      schemaVersion: 1 as const,
+      sequence: 21,
+      occurredAt: new Date().toISOString(),
+      monotonicOffsetMs: 1,
+      source: "pi" as const,
+      type: "message",
+      event: {},
+    };
+    await expect(
+      store.persist({ context, event }, { signal: controller.signal }),
+    ).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(controller.signal.aborted).toBe(true);
+    expect(staging.size).toBe(1);
+    const expired = await administrator.query(
+      `UPDATE "${schema}".run_trajectory_entries SET expires_at=now() WHERE sequence=21 RETURNING persistence_status`,
+    );
+    expect(expired.rows).toEqual([{ persistence_status: "pending" }]);
+    const recovery = new DurableTraceBlobPersistenceAdapter(
+      new PgBlobLifecycleRepository(runtime),
+      blobs as BlobStore,
+    );
+    const restarted = new PgRunTrajectoryStore(
+      runtime,
+      blobs as BlobStore,
+      undefined,
+      30,
+      undefined,
+      recovery,
+    );
+    await expect(restarted.cleanupExpired("tenant_a", 1)).resolves.toBe(1);
+    expect(staging.size).toBe(0);
+    await expect(restarted.cleanupExpired("tenant_a", 1)).resolves.toBe(0);
+  });
+
+  it("已提交 Blob、索引仍 pending 时，在同一有界批次绑定、释放并回收", async () => {
+    const lifecycle = randomUUID(),
+      incarnation = randomUUID();
+    const connection = await administrator.connect();
+    try {
+      await connection.query("BEGIN");
+      await connection.query(`SET LOCAL search_path TO "${schema}"`);
+      await connection.query(`INSERT INTO run_trajectory_entries(tenant_id,thread_id,run_id,attempt_id,sequence,source,event_type,occurred_at,monotonic_offset_ms,sha256,size,persistence_status,blob_operation_id,expires_at)
+        VALUES('tenant_a','thread_1','run_a2','run_a2_attempt',22,'pi','test',now(),0,repeat('c',64),3,'pending','trace-'||repeat('d',64),now());
+        INSERT INTO blob_commits(tenant_id,operation_id,status,version,snapshot) VALUES ('tenant_a','trace-'||repeat('d',64),'completed',0,'{}')`);
+      await connection.query(
+        `INSERT INTO blob_lifecycles(tenant_id,lifecycle_id,purpose,sha256,size,state,current_incarnation_id,generation) VALUES('tenant_a',$1,'trace',repeat('c',64),3,'active',$2,1)`,
+        [lifecycle, incarnation],
+      );
+      await connection.query(
+        `INSERT INTO blob_incarnations(tenant_id,lifecycle_id,purpose,sha256,size,incarnation_id,physical_object_key,state) VALUES('tenant_a',$1,'trace',repeat('c',64),3,$2,'trace/stable','active')`,
+        [lifecycle, incarnation],
+      );
+      await connection.query(
+        `INSERT INTO blob_references(tenant_id,reference_id,operation_id,state,purpose,sha256,size,media_type,staging_upload_id,lifecycle_id,incarnation_id,physical_object_key) VALUES('tenant_a','ref_trace','trace-'||repeat('d',64),'stable','trace',repeat('c',64),3,'text/plain','upload',$1,$2,'trace/stable')`,
+        [lifecycle, incarnation],
+      );
+      await connection.query("COMMIT");
+    } catch (error) {
+      await connection.query("ROLLBACK");
+      throw error;
+    } finally {
+      connection.release();
+    }
+    const gc = vi.fn(async () => {
+      const result = await administrator.query(
+        `SELECT e.persistence_status,r.state FROM "${schema}".run_trajectory_entries e JOIN "${schema}".blob_references r USING(tenant_id) WHERE e.blob_reference_id=r.reference_id AND e.sequence=22`,
+      );
+      expect(result.rows).toEqual([{ persistence_status: "stored", state: "released" }]);
+      return "deleted" as const;
+    });
+    const store = new PgRunTrajectoryStore(
+      runtime,
+      {} as BlobStore,
+      undefined,
+      30,
+      { collectIfUnreachable: gc },
+      { recoverForRetention: async () => "completed" },
+    );
+    await expect(store.cleanupExpired("tenant_a", 1)).resolves.toBe(1);
+    expect(gc).toHaveBeenCalledTimes(1);
+    await expect(store.cleanupExpired("tenant_a", 1)).resolves.toBe(0);
+  });
+
+  it("未终结的旧提交不会反复占满小批次", async () => {
+    await administrator.query(`INSERT INTO "${schema}".run_trajectory_entries(
+       tenant_id,thread_id,run_id,attempt_id,sequence,source,event_type,occurred_at,monotonic_offset_ms,sha256,size,persistence_status,blob_operation_id,expires_at,updated_at)
+       SELECT 'tenant_b','thread_1','run_b1','run_b1_attempt',n,'pi','test',now(),0,repeat('e',64),1,'pending',
+              'trace-'||lpad(n::text,64,'0'),now()-interval '1 day',now()-interval '2 days' FROM generate_series(23,24) n`);
+    const tried: number[] = [];
+    const store = new PgRunTrajectoryStore(runtime, {} as BlobStore, undefined, 30, undefined, {
+      recoverForRetention: async ({ operationId }) => {
+        const n = Number(operationId.slice(-2));
+        tried.push(n);
+        return n === 23 ? "deferred" : "abandoned";
+      },
+    });
+    await expect(store.cleanupExpired("tenant_b", 1)).resolves.toBe(0);
+    await expect(store.cleanupExpired("tenant_b", 1)).resolves.toBe(1);
+    expect(tried).toEqual([23, 24]);
   });
 
   it("管理员列表显示问题并支持关键词搜索，接入目录固定初始化管理员空间", async () => {

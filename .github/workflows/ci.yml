@@ -141,6 +141,7 @@ jobs:
           DATABASE_MIGRATOR_ROLE: m4_ci_migrator
           DATABASE_SKILL_PUBLISHER_ROLE: m4_ci_skill_publisher
           DATABASE_WORKER_COORDINATOR_ROLE: m4_ci_worker_coordinator
+          DATABASE_TRAJECTORY_DIRECTORY_ROLE: m4_ci_trajectory_directory
           DATABASE_TEAM_COORDINATOR_ROLE: m4_ci_team_coordinator
           DATABASE_ADMIN_CONTROL_ROLE: m4_ci_admin_control
           DATABASE_WEBHOOK_DISPATCHER_ROLE: m4_ci_webhook_dispatcher
@@ -149,6 +150,7 @@ jobs:
           M4_DATABASE_MIGRATOR_PASSWORD: ci-migrator-placeholder-password
           M4_DATABASE_SKILL_PUBLISHER_PASSWORD: ci-skill-publisher-placeholder-password
           M4_DATABASE_WORKER_COORDINATOR_PASSWORD: ci-worker-coordinator-placeholder-password
+          M4_DATABASE_TRAJECTORY_DIRECTORY_PASSWORD: ci-trajectory-directory-placeholder-password
           M4_DATABASE_TEAM_COORDINATOR_PASSWORD: ci-team-coordinator-placeholder-password
           M4_DATABASE_ADMIN_CONTROL_PASSWORD: ci-admin-control-placeholder-password
           M4_DATABASE_WEBHOOK_DISPATCHER_PASSWORD: ci-webhook-dispatcher-placeholder-password
@@ -199,10 +201,12 @@ jobs:
           DATABASE_BOOTSTRAP_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
           DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
           DATABASE_WORKER_COORDINATOR_URL: postgresql://m4_ci_worker_coordinator:ci-worker-coordinator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_TRAJECTORY_DIRECTORY_URL: postgresql://m4_ci_trajectory_directory:ci-trajectory-directory-placeholder-password@127.0.0.1:5432/agent_runtime_ci
           DATABASE_RUNTIME_ROLE: m4_ci_runtime
           DATABASE_MIGRATOR_ROLE: m4_ci_migrator
           DATABASE_SKILL_PUBLISHER_ROLE: m4_ci_skill_publisher
           DATABASE_WORKER_COORDINATOR_ROLE: m4_ci_worker_coordinator
+          DATABASE_TRAJECTORY_DIRECTORY_ROLE: m4_ci_trajectory_directory
           DATABASE_TEAM_COORDINATOR_ROLE: m4_ci_team_coordinator
           DATABASE_ADMIN_CONTROL_ROLE: m4_ci_admin_control
           DATABASE_WEBHOOK_DISPATCHER_ROLE: m4_ci_webhook_dispatcher

@@ -45,7 +45,7 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
       readonly signal?: AbortSignal;
     },
   ): Promise<TraceBlobPersistenceResult> {
-    if (input.signal?.aborted) return { outcome: "unavailable" };
+    if (input.signal?.aborted) return { outcome: "unknown" };
     const operationId = normalizeOperationId(input.idempotencyKey);
     const scope = { tenantId: input.tenantId };
     const uploadId = `trace-${operationId}`;
@@ -69,7 +69,7 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
         if (snapshot === undefined) return { outcome: "unknown" };
       }
       for (let step = 0; step < 32; step += 1) {
-        if (input.signal?.aborted) return { outcome: "unavailable" };
+        if (input.signal?.aborted) return { outcome: "unknown" };
         if (!matchesTraceCommand(snapshot, input.tenantId, input.sha256, input.body.byteLength)) {
           return { outcome: "conflict" };
         }
@@ -85,7 +85,7 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
       }
       return { outcome: "unknown" };
     } catch (error) {
-      return mapTraceFailure(error);
+      return input.signal?.aborted ? { outcome: "unknown" } : mapTraceFailure(error);
     }
   }
 

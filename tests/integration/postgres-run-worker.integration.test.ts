@@ -149,6 +149,9 @@ const teamCoordinatorRole = preprovisionedDatabase
 const adminControlRole = preprovisionedDatabase
   ? (process.env.DATABASE_ADMIN_CONTROL_ROLE ?? "")
   : `it_rw_control_${suffix}`;
+const trajectoryDirectoryRole = preprovisionedDatabase
+  ? (process.env.DATABASE_TRAJECTORY_DIRECTORY_ROLE ?? "")
+  : `it_rw_directory_${suffix}`;
 const webhookDispatcherRole = preprovisionedDatabase
   ? (process.env.DATABASE_WEBHOOK_DISPATCHER_ROLE ?? "")
   : `it_rw_webhook_${suffix}`;
@@ -541,10 +544,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${adminControlRole}" LOGIN PASSWORD '${adminControlPassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${trajectoryDirectoryRole}" LOGIN PASSWORD '${adminControlPassword}'
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${webhookDispatcherRole}" LOGIN PASSWORD '${adminControlPassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}"
-         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}";
+         TO "${trajectoryDirectoryRole}", "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
       );
     }
@@ -563,6 +568,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         !teamCoordinatorRole.startsWith("m4_ci_") ||
         !adminControlRole.startsWith("m4_ci_") ||
         !webhookDispatcherRole.startsWith("m4_ci_") ||
+        !trajectoryDirectoryRole.startsWith("m4_ci_") ||
         !safePgIdentifier.test(schema) ||
         !safePgIdentifier.test(runtimeRole) ||
         !safePgIdentifier.test(migratorRole) ||
@@ -571,6 +577,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         !safePgIdentifier.test(teamCoordinatorRole) ||
         !safePgIdentifier.test(adminControlRole) ||
         !safePgIdentifier.test(webhookDispatcherRole) ||
+        !safePgIdentifier.test(trajectoryDirectoryRole) ||
         migratorUrl.username !== migratorRole ||
         runtimeUrl.username !== runtimeRole ||
         workerCoordinatorUrl.username !== workerCoordinatorRole ||
@@ -606,6 +613,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       teamCoordinatorRole,
       adminControlRole,
       webhookDispatcherRole,
+      trajectoryDirectoryRole,
       schema,
     });
     const dispatchAcl = await admin.query<{ readonly allowed: boolean; readonly version: number }>(
@@ -651,6 +659,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         teamCoordinatorRole,
         adminControlRole,
         webhookDispatcherRole,
+        trajectoryDirectoryRole,
       ];
       if (
         schema !== `it_rw_${suffix}` ||
@@ -957,6 +966,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         teamCoordinatorRole,
         adminControlRole,
         webhookDispatcherRole,
+        trajectoryDirectoryRole,
         schema: isolatedSchema,
       });
       const identity = await control.query<{

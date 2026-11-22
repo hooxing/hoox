@@ -639,6 +639,36 @@ function RunAttemptTimeline({
   );
 }
 
+// 两个视图共享同一记录窗口；展开长 JSON 不会改变窗口边界。
+const trajectoryWindowSize = 20;
+
+function appendSearchTerms(value: unknown, terms: string[]): void {
+  if (value === null || typeof value !== "object") {
+    terms.push(String(value));
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    terms.push(key);
+    appendSearchTerms(item, terms);
+  }
+}
+
+function TrajectoryDetail({ detail }: { readonly detail: unknown }) {
+  const json = useMemo(() => JSON.stringify(detail, null, 2), [detail]);
+  return (
+    <div className="trajectory-entry-detail">
+      <button
+        type="button"
+        className="text-button"
+        onClick={() => void navigator.clipboard.writeText(json).catch(() => {})}
+      >
+        复制 JSON
+      </button>
+      <pre className="run-timeline-content">{json}</pre>
+    </div>
+  );
+}
+
 export function DeepSeekTrajectoryDebugger({
   trajectory,
 }: {
@@ -651,35 +681,39 @@ export function DeepSeekTrajectoryDebugger({
   const [showTurns, setShowTurns] = useState(true);
   const [showCalls, setShowCalls] = useState(true);
   const [showSubcalls, setShowSubcalls] = useState(true);
-  const searchIndex = useMemo(
+  const [page, setPage] = useState(0);
+  const needle = query.trim().toLocaleLowerCase();
+  const searching = needle !== "";
+  const searchIndex = useMemo(() => {
+    if (!searching) return undefined;
+    return trajectory.records.map((record) => {
+      const terms = [record.label, record.summary];
+      appendSearchTerms(record.detail, terms);
+      return terms.join(" ").toLocaleLowerCase();
+    });
+  }, [searching, trajectory.records]);
+  const records = useMemo(
     () =>
-      trajectory.records.map((record) => ({
-        record,
-        detailJson: JSON.stringify(record.detail, null, 2),
-        searchText:
-          `${record.label} ${record.summary} ${JSON.stringify(record.detail)}`.toLocaleLowerCase(),
-      })),
-    [trajectory.records],
+      trajectory.records.filter((record, index) => {
+        if (!showCalls && (record.kind === "tool" || record.kind === "subtool")) return false;
+        if (!showSubcalls && record.kind === "subtool") return false;
+        return searchIndex === undefined || searchIndex[index]?.includes(needle);
+      }),
+    [trajectory.records, needle, searchIndex, showCalls, showSubcalls],
   );
-  const groupedRecords = useMemo(() => {
-    const groups = new Map<number, RunTrajectoryRecordDto[]>();
-    const normalizedQuery = query.trim().toLocaleLowerCase();
-    for (const indexed of searchIndex) {
-      if (!indexed.searchText.includes(normalizedQuery)) continue;
-      const group = groups.get(indexed.record.turn) ?? [];
-      group.push(indexed.record);
-      groups.set(indexed.record.turn, group);
-    }
-    return [...groups.entries()].map(([turn, turnRecords]) => ({ turn, records: turnRecords }));
-  }, [query, searchIndex]);
-  const records = useMemo(() => groupedRecords.flatMap((group) => group.records), [groupedRecords]);
-  const detailJsonById = useMemo(
-    () => new Map(searchIndex.map(({ record, detailJson }) => [record.id, detailJson])),
-    [searchIndex],
-  );
+  const lastPage = Math.max(0, Math.ceil(records.length / trajectoryWindowSize) - 1);
+  const start = Math.min(page, lastPage) * trajectoryWindowSize;
+  const visibleRecords = records.slice(start, start + trajectoryWindowSize);
+  const groups = new Map<number, RunTrajectoryRecordDto[]>();
+  for (const record of visibleRecords) {
+    const group = groups.get(record.turn) ?? [];
+    group.push(record);
+    groups.set(record.turn, group);
+  }
+  const origin = Math.min(...visibleRecords.map((record) => record.monotonicOffsetMs));
   const maxOffset = Math.max(
     1,
-    ...records.map((record) => record.monotonicOffsetMs + (record.durationMs ?? 0)),
+    ...visibleRecords.map((record) => record.monotonicOffsetMs - origin + (record.durationMs ?? 0)),
   );
   const usage = trajectory.stats;
   const tokenTotal =
@@ -722,7 +756,10 @@ export function DeepSeekTrajectoryDebugger({
           <input
             type="checkbox"
             checked={showCalls}
-            onChange={(event) => setShowCalls(event.target.checked)}
+            onChange={(event) => {
+              setShowCalls(event.target.checked);
+              setPage(0);
+            }}
           />
           调用
         </label>
@@ -730,7 +767,10 @@ export function DeepSeekTrajectoryDebugger({
           <input
             type="checkbox"
             checked={showSubcalls}
-            onChange={(event) => setShowSubcalls(event.target.checked)}
+            onChange={(event) => {
+              setShowSubcalls(event.target.checked);
+              setPage(0);
+            }}
           />
           子调用
         </label>
@@ -738,15 +778,39 @@ export function DeepSeekTrajectoryDebugger({
           aria-label="搜索轨迹"
           placeholder="搜索轨迹内容"
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setPage(0);
+          }}
         />
       </div>
+      {lastPage > 0 && (
+        <nav className="trajectory-toolbar" aria-label="轨迹显示窗口">
+          <button
+            type="button"
+            disabled={start === 0}
+            onClick={() => setPage(start / trajectoryWindowSize - 1)}
+          >
+            上一组
+          </button>
+          <span aria-live="polite">
+            显示 {start + 1}–{start + visibleRecords.length} / {records.length} 条记录
+          </span>
+          <button
+            type="button"
+            disabled={page >= lastPage}
+            onClick={() => setPage(start / trajectoryWindowSize + 1)}
+          >
+            下一组
+          </button>
+        </nav>
+      )}
       <section className="trajectory-timeline" aria-label="轨迹时间轴">
         {(["input", "model", "tools"] as const).map((lane) => (
           <div className="trajectory-lane" key={lane}>
             <strong>{lane === "input" ? "输入" : lane === "model" ? "模型" : "工具"}</strong>
             <div className="trajectory-lane-track">
-              {records
+              {visibleRecords
                 .filter((record) => record.lane === lane)
                 .map((record) => (
                   <button
@@ -756,7 +820,7 @@ export function DeepSeekTrajectoryDebugger({
                     aria-pressed={selectedId === record.id}
                     className={`trajectory-bar ${record.kind} ${selectedId === record.id ? "selected" : ""}`}
                     style={{
-                      left: `${Math.max(0, (record.monotonicOffsetMs / maxOffset) * 100)}%`,
+                      left: `${Math.max(0, ((record.monotonicOffsetMs - origin) / maxOffset) * 100)}%`,
                       width: `${Math.max(1.5, ((showDuration ? (record.durationMs ?? 0) : 1) / maxOffset) * 100)}%`,
                     }}
                     onClick={() => select(record)}
@@ -767,12 +831,10 @@ export function DeepSeekTrajectoryDebugger({
         ))}
       </section>
       <div className="trajectory-ledger">
-        {groupedRecords.map(({ turn, records: turnRecords }) => (
+        {[...groups].map(([turn, turnRecords]) => (
           <section className="trajectory-turn" key={turn}>
             {showTurns && <h3>第 {turn} 轮</h3>}
             {turnRecords.map((record) => {
-              if (!showCalls && (record.kind === "tool" || record.kind === "subtool")) return null;
-              if (!showSubcalls && record.kind === "subtool") return null;
               const isExpanded = expanded.has(record.id);
               return (
                 <article
@@ -782,6 +844,7 @@ export function DeepSeekTrajectoryDebugger({
                   <button
                     type="button"
                     className="trajectory-entry-toggle"
+                    aria-expanded={isExpanded}
                     onClick={() => {
                       select(record);
                       setExpanded((current) => {
@@ -798,24 +861,7 @@ export function DeepSeekTrajectoryDebugger({
                       {record.durationMs === null ? "—" : formatDuration(record.durationMs)}
                     </span>
                   </button>
-                  {isExpanded && (
-                    <div className="trajectory-entry-detail">
-                      <button
-                        type="button"
-                        className="text-button"
-                        onClick={() =>
-                          void navigator.clipboard
-                            .writeText(detailJsonById.get(record.id) ?? "null")
-                            .catch(() => {})
-                        }
-                      >
-                        复制 JSON
-                      </button>
-                      <pre className="run-timeline-content">
-                        {detailJsonById.get(record.id) ?? "null"}
-                      </pre>
-                    </div>
-                  )}
+                  {isExpanded && <TrajectoryDetail detail={record.detail} />}
                 </article>
               );
             })}

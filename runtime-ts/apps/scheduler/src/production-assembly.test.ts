@@ -96,9 +96,9 @@ function environment(): Record<string, string> {
     RUNTIME_ENV: "production",
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_RUNTIME_ROLE: "runtime",
-    DATABASE_WORKER_COORDINATOR_URL:
-      "postgresql://worker_coordinator:credential@database:5432/runtime?sslmode=verify-full",
-    DATABASE_WORKER_COORDINATOR_ROLE: "worker_coordinator",
+    DATABASE_TRAJECTORY_DIRECTORY_URL:
+      "postgresql://trajectory_directory:credential@database:5432/runtime?sslmode=verify-full",
+    DATABASE_TRAJECTORY_DIRECTORY_ROLE: "trajectory_directory",
     DATABASE_SCHEMA: "runtime",
     S3_ENDPOINT: "https://s3.invalid",
     S3_BUCKET: "runtime-test",
@@ -158,8 +158,8 @@ describe("生产 Scheduler 装配顺序", () => {
     );
     expect(mocks.createPostgresPool).toHaveBeenCalledWith(
       expect.objectContaining({
-        expectedRuntimeRole: "worker_coordinator",
-        applicationName: "hoox-scheduler-trajectory-retention-coordinator",
+        expectedRuntimeRole: "trajectory_directory",
+        applicationName: "hoox-scheduler-trajectory-retention-directory",
         ssl: { rejectUnauthorized: true },
       }),
     );

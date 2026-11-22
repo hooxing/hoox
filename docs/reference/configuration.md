@@ -22,7 +22,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - Compose 的 PostgreSQL 17 位于 `local-postgres` profile，命名卷持久化数据，宿主端口仅绑定 `127.0.0.1`。只有明确启用该 profile 时才需设置非空 `POSTGRES_BOOTSTRAP_PASSWORD`，并使它与 `DATABASE_BOOTSTRAP_URL` 密码一致；该变量在环境契约中为可选，以兼容已有外部数据库 `.env`。
 - 可以改用外部专用 PostgreSQL；此时应将所有数据库 URL 指向该实例，并使用不带 `--profile local-postgres` 的 Compose 命令，仅启动 MinIO。
 
-- Runtime、迁移器、Worker Coordinator、Team Coordinator、Admin Control 和 Skill Publisher 使用不同连接或角色。
+- Runtime、迁移器、Worker Coordinator、Team Coordinator、Admin Control、Skill Publisher、Webhook Dispatcher 和轨迹目录 使用不同连接或角色。
 - `DATABASE_URL` 面向本机 Runtime 进程；Docker 内访问使用单独 endpoint。
 - bootstrap 和 migration 连接只用于初始化，不能注入普通 API、Worker 或 Scheduler。
 - 只对专用开发数据库执行角色 bootstrap、迁移和黑盒测试。
@@ -45,7 +45,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - 面向浏览器的 `S3_PUBLIC_ENDPOINT` 必须和 API/Web origin 隔离。
 - 不要执行 `docker compose down -v`，除非明确要删除本地 MinIO 数据。
 
-完整逻辑运行轨迹存入共享 trace Blob 存储，默认保留 30 天。`RUN_TRAJECTORY_RETENTION_DAYS` 可设为 1–365 天；Scheduler 使用 Worker Coordinator 枚举 Tenant，并逐租户清理到期索引与无引用 Blob。对象删除失败时保留索引供下次周期重试。轨迹仅含去除请求头和凭据字段后的逻辑事件，不含原始 HTTP response/SSE。模型原始 request body 诊断仍由 `MODEL_WIRE_TRACE_ENABLED` 独立控制。
+完整逻辑运行轨迹存入共享 trace Blob 存储，默认保留 30 天。`RUN_TRAJECTORY_RETENTION_DAYS` 可设为 1–365 天；Scheduler 以 `DATABASE_TRAJECTORY_DIRECTORY_URL` 连接 `DATABASE_TRAJECTORY_DIRECTORY_ROLE` 读取 Tenant ID 目录，再使用 Runtime 身份逐租户清理到期索引与无引用 Blob。迁移命令只需目录角色名；不得向生产 Scheduler 注入 Worker Coordinator 凭据。对象删除失败时保留索引供下次周期重试。轨迹仅含去除请求头和凭据字段后的逻辑事件，不含原始 HTTP response/SSE。模型原始 request body 诊断仍由 `MODEL_WIRE_TRACE_ENABLED` 独立控制。
 
 ### Sandbox Provider
 

@@ -138,6 +138,9 @@ export async function migrateUp(
       await client.query("SELECT set_config('app.worker_coordinator_role', $1, true)", [
         options.workerCoordinatorRole,
       ]);
+      await client.query("SELECT set_config('app.trajectory_directory_role', $1, true)", [
+        options.trajectoryDirectoryRole ?? "",
+      ]);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);
       // 2026-11 基线压缩后，压缩前的迁移记录（任意 0001 以外版本或旧 0001 名称）都会在此失败关闭；

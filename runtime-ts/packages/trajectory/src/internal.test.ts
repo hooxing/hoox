@@ -131,6 +131,53 @@ describe("InternalTrajectoryAttemptRecorder", () => {
     expect(serialized).toContain("[REDACTED]");
   });
 
+  it.each([
+    "Authorization: Basic PRIVATE",
+    "Authorization: Bearer PRIVATE",
+    "Authorization: Token PRIVATE",
+    'Authorization: Digest realm="test", response="PRIVATE"',
+    "Authorization: Custom-Scheme opaque PRIVATE",
+    "Authorization:\r\n Custom PRIVATE",
+    "key=PRIVATE&location=x",
+    '{"value":"PRIVATE","name":"Authorization"}',
+    '{"Authorization":"Basic PRIVATE"}',
+    '{"X-Api-Key":"PRIVATE"}',
+    '{"X-Client-Token":"PRIVATE"}',
+    '{"Session-Secret":"PRIVATE"}',
+    '{"Cookie":"id=a; session=PRIVATE"}',
+    '{"label":"token","X-Api-Key":"PRIVATE"}',
+    '{"X.Acme-Token":"PRIVATE"}',
+    '{"X-Secret":["PRIVATE"]}',
+    "Set-Cookie: id=a; other=PRIVATE",
+    "curl -H 'Authorization: Other PRIVATE'",
+    'curl --header="X-Key: PRIVATE"',
+    "curl -u user:PRIVATE",
+    "curl --user 'user:pass PRIVATE'",
+    "https://user:PRIVATE@example.invalid/index",
+    "//user:PRIVATE@example.invalid",
+    'https://example.invalid/?key="PRIVATE VALUE"',
+    "https://example.invalid/?token=PRIVATE",
+    "https://example.invalid/?q=1&key=PRIVATE",
+    '[["Authorization","Custom PRIVATE"]]',
+    JSON.stringify('{"X-Api-Key":"PRIVATE"}'),
+    JSON.stringify('{"Authorization":"Custom PRIVATE"}'),
+    "Basic PRIVATE",
+    "Bearer PRIVATE",
+    "Token PRIVATE",
+    'Digest realm="test", response="PRIVATE"',
+  ])("未注册凭据也不能进入 persist（样例 %#）", async (text) => {
+    const persist = vi.fn(async (_record: InternalTrajectoryDiagnosticRecord) => undefined);
+    const recorder = new InternalTrajectoryAttemptRecorder(
+      { tenantId: "tenant_a", threadId: "thread_a", runId: "run_a", attemptId: "attempt_a" },
+      { persist },
+    );
+    recorder.record("pi", "request", { text });
+    await recorder.drain();
+    const result = JSON.stringify(persist.mock.calls[0]?.[0].event.event);
+    expect(result.includes("PRIVATE")).toBe(false);
+    expect(result).toContain("[REDACTED]");
+  });
+
   it("队列有界，写入超时会取消且 drain 不等待诊断后端", async () => {
     let signal: AbortSignal | undefined;
     const failureObserver = vi.fn();

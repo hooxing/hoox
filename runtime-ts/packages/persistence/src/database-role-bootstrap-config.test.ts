@@ -16,6 +16,9 @@ const baseEnvironment = Object.freeze({
   DATABASE_TEAM_COORDINATOR_ROLE: "team_local",
   ADMIN_CONTROL_DATABASE_URL:
     "postgresql://admin_control_local:admin%27secret@127.0.0.1/runtime_dev",
+  DATABASE_TRAJECTORY_DIRECTORY_ROLE: "directory_local",
+  DATABASE_TRAJECTORY_DIRECTORY_URL:
+    "postgresql://directory_local:placeholder@127.0.0.1/runtime_dev",
   DATABASE_ADMIN_CONTROL_ROLE: "admin_control_local",
   DATABASE_WEBHOOK_DISPATCHER_ROLE: "webhook_dispatcher_local",
   WEBHOOK_DISPATCHER_DATABASE_URL:
@@ -23,10 +26,10 @@ const baseEnvironment = Object.freeze({
 });
 
 describe("数据库角色 bootstrap 配置", () => {
-  it("从七个应用连接提取角色密码并允许省略默认端口", () => {
+  it("从八个应用连接提取角色密码并允许省略默认端口", () => {
     const configuration = readDatabaseRoleBootstrapConfiguration({ ...baseEnvironment });
 
-    expect(configuration.credentials).toHaveLength(7);
+    expect(configuration.credentials).toHaveLength(8);
     expect(configuration.credentials.at(-2)).toEqual({
       role: "admin_control_local",
       password: "admin'secret",

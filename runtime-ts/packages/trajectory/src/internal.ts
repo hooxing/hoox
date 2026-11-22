@@ -150,23 +150,53 @@ function tagged(type: string, value?: string): InternalTrajectoryValue {
 }
 
 const secretProperty =
-  /(?:authorization|proxy-authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|credential|webhook[-_]?(?:key|secret))/iu;
+  /(?:authorization|proxy-authorization|cookie|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|credential|webhook[-_]?(?:key|secret))/iu;
 
+const credentialSuffix =
+  "(?:authorization|cookie|api[-_]?key|token|secret|password|credential|webhook[-_]?key)";
+
+const quotedValue = String.raw`(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`;
+const serializedCredential = new RegExp(
+  String.raw`(${credentialSuffix}["']\s*:\s*)${quotedValue}`,
+  "giu",
+);
+// 元组中的逗号也可能是下一个 JSON 字段的开始；不重写有歧义的键边界。
+const ambiguousCredential = new RegExp(
+  String.raw`${credentialSuffix}["']\s*(?:,|:\s*[^"'\s])|["']name["']\s*:\s*["'][\w.-]*${credentialSuffix}["']`,
+  "iu",
+);
+const shellArgument = String.raw`(?:${quotedValue}|\\.|[^\s"'\\])+`;
 const secretTextPatterns = [
-  /((?:proxy-)?authorization\s*[:=]\s*["']?)(?:bearer\s+)?[^\s,"'`;]+/giu,
-  /(\bbearer\s+)[A-Za-z0-9._~+/-]+=*/giu,
-  /((?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|credential|webhook[-_]?(?:key|secret))\s*[:=]\s*["']?)[^\s,"'&;]+/giu,
-  /(["'](?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|credential|webhook[-_]?(?:key|secret))["']\s*:\s*["'])[^"']*(?=["'])/giu,
-  /(--(?:api[-_]?key|token|secret|password|credential)(?:=|\s+))[^\s]+/giu,
+  new RegExp(String.raw`(${credentialSuffix}\\+["']\s*:\s*)[^\r\n]+`, "giu"),
+  /(\/\/)[^\s/?#@]+(?=@)/giu,
+  new RegExp(
+    String.raw`((?:^|[?&;])(?:[\w.-]*${credentialSuffix}|key)=)(?:${quotedValue}|[^\s&#]*)`,
+    "giu",
+  ),
+  // 裸头不能按空格、引号或逗号切词：认证方案可扩展，Digest 和 Cookie 的值可能由多段组成。
+  new RegExp(
+    String.raw`(${credentialSuffix}[ \t]*[:=][ \t]*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*`,
+    "giu",
+  ),
+  new RegExp(
+    String.raw`(\B(?:-H|-u|--header\b|--user\b|--(?:api[-_]?key|token|secret|password|credential)\b)[= \t]*)${shellArgument}`,
+    "giu",
+  ),
+  /(\b(?:bearer|basic|token)[ \t]+)[^\s,"'`;]+/giu,
+  /(\bdigest[ \t]+)[^\r\n]+/giu,
 ];
 
 function redactString(value: string, knownSecrets: readonly string[]): string {
-  let result = value;
-  for (const secret of knownSecrets) {
-    if (secret.length > 0) result = result.replaceAll(secret, "[REDACTED]");
-  }
+  if (ambiguousCredential.test(value)) return "[REDACTED]";
+  let result = value.replace(serializedCredential, '$1"[REDACTED]"');
   for (const pattern of secretTextPatterns) {
     result = result.replace(pattern, (_match, prefix: string) => `${prefix}[REDACTED]`);
+  }
+  for (const secret of knownSecrets) {
+    if (secret.length === 0 || !value.includes(secret)) continue;
+    // 结构脱敏可能只覆盖注册值的一部分，交叠时宁可隐藏整个字符串。
+    if (result !== value) return "[REDACTED]";
+    result = result.replaceAll(secret, "[REDACTED]");
   }
   return result;
 }

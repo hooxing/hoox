@@ -31,7 +31,7 @@
 | Worker | PG、S3、Sandbox、主模型 | API 身份私钥、Admin 管理凭据 |
 | Admin API | 独立管理身份、Admin Control PG、Skill Publisher PG、发布对象存储凭据及读取 Run 轨迹所需的 S3 凭据 | 普通 Runtime 全量秘密 |
 
-Scheduler、Worker 与 Admin API 的轨迹存储配置必须指向同一个 bucket。Scheduler 使用 Runtime 数据库连接读取仅含 Tenant ID 的受限清理目录视图，再逐 Tenant 经 RLS 清理；不复用 Worker Coordinator 身份。`RUN_TRAJECTORY_RETENTION_DAYS` 默认 30 天、允许 1–365 天。轨迹写入故障不影响 Run，但应监控不含正文的 `运行轨迹事件写入失败` 与 `运行轨迹保留清理失败` 日志。清理会先按 `blob_operation_id` 收敛 pending 提交并释放引用，再回收对象和移除索引；对象删除失败或提交仍在途时保留到期索引作为下一周期的重试锚点。
+Scheduler、Worker 与 Admin API 的轨迹存储配置必须指向同一个 bucket。Scheduler 使用专用只读目录连接枚举 Tenant ID，再逐 Tenant 经 Runtime RLS 清理；不复用 Worker Coordinator 身份。`RUN_TRAJECTORY_RETENTION_DAYS` 默认 30 天、允许 1–365 天。轨迹写入故障不影响 Run，但应监控不含正文的 `运行轨迹事件写入失败` 与 `运行轨迹保留清理失败` 日志。清理会先按 `blob_operation_id` 收敛 pending 提交、绑定稳定引用后再释放引用，再回收对象和移除索引；对象删除失败或提交仍在途时保留到期索引作为下一周期的重试锚点。
 
 production 入口对非空 `NODE_*` 默认拒绝，只允许镜像固定的 `NODE_ENV`、`NODE_VERSION` 和私有 CA 通道 `NODE_EXTRA_CA_CERTS`；同时拒绝环境代理和 OpenSSL CA/config/provider 覆盖。该边界不能抵抗有权替换镜像 entrypoint 或 command 的部署者，必须由平台策略补足。
 

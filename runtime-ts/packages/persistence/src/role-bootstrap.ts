@@ -1795,6 +1795,7 @@ export interface MigrationSecurityContext {
   readonly teamCoordinatorRole: string;
   readonly adminControlRole: string;
   readonly webhookDispatcherRole?: string;
+  readonly trajectoryDirectoryRole?: string;
   readonly schema: string;
 }
 
@@ -1810,23 +1811,13 @@ function validateContext(context: MigrationSecurityContext): void {
   quoteIdentifier(context.workerCoordinatorRole);
   quoteIdentifier(context.teamCoordinatorRole);
   quoteIdentifier(context.adminControlRole);
+  if (context.trajectoryDirectoryRole !== undefined)
+    quoteIdentifier(context.trajectoryDirectoryRole);
   if (context.webhookDispatcherRole !== undefined) quoteIdentifier(context.webhookDispatcherRole);
   assertSafeSchemaName(context.schema);
-  if (
-    new Set([
-      context.runtimeRole,
-      context.migratorRole,
-      context.skillPublisherRole,
-      context.workerCoordinatorRole,
-      context.teamCoordinatorRole,
-      context.adminControlRole,
-      ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
-    ]).size !== (context.webhookDispatcherRole === undefined ? 6 : 7)
-  ) {
-    throw new PersistenceError(
-      "CONSTRAINT_VIOLATION",
-      "Runtime、Migrator、Skill Publisher、Worker Coordinator、Team Coordinator 与 Admin Control 必须使用不同角色",
-    );
+  const roles = databaseRoles(context);
+  if (new Set(roles).size !== roles.length) {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "数据库应用身份必须使用不同角色");
   }
 }
 
@@ -2201,6 +2192,11 @@ export async function assertMigrationContextSafe(
     ...context,
     workerCoordinatorRole: context.adminControlRole,
   });
+  if (context.trajectoryDirectoryRole !== undefined)
+    await assertWorkerCoordinatorContextSafe(client, {
+      ...context,
+      workerCoordinatorRole: context.trajectoryDirectoryRole,
+    });
   if (context.webhookDispatcherRole !== undefined)
     await assertWorkerCoordinatorContextSafe(client, {
       ...context,
@@ -2232,6 +2228,12 @@ async function assertBootstrapContextSafe(
     },
     true,
   );
+  if (context.trajectoryDirectoryRole !== undefined)
+    await assertWorkerCoordinatorContextSafe(
+      client,
+      { ...context, workerCoordinatorRole: context.trajectoryDirectoryRole },
+      true,
+    );
   if (context.webhookDispatcherRole !== undefined)
     await assertWorkerCoordinatorContextSafe(
       client,
@@ -2263,6 +2265,7 @@ export function databaseRoles(context: MigrationSecurityContext): readonly strin
     context.teamCoordinatorRole,
     context.adminControlRole,
     ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
+    ...(context.trajectoryDirectoryRole === undefined ? [] : [context.trajectoryDirectoryRole]),
   ];
 }
 
@@ -3900,10 +3903,10 @@ async function resolveWebhookDispatcherColumns(
 const webhookTenantPolicies = ["tenant_webhooks_tenant_policy", "webhook_outbox_tenant_policy"];
 
 /**
- * 找出当前配置之外仍与 Webhook 表关联的角色：表/列 ACL 的被授予者，或任何 Webhook 策略绑定的角色。
- * 这些通常是更换前的 Dispatcher；表所有者与当前上下文中的角色不在结果内。
+ * 找出当前配置之外仍与 Webhook 表或轨迹目录关联的角色：表/列 ACL 的被授予者，或任何 Webhook 策略绑定的角色。
+ * 这些通常是更换前的 Scheduler 专用角色；表所有者与当前上下文中的角色不在结果内。
  */
-async function findStaleWebhookRoles(
+async function findStaleSchedulerRoles(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<readonly string[]> {
@@ -3928,7 +3931,11 @@ async function findStaleWebhookRoles(
       WHERE role_state.rolname <> ALL($3::text[])
         AND NOT EXISTS (SELECT 1 FROM target WHERE target.relowner=role_state.oid)
       ORDER BY 1`,
-    [context.schema, [...webhookTables], [...databaseRoles(context)]],
+    [
+      context.schema,
+      [...webhookTables, "run_trajectory_cleanup_tenants"],
+      [...databaseRoles(context)],
+    ],
   );
   return result.rows.map((row) => row.role_name);
 }
@@ -4171,7 +4178,7 @@ export async function bootstrapRuntimeAccessOnClient(
   const schema = quoteIdentifier(context.schema);
   // 更换 Dispatcher 等角色后，旧角色仍可能保留 Schema/表/列 ACL 或 Webhook 策略绑定；
   // 必须在重新授权前与当前角色一起撤销，否则旧凭据仍能访问投递记录。
-  const staleWebhookRoles = await findStaleWebhookRoles(client, context);
+  const staleSchedulerRoles = await findStaleSchedulerRoles(client, context);
   const revokedRoles = [
     "PUBLIC",
     ...[
@@ -4181,7 +4188,8 @@ export async function bootstrapRuntimeAccessOnClient(
       context.teamCoordinatorRole,
       context.adminControlRole,
       ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
-      ...staleWebhookRoles,
+      ...(context.trajectoryDirectoryRole === undefined ? [] : [context.trajectoryDirectoryRole]),
+      ...staleSchedulerRoles,
     ].map(quoteIdentifier),
   ].join(", ");
   await client.query(`REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM ${revokedRoles}`);
@@ -4301,14 +4309,14 @@ export async function bootstrapRuntimeAccessOnClient(
         `GRANT UPDATE(persistence_status,blob_reference_id,updated_at)
          ON TABLE ${schema}.run_trajectory_entries TO ${role}`,
       );
-    }
-    if (await hasRunTrajectoryState(client, context.schema)) {
       await client.query(
         `GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.run_trajectory_entries TO ${role}`,
       );
-      await client.query(
-        `GRANT SELECT ON TABLE ${schema}.run_trajectory_cleanup_tenants TO ${role}`,
-      );
+      if (context.trajectoryDirectoryRole !== undefined) {
+        const directory = quoteIdentifier(context.trajectoryDirectoryRole);
+        await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${directory};
+          GRANT SELECT ON TABLE ${schema}.run_trajectory_cleanup_tenants TO ${directory}`);
+      }
     }
     if (await hasCleanupConsumerState(client)) {
       await client.query(
@@ -4815,7 +4823,7 @@ export async function bootstrapRuntimeAccessOnClient(
   await grantTeamCoordinatorAccess(client, context);
   await grantAdminControlAccess(client, context);
   await assertActiveRuntimeWhitelist(client, context);
-  await assertWebhookBoundary(client, context, staleWebhookRoles);
+  await assertWebhookBoundary(client, context, staleSchedulerRoles);
 }
 
 /** 独立、可重复的 ACL bootstrap；角色与 Schema preflight 始终先于任何 ACL 变更。 */
@@ -4835,27 +4843,24 @@ export async function teardownRuntimeSchemaAccessOnClient(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
-  const role = quoteIdentifier(context.runtimeRole);
-  const publisherRole = quoteIdentifier(context.skillPublisherRole);
-  const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
-  const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
-  const adminControlRole = quoteIdentifier(context.adminControlRole);
-  const webhookDispatcherRole =
-    context.webhookDispatcherRole === undefined
-      ? undefined
-      : quoteIdentifier(context.webhookDispatcherRole);
+  const grantees = [
+    "PUBLIC",
+    ...databaseRoles(context)
+      .filter((role) => role !== context.migratorRole)
+      .map(quoteIdentifier),
+  ].join(", ");
   const schema = quoteIdentifier(context.schema);
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
+       FROM ${grantees}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
+       FROM ${grantees}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
+       FROM ${grantees}`,
   );
   await assertRuntimeAccessRemoved(client, context);
 }

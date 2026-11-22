@@ -76,13 +76,13 @@ const schedulerEnvironmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
-  DATABASE_WORKER_COORDINATOR_URL: urlEnvironmentField({
+  DATABASE_TRAJECTORY_DIRECTORY_URL: urlEnvironmentField({
     secret: true,
     protocols: ["postgres:", "postgresql:"],
     allowCredentials: true,
     maxLength: 8_192,
   }),
-  DATABASE_WORKER_COORDINATOR_ROLE: stringEnvironmentField({ maxLength: 63 }),
+  DATABASE_TRAJECTORY_DIRECTORY_ROLE: stringEnvironmentField({ maxLength: 63 }),
   S3_ENDPOINT: urlEnvironmentField(),
   S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
   S3_REGION: stringEnvironmentField({ maxLength: 128 }),
@@ -200,9 +200,9 @@ export interface SchedulerProcessConfiguration {
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   readonly databaseRuntimeRole: string;
-  readonly workerCoordinatorUrl: string;
-  readonly workerCoordinatorRole: string;
-  readonly workerCoordinatorSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
+  readonly trajectoryDirectoryUrl: string;
+  readonly trajectoryDirectoryRole: string;
+  readonly trajectoryDirectorySsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly objectStorage: Readonly<{
     endpoint: string;
     bucket: string;
@@ -272,6 +272,9 @@ export function selectSchedulerProcessEnvironment(
   source: NodeJS.ProcessEnv,
 ): Readonly<Record<string, string | undefined>> {
   assertProductionInheritedEnvironment(source);
+  if (source.RUNTIME_ENV === "production" && source.DATABASE_WORKER_COORDINATOR_URL) {
+    throw new TypeError("Scheduler 禁止注入 Worker Coordinator 凭据");
+  }
   return selectDeclaredEnvironment(source, schedulerProcessEnvironmentKeys);
 }
 
@@ -317,26 +320,29 @@ export function parseSchedulerProcessEnvironment(
   if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(configuredRuntimeRole)) {
     throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
   }
-  const workerCoordinatorRole = readRequiredEnvironmentValue(
+  const trajectoryDirectoryRole = readRequiredEnvironmentValue(
     parsed,
-    "DATABASE_WORKER_COORDINATOR_ROLE",
+    "DATABASE_TRAJECTORY_DIRECTORY_ROLE",
   );
-  const workerCoordinatorUrl = readRequiredEnvironmentValue(
+  const trajectoryDirectoryUrl = readRequiredEnvironmentValue(
     parsed,
-    "DATABASE_WORKER_COORDINATOR_URL",
+    "DATABASE_TRAJECTORY_DIRECTORY_URL",
   );
-  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(workerCoordinatorRole)) {
-    throw new TypeError("DATABASE_WORKER_COORDINATOR_ROLE 格式无效");
+  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(trajectoryDirectoryRole)) {
+    throw new TypeError("DATABASE_TRAJECTORY_DIRECTORY_ROLE 格式无效");
   }
-  if (workerCoordinatorRole === configuredRuntimeRole) {
-    throw new TypeError("Worker Coordinator 角色必须与 Runtime 角色不同");
+  if (
+    trajectoryDirectoryRole === configuredRuntimeRole ||
+    trajectoryDirectoryRole === webhookRole
+  ) {
+    throw new TypeError("轨迹目录角色必须与 Runtime、Webhook Dispatcher 角色不同");
   }
-  if (decodeURIComponent(new URL(workerCoordinatorUrl).username) !== workerCoordinatorRole) {
-    throw new TypeError("Worker Coordinator 连接用户名必须与数据库角色一致");
+  if (decodeURIComponent(new URL(trajectoryDirectoryUrl).username) !== trajectoryDirectoryRole) {
+    throw new TypeError("轨迹目录连接用户名必须与数据库角色一致");
   }
-  const productionCoordinatorDatabase =
+  const productionDirectoryDatabase =
     parsed.runtimeEnvironment === "production"
-      ? parseProductionPostgresTransport(workerCoordinatorUrl)
+      ? parseProductionPostgresTransport(trajectoryDirectoryUrl)
       : undefined;
   const s3Endpoint = readRequiredEnvironmentValue(parsed, "S3_ENDPOINT");
   if (parsed.runtimeEnvironment === "production") {
@@ -449,11 +455,11 @@ export function parseSchedulerProcessEnvironment(
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     databaseRuntimeRole: configuredRuntimeRole,
-    workerCoordinatorUrl: productionCoordinatorDatabase?.connectionString ?? workerCoordinatorUrl,
-    workerCoordinatorRole,
-    ...(productionCoordinatorDatabase === undefined
+    trajectoryDirectoryUrl: productionDirectoryDatabase?.connectionString ?? trajectoryDirectoryUrl,
+    trajectoryDirectoryRole,
+    ...(productionDirectoryDatabase === undefined
       ? {}
-      : { workerCoordinatorSsl: productionCoordinatorDatabase.ssl }),
+      : { trajectoryDirectorySsl: productionDirectoryDatabase.ssl }),
     objectStorage: Object.freeze({
       endpoint: s3Endpoint,
       bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
@@ -506,7 +512,8 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
   async assemble(configuration) {
     if (
       configuration.runtimeEnvironment === "production" &&
-      (configuration.databaseSsl === undefined || configuration.workerCoordinatorSsl === undefined)
+      (configuration.databaseSsl === undefined ||
+        configuration.trajectoryDirectorySsl === undefined)
     ) {
       throw new Error("PRODUCTION_SCHEDULER_ASSEMBLY_FORBIDDEN");
     }
@@ -517,14 +524,14 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "hoox-scheduler-cleanup",
     });
-    const coordinatorPool = createPostgresPool({
-      connectionString: configuration.workerCoordinatorUrl,
-      ...(configuration.workerCoordinatorSsl === undefined
+    const directoryPool = createPostgresPool({
+      connectionString: configuration.trajectoryDirectoryUrl,
+      ...(configuration.trajectoryDirectorySsl === undefined
         ? {}
-        : { ssl: configuration.workerCoordinatorSsl }),
+        : { ssl: configuration.trajectoryDirectorySsl }),
       schema: configuration.databaseSchema,
-      expectedRuntimeRole: configuration.workerCoordinatorRole,
-      applicationName: "hoox-scheduler-trajectory-retention-coordinator",
+      expectedRuntimeRole: configuration.trajectoryDirectoryRole,
+      applicationName: "hoox-scheduler-trajectory-retention-directory",
       maxConnections: 2,
     });
     const webhookPool =
@@ -544,7 +551,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
     let trajectoryCleanupInFlight: Promise<number> | undefined;
     let webhookDispatcher: WebhookDispatcher | undefined;
     try {
-      await probePostgres(coordinatorPool, configuration.workerCoordinatorRole);
+      await probePostgres(directoryPool, configuration.trajectoryDirectoryRole);
       const blobRepository = new PgBlobLifecycleRepository(pool, {
         objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX,
       });
@@ -566,8 +573,10 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       );
       const runTrajectoryCleanup = async () => {
         if (trajectoryCleanupInFlight !== undefined) return trajectoryCleanupInFlight;
-        trajectoryCleanupInFlight = runRunTrajectoryRetentionPass(pool, trajectoryStore, () =>
-          console.error("运行轨迹保留清理失败"),
+        trajectoryCleanupInFlight = runRunTrajectoryRetentionPass(
+          directoryPool,
+          trajectoryStore,
+          () => console.error("运行轨迹保留清理失败"),
         ).finally(() => {
           trajectoryCleanupInFlight = undefined;
         });
@@ -737,8 +746,8 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         resources: Object.freeze([
           Object.freeze({ name: "postgres", close: () => pool.end() }),
           Object.freeze({
-            name: "worker-coordinator-postgres",
-            close: () => coordinatorPool.end(),
+            name: "trajectory-directory-postgres",
+            close: () => directoryPool.end(),
           }),
           ...(webhookPool === undefined
             ? []
@@ -755,8 +764,8 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
             probe: () => probePostgres(pool, configuration.databaseRuntimeRole),
           }),
           Object.freeze({
-            name: "worker-coordinator-postgres",
-            probe: () => probePostgres(coordinatorPool, configuration.workerCoordinatorRole),
+            name: "trajectory-directory-postgres",
+            probe: () => probePostgres(directoryPool, configuration.trajectoryDirectoryRole),
           }),
           ...(webhookPool === undefined
             ? []
@@ -775,7 +784,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       if (trajectoryTimer !== undefined) clearInterval(trajectoryTimer);
       await webhookDispatcher?.close();
       await pool.end().catch(() => undefined);
-      await coordinatorPool.end().catch(() => undefined);
+      await directoryPool.end().catch(() => undefined);
       await webhookPool?.end().catch(() => undefined);
       throw error;
     }

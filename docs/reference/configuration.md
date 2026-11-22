@@ -34,6 +34,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - 固定 `dev-user-a` / `dev-user-b` 只用于隔离夹具。
 - Web 默认使用 API 进程内嵌的 Better Auth；development 可以显式保留旧本地账号端点和固定身份夹具。
 - `BETTER_AUTH_SECRET` 至少 32 字节，API 与 Admin Control 必须使用同值；它不能进入后台配置、Git 或日志。
+- `WEBHOOK_SECRET_ENCRYPTION_KEY` 至少 32 字节，只由 Admin Control 与 Scheduler 共用，用于后台注册、轮换和投递签名密钥的加解密；用户 API 与 Worker 不需要该变量。未配置时后台不能注册 Webhook 或轮换密钥，既有订阅的投递仍要求 Scheduler 配置同一根密钥。
 - `BETTER_AUTH_TRUSTED_ORIGINS` 是允许发起身份请求的逗号分隔 origin 列表；production 至少包含 Web 对外 origin。
 - 游标签名、ResourceFS 签名等密钥必须使用本机随机值，不能复用示例占位符。
 

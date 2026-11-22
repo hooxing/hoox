@@ -14,7 +14,6 @@
       "!!runtime-ts/vendor/deepseek-v4-tokenizer/tokenizer.json",
       "!!runtime-ts/vendor/deepseek-v4-tokenizer/tokenizer_config.json",
       "!!runtime-ts/vendor/deepseek-markdown/src",
-      "!!runtime-ts/vendor/iconfont-file-types-33437/*.svg",
       "!!runtime-ts/packages/protocol/src/pi-model-catalog.generated.ts"
     ]
   },

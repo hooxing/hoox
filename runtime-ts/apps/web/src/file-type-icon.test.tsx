@@ -28,7 +28,8 @@ describe("文件类型图标", () => {
   it("图标由本地资源提供且作为装饰，不重复朗读文件名", () => {
     const html = renderToStaticMarkup(<FileTypeIcon name="公告.docx" />);
     expect(html).toContain('aria-hidden="true"');
-    expect(html).toContain("background-image:url(");
+    expect(html).toContain("<svg");
+    expect(html).toContain('width="32"');
     expect(html).not.toContain("https://");
   });
 

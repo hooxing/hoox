@@ -10,6 +10,7 @@
 | --- | --- |
 | `tokenizer.json` | `8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf` |
 | `tokenizer_config.json` | `6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547` |
-| `LICENSE` | `f2c6c602815669d292889e5be8c802f2ed950653b77999b1584e8e6aed25d040` |
+| `LICENSE` 上游原始字节 | `f2c6c602815669d292889e5be8c802f2ed950653b77999b1584e8e6aed25d040` |
+| `LICENSE` 仓库 LF 归一化后 | `1c8f573e830ca9b3ebfeb7ace1823146e22b66f99ee223840e7637c9e745e1c7` |
 
-更新这些资源时必须同时更新固定提交、校验值、自动化测试和 [Prompt、上下文预算与模型交互](../../../docs/architecture/prompt-and-model-io.md)。
+上游 `LICENSE` 使用 CRLF；仓库 `.gitattributes` 的 `* text=auto eol=lf` 将其归一化为 LF，因此原始字节摘要与仓库文件摘要不同，正文逐字一致。更新这些资源时必须同时更新固定提交、校验值、自动化测试和 [Prompt、上下文预算与模型交互](../../../docs/architecture/prompt-and-model-io.md)。

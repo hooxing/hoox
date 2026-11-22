@@ -1246,6 +1246,34 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
+  it("用户管理标注 API 映射来源，且不显示虚构登录邮箱", async () => {
+    const api = fixture();
+    const page = await api.listUsers();
+    const user = page.items[0];
+    if (user === undefined) throw new Error("用户夹具缺失");
+    api.listUsers = vi.fn(async () => ({
+      ...page,
+      items: [{ ...user, email: "", displayName: "customer:42", source: "api_mapping" as const }],
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    act(() => navigationItem(container, "用户管理").click());
+    await settle();
+    expect(container.textContent).toContain("customer:42");
+    expect(container.textContent).toContain("API 映射 · 无工作台登录身份");
+    const disable = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent === "停用",
+    );
+    if (disable === undefined) throw new Error("停用按钮缺失");
+    act(() => disable.click());
+    expect(container.textContent).toContain("拒绝该终端用户的后续 API 请求");
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it("恢复用户直接执行，停用失败时保留后果确认", async () => {
     const api = fixture();
     const userPage = await api.listUsers();

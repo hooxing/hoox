@@ -828,6 +828,20 @@
           }
         ],
         "x-hoox-api-key-scope": "threads:read",
+        "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "成功",
@@ -931,6 +945,18 @@
         ],
         "x-hoox-api-key-scope": "threads:create",
         "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
           {
             "name": "Idempotency-Key",
             "in": "header",
@@ -1090,6 +1116,18 @@
         "x-hoox-api-key-scope": "threads:read",
         "parameters": [
           {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
             "name": "cursor",
             "in": "query",
             "required": false,
@@ -1215,6 +1253,18 @@
         "x-hoox-api-key-scope": "threads:read",
         "parameters": [
           {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
             "name": "threadId",
             "in": "path",
             "required": true,
@@ -1329,6 +1379,18 @@
         ],
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
           {
             "name": "threadId",
             "in": "path",
@@ -1453,6 +1515,18 @@
         ],
         "x-hoox-api-key-scope": "runs:create",
         "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
           {
             "name": "threadId",
             "in": "path",
@@ -1636,6 +1710,18 @@
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
           {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
             "name": "threadId",
             "in": "path",
             "required": true,
@@ -1759,6 +1845,18 @@
         ],
         "x-hoox-api-key-scope": "runs:create",
         "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
           {
             "name": "threadId",
             "in": "path",
@@ -1895,6 +1993,18 @@
         ],
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
           {
             "name": "threadId",
             "in": "path",
@@ -2044,6 +2154,18 @@
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
           {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
             "name": "threadId",
             "in": "path",
             "required": true,
@@ -2183,6 +2305,18 @@
         ],
         "x-hoox-api-key-scope": "runs:create",
         "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
           {
             "name": "Idempotency-Key",
             "in": "header",
@@ -2348,6 +2482,18 @@
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
           {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
             "name": "resourceId",
             "in": "path",
             "required": true,
@@ -2474,6 +2620,18 @@
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
           {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
             "name": "threadId",
             "in": "path",
             "required": true,
@@ -2599,6 +2757,18 @@
         ],
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
           {
             "name": "threadId",
             "in": "path",
@@ -2747,6 +2917,18 @@
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
           {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
             "name": "threadId",
             "in": "path",
             "required": true,
@@ -2893,6 +3075,18 @@
         ],
         "x-hoox-api-key-scope": "runs:read",
         "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
           {
             "name": "threadId",
             "in": "path",

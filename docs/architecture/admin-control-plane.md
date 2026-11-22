@@ -17,6 +17,8 @@
 
 ## 接入管理边界
 
+用户管理目录同时包含登录账号与 API 映射的终端用户。后者返回 `source=api_mapping`、外部 ID 作为显示名、空登录邮箱及零登录会话；平台管理员可沿用停用/恢复接口，并在同一幂等事务写入审计。Admin Control 对映射表仅有读取与 `status` 列更新权限，不因管理终端用户获得其 Thread/Run 正文访问权。身份与拒绝语义见[Headless 终端用户](identity-and-session.md#headless-终端用户)。
+
 - API Key 与 Webhook 属于部署方集成配置，只由有效的平台 `admin` 在后台「接入」管理；`viewer`、`operator`、仅有 Skill 管理授权的身份、Tenant Owner/Admin 与 API Key 均无此权限。工作台只面向终端用户，不提供这两类管理入口。
 - 页面使用管理员可搜索的空间目录选择目标，展示团队名或个人用户邮箱/名称。默认目标固定为初始化管理员的个人空间，不随当前登录管理员变化；无法解析时不预选。管理员不必成为目标空间成员；服务端在事务中复核平台管理角色与目标空间。跨空间的资源 ID、缺失空间或已删除资源统一返回 404。
 - `GET /v1/admin/control/integrations/tenants` 只向有效平台管理员返回空间 ID、可读名称、类型及是否为初始化管理员个人空间；读取通过受限安全视图，不授予 Admin Control 对 Tenant 或用户目录底表的通用读取权限。

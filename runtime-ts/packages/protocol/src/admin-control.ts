@@ -260,8 +260,9 @@ export type RuntimeStatisticsDto = Static<typeof RuntimeStatisticsDtoSchema>;
 export const PlatformUserSummaryDtoSchema = Type.Object(
   {
     userId: IdSchema,
-    email: Type.String({ minLength: 3, maxLength: 254 }),
-    displayName: Type.String({ minLength: 2, maxLength: 32 }),
+    email: Type.String({ maxLength: 254 }),
+    displayName: Type.String({ minLength: 1, maxLength: 128 }),
+    source: Type.Optional(Type.Literal("api_mapping")),
     status: Type.Union([Type.Literal("active"), Type.Literal("disabled")]),
     createdAt: IsoTimestampSchema,
     lastActiveAt: Type.Optional(IsoTimestampSchema),

@@ -148,6 +148,7 @@ export interface PlatformUserSummary {
   readonly userId: string;
   readonly email: string;
   readonly displayName: string;
+  readonly source?: "api_mapping";
   readonly status: PlatformUserStatus;
   readonly createdAt: string;
   readonly lastActiveAt?: string;

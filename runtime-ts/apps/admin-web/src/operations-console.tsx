@@ -277,7 +277,7 @@ function UserRow({
       <span className="user-avatar">{user.displayName.slice(0, 1).toUpperCase()}</span>
       <span className="user-identity">
         <strong>{user.displayName}</strong>
-        <small>{user.email}</small>
+        <small>{user.source === "api_mapping" ? "API 映射 · 无工作台登录身份" : user.email}</small>
         <code>{user.userId}</code>
       </span>
       <span className="user-usage">
@@ -318,9 +318,11 @@ function UserRow({
           <span>
             <strong>{nextStatus === "disabled" ? "停用该用户" : "恢复该用户"}</strong>
             <small>
-              {nextStatus === "disabled"
-                ? "提交后将立即拒绝登录并撤销现有会话。"
-                : "提交后允许用户重新登录；旧会话不会恢复。"}
+              {user.source === "api_mapping"
+                ? "提交后将拒绝该终端用户的后续 API 请求；已接受的 Run 不会取消。"
+                : nextStatus === "disabled"
+                  ? "提交后将立即拒绝登录并撤销现有会话。"
+                  : "提交后允许用户重新登录；旧会话不会恢复。"}
             </small>
           </span>
           <button

@@ -9,8 +9,15 @@ export const ApiKeyScopeSchema = Type.Union([
   Type.Literal("threads:create"),
   Type.Literal("runs:create"),
   Type.Literal("tool-results:submit"),
+  Type.Literal("end-users:represent"),
   Type.Literal("webhooks:manage"),
 ]);
+export const EndUserHeaderSchema = Type.String({
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+  description: "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+});
 export const ApiKeyDtoSchema = Type.Object(
   {
     id: IdSchema,

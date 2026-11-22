@@ -157,6 +157,9 @@ export async function migrateUp(
       }
       for (const migration of migrations) {
         if (applied.some((record) => record.version === migration.version)) continue;
+        // 迁移内不依赖延迟约束，避免 UPDATE 后的待处理触发器事件阻塞 ALTER TABLE。
+        // 已合并迁移不可修改；在执行器层逐项设置，不改变迁移 SQL 与 checksum。
+        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
         await client.query(migration.upSql);
         await client.query(
           "INSERT INTO runtime_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
@@ -214,9 +217,8 @@ export async function migrateDown(
         if (source === undefined || source.checksum !== record.checksum) {
           throw new PersistenceError("MIGRATION_MISMATCH", `无法安全回退迁移 ${record.version}`);
         }
-        // 某个 down migration 可能为冲刷自身约束临时切到 IMMEDIATE；下一项必须恢复
-        // DEFERRABLE 约束的初始语义，避免一个迁移的会话状态污染后续回退脚本。
-        await client.query("SET CONSTRAINTS ALL DEFERRED");
+        // 与 up 保持相同的不变量：每项回退前即时检查，不能继承上一脚本的延迟状态。
+        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
         await client.query(source.downSql);
         await client.query("DELETE FROM runtime_schema_migrations WHERE version = $1", [
           record.version,

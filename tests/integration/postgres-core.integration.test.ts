@@ -1387,6 +1387,161 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await target.close();
     }
   });
+  it("带数据旧库升级在即时约束下保留 Agent 与 Thread，未修复 SQL 以 55006 失败", async () => {
+    const migrations = await loadMigrations();
+    const snapshotMigration = migrations.find(
+      (migration) => migration.name === "run_agent_snapshots",
+    );
+    if (snapshotMigration === undefined) throw new Error("缺少 RunAgentSnapshot 迁移");
+    const previousMigrations = migrations.filter(
+      (migration) => migration.version < snapshotMigration.version,
+    );
+    const previousVersion = previousMigrations.at(-1)?.version;
+    if (previousVersion === undefined) throw new Error("缺少旧库迁移基线");
+    const target = await createIsolatedMigrationTarget("populated_upgrade");
+    const oldMigrations = await mkdtemp(join(tmpdir(), "hoox-populated-migrations-"));
+    const seedPool = createPostgresPool({
+      connectionString: bootstrapDatabaseUrl,
+      schema: target.context.schema,
+      maxConnections: 2,
+    });
+    try {
+      for (const migration of previousMigrations) {
+        for (const direction of ["up", "down"]) {
+          const name = `${String(migration.version).padStart(4, "0")}_${migration.name}.${direction}.sql`;
+          await copyFile(join(sourceMigrationDirectory, name), join(oldMigrations, name));
+        }
+      }
+      const previousRecords = await migrateUp(target.pool, {
+        ...target.context,
+        directory: oldMigrations,
+      });
+      await withTransaction(seedPool, async (client) => {
+        await client.query(`
+          INSERT INTO app_users(id,created_at) VALUES('user_upgrade',clock_timestamp());
+          INSERT INTO tenants(id,kind,owner_user_id,created_at)
+            VALUES('tenant_upgrade','personal','user_upgrade',clock_timestamp());
+          INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at)
+            VALUES('tenant_upgrade','membership_upgrade','user_upgrade','owner','active',clock_timestamp());
+          INSERT INTO agent_definitions(id,status,generation,availability_mode)
+            VALUES('agent_upgrade','published',1,'all_tenants');
+          INSERT INTO agent_revisions(id,definition_id,revision,status,content,content_digest,created_by)
+            SELECT 'agent_upgrade_revision','agent_upgrade',1,'published',content,content_digest,'user_upgrade'
+              FROM agent_revisions WHERE id='agent_default_revision_1';
+          UPDATE agent_definitions SET current_revision_id='agent_upgrade_revision' WHERE id='agent_upgrade';
+          INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at,agent_definition_id)
+            VALUES('tenant_upgrade','thread_upgrade','user_upgrade','既有默认任务','active',clock_timestamp(),clock_timestamp(),'agent_default'),
+                  ('tenant_upgrade','thread_custom','user_upgrade','既有自定义任务','active',clock_timestamp(),clock_timestamp(),'agent_upgrade');
+          INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
+            VALUES('tenant_upgrade','run_upgrade','thread_upgrade','succeeded',clock_timestamp(),clock_timestamp());
+        `);
+      });
+      const originalRevisions = await seedPool.query<{
+        id: string;
+        content: Record<string, unknown>;
+        content_digest: string;
+      }>("SELECT id,content,content_digest FROM agent_revisions ORDER BY id");
+
+      // 旧执行器在新事务保留初始延迟属性；直接执行原迁移复现 UPDATE 后 ALTER 的真实失败。
+      await expect(
+        withTransaction(target.pool, async (client) => {
+          await client.query("SELECT set_config('app.runtime_role', $1, true)", [runtimeRole]);
+          await client.query("SET CONSTRAINTS ALL DEFERRED");
+          await client.query(snapshotMigration.upSql);
+        }),
+      ).rejects.toMatchObject({ code: "55006" });
+      expect(
+        (await target.pool.query("SELECT to_regclass('run_agent_snapshots') AS relation")).rows,
+      ).toEqual([{ relation: null }]);
+
+      const expectedRecords = migrations.map(({ version, name, checksum }) => ({
+        version,
+        name,
+        checksum,
+      }));
+      expect(await migrateUp(target.pool, target.context)).toEqual(expectedRecords);
+      const definitions = await seedPool.query(
+        "SELECT id,current_revision_id,generation::text FROM agent_definitions ORDER BY id",
+      );
+      expect(definitions.rows).toEqual([
+        {
+          id: "agent_default",
+          current_revision_id: "agent_default_revision_platform_memory",
+          generation: "2",
+        },
+        { id: "agent_upgrade", current_revision_id: "agent_upgrade_revision", generation: "1" },
+      ]);
+      const revision = await seedPool.query(
+        "SELECT content,content_digest FROM agent_revisions WHERE id='agent_default_revision_platform_memory'",
+      );
+      const originalContent = originalRevisions.rows.find(
+        (row) => row.id === "agent_default_revision_1",
+      )?.content;
+      if (originalContent === undefined) throw new Error("缺少默认 Agent 原始 Revision");
+      const { longTermMemoryEnabled: _oldMemory, ...unchangedContent } = originalContent;
+      expect(revision.rows[0]?.content).toEqual({
+        ...unchangedContent,
+        memory: { mode: "platform_default" },
+      });
+      expect(revision.rows[0]?.content_digest).toBe(
+        createHash("sha256").update(canonical(revision.rows[0]?.content)).digest("hex"),
+      );
+      expect(
+        (
+          await seedPool.query(
+            "SELECT id,content,content_digest FROM agent_revisions WHERE id=ANY($1::text[]) ORDER BY id",
+            [originalRevisions.rows.map((row) => row.id)],
+          )
+        ).rows,
+      ).toEqual(originalRevisions.rows);
+      expect(
+        (
+          await seedPool.query(
+            "SELECT id,agent_definition_id FROM threads WHERE tenant_id='tenant_upgrade' ORDER BY id",
+          )
+        ).rows,
+      ).toEqual([
+        { id: "thread_custom", agent_definition_id: "agent_upgrade" },
+        { id: "thread_upgrade", agent_definition_id: "agent_default" },
+      ]);
+      expect(
+        (
+          await seedPool.query(
+            "SELECT id,thread_id,status FROM runs WHERE tenant_id='tenant_upgrade'",
+          )
+        ).rows,
+      ).toEqual([{ id: "run_upgrade", thread_id: "thread_upgrade", status: "succeeded" }]);
+      expect(
+        (
+          await target.pool.query(
+            `SELECT condeferrable,condeferred FROM pg_constraint
+            WHERE conrelid='agent_definitions'::regclass AND conname='agent_definitions_current_revision_fk'`,
+          )
+        ).rows,
+      ).toEqual([{ condeferrable: true, condeferred: true }]);
+      expect(
+        await migrateDown(target.pool, {
+          ...target.context,
+          targetVersion: previousVersion,
+          allowDestructive: true,
+          environment: "test",
+        }),
+      ).toEqual(previousRecords);
+      expect(
+        (
+          await seedPool.query(
+            "SELECT current_revision_id FROM agent_definitions WHERE id='agent_default'",
+          )
+        ).rows,
+      ).toEqual([{ current_revision_id: "agent_default_revision_1" }]);
+      expect(await migrateUp(target.pool, target.context)).toEqual(expectedRecords);
+    } finally {
+      await seedPool.end();
+      await rm(oldMigrations, { recursive: true, force: true });
+      await target.close();
+    }
+  });
+
   it("默认 Agent Revision 使用 Prompt Builder 指令且内容摘要可校验", async () => {
     const revision = await readDefaultAgentRevision();
     expect(revision).toBeDefined();

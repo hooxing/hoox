@@ -28,9 +28,26 @@ async function click(root: ParentNode, name: string) {
   act(() => button(root, name).click());
   await settle();
 }
+const tenantItems = [
+  { tenantId: "tenant_a", displayName: "admin@example.invalid", kind: "personal", isDefault: true },
+  { tenantId: "tenant_b", displayName: "团队空间", kind: "team", isDefault: false },
+  { tenantId: "tenant_first", displayName: "第一空间", kind: "team", isDefault: false },
+  { tenantId: "tenant_second", displayName: "第二空间", kind: "team", isDefault: false },
+];
 async function tenant(root: ParentNode, id: string) {
-  enter(field<HTMLInputElement>(root, "Tenant ID"), id);
-  await click(root, "选择 Tenant");
+  const combo = root.querySelector<HTMLInputElement>('[role="combobox"]');
+  if (!combo) throw new Error("缺少空间选择器");
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(combo, id);
+    combo.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await settle();
+  const option = [...document.querySelectorAll<HTMLElement>(".ant-select-item-option")].find(
+    (item) => item.textContent?.includes(id),
+  );
+  if (!option) throw new Error(`未找到空间：${id}`);
+  act(() => option.click());
+  await settle();
 }
 
 describe("后台接入页面", () => {
@@ -42,7 +59,7 @@ describe("后台接入页面", () => {
     await settle();
     expect(root.textContent).toContain("接入");
     expect(root.textContent).toContain(name);
-    expect(field(root, "Tenant ID")).toBeDefined();
+    expect(root.querySelector('[aria-label="选择空间"]')).toBeDefined();
   });
 
   it("按 Tenant 创建、轮换、吊销 Key，关闭明文后刷新不再展示", async () => {
@@ -51,6 +68,7 @@ describe("后台接入页面", () => {
     let items: object[] = [];
     const fetcher = vi.fn<typeof fetch>(async (url, init) => {
       const path = String(url);
+      if (path.endsWith("/integrations/tenants")) return ok({ items: tenantItems });
       if (init?.method === "GET") return ok({ items });
       if (init?.method === "DELETE") {
         items = [{ ...key, revokedAt: "2026-11-21T01:00:00.000Z" }];
@@ -84,8 +102,10 @@ describe("后台接入页面", () => {
     expect(root.textContent).toContain("已吊销");
     expect(root.textContent?.includes(rotated)).toBe(false);
     expect(
-      fetcher.mock.calls.every(([url]) =>
-        String(url).startsWith("/v1/admin/control/integrations/tenant_a/api-keys"),
+      fetcher.mock.calls.every(
+        ([url]) =>
+          String(url).endsWith("/integrations/tenants") ||
+          String(url).startsWith("/v1/admin/control/integrations/tenant_a/api-keys"),
       ),
     ).toBe(true);
     expect(fetcher.mock.calls.every(([, init]) => init?.cache === "no-store")).toBe(true);
@@ -97,6 +117,7 @@ describe("后台接入页面", () => {
       { ...webhook, disabledAt: webhook.createdAt, disabledReason: "delivery_attempts_exhausted" },
     ];
     const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      if (String(url).endsWith("/integrations/tenants")) return ok({ items: tenantItems });
       if (init?.method === "GET") return ok({ items });
       if (init?.method === "DELETE") {
         items = [];
@@ -138,8 +159,10 @@ describe("后台接入页面", () => {
     await click(root, "删除");
     expect(root.textContent).toContain("暂无 Webhook");
     expect(
-      fetcher.mock.calls.every(([url]) =>
-        String(url).startsWith("/v1/admin/control/integrations/tenant_b/webhooks"),
+      fetcher.mock.calls.every(
+        ([url]) =>
+          String(url).includes("/integrations/tenants") ||
+          /^\/v1\/admin\/control\/integrations\/tenant_[ab]\/webhooks/.test(String(url)),
       ),
     ).toBe(true);
   });
@@ -148,12 +171,14 @@ describe("后台接入页面", () => {
     "切换 Tenant 后迟到的 %s 创建响应不能展示旧秘密",
     async (kind) => {
       let finish!: (response: Response) => void;
-      const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
-        init?.method === "GET"
-          ? ok({ items: [] })
-          : new Promise((resolve) => {
-              finish = resolve;
-            }),
+      const fetcher = vi.fn<typeof fetch>(async (url, init) =>
+        String(url).endsWith("/integrations/tenants")
+          ? ok({ items: tenantItems })
+          : init?.method === "GET"
+            ? ok({ items: [] })
+            : new Promise((resolve) => {
+                finish = resolve;
+              }),
       );
       const api = new IntegrationApi(fetcher);
       const root = render(
@@ -179,17 +204,19 @@ describe("后台接入页面", () => {
         );
       });
       await settle();
-      expect(root.textContent).toContain("当前 Tenant：tenant_second");
+      expect(root.textContent).toContain("当前空间：第二空间 tenant_second");
       expect(root.textContent).not.toContain("old-secret-placeholder");
       expect(root.textContent).not.toContain("一次性凭据");
     },
   );
 
   it("服务端拒绝非管理员时不回显响应中的秘密或重试写入", async () => {
-    const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
-      init?.method === "GET"
-        ? ok({ items: [] })
-        : Response.json({ error: { message: "must-not-display-secret" } }, { status: 401 }),
+    const fetcher = vi.fn<typeof fetch>(async (url, init) =>
+      String(url).endsWith("/integrations/tenants")
+        ? ok({ items: tenantItems })
+        : init?.method === "GET"
+          ? ok({ items: [] })
+          : Response.json({ error: { message: "must-not-display-secret" } }, { status: 401 }),
     );
     const root = render(<IntegrationApiKeysPage api={new IntegrationApi(fetcher)} />);
     await tenant(root, "tenant_a");

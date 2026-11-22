@@ -18,7 +18,7 @@ export function IntegrationApiKeysPage({
   readonly api?: IntegrationApi;
 }) {
   return (
-    <IntegrationTenant title="API Key">
+    <IntegrationTenant title="API Key" api={api}>
       {(tenant) => <KeyEditor api={api} tenant={tenant} />}
     </IntegrationTenant>
   );

@@ -24,8 +24,7 @@ export const RUN_EXPLORER_ORIGINS = ["normal", "playground", "evaluation", "api"
 export type RunExplorerOrigin = (typeof RUN_EXPLORER_ORIGINS)[number];
 
 /**
- * 控制面权限位。`run_content.read` 是查看 Run 正文（Prompt、思考、回复、工具摘要与错误原文）
- * 的显式权限，当前只由 `admin` 角色持有；数据库正文视图按同一规则独立校验。
+ * 正文能力只授予 `admin`；数据库正文视图按同一规则独立校验。非管理员返回结构视图。
  */
 export type ControlCapability = "run_structure.read" | "run_content.read";
 
@@ -47,6 +46,7 @@ export interface RunExplorerQuery {
   readonly agentDefinitionId?: string;
   readonly agentRevisionId?: string;
   readonly origin?: RunExplorerOrigin;
+  readonly search?: string;
   readonly cursor?: string;
   readonly limit?: number;
 }
@@ -72,11 +72,16 @@ export interface RunExplorerUsage {
   readonly generationDurationMs: number;
 }
 
-/** Run 结构摘要：只含标识、状态、时间与计数，不含 Thread 标题、输入或模型正文。 */
+/** Run 目录投影。正文字段只在管理员响应中填充；其他角色由服务层清空。 */
 export interface RunExplorerSummary {
   readonly tenantId: string;
   readonly runId: string;
   readonly threadId: string;
+  readonly threadTitle: string;
+  readonly userInput?: string;
+  readonly userEmail?: string;
+  readonly userDisplayName?: string;
+  readonly agentDisplayName?: string;
   readonly status: RunExplorerStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -119,8 +124,9 @@ export interface RunExplorerDetail {
   readonly run: RunExplorerRunRecord;
   readonly attemptId?: string;
   readonly timeline: TrajectoryProjection;
-  /** 当前操作者是否持有 `run_content.read`；只决定界面是否提供入口，正文接口仍独立授权。 */
+  /** 是否为正文读取已审计的管理员详情；接口每次读取均重新授权。 */
   readonly contentAccess: boolean;
+  readonly auditId?: string;
 }
 
 export interface RunExplorerContent extends RunExplorerDetail {
@@ -138,13 +144,19 @@ export interface RunExplorerRepository {
     readonly agentDefinitionId?: string;
     readonly agentRevisionId?: string;
     readonly origin?: RunExplorerOrigin;
+    readonly search?: string;
     readonly after?: RunExplorerCursor;
     readonly limit: number;
+    readonly audit?: {
+      readonly auditId: string;
+      readonly querySummary: Readonly<Record<string, unknown>>;
+    };
   }): Promise<readonly RunExplorerSummary[]>;
   getRun(input: {
     readonly actorUserId: string;
     readonly tenantId: string;
     readonly runId: string;
+    readonly inputAuditId?: string;
   }): Promise<RunExplorerRunRecord | undefined>;
   /** 读取正文已在数据库内剥离的事件结构。 */
   readOutline(input: {
@@ -233,6 +245,15 @@ function selectAttempt(run: RunExplorerRunRecord, attemptId: string | undefined)
   return attemptId;
 }
 
+function redactRunInput<T extends RunExplorerSummary>(run: T): T {
+  const { threadTitle: _threadTitle, userInput: _userInput, ...safe } = run;
+  return {
+    ...safe,
+    threadTitle: "",
+    ...("attempts" in run ? { attempts: run.attempts } : {}),
+  } as T;
+}
+
 const emptyTimeline: TrajectoryProjection = Object.freeze({
   records: Object.freeze([]),
   stats: Object.freeze({
@@ -246,8 +267,8 @@ const emptyTimeline: TrajectoryProjection = Object.freeze({
 });
 
 /**
- * 后台 Run 浏览器。列表与结构详情对所有有效控制面角色开放；正文只经 `readContent` 返回，
- * 要求 `run_content.read` 且每次读取都写入审计。数据只来自 Run 表、持久事件与模型用量账本。
+ * 后台 Run 浏览器。列表与结构详情对有效控制面角色开放；问题与正文仅向 admin 返回，
+ * 且管理员详情每次读取均写入审计。数据来自持久 Run 视图与事件。
  */
 export class RunExplorerService {
   constructor(
@@ -277,6 +298,9 @@ export class RunExplorerService {
     const tenantId = identifier(query.tenantId, "Tenant");
     const agentDefinitionId = identifier(query.agentDefinitionId, "AgentDefinition");
     const agentRevisionId = identifier(query.agentRevisionId, "Revision");
+    const search = query.search?.trim();
+    if (search !== undefined && search.length > 200) throw new TypeError("关键词过长");
+    const auditId = capabilities.includes("run_content.read") ? this.auditId() : undefined;
     const rows = await this.repository.listRuns({
       actorUserId,
       ...(tenantId === undefined ? {} : { tenantId }),
@@ -286,10 +310,32 @@ export class RunExplorerService {
       ...(agentDefinitionId === undefined ? {} : { agentDefinitionId }),
       ...(agentRevisionId === undefined ? {} : { agentRevisionId }),
       ...(query.origin === undefined ? {} : { origin: query.origin }),
+      ...(search === undefined || search.length === 0 ? {} : { search }),
       ...(query.cursor === undefined ? {} : { after: decodeRunExplorerCursor(query.cursor) }),
       limit: limit + 1,
+      ...(auditId === undefined
+        ? {}
+        : {
+            audit: {
+              auditId,
+              querySummary: {
+                tenantId: tenantId ?? null,
+                status: query.status ?? null,
+                createdFrom: createdFrom ?? null,
+                createdTo: createdTo ?? null,
+                agentDefinitionId: agentDefinitionId ?? null,
+                agentRevisionId: agentRevisionId ?? null,
+                origin: query.origin ?? null,
+                search: search ?? null,
+                cursor: query.cursor === undefined ? null : "provided",
+                limit,
+              },
+            },
+          }),
     });
-    const items = rows.slice(0, limit);
+    const items = rows
+      .slice(0, limit)
+      .map((run) => (capabilities.includes("run_content.read") ? run : redactRunInput(run)));
     const last = items.at(-1);
     return Object.freeze({
       items: Object.freeze(items),
@@ -306,17 +352,23 @@ export class RunExplorerService {
     });
   }
 
-  private async requireRun(actorUserId: string, tenantId: string, runId: string) {
+  private async requireRun(
+    actorUserId: string,
+    tenantId: string,
+    runId: string,
+    inputAuditId?: string,
+  ) {
     const run = await this.repository.getRun({
       actorUserId,
       tenantId: identifier(tenantId, "Tenant") ?? tenantId,
       runId: identifier(runId, "Run") ?? runId,
+      ...(inputAuditId === undefined ? {} : { inputAuditId }),
     });
     if (run === undefined) throw new RunExplorerError("NOT_FOUND");
     return run;
   }
 
-  /** 结构详情：时间线经过 `outlineTrajectory`，不触发审计，也不返回任何正文。 */
+  /** 管理员直接取得完整详情；其他角色仅取得经过 outlineTrajectory 的结构时间线。 */
   async getRunDetail(
     actorUserId: string,
     tenantId: string,
@@ -324,7 +376,8 @@ export class RunExplorerService {
     attemptId?: string,
   ): Promise<RunExplorerDetail> {
     const capabilities = await this.capabilities(actorUserId);
-    const run = await this.requireRun(actorUserId, tenantId, runId);
+    const inputAuditId = capabilities.includes("run_content.read") ? this.auditId() : undefined;
+    const run = await this.requireRun(actorUserId, tenantId, runId, inputAuditId);
     const selected = selectAttempt(run, identifier(attemptId, "Attempt"));
     const timeline =
       selected === undefined
@@ -341,8 +394,12 @@ export class RunExplorerService {
               ),
             ),
           );
+    if (capabilities.includes("run_content.read") && selected !== undefined) {
+      const content = await this.readRunContent(actorUserId, run.tenantId, run.runId, selected);
+      return Object.freeze({ ...content });
+    }
     return Object.freeze({
-      run,
+      run: capabilities.includes("run_content.read") ? run : redactRunInput(run),
       ...(selected === undefined ? {} : { attemptId: selected }),
       timeline,
       contentAccess: capabilities.includes("run_content.read"),
@@ -358,7 +415,7 @@ export class RunExplorerService {
   ): Promise<RunExplorerContent> {
     const capabilities = await this.capabilities(actorUserId);
     if (!capabilities.includes("run_content.read")) throw new RunExplorerError("NOT_AUTHORIZED");
-    const run = await this.requireRun(actorUserId, tenantId, runId);
+    const run = await this.requireRun(actorUserId, tenantId, runId, this.auditId());
     const selected = selectAttempt(run, identifier(attemptId, "Attempt"));
     if (selected === undefined) throw new RunExplorerError("NOT_FOUND");
     const auditId = this.auditId();

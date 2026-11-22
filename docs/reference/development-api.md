@@ -7,7 +7,7 @@
 - development API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`。
 - Web 开发服务器通过同源代理访问 API，不启用宽松 CORS。
 - `Authorization: Bearer dev-user-a|dev-user-b` 只用于固定隔离测试 fixture。
-- 服务端凭据使用 `Authorization: Bearer hoox_sk_…`。平台管理员在后台「接入 → API Key」按 Tenant 创建、轮换和吊销；创建或轮换成功响应各只返回一次明文。API Key 需具备路由显式声明的作用域；未声明作用域的路由默认拒绝 API Key，会话、账号及团队成员路由仅接受人类会话。工作台与用户 API 不提供 Key 或 Webhook 管理能力。
+- 服务端凭据使用 `Authorization: Bearer hoox_sk_…`。部署方用 API Key 从自己的后端或脚本调用 Hoox API；平台管理员在后台「接入 → API Key」按 Tenant 创建、轮换和吊销，创建或轮换成功响应各只返回一次明文。空间选择器默认定位初始化管理员的个人空间；只有为特定用户或团队空间单独接入时才选择其他空间。API Key 需具备路由显式声明的作用域；未声明作用域的路由默认拒绝 API Key，会话、账号及团队成员路由仅接受人类会话。工作台与用户 API 不提供 Key 或 Webhook 管理能力。
 - API Key 绑定不可登录的集成 User 与 Tenant `member` Membership；认证后仍从 Membership 重建 TenantScope 并受 PostgreSQL RLS 限制。
 - `/api/auth/*` 承载内嵌 Better Auth 的邮箱、OAuth 和手机号协议；`/v1/auth/config` 返回公开启用状态，`/v1/auth/exchange` 把 Better Auth Cookie Session 交换为 Hoox 会话。
 - `/v1/auth/register` 和 `/v1/auth/login` 只在 development 显式保留，用于本地账号兼容和测试。

@@ -31,7 +31,7 @@ Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交�
 ## 诊断数据
 
 - 模型网络请求诊断默认关闭，只有显式开启后才拦截与配置 Provider 匹配的 `chat/completions` 请求，保存最终请求正文；不保存 HTTP header、原始响应正文或 Sandbox/S3 等其他请求。诊断正文进入 trace Blob 生命周期，受保留期与 GC 约束。
-- 内部轨迹记录（`@hoox/trajectory`）由 Worker 在 Session 内收集 Runtime 与 Pi 事件，供 development/Demo 的内部轨迹查看器读取；它不是公开产品 API。
+- 持久 Run 事件由后台“运行记录”统一投影；有效平台管理员可以查看正文，读取用户输入的列表请求、无 Attempt 详情与完整轨迹详情均写入访问审计，审计失败时不返回正文。列表筛选通过 POST 请求体传递，避免关键词进入 URL 访问日志。旧 `/trajectory/` 部署入口重定向到 `/admin/runs`。development 的 `@hoox/trajectory-web` 仍可读取本地 Worker 诊断镜像，不能部署为生产服务或作为 Run 事实来源。
 - 模型用量（未缓存输入、输出、缓存读取 Token 与生成时长）原子写入租户隔离的低基数指标账本，后台只读取跨 Tenant 聚合视图，不保存 Provider 身份或模型正文。
 - Worker 的 [OpenTelemetry 导出](../maintainers/diagnostics.md#导出到-opentelemetry)只旁听 Provider 流与通过持久化验证的 Run/工具事件。同一 Tool Call 的重复读回不生成新 Span；没有已确认的结束事实不猜测结果。导出默认不含正文，不复制持久账本，也不作为界面投影、恢复或计费依据。
 - 诊断数据可能包含用户内容，必须按敏感数据处理；配置错误、日志和测试失败不得输出秘密值。

@@ -11,6 +11,7 @@ type ValidatedExternalTarget = Awaited<ReturnType<typeof validateExternalHttpsTa
 function repository() {
   return {
     assertAccess: vi.fn(async () => undefined),
+    listTenants: vi.fn<IntegrationAdminPort["listTenants"]>(async () => []),
     listKeys: vi.fn(async () => []),
     createKey: vi.fn(),
     rotateKey: vi.fn(),
@@ -57,6 +58,37 @@ describe("后台接入路由", () => {
         expect(result.statusCode).toBe(401);
       }
       expect(integrations.listKeys).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("管理员可以读取空间目录，未认证请求不触达仓储", async () => {
+    const { app, integrations } = appFixture();
+    try {
+      expect(
+        (await app.inject({ method: "GET", url: "/v1/admin/control/integrations/tenants" }))
+          .statusCode,
+      ).toBe(401);
+      integrations.listTenants.mockResolvedValueOnce([
+        {
+          tenantId: "tenant_a",
+          displayName: "admin@example.invalid",
+          kind: "personal",
+          isDefault: true,
+        },
+      ]);
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/admin/control/integrations/tenants",
+        headers: { authorization: "Bearer administrator" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.items[0]).toMatchObject({
+        tenantId: "tenant_a",
+        isDefault: true,
+      });
+      expect(integrations.listTenants).toHaveBeenCalledWith("admin_test");
     } finally {
       await app.close();
     }

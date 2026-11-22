@@ -94,7 +94,7 @@ http://127.0.0.1:4188
 
 development 管理 Web 的“数据运营”页显示“打开内部轨迹”链接。该链接在新窗口打开回环地址，不把轨迹正文交给 Admin API；仍需维护者单独启动上述命令。
 
-受控 Demo 默认在同一镜像中构建并启动查看器，入口为 `https://hoox.aisay.cc/trajectory/`。页面外壳不包含轨迹数据；列表、详情与模型报文 API 会读取同源 `hoox.auth-session.v2`，只有 Demo 管理员 Hoox Session 能通过 Nginx `auth_request`。鉴权后 Nginx 会清空转发给查看器的 `Authorization`。Demo Worker 与查看器共享固定数据 epoch 的轨迹卷；新 Run 产生的轨迹跨应用发布和回滚持续保留，旧 release 目录清理不得删除该卷。启用稳定卷以前的记录不自动回填。
+Demo 不部署查看器；旧 `/trajectory/` 只重定向到后台运行记录。Worker 仍写入固定数据 epoch 的本地诊断卷，供维护者在 development 环境排障；该卷不由 Admin API 读取。
 
 可覆盖参数：
 
@@ -109,25 +109,16 @@ Attempt 下拉框支持切换单次 Attempt，默认组合各 Run 的最新 Atte
 
 “模型流生成”为 assistant `message_start` 到 `message_end` 的累计时间；“模型等待”为各轮 `turn_start` 到首个 assistant `message_start` 的已采集等待，包含请求准备及首响应等待，不是精确 HTTP TTFT。完全缺少等待边界时显示空值。轨迹跨度来自内部事件的单调时钟范围，不能当作服务端完整 Run 总耗时。只有旧版 Runtime 镜像时才使用文件 mtime 做近似定位。
 
-## 与后台运行记录的关系
+## 后台运行记录
 
-管理 Web 的“运行记录”页是面向平台管理员的产品入口，内部轨迹查看器是面向维护者的诊断工具，两者共用 `@hoox/trajectory` 的事件投影，但数据来源和授权不同：
+管理 Web 的“运行记录”是所有部署的统一 Run 调试入口。列表按用户问题或 Thread 标题搜索，并显示 Agent、用户、状态、时间、耗时与 Token；详情直接展示持久事件中的思考、回复、工具参数与结果、错误及 Attempt 时间线。每次管理员详情读取均静默写入正文访问审计。权限边界见[后台控制面与运行配置](../architecture/admin-control-plane.md#run-浏览器与正文访问)。
 
-| | 后台运行记录 | 内部轨迹查看器 |
-| --- | --- | --- |
-| 数据来源 | PostgreSQL `runs`、`execution_attempts`、`run_events` 与模型用量账本，经 Admin Control 受限视图读取 | 本地 `model-wire-traces` 镜像目录 |
-| 可用环境 | 所有部署 | development 与受控 Demo |
-| 默认内容 | 结构与指标，不含正文 | 思考、回复、工具生命周期与 request 原文 |
-| 正文 | 需要 `run_content.read`（当前仅 `admin`），每次打开写入审计 | 由回环绑定或 Demo 管理员会话网关保护，不写访问审计 |
-| 模型报文 | 不提供 | 提供 request 原文、阶段计时与 Session log 下载 |
-
-排查某个 Run 时先在运行记录页定位 Tenant、Attempt、失败工具与错误码；需要逐字节 request、内部阶段计时或 Session log 时再使用内部轨迹查看器。运行记录页不读取本地镜像，也不依赖 `MODEL_WIRE_TRACE_ENABLED`。权限与审计边界见[后台控制面与运行配置](../architecture/admin-control-plane.md#run-浏览器与正文访问)。
+已发布 Demo 的 `/trajectory/` 与 `/trajectory` 仅兼容重定向到 `/admin/runs`，不再运行轨迹 Web 服务。本地 development 仍可按需运行 `corepack pnpm dev:trajectory` 检查 Worker 在 `model-wire-traces` 下的诊断镜像；这些镜像包含额外的 Pi 原始事件、request 原文和内部阶段计时，不属于 PostgreSQL Run 事实，也不进入后台详情或生产部署。
 
 ## 安全约束
 
-- 查看器只允许绑定本机回环地址。除 `deploy/demo` 明确实现的同源管理员会话网关外，不得代理或转发到远程网络。
-- 通用 production 装配不得嵌入或代理查看器；development 管理页使用回环新窗口链接，受控 Demo 管理页使用同源 `/trajectory/` 新窗口链接。
-- Demo 只能公开不含数据的页面外壳；`/trajectory/api/` 必须拒绝无会话和非管理员会话，且不得把 Hoox Session Token 转交给查看器进程。
+- 本地查看器只允许绑定本机回环地址，不得代理或转发到远程网络。
+- 通用 production 与 Demo 部署均不得嵌入或代理本地查看器；Demo 的旧路径仅用于跳转后台运行记录。
 - 禁止将 `model-wire-traces`、截图或正文粘贴到公开 Issue。
 - 删除诊断数据前确认相关故障证据已经完成受控留存。
 - 关闭 `MODEL_WIRE_TRACE_ENABLED` 只停止新增采集，不自动删除既有记录。

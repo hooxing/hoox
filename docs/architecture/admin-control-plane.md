@@ -18,7 +18,8 @@
 ## 接入管理边界
 
 - API Key 与 Webhook 属于部署方集成配置，只由有效的平台 `admin` 在后台「接入」管理；`viewer`、`operator`、仅有 Skill 管理授权的身份、Tenant Owner/Admin 与 API Key 均无此权限。工作台只面向终端用户，不提供这两类管理入口。
-- 页面沿用后台按 Tenant ID 指定目标的方式，可选择主 Tenant、个人空间或团队空间。管理员不必成为目标 Tenant 的成员；服务端在事务中复核平台管理角色与目标 Tenant，并通过独立的事务级管理员标识和 Tenant RLS 限定访问。跨 Tenant 的资源 ID、缺失 Tenant 或已删除资源统一返回 404，不能凭资源 ID 修改其他目标的数据。
+- 页面使用管理员可搜索的空间目录选择目标，展示团队名或个人用户邮箱/名称。默认目标固定为初始化管理员的个人空间，不随当前登录管理员变化；无法解析时不预选。管理员不必成为目标空间成员；服务端在事务中复核平台管理角色与目标空间。跨空间的资源 ID、缺失空间或已删除资源统一返回 404。
+- `GET /v1/admin/control/integrations/tenants` 只向有效平台管理员返回空间 ID、可读名称、类型及是否为初始化管理员个人空间；读取通过受限安全视图，不授予 Admin Control 对 Tenant 或用户目录底表的通用读取权限。
 - 路由前缀为 `/v1/admin/control/integrations/:tenantId`。`GET/POST /api-keys` 列表和创建，`POST /api-keys/:keyId/rotate` 轮换，`DELETE /api-keys/:keyId` 吊销；`GET/POST /webhooks` 列表和注册，`POST /webhooks/:webhookId/rotate-secret` 轮换密钥，`POST /webhooks/:webhookId/disable` 停用，`DELETE /webhooks/:webhookId` 逻辑删除。用户 API 的 `/v1/api-keys`、`/v1/webhooks` 不提供兼容管理路由。
 - 管理操作复用 API Key、Webhook 持久化仓储与现有领域校验；读取和变更均在事务内写入 `integration_admin_audits`，只记录操作者、Tenant、动作、目标 ID 和时间，不写入 Key、Webhook 密钥或密文。审计失败会回滚变更。Admin Control 只获得接入表的必要 ACL 与身份关联的列级权限，不能读取 Webhook 密文、Thread、Run 或 Webhook Outbox。
 - API Key 创建与轮换、Webhook 注册与密钥轮换各只在成功响应中返回一次明文，不进入持久回执、查询缓存、日志或错误；页面关闭、离开页面或切换 Tenant 后无法取回，迟到响应不能显示到另一 Tenant。请求失败时先刷新列表核对结果，不自动重试写入。
@@ -58,13 +59,12 @@ Agent 版本在受理 Run 时固定，见 [Agent 定义、版本与 Run 快照](
 
 ## Run 浏览器与正文访问
 
-后台“运行记录”按 Tenant、状态和创建时间跨 Tenant 浏览 Run。数据只来自 `runs`、`execution_attempts`、持久 `run_events` 与模型用量账本，不建立第二个事实源；时间线复用 `@hoox/trajectory` 的投影。接口与页面入口见[维护者开发边界](../maintainers/runtime-development-boundaries.md#平台控制面)。
+后台“运行记录”按 Tenant、状态、时间和用户问题关键词浏览 Run，列表显示问题、Thread 标题、Agent、发起用户及调试指标。问题和标题来自 `run_execution_inputs`、`threads` 的只读投影视图；时间线复用 `@hoox/trajectory` 的投影。接口与页面入口见[维护者开发边界](../maintainers/runtime-development-boundaries.md#平台控制面)。
 
-- **两级权限**：所有有效控制面角色（`viewer`、`operator`、`admin`）持有 `run_structure.read`，只能读取结构与指标；查看 Run 正文是显式权限 `run_content.read`，当前只由 `admin` 持有（`@hoox/admin-control` 的 `controlCapabilities`）。新增 Agent 管理类角色需要正文权限时，必须同时修改该权限矩阵与数据库正文视图、审计策略中的角色条件。
-- **结构读取不含正文**：Admin Control 只取得三个 Migrator 持有的 `security_barrier` 视图的 SELECT，不取得 `runs`、`execution_attempts`、`run_events`、`threads` 或指标底表的任何权限。`admin_run_directory` 只返回标识、状态、时间、Attempt 与计数，不含 Thread 标题或输入；`admin_run_event_outline` 在数据库内把思考与回复增量、工具展示标题、失败消息、等待问题、交付物修正反馈、队列条目和 Todo 内容替换为空值，只保留类型、标识、枚举与计数。服务端再经 `outlineTrajectory` 按记录类型重新生成摘要、只保留白名单详情，因此即使输入含正文也不会返回。新增事件字段默认不进入结构视图，暴露前必须确认它不是用户或模型正文。
-- **正文读取必审计**：正文只经独立接口返回，服务端先校验 `run_content.read`，再在同一读写事务中以本人身份写入 `admin_run_content_access_audits`（操作者、Tenant、Run、Attempt、时间与事务号），把审计号写入事务级 `app.run_content_audit_id` 后读取 `admin_run_event_content`。该视图只放行“有效 `admin` + 本事务写入 + 审计号与 Tenant/Run/Attempt 全部匹配”的行；审计写入被 RLS 拒绝时整个读取失败，旧审计号在后续事务中读不到任何行。每次打开正文都会产生一条新审计；查看结构不写审计。
+- **管理员直接调试**：有效 `admin` 在列表和详情直接看到用户问题、思考、回复、工具参数/结果与错误；查看问题和标题不会替代正文审计。`viewer`、`operator` 可以查看结构指标，但不会收到问题、Thread 标题或事件正文，正文接口始终拒绝非管理员。
+- **正文读取必审计**：每次管理员详情加载、Attempt 切换或刷新正文时，服务端在同一读写事务内以本人身份写入 `admin_run_content_access_audits`（操作者、Tenant、Run、Attempt、时间与事务号），再读取 `admin_run_event_content`。该视图只放行“有效 `admin` + 本事务写入 + 审计号与 Tenant/Run/Attempt 全部匹配”的行；审计写入被 RLS 拒绝时整个读取失败，旧审计号在后续事务中读不到任何行。界面不要求额外点击，也不展示审计操作提示。
 - **审计独立保留**：正文访问审计不引用业务行，不阻塞 Run 数据的保留清理，也不随其删除。只有有效 `admin` 能写入或查看该表，Runtime 与 Team Coordinator 对其零 ACL。
-- **授权位置**：菜单、按钮和“是否持有正文权限”的响应字段只决定界面入口；服务端在每个请求中重新解析角色，数据库视图与 RLS 再独立校验一次。操作者被停用后，列表、结构详情与正文读取均立即失败。
+- **授权位置**：菜单和页面路由不参与授权；服务端在每个请求中重新解析角色，数据库视图与 RLS 再独立校验一次。操作者被停用后，列表、结构详情与正文读取均立即失败。
 - **来源与 Playground**：Run 目录的 `agent_definition_id`、`agent_revision_id` 与 `origin` 来自持久化快照和 Run 来源列。Playground 运行可在实时 Run 浏览器中查看，但不计入业务运行数、会话数及 Token 指标；个人目录与终端用户路径排除 Playground Thread/Run。
 - **耗时与用量口径**：耗时为 Run 创建到最新 Attempt 结束的端到端时间（含排队），未结束时缺省；模型调用次数与 Token 为该 Run 所有 Attempt 的用量账本汇总；工具调用、失败与错误计数只统计最新 Attempt 的持久事件。时间线默认展示最新 Attempt，可切换历史 Attempt。
 

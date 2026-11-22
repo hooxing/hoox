@@ -23,6 +23,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 export type IntegrationAdminPort = Pick<
   PgIntegrationAdminRepository,
   | "assertAccess"
+  | "listTenants"
   | "listKeys"
   | "createKey"
   | "rotateKey"
@@ -70,6 +71,40 @@ export function registerIntegrationRoutes(
   resolveTarget: typeof validateExternalHttpsTarget = validateExternalHttpsTarget,
 ): void {
   const { actor, success, requireJson, responseSchemas, badRequest } = helpers;
+  app.get(
+    "/v1/admin/control/integrations/tenants",
+    {
+      schema: {
+        response: responseSchemas(
+          Type.Object(
+            {
+              version: Type.Literal("v1"),
+              requestId: Type.String(),
+              data: Type.Object(
+                {
+                  items: Type.Array(
+                    Type.Object(
+                      {
+                        tenantId: IdSchema,
+                        displayName: Type.String(),
+                        kind: Type.Union([Type.Literal("personal"), Type.Literal("team")]),
+                        isDefault: Type.Boolean(),
+                      },
+                      { additionalProperties: false },
+                    ),
+                  ),
+                },
+                { additionalProperties: false },
+              ),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+    },
+    async (request) =>
+      success(request, { items: await repository.listTenants(await actor(request)) }),
+  );
   app.get<{ Params: TenantPath }>(
     `${base}/api-keys`,
     {

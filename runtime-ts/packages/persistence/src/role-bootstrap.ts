@@ -1225,6 +1225,29 @@ async function hasAdminRunExplorerState(client: PoolClient, schema: string): Pro
   return result.rows[0]?.present === true;
 }
 
+async function hasAdminIntegrationTenantDirectoryState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.admin_integration_tenant_directory',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasAdminRunInputProjectionPolicyState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1 AND tablename='run_execution_inputs'
+       AND policyname='run_execution_inputs_admin_projection_read') AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 const adminRunExplorerViews = [
   "admin_run_directory",
   "admin_run_event_outline",
@@ -2472,6 +2495,8 @@ async function assertAdminControlBoundary(
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
   const runExplorerEnabled = enabled && (await hasAdminRunExplorerState(client, context.schema));
+  const integrationTenantDirectoryEnabled =
+    enabled && (await hasAdminIntegrationTenantDirectoryState(client, context.schema));
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
   const externalToolsEnabled = enabled && (await hasExternalToolState(client, context.schema));
   const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
@@ -2701,6 +2726,7 @@ async function assertAdminControlBoundary(
         "admin_user_directory",
         "external_tool_selectable_versions",
         ...adminRunExplorerViews,
+        "admin_integration_tenant_directory",
       ],
     ],
   );
@@ -2712,7 +2738,9 @@ async function assertAdminControlBoundary(
           ? userOperationsEnabled
           : row.view_name === "external_tool_selectable_versions"
             ? externalToolAdminEnabled
-            : runExplorerEnabled;
+            : row.view_name === "admin_integration_tenant_directory"
+              ? integrationTenantDirectoryEnabled
+              : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3332,6 +3360,11 @@ const adminRunExplorerPolicyBindings = Object.freeze([
   ["run_events", "run_events_admin_projection_read", "migrator"],
 ] as const);
 
+const adminIntegrationTenantDirectoryPolicyBindings = Object.freeze([
+  ["tenants", "tenants_admin_integration_directory_read", "migrator"],
+  ["user_accounts", "user_accounts_admin_integration_directory_read", "migrator"],
+] as const);
+
 async function rebindRoleScopedPolicies(
   client: PoolClient,
   context: MigrationSecurityContext,
@@ -3400,8 +3433,15 @@ async function rebindRoleScopedPolicies(
       "thread_continuity_metric_observations",
       "user_sessions",
     ]) {
-      await client.query(`ALTER POLICY ${quoteIdentifier(`${table}_admin_projection_read`)}
-        ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.migratorRole)}`);
+      const policyName = `${table}_admin_projection_read`;
+      const policyExists = await client.query<{ present: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1 AND tablename=$2 AND policyname=$3) AS present",
+        [context.schema, table, policyName],
+      );
+      if (policyExists.rows[0]?.present) {
+        await client.query(`ALTER POLICY ${quoteIdentifier(policyName)}
+          ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.migratorRole)}`);
+      }
     }
   }
   if (await hasSkillPublicationState(client, context.schema)) {
@@ -3457,6 +3497,19 @@ async function rebindRoleScopedPolicies(
     }
     if (await hasAdminRunExplorerState(client, context.schema)) {
       for (const [table, policy, target] of adminRunExplorerPolicyBindings) {
+        const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
+        await client.query(
+          `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+        );
+      }
+    }
+    if (await hasAdminRunInputProjectionPolicyState(client, context.schema)) {
+      await client.query(
+        `ALTER POLICY run_execution_inputs_admin_projection_read ON ${schema}.run_execution_inputs TO ${quoteIdentifier(context.migratorRole)}`,
+      );
+    }
+    if (await hasAdminIntegrationTenantDirectoryState(client, context.schema)) {
+      for (const [table, policy, target] of adminIntegrationTenantDirectoryPolicyBindings) {
         const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
         await client.query(
           `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
@@ -3670,6 +3723,11 @@ async function grantAdminControlAccess(
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
        GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
+    );
+  }
+  if (await hasAdminIntegrationTenantDirectoryState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT ON TABLE ${schema}.admin_integration_tenant_directory TO ${control}`,
     );
   }
   if (await hasExternalToolAdminState(client, context.schema)) {

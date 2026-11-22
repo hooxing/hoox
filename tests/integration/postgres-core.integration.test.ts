@@ -3267,6 +3267,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         "memory_ingestion_outbox_admin_projection_read",
         "run_dispatch_outbox_admin_projection_read",
         "run_events_admin_projection_read",
+        "run_execution_inputs_admin_projection_read",
         "runs_admin_projection_read",
         "sandbox_registry_admin_projection_read",
         "scheduled_task_occurrences_admin_projection_read",

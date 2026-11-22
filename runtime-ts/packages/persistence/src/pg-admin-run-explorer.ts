@@ -18,6 +18,11 @@ interface DirectoryRow extends QueryResultRow {
   readonly tenant_id: string;
   readonly run_id: string;
   readonly thread_id: string;
+  readonly thread_title: string;
+  readonly user_input: string | null;
+  readonly user_email: string | null;
+  readonly user_display_name: string | null;
+  readonly agent_display_name: string | null;
   readonly status: string;
   readonly created_at: Date | string;
   readonly updated_at: Date | string;
@@ -49,6 +54,7 @@ interface EventRow extends QueryResultRow {
 }
 
 const directoryColumns = `tenant_id,run_id,thread_id,status,created_at,updated_at,
+  thread_title,user_input,user_email,user_display_name,agent_display_name,
   agent_definition_id,agent_revision_id,origin,attempt_count::text,attempts,
   latest_attempt_id,latest_attempt_status,latest_attempt_started_at,latest_attempt_finished_at,
   model_calls::text,input_tokens,output_tokens,cache_read_tokens,generation_duration_ms,
@@ -115,6 +121,11 @@ function mapRun(row: DirectoryRow): RunExplorerRunRecord {
     tenantId: row.tenant_id,
     runId: row.run_id,
     threadId: row.thread_id,
+    threadTitle: row.thread_title,
+    ...(row.user_input === null ? {} : { userInput: row.user_input }),
+    ...(row.user_email === null ? {} : { userEmail: row.user_email }),
+    ...(row.user_display_name === null ? {} : { userDisplayName: row.user_display_name }),
+    ...(row.agent_display_name === null ? {} : { agentDisplayName: row.agent_display_name }),
     status,
     createdAt,
     updatedAt: timestamp(row.updated_at),
@@ -184,7 +195,7 @@ export class PgAdminRunExplorerRepository implements RunExplorerRepository {
   async listRuns(
     input: Parameters<RunExplorerRepository["listRuns"]>[0],
   ): Promise<readonly RunExplorerSummary[]> {
-    return await this.read(input.actorUserId, "读取 Run 列表", async (client) => {
+    const operation = async (client: PoolClient) => {
       const result = await client.query<DirectoryRow>(
         `SELECT ${directoryColumns}
            FROM admin_run_directory
@@ -195,10 +206,11 @@ export class PgAdminRunExplorerRepository implements RunExplorerRepository {
             AND ($5::text IS NULL OR agent_definition_id=$5)
             AND ($6::text IS NULL OR agent_revision_id=$6)
             AND ($7::text IS NULL OR origin=$7)
-            AND ($8::timestamptz IS NULL
-                 OR (created_at,tenant_id,run_id) < ($8::timestamptz,$9::text,$10::text))
+            AND ($8::text IS NULL OR thread_title ILIKE '%'||$8||'%' OR user_input ILIKE '%'||$8||'%')
+            AND ($9::timestamptz IS NULL
+                 OR (created_at,tenant_id,run_id) < ($9::timestamptz,$10::text,$11::text))
           ORDER BY created_at DESC,tenant_id DESC,run_id DESC
-          LIMIT $11`,
+          LIMIT $12`,
         [
           input.tenantId ?? null,
           input.status ?? null,
@@ -207,27 +219,60 @@ export class PgAdminRunExplorerRepository implements RunExplorerRepository {
           input.agentDefinitionId ?? null,
           input.agentRevisionId ?? null,
           input.origin ?? null,
+          input.search ?? null,
           input.after?.createdAt ?? null,
           input.after?.tenantId ?? null,
           input.after?.runId ?? null,
           input.limit,
         ],
       );
+      if (input.audit !== undefined) {
+        await client.query(
+          `INSERT INTO admin_run_content_access_audits(audit_id,actor_user_id,tenant_id,run_id,attempt_id,query_summary,returned_run_count)
+           VALUES($1,$2,'*','*',NULL,$3::jsonb,$4)`,
+          [
+            input.audit.auditId,
+            input.actorUserId,
+            JSON.stringify(input.audit.querySummary),
+            Math.min(result.rows.length, input.limit - 1),
+          ],
+        );
+      }
       return Object.freeze(result.rows.map((row) => summary(mapRun(row))));
-    });
+    };
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        await client.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
+        return operation(client);
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "读取 Run 列表");
+    }
   }
 
   async getRun(
     input: Parameters<RunExplorerRepository["getRun"]>[0],
   ): Promise<RunExplorerRunRecord | undefined> {
-    return await this.read(input.actorUserId, "读取 Run 摘要", async (client) => {
-      const result = await client.query<DirectoryRow>(
-        `SELECT ${directoryColumns} FROM admin_run_directory WHERE tenant_id=$1 AND run_id=$2`,
-        [input.tenantId, input.runId],
-      );
-      const row = result.rows[0];
-      return row === undefined ? undefined : mapRun(row);
-    });
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        await client.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
+        const result = await client.query<DirectoryRow>(
+          `SELECT ${directoryColumns} FROM admin_run_directory WHERE tenant_id=$1 AND run_id=$2`,
+          [input.tenantId, input.runId],
+        );
+        const row = result.rows[0];
+        if (row !== undefined && input.inputAuditId !== undefined) {
+          await client.query(
+            `INSERT INTO admin_run_content_access_audits(audit_id,actor_user_id,tenant_id,run_id,attempt_id,query_summary,returned_run_count)
+             VALUES($1,$2,$3,$4,NULL,'{"type":"run_detail_input"}'::jsonb,1)`,
+            [input.inputAuditId, input.actorUserId, input.tenantId, input.runId],
+          );
+        }
+        return row === undefined ? undefined : mapRun(row);
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "读取 Run 摘要");
+    }
   }
 
   async readOutline(

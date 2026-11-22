@@ -20,7 +20,7 @@ docker() {
     return
   fi
   if [[ "$*" == *'config --services'* ]]; then
-    printf 'postgres\nminio\napi\nweb\nadmin-control\nadmin-web\ntrajectory\nscheduler\nworker\n'
+    printf 'postgres\nminio\napi\nweb\nadmin-control\nadmin-web\nscheduler\nworker\n'
   elif [[ "$*" == *'exec -T postgres pg_dump'* ]]; then
     if [[ "$MOCK_MODE" == config-export-dump-failure ]]; then
       return 23
@@ -86,7 +86,7 @@ curl() {
       printf '500'
     elif [[ "$*" == *'/sign-in/email'* && "$MOCK_MODE" == existing-account-signin-failure ]]; then
       printf '401'
-    elif [[ "$*" == *'/v1/admin/control/overview'* || "$*" == *'/trajectory/api/threads'* ]]; then
+    elif [[ "$*" == *'/v1/admin/control/overview'* ]]; then
       printf '401'
     else
       printf '200'

@@ -4306,6 +4306,15 @@ td:first-child {
   font-size: 12px;
 }
 
+.run-question {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  max-width: 34rem;
+}
+
 @media (max-width: 720px) {
   .run-timeline-record {
     grid-template-columns: 70px minmax(0, 1fr);

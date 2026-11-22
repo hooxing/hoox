@@ -1114,11 +1114,14 @@ function AdminPlatform({
   controlApi,
   runApi,
   agentApi,
+  onLogout,
 }: {
   readonly apiClient: SkillAdminApiContract;
   readonly controlApi?: AdminControlApiContract;
   readonly runApi: RunExplorerApiContract;
   readonly agentApi: AgentDefinitionApiContract;
+  /** 仅真实管理台提供；注入客户端的测试与嵌入场景不渲染退出入口。 */
+  readonly onLogout?: () => void;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -1196,6 +1199,11 @@ function AdminPlatform({
                 <small>权限由管理网关确认</small>
               </span>
             </span>
+            {onLogout !== undefined && (
+              <button type="button" className="installation-logout" onClick={onLogout}>
+                退出登录
+              </button>
+            )}
           </div>
         </Header>
         <Content className="platform-content">
@@ -1342,32 +1350,61 @@ export function App({
       }),
     [],
   );
+  const logout = () => {
+    void (async () => {
+      const token = readAdminAccessToken();
+      try {
+        const response = await fetch("/api/v1/auth/logout", {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+        });
+        if (!response.ok && response.status !== 401) throw new Error("LOGOUT_FAILED");
+        localStorage.removeItem("hoox.auth-session.v2");
+        window.location.reload();
+      } catch {
+        window.alert("退出失败，请检查连接后重试。");
+      }
+    })();
+  };
   const platform = (
     <ConfigProvider
       theme={{
         token: {
+          // 取值与 @hoox/ui-theme 的语义令牌保持一致，antd 组件才能与自写样式同色。
           colorPrimary: "#176b4d",
-          colorInfo: "#176b4d",
+          colorInfo: "#2d5fc4",
           colorSuccess: "#21875f",
-          colorWarning: "#d18a32",
-          colorError: "#c65045",
-          colorText: "#17251f",
-          colorTextSecondary: "#66756d",
-          colorBgLayout: "#f3f6f4",
-          colorBorderSecondary: "#e4eae6",
-          borderRadius: 10,
-          borderRadiusLG: 16,
+          colorWarning: "#b57a1a",
+          colorError: "#b3261e",
+          colorText: "#19191b",
+          colorTextSecondary: "#524f4d",
+          colorTextTertiary: "#6d6a68",
+          colorBgLayout: "#faf9f7",
+          colorBorder: "#c4bfb9",
+          colorBorderSecondary: "#e1ddd8",
+          borderRadius: 8,
+          borderRadiusLG: 12,
+          fontSize: 14,
+          fontWeightStrong: 600,
+          controlHeight: 36,
           fontFamily:
-            'Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif',
+            'Inter, "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif',
         },
         components: {
           Menu: {
-            itemBorderRadius: 10,
-            itemHeight: 42,
-            itemSelectedBg: "#e7f3ed",
+            itemBorderRadius: 8,
+            itemHeight: 36,
+            itemMarginInline: 0,
+            groupTitleFontSize: 12,
+            itemSelectedBg: "#e8f1ed",
             itemSelectedColor: "#12563e",
           },
-          Button: { controlHeight: 38 },
+          Button: {
+            controlHeight: 36,
+            fontWeight: 400,
+            primaryShadow: "none",
+            defaultShadow: "none",
+          },
         },
       }}
     >
@@ -1377,35 +1414,12 @@ export function App({
             new URLSearchParams(window.location.search).get("setup") === "1" && (
               <InstallationProgress />
             )}
-          {apiClient === undefined && controlApi === undefined && (
-            <button
-              type="button"
-              className="installation-logout"
-              onClick={() => {
-                void (async () => {
-                  const token = readAdminAccessToken();
-                  try {
-                    const response = await fetch("/api/v1/auth/logout", {
-                      method: "POST",
-                      headers: { authorization: `Bearer ${token}` },
-                    });
-                    if (!response.ok && response.status !== 401) throw new Error("LOGOUT_FAILED");
-                    localStorage.removeItem("hoox.auth-session.v2");
-                    window.location.reload();
-                  } catch {
-                    window.alert("退出失败，请检查连接后重试。");
-                  }
-                })();
-              }}
-            >
-              退出登录
-            </button>
-          )}
           <AdminPlatform
             apiClient={apiClient ?? defaultApi}
             {...(controlApi === undefined ? {} : { controlApi })}
             runApi={runApi ?? defaultRunApi}
             agentApi={agentApi ?? defaultManagementApi}
+            {...(apiClient === undefined && controlApi === undefined ? { onLogout: logout } : {})}
           />
         </QueryClientProvider>
       </AntApp>

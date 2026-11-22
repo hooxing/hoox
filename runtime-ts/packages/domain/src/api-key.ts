@@ -7,6 +7,7 @@ export const apiKeyScopes = [
   "threads:create",
   "runs:create",
   "tool-results:submit",
+  "end-users:represent",
   "webhooks:manage",
 ] as const;
 export type ApiKeyScope = (typeof apiKeyScopes)[number];

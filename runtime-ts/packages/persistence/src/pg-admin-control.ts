@@ -97,6 +97,7 @@ interface PlatformUserRow extends QueryResultRow {
   readonly user_id: string;
   readonly email: string;
   readonly display_name: string;
+  readonly source?: "api_mapping" | null;
   readonly status: PlatformUserStatus;
   readonly created_at: Date | string;
   readonly last_active_at: Date | string | null;
@@ -162,6 +163,7 @@ function mapPlatformUser(row: PlatformUserRow): PlatformUserSummary {
     userId: row.user_id,
     email: row.email,
     displayName: row.display_name,
+    ...(row.source === "api_mapping" ? { source: row.source } : {}),
     status: row.status,
     createdAt: timestamp(row.created_at),
     ...(row.last_active_at === null ? {} : { lastActiveAt: timestamp(row.last_active_at) }),
@@ -956,7 +958,7 @@ export class PgAdminControlRepository
           parameters,
         ),
         client.query<PlatformUserRow>(
-          `SELECT user_id,email,display_name,status,created_at,last_active_at,
+          `SELECT user_id,email,display_name,source,status,created_at,last_active_at,
                   active_sessions::text,conversation_count::text,run_count::text
              FROM admin_user_directory ${where}
             ORDER BY status,last_active_at DESC NULLS LAST,created_at DESC,user_id
@@ -984,10 +986,12 @@ export class PgAdminControlRepository
             if (current === undefined) return { outcome: "not_found" };
             if (current.status === input.status) return { outcome: "applied", value: current };
             await client.query(
-              "UPDATE user_accounts SET status=$2,updated_at=clock_timestamp() WHERE user_id=$1",
+              current.source === "api_mapping"
+                ? "UPDATE api_end_users SET status=$2 WHERE user_id=$1"
+                : "UPDATE user_accounts SET status=$2,updated_at=clock_timestamp() WHERE user_id=$1",
               [input.targetUserId, input.status],
             );
-            if (input.status === "disabled") {
+            if (input.status === "disabled" && current.source !== "api_mapping") {
               await client.query("DELETE FROM user_sessions WHERE user_id=$1", [
                 input.targetUserId,
               ]);
@@ -1110,7 +1114,7 @@ export class PgAdminControlRepository
     targetUserId: string,
   ): Promise<PlatformUserSummary | undefined> {
     const result = await client.query<PlatformUserRow>(
-      `SELECT user_id,email,display_name,status,created_at,last_active_at,
+      `SELECT user_id,email,display_name,source,status,created_at,last_active_at,
               active_sessions::text,conversation_count::text,run_count::text
          FROM admin_user_directory WHERE user_id=$1`,
       [targetUserId],

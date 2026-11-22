@@ -1385,6 +1385,109 @@ describe("API Key 路由授权", () => {
     ).toBe(404);
   });
 
+  it("公开路由先校验作用域与终端用户声明，再切换到映射用户的个人空间", async () => {
+    const token = createApiKeyToken();
+    const owner = personalBundle("owner_a");
+    const mapped = personalBundle("owner_b");
+    let scopes: readonly string[] = ["threads:read"];
+    let disabled = false;
+    const mapEndUser = vi.fn(async () =>
+      disabled ? "disabled" : { userId: mapped.user.id, tenantId: mapped.tenant.id },
+    );
+    const apiKeys = {
+      authenticateKey: vi.fn(async () => ({
+        userId: owner.user.id,
+        tenantId: owner.tenant.id,
+        apiKeyId: "key_end_user",
+        scopes,
+      })),
+      mapEndUser,
+    } as unknown as NonNullable<ApiDependencies["apiKeys"]>;
+    const { app, state } = fixture({ apiKeys });
+    openApps.push(app);
+    const headers = { authorization: `Bearer ${token}`, "hoox-end-user": "customer:42" };
+    expect((await app.inject({ method: "GET", url: "/v1/threads", headers })).statusCode).toBe(403);
+    expect(mapEndUser).not.toHaveBeenCalled();
+    scopes = ["end-users:represent"];
+    expect((await app.inject({ method: "GET", url: "/v1/threads", headers })).statusCode).toBe(403);
+    expect(mapEndUser).not.toHaveBeenCalled();
+    scopes = ["threads:read", "threads:create", "runs:create", "end-users:represent"];
+    for (const externalId of ["", "bad id", "bad,joined", "a".repeat(129)]) {
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/v1/threads",
+            headers: { ...headers, "hoox-end-user": externalId },
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/v1/threads",
+          headers: { ...headers, "hoox-end-user": ["alice", "bob"] },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/v1/threads",
+          headers: { authorization: "Bearer token-a", "hoox-end-user": "customer:42" },
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/v1/threads",
+          headers: { ...headers, "x-tenant-id": mapped.tenant.id },
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect((await app.inject({ method: "GET", url: "/v1/teams", headers })).statusCode).toBe(404);
+    expect(mapEndUser).not.toHaveBeenCalled();
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": "mapped-thread-0001",
+      },
+      payload: { title: "映射空间" },
+    });
+    expect(created.statusCode).toBe(200);
+    expect([...state.threads.values()][0]?.entity.tenantId).toBe(mapped.tenant.id);
+    expect([...state.threads.values()][0]?.entity.createdByUserId).toBe(mapped.user.id);
+    const run = await app.inject({
+      method: "POST",
+      url: `/v1/threads/${created.json().data.id}/runs`,
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": "mapped-run-000001",
+      },
+      payload: { input: "映射用户的输入" },
+    });
+    expect(run.statusCode).toBe(200);
+    expect([...state.runs.values()][0]?.entity.tenantId).toBe(mapped.tenant.id);
+    expect(state.createdRunOrigins).toEqual(["api"]);
+    expect(mapEndUser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        externalId: "customer:42",
+        principal: expect.objectContaining({ userId: owner.user.id }),
+      }),
+    );
+    disabled = true;
+    expect((await app.inject({ method: "GET", url: "/v1/threads", headers })).statusCode).toBe(403);
+  });
+
   it("公开创建 Run 时将 API 来源传入持久化边界", async () => {
     const token = createApiKeyToken();
     const owner = personalBundle("owner_a");

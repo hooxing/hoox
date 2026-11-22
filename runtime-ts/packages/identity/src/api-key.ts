@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ApiKeyScope, TenantId, UserId } from "@hoox/domain";
 
-export type AuthPrincipalKind = "human" | "integration";
+export type AuthPrincipalKind = "human" | "integration" | "end_user";
 
 export const API_KEY_PREFIX = "hoox_sk_";
 const secretBytes = 32;
@@ -19,6 +19,15 @@ export interface ApiKeyAuthenticationPort {
     readonly token: string;
     readonly now: string;
   }): Promise<ApiKeyPrincipal | undefined>;
+  mapEndUser?(input: {
+    readonly principal: ApiKeyPrincipal;
+    readonly externalId: string;
+    readonly now: string;
+  }): Promise<Readonly<{ userId: UserId; tenantId: TenantId }> | "disabled" | undefined>;
+}
+
+export function isExternalEndUserId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\s\S])/u.test(value);
 }
 
 export function createApiKeyToken(): string {

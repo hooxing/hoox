@@ -7,7 +7,12 @@ import {
   tenantId,
   userId,
 } from "@hoox/domain";
-import { hashApiKey, type ApiKeyAuthenticationPort, type ApiKeyPrincipal } from "@hoox/identity";
+import {
+  hashApiKey,
+  isExternalEndUserId,
+  type ApiKeyAuthenticationPort,
+  type ApiKeyPrincipal,
+} from "@hoox/identity";
 import type { PoolClient, QueryResultRow } from "pg";
 import { PersistenceError } from "./errors.js";
 import type { TenantScope } from "./ports.js";
@@ -77,6 +82,86 @@ export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
       operation,
     ) => transaction(pool, operation),
   ) {}
+
+  async mapEndUser(input: {
+    readonly principal: ApiKeyPrincipal;
+    readonly externalId: string;
+    readonly now: string;
+  }): Promise<
+    | Readonly<{ userId: ReturnType<typeof userId>; tenantId: ReturnType<typeof tenantId> }>
+    | "disabled"
+    | undefined
+  > {
+    if (
+      !input.principal.scopes.includes("end-users:represent") ||
+      !isExternalEndUserId(input.externalId)
+    )
+      return undefined;
+    return transaction(this.pool, async (client) => {
+      await setTenant(client, input.principal);
+      const credential = await client.query(
+        `SELECT k.id FROM api_keys k JOIN memberships m
+           ON m.tenant_id=k.tenant_id AND m.user_id=k.integration_user_id
+         WHERE k.tenant_id=$1 AND k.id=$2 AND k.integration_user_id=$3
+           AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>clock_timestamp())
+           AND 'end-users:represent'=ANY(k.scopes) AND m.status='active'
+         FOR SHARE OF k,m`,
+        [input.principal.tenantId, input.principal.apiKeyId, input.principal.userId],
+      );
+      if (credential.rowCount !== 1) return undefined;
+      await client.query("SELECT set_config('app.end_user_integration_tenant',$1,true)", [
+        input.principal.tenantId,
+      ]);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        JSON.stringify([input.principal.tenantId, input.externalId]),
+      ]);
+      const existing = await client.query<{
+        user_id: string;
+        personal_tenant_id: string;
+        status: string;
+      }>(
+        `SELECT user_id,personal_tenant_id,status FROM api_end_users
+         WHERE integration_tenant_id=$1 AND external_id=$2`,
+        [input.principal.tenantId, input.externalId],
+      );
+      const row = existing.rows[0];
+      if (row !== undefined) {
+        if (row.status !== "active") return "disabled";
+        return { userId: userId(row.user_id), tenantId: tenantId(row.personal_tenant_id) };
+      }
+      const mapped = {
+        userId: userId(`usr_${randomUUID()}`),
+        tenantId: tenantId(`tenant_${randomUUID()}`),
+      };
+      await setTenant(client, mapped);
+      await client.query("INSERT INTO app_users(id,created_at) VALUES($1,$2)", [
+        mapped.userId,
+        input.now,
+      ]);
+      await client.query(
+        "INSERT INTO tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,$3)",
+        [mapped.tenantId, mapped.userId, input.now],
+      );
+      await client.query(
+        "INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at) VALUES($1,$2,$3,'owner','active',$4)",
+        [mapped.tenantId, `mem_${randomUUID()}`, mapped.userId, input.now],
+      );
+      await client.query(
+        `INSERT INTO api_end_users(integration_tenant_id,created_by_api_key_id,created_by_integration_user_id,external_id,user_id,personal_tenant_id,created_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          input.principal.tenantId,
+          input.principal.apiKeyId,
+          input.principal.userId,
+          input.externalId,
+          mapped.userId,
+          mapped.tenantId,
+          input.now,
+        ],
+      );
+      return mapped;
+    });
+  }
 
   async create(input: {
     readonly scope: TenantScope;

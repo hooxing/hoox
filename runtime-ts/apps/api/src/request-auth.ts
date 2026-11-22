@@ -36,6 +36,7 @@ export function createRequestAuthentication(service: Pick<ApiService, "authentic
         authorization(request),
         requestId(request),
         tenantSelector(request),
+        { endUserId: endUserId(request), requiredScope },
       ),
       requiredScope,
     );
@@ -45,13 +46,21 @@ export function createRequestAuthentication(service: Pick<ApiService, "authentic
     requiredScope?: ApiKeyScope,
   ) =>
     enforceCredentialBoundary(
-      await service.authenticate(authorization(request), requestId(request), {
-        kind: "selected",
-        value: selectedTenantId,
-      }),
+      await service.authenticate(
+        authorization(request),
+        requestId(request),
+        { kind: "selected", value: selectedTenantId },
+        { endUserId: endUserId(request), requiredScope },
+      ),
       requiredScope,
     );
   return { authenticate, authenticateSelectedTenant };
+}
+
+function endUserId(request: FastifyRequest): string | undefined {
+  const values = headerValues(request, "hoox-end-user");
+  if (values.length > 1) throw new ApiFailure("bad_request");
+  return values[0];
 }
 
 export function authorization(request: FastifyRequest): string | undefined {

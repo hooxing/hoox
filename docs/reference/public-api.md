@@ -12,13 +12,33 @@
 | `threads:create` | 创建 Thread |
 | `runs:read` | Run 查询、分页事件、SSE、Artifact 列表与交付 |
 | `runs:create` | 创建和取消 Run、上传文件 |
-| `runs:read` | 查询 Run/事件/Artifact、下载文件 |
+| `end-users:represent` | 允许携带 `Hoox-End-User` 代表终端用户；仍需接口本身的作用域 |
 
 认证失败返回 401；有效 Key 但作用域不足返回 403。Key 管理、Webhook 管理、登录会话、团队成员管理、客户端工具结果提交及工作台专用接口不接受 API Key。服务端继续从集成身份的 Membership 构造 TenantScope，并在 PostgreSQL RLS 下访问数据。
 
 ```sh
 export HOOX_API_ORIGIN="https://hoox.example.com"
 export HOOX_API_KEY="hoox_sk_REPLACE_WITH_SECRET"
+```
+
+## 终端用户映射
+
+部署方服务端可在任意公开 API 请求携带单个 `Hoox-End-User` 请求头，值为其业务系统中的终端用户 ID。Key 必须同时具有 `end-users:represent` 和目标接口要求的作用域，否则返回 403。人类登录会话不能使用此声明；重复请求头、空值或格式错误返回 400。请求体不接受终端用户身份字段。
+
+ID 区分大小写，为 1–128 个 ASCII 字符：首字符是英文字母或数字，其余可为英文字母、数字、`.`、`_`、`:`、`@`、`/`、`-`，不接受空白、控制字符或逗号。不应把密码、邮箱验证码或访问令牌用作 ID；服务端日志不记录 API Key 明文。
+
+首次声明时，平台原子创建内部 User、个人空间、Owner Membership 和映射；重复及并发声明返回同一身份。命名空间是 Key 所属的**空间**：同一空间下不同 Key（包括不同后台创建者创建的 Key）对相同外部 ID 返回同一 User 与个人空间；不同空间的相同外部 ID 相互隔离。Key 的轮换、吊销与新建不会改变空间级映射身份，但每个请求仍须通过当前 Key 的作用域、有效期和集成身份状态校验。
+
+携带声明的请求始终以映射 User 和个人空间执行，Thread、Run、Workspace、记忆、文件和幂等键均位于该空间，继续接受 Membership 与 PostgreSQL RLS 授权。不同终端用户以及原集成身份默认不能看到彼此数据；个人空间也不会继承 Key 所属空间的成员关系或限定空间的 Agent 使用权。若发送 `X-Tenant-Id`，其值仍只能是 Key 原属空间，不能借此选择映射空间或其他空间。
+
+未携带声明时保留集成身份及其原属空间，不会自动选择某个终端用户。创建、查询、上传、下载与 SSE 重连都必须重复携带同一个 `Hoox-End-User`，否则将访问另一个空间并通常返回 404。部署方必须先验证自身终端用户身份，再由可信服务端选择该 ID；不能把具有代用户作用域的 Key 发给终端用户或直接信任浏览器传来的身份声明。
+
+映射 User 没有登录账号、密码或工作台 Session，不能直接登录工作台。平台管理员可在后台「用户管理」按外部 ID 或内部 User ID 查找，来源标注为「API 映射」，可停用或恢复。停用后后续携带该映射声明的请求返回 403；恢复不创建新身份或空间。Key 吊销、到期或集成 Membership 失效后，也不能通过该 Key 使用映射。停用不取消已被接受的 Run，也不撤回已签发的短期下载 URL。
+
+```sh
+curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads" \
+  -H "Authorization: Bearer $HOOX_API_KEY" \
+  -H 'Hoox-End-User: customer:42'
 ```
 
 ## 接口
@@ -65,7 +85,7 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads/$thread_id/runs" \
 
 ## 文件与 Artifact
 
-上传时通过 `X-File-Name` 指定 URL 编码的文件名，可选 `X-File-Media-Type` 指定媒体类型；请求正文是原始字节。响应包含 `resourceId` 与 `versionId`。下载文件与 Artifact 时，Hoox 先按当前 Key 所属空间授权，再返回短期 URL 或有界内容；不得长期保存或记录签名 URL。Artifact 仅列出已发布的交付物，预览类型和大小受限。
+上传时通过 `X-File-Name` 指定 URL 编码的文件名，可选 `X-File-Media-Type` 指定媒体类型；请求正文是原始字节。响应包含 `resourceId` 与 `versionId`。下载文件与 Artifact 时，Hoox 先按当前认证上下文的有效空间授权（携带终端用户声明时为该用户个人空间），再返回短期 URL 或有界内容；不得长期保存或记录签名 URL。Artifact 仅列出已发布的交付物，预览类型和大小受限。
 
 ```sh
 curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/resources/uploads" \
@@ -93,4 +113,4 @@ JSON 成功响应统一为 `{ "version": "v1", "requestId": "…", "data": … }
 
 兼容性契约由 `runtime-ts/packages/protocol` 的 TypeBox Schema 拥有。OpenAPI 3.1 产物位于 `docs/reference/openapi/public-v1.json`；运行 `pnpm api:openapi:generate` 生成，CI 通过 `pnpm api:openapi:check` 校验。破坏性变化通过新版本路径发布。
 
-终端用户映射与客户端工具 `requires_action` / 结果提交尚不属于 v1 本次接口范围。
+客户端工具 `requires_action` / 结果提交尚不属于 v1 接口范围。

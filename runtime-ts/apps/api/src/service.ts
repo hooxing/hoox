@@ -47,7 +47,12 @@ import {
   type ExplicitSkillInvocation,
 } from "@hoox/skill";
 import type { ApiCreateCapability } from "./capabilities.js";
-import { isApiKeyToken, type ApiKeyAuthenticationPort } from "@hoox/identity";
+import {
+  isApiKeyToken,
+  isExternalEndUserId,
+  type ApiKeyAuthenticationPort,
+  type ApiKeyPrincipal,
+} from "@hoox/identity";
 import { InvalidThreadCursorError } from "./cursor.js";
 import type {
   ApiClock,
@@ -131,9 +136,14 @@ export class ApiService {
     authorization: string | undefined,
     requestId: string,
     tenantSelector: TenantSelector = Object.freeze({ kind: "absent" }),
+    options: {
+      readonly endUserId?: string | undefined;
+      readonly requiredScope?: ApiKeyScope | undefined;
+    } = {},
   ): Promise<AuthContext> {
     const bearer = authorization?.match(/^Bearer ([^\s]+)$/u)?.[1];
     let principal: AuthPrincipal | undefined;
+    let apiKeyPrincipal: ApiKeyPrincipal | undefined;
     if (bearer?.startsWith("hoox_sk_")) {
       if (!isApiKeyToken(bearer) || this.dependencies.apiKeys === undefined) {
         throw new ApiFailure("unauthorized");
@@ -143,6 +153,7 @@ export class ApiService {
         now: this.dependencies.clock.now(),
       });
       if (credential === undefined) throw new ApiFailure("unauthorized");
+      apiKeyPrincipal = credential;
       principal = {
         userId: credential.userId,
         kind: "integration",
@@ -153,6 +164,16 @@ export class ApiService {
       principal = await this.dependencies.auth.resolve({ authorization, requestId });
     }
     if (principal === undefined) throw new ApiFailure("unauthorized");
+    if (options.endUserId !== undefined) {
+      if (
+        apiKeyPrincipal === undefined ||
+        options.requiredScope === undefined ||
+        !apiKeyPrincipal.scopes.includes("end-users:represent")
+      ) {
+        throw new ApiFailure("forbidden");
+      }
+      if (!isExternalEndUserId(options.endUserId)) throw new ApiFailure("bad_request");
+    }
     if (tenantSelector.kind === "invalid") throw new ApiFailure("bad_request");
     let selectedTenantId = principal.tenantId;
     if (tenantSelector.kind === "selected") {
@@ -168,10 +189,37 @@ export class ApiService {
       throw new ApiFailure("bad_request");
     }
     // 凭据只证明 User 身份；X-Tenant-Id 是候选 scope，Repository 会用 Membership 与 RLS 复核。
-    const scope = { tenantId: selectedTenantId, userId: principal.userId } as const;
-    const tenant = await this.dependencies.repositories.tenants.get(scope);
+    let scope = { tenantId: selectedTenantId, userId: principal.userId };
+    let tenant = await this.dependencies.repositories.tenants.get(scope);
     // 凭据有效但成员关系无效时统一为不存在，不能成为租户成员枚举接口。
     if (tenant === undefined) throw new ApiFailure("not_found");
+    if (
+      principal.apiKey !== undefined &&
+      options.requiredScope !== undefined &&
+      !principal.apiKey.scopes.includes(options.requiredScope)
+    ) {
+      throw new ApiFailure("forbidden");
+    }
+    if (options.endUserId !== undefined && apiKeyPrincipal !== undefined) {
+      const mapper = this.dependencies.apiKeys;
+      if (mapper?.mapEndUser === undefined) throw new ApiFailure("dependency_unavailable");
+      const mapped = await mapper.mapEndUser({
+        principal: apiKeyPrincipal,
+        externalId: options.endUserId,
+        now: this.dependencies.clock.now(),
+      });
+      if (mapped === "disabled") throw new ApiFailure("forbidden");
+      if (mapped === undefined) throw new ApiFailure("unauthorized");
+      principal = {
+        ...principal,
+        kind: "end_user",
+        userId: mapped.userId,
+        tenantId: mapped.tenantId,
+      };
+      scope = { tenantId: mapped.tenantId, userId: mapped.userId };
+      tenant = await this.dependencies.repositories.tenants.get(scope);
+      if (tenant === undefined) throw new ApiFailure("not_found");
+    }
     return {
       principal,
       scope,

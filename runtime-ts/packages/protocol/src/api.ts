@@ -24,6 +24,12 @@ export const RunArtifactPathSchema = Type.Object(
 );
 export type RunArtifactPath = Static<typeof RunArtifactPathSchema>;
 
+export const ResourceDownloadPathSchema = Type.Object(
+  { resourceId: IdSchema, versionId: IdSchema },
+  strict,
+);
+export type ResourceDownloadPath = Static<typeof ResourceDownloadPathSchema>;
+
 export const ModelWireTraceBodyPathSchema = Type.Object(
   {
     threadId: IdSchema,
@@ -380,6 +386,19 @@ export const ArtifactListDtoSchema = Type.Object(
 );
 export type ArtifactListDto = Static<typeof ArtifactListDtoSchema>;
 
+export const ResourceDownloadDtoSchema = Type.Object(
+  {
+    resourceId: IdSchema,
+    versionId: IdSchema,
+    name: Type.String({ minLength: 1, maxLength: 255 }),
+    mediaType: Type.String({ minLength: 1, maxLength: 255 }),
+    sizeBytes: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    url: Type.String({ minLength: 1, maxLength: 4_096 }),
+    expiresInSeconds: Type.Integer({ minimum: 1, maximum: 3_600 }),
+  },
+  { ...strict, $id: "v1.ResourceDownloadDto" },
+);
+
 export const ModelWireTraceRecordDtoSchema = Type.Object(
   {
     attemptId: IdSchema,
@@ -444,6 +463,8 @@ export const UploadedResourceSuccessEnvelopeSchema =
 export const ArtifactListSuccessEnvelopeSchema = successEnvelopeSchema(ArtifactListDtoSchema);
 export const ArtifactDeliverySuccessEnvelopeSchema =
   successEnvelopeSchema(ArtifactDeliveryDtoSchema);
+export const ResourceDownloadSuccessEnvelopeSchema =
+  successEnvelopeSchema(ResourceDownloadDtoSchema);
 export const ModelWireTraceListSuccessEnvelopeSchema = successEnvelopeSchema(
   ModelWireTraceListDtoSchema,
 );

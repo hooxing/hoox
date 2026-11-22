@@ -45,6 +45,8 @@ describe("Run SSE 生命周期", () => {
     });
     let text = "";
     for await (const chunk of stream) text += chunk;
+    expect(text).toContain("id: attempt_1-0\nevent: run-events");
+    expect(text).toContain("id: attempt_1-1\nevent: run-events");
     expect(frames(text)).toMatchObject([
       { page: { items: [{ sequence: 0, type: "message.delta" }] } },
       { page: { items: [{ sequence: 1 }] } },

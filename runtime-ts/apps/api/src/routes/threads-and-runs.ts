@@ -243,7 +243,7 @@ export function registerThreadAndRunRoutes(
           },
         },
         async (request) => {
-          const auth = await authenticate(request, "threads:read");
+          const auth = await authenticate(request);
           return success(
             request,
             await service.getThreadInputReceipt(
@@ -422,7 +422,7 @@ export function registerThreadAndRunRoutes(
       },
     },
     async (request) => {
-      const auth = await authenticate(request);
+      const auth = await authenticate(request, "runs:create");
       return success(
         request,
         await service.cancelRun(auth, request.params.threadId, request.params.runId),
@@ -449,7 +449,7 @@ export function registerThreadAndRunRoutes(
         },
       },
       async (request) => {
-        const auth = await authenticate(request, "threads:read");
+        const auth = await authenticate(request);
         const read = await dependencies.threadContext?.listMessages({
           scope: auth.scope,
           threadId: threadId(request.params.threadId),
@@ -522,7 +522,7 @@ export function registerThreadAndRunRoutes(
         },
       },
       async (request) => {
-        const auth = await authenticate(request, "threads:read");
+        const auth = await authenticate(request);
         const read = await dependencies.threadContinuity?.getStatus({
           scope: auth.scope,
           threadId: threadId(request.params.threadId),

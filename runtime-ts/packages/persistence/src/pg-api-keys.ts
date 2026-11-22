@@ -71,7 +71,12 @@ async function setTenant(client: PoolClient, scope: TenantScope): Promise<void> 
 }
 
 export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
-  constructor(private readonly pool: PgPool) {}
+  constructor(
+    private readonly pool: PgPool,
+    private readonly transact: <T>(operation: (client: PoolClient) => Promise<T>) => Promise<T> = (
+      operation,
+    ) => transaction(pool, operation),
+  ) {}
 
   async create(input: {
     readonly scope: TenantScope;
@@ -88,7 +93,7 @@ export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
     const integrationUserId = userId(`int_${randomUUID()}`);
     const membershipId = `mem_${randomUUID()}`;
     try {
-      return await transaction(this.pool, async (client) => {
+      return await this.transact(async (client) => {
         await setTenant(client, { ...input.scope, userId: integrationUserId });
         await client.query(
           "INSERT INTO app_users(id, created_at, kind) VALUES ($1, $2, 'integration')",
@@ -133,7 +138,7 @@ export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
   }
 
   private async findByHash(keyHash: Uint8Array): Promise<ApiKeyRecord | undefined> {
-    return transaction(this.pool, async (client) => {
+    return this.transact(async (client) => {
       await client.query("SELECT set_config('app.api_key_hash', $1, true)", [
         Buffer.from(keyHash).toString("hex"),
       ]);
@@ -154,7 +159,7 @@ export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
   }
 
   async list(scope: TenantScope): Promise<readonly ApiKeyRecord[]> {
-    return transaction(this.pool, async (client) => {
+    return this.transact(async (client) => {
       await setTenant(client, scope);
       const result = await client.query<ApiKeyRow>(
         `SELECT ${columns} FROM api_keys ORDER BY created_at DESC, id`,
@@ -164,7 +169,7 @@ export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
   }
 
   async revoke(scope: TenantScope, id: string, now: string): Promise<ApiKeyRecord | undefined> {
-    return transaction(this.pool, async (client) => {
+    return this.transact(async (client) => {
       await setTenant(client, scope);
       const revoked = await client.query<{ readonly integration_user_id: string }>(
         `UPDATE api_keys SET revoked_at = $3
@@ -197,6 +202,25 @@ export class PgApiKeyRepository implements ApiKeyAuthenticationPort {
       const row = result.rows[0];
       if (row === undefined) throw new Error("REVOKED_API_KEY_NOT_READABLE");
       return mapKey(row);
+    });
+  }
+
+  async rotate(
+    scope: TenantScope,
+    id: string,
+    keyHash: Uint8Array,
+    prefix: string,
+  ): Promise<ApiKeyRecord | undefined> {
+    return this.transact(async (client) => {
+      await setTenant(client, scope);
+      const result = await client.query<ApiKeyRow>(
+        `UPDATE api_keys SET key_hash=$3,key_prefix=$4
+          WHERE tenant_id=$1 AND id=$2 AND revoked_at IS NULL
+            AND (expires_at IS NULL OR expires_at>clock_timestamp()) RETURNING ${columns}`,
+        [scope.tenantId, id, keyHash, prefix],
+      );
+      const row = result.rows[0];
+      return row === undefined ? undefined : mapKey(row);
     });
   }
 

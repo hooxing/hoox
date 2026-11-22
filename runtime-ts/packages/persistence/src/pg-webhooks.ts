@@ -42,11 +42,11 @@ function mapRow(row: WebhookRow): TenantWebhook {
   });
 }
 async function scoped<T>(
-  pool: Pool,
+  transact: <Result>(operation: (client: PoolClient) => Promise<Result>) => Promise<Result>,
   scope: TenantScope,
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
-  return withTransaction(pool, async (client) => {
+  return transact(async (client) => {
     await client.query(
       "SELECT set_config('app.tenant_id',$1,true),set_config('app.user_id',$2,true)",
       [scope.tenantId, scope.userId],
@@ -55,14 +55,19 @@ async function scoped<T>(
   });
 }
 
-/** 停用原因：Owner 手动停用，或投递次数耗尽后由 Dispatcher 自动停用。 */
+/** 停用原因：平台管理员手动停用，或投递次数耗尽后由 Dispatcher 自动停用。 */
 export const WEBHOOK_DISABLED_BY_OWNER = "disabled_by_owner";
 export const WEBHOOK_DISABLED_ATTEMPTS_EXHAUSTED = "delivery_attempts_exhausted";
 
 export class PgWebhookRepository {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    pool: Pool,
+    private readonly transact: <T>(operation: (client: PoolClient) => Promise<T>) => Promise<T> = (
+      operation,
+    ) => withTransaction(pool, operation),
+  ) {}
   async list(scope: TenantScope): Promise<readonly TenantWebhook[]> {
-    return scoped(this.pool, scope, async (c) => {
+    return scoped(this.transact, scope, async (c) => {
       const r = await c.query<WebhookRow>(
         `SELECT ${selectColumns} FROM tenant_webhooks
           WHERE tenant_id=$1 AND disabled_reason IS DISTINCT FROM 'deleted_by_owner' ORDER BY created_at DESC,id`,
@@ -79,7 +84,7 @@ export class PgWebhookRepository {
     eventTypes: readonly WebhookEventType[];
     secret: EncryptedWebhookSecret;
   }): Promise<TenantWebhook> {
-    return scoped(this.pool, input.scope, async (c) => {
+    return scoped(this.transact, input.scope, async (c) => {
       const id = input.id ?? `wh_${randomUUID()}`;
       const r = await c.query<WebhookRow>(
         `INSERT INTO tenant_webhooks(tenant_id,id,name,endpoint_url,event_types,secret_ciphertext,created_by_user_id,created_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,clock_timestamp()) RETURNING ${selectColumns}`,
@@ -104,7 +109,7 @@ export class PgWebhookRepository {
    * 那一次请求可能仍会到达接收端。删除是逻辑删除，保留记录以满足 Outbox 外键并隔离并发；不可恢复。
    */
   async disable(scope: TenantScope, id: string): Promise<TenantWebhook | undefined> {
-    return scoped(this.pool, scope, async (c) => {
+    return scoped(this.transact, scope, async (c) => {
       const r = await c.query<WebhookRow>(
         `UPDATE tenant_webhooks SET disabled_at=COALESCE(disabled_at,clock_timestamp()),disabled_reason=COALESCE(disabled_reason,$3) WHERE tenant_id=$1 AND id=$2 AND disabled_reason IS DISTINCT FROM 'deleted_by_owner' RETURNING ${selectColumns}`,
         [scope.tenantId, id, WEBHOOK_DISABLED_BY_OWNER],
@@ -113,7 +118,7 @@ export class PgWebhookRepository {
     });
   }
   async remove(scope: TenantScope, id: string): Promise<boolean> {
-    return scoped(this.pool, scope, async (c) => {
+    return scoped(this.transact, scope, async (c) => {
       // 逻辑删除保留外键目标，避免与业务事务的 Outbox 入队竞争并回滚 Run 状态。
       const r = await c.query(
         `UPDATE tenant_webhooks SET disabled_at=COALESCE(disabled_at,clock_timestamp()),disabled_reason='deleted_by_owner'
@@ -128,7 +133,7 @@ export class PgWebhookRepository {
    * 只有轮换提交时已通过复核的在途尝试可能使用旧密钥。
    */
   async rotate(scope: TenantScope, id: string, secret: EncryptedWebhookSecret): Promise<boolean> {
-    return scoped(this.pool, scope, async (c) => {
+    return scoped(this.transact, scope, async (c) => {
       const r = await c.query(
         `UPDATE tenant_webhooks SET secret_ciphertext=$3::jsonb WHERE tenant_id=$1 AND id=$2 AND disabled_reason IS DISTINCT FROM 'deleted_by_owner'`,
         [scope.tenantId, id, JSON.stringify(secret)],

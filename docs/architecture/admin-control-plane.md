@@ -6,7 +6,7 @@
 
 - 用户 Web、Skill 发布和平台控制面保持不同的身份与授权边界。统一 Admin API 进程同时承载控制面与 Skill 路由，但内部仍使用 Admin Control 与 Skill Publisher 两套数据库连接，Skill Publisher 另持发布用对象存储凭据；合并的是进程与 HTTP 边界，不是数据库权限。
 - 管理请求使用同源 Hoox Session，Admin API 向固定主 API 校验会话与有效管理身份，再按领域角色（`viewer`、`operator`、`admin` 及 Skill 管理身份）授权。浏览器路由、菜单可见性和查询缓存都不构成授权事实。
-- 统计面只能读取预定义的跨 Tenant 聚合视图，不获得 Prompt、模型正文、Tenant 业务行或对象存储内容。Run 浏览器的结构读取与受审计正文读取见下文 [Run 浏览器与正文访问](#run-浏览器与正文访问)。
+- 统计面只能读取预定义的跨 Tenant 聚合视图，不获得 Prompt、模型正文、Tenant 业务行或对象存储内容。[Run 浏览器与正文访问](#run-浏览器与正文访问)和[接入管理](#接入管理边界)使用各自独立的受限读取与授权，不能借此访问任意业务表。
 - PostgreSQL、对象存储、监听地址、数据库角色和平台根秘密（包括 `MODEL_CREDENTIAL_ENCRYPTION_KEY`）由部署配置提供，不依赖自身管理的动态配置，也没有通用环境变量编辑器。
 
 ## 配置是类型化、不可变的事实
@@ -14,6 +14,15 @@
 - 模型 Provider、记忆、运行设置和沙箱配置都保存为不可变 Revision，带类型校验、审计和全局 generation。保存接口要求幂等键与 `expectedGeneration`，服务端事务完成授权、并发比较、写入、active 切换与审计，失败不留下待启用状态。
 - 模型配置以 Provider 为聚合根，一个 Revision 包含多个模型条目和一个默认模型。已保存的输入模态、上下文窗口和最大输出就是 Worker 的模型能力事实；模型家族 Profile 只补充请求协议，不用硬编码能力值覆盖已保存配置。Pi 目录只用于填充初始值。
 - 运行设置包含工具调用模式、工具启用名单、并发上限、标题模型引用和上下文压缩参数；未保存时使用部署回退值，页面明确区分推荐值和已保存值。
+
+## 接入管理边界
+
+- API Key 与 Webhook 属于部署方集成配置，只由有效的平台 `admin` 在后台「接入」管理；`viewer`、`operator`、仅有 Skill 管理授权的身份、Tenant Owner/Admin 与 API Key 均无此权限。工作台只面向终端用户，不提供这两类管理入口。
+- 页面沿用后台按 Tenant ID 指定目标的方式，可选择主 Tenant、个人空间或团队空间。管理员不必成为目标 Tenant 的成员；服务端在事务中复核平台管理角色与目标 Tenant，并通过独立的事务级管理员标识和 Tenant RLS 限定访问。跨 Tenant 的资源 ID、缺失 Tenant 或已删除资源统一返回 404，不能凭资源 ID 修改其他目标的数据。
+- 路由前缀为 `/v1/admin/control/integrations/:tenantId`。`GET/POST /api-keys` 列表和创建，`POST /api-keys/:keyId/rotate` 轮换，`DELETE /api-keys/:keyId` 吊销；`GET/POST /webhooks` 列表和注册，`POST /webhooks/:webhookId/rotate-secret` 轮换密钥，`POST /webhooks/:webhookId/disable` 停用，`DELETE /webhooks/:webhookId` 逻辑删除。用户 API 的 `/v1/api-keys`、`/v1/webhooks` 不提供兼容管理路由。
+- 管理操作复用 API Key、Webhook 持久化仓储与现有领域校验；读取和变更均在事务内写入 `integration_admin_audits`，只记录操作者、Tenant、动作、目标 ID 和时间，不写入 Key、Webhook 密钥或密文。审计失败会回滚变更。Admin Control 只获得接入表的必要 ACL 与身份关联的列级权限，不能读取 Webhook 密文、Thread、Run 或 Webhook Outbox。
+- API Key 创建与轮换、Webhook 注册与密钥轮换各只在成功响应中返回一次明文，不进入持久回执、查询缓存、日志或错误；页面关闭、离开页面或切换 Tenant 后无法取回，迟到响应不能显示到另一 Tenant。请求失败时先刷新列表核对结果，不自动重试写入。
+- Webhook 地址经 Tool Router 校验公网 HTTPS 目标；投递、签名和停用语义见 [Webhook 参考](../reference/webhooks.md)。`WEBHOOK_SECRET_ENCRYPTION_KEY` 只注入 Admin Control 与 Scheduler，主用户 API 和 Worker 不需要该根密钥；未配置时仍可管理 API Key 和读取、停用、删除 Webhook，但注册与轮换密钥返回 503。
 
 ## 外部工具注册边界
 

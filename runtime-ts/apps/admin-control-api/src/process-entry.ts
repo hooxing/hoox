@@ -104,6 +104,12 @@ const environmentSchema = Object.freeze({
     maxLength: 512,
   }),
   EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES: booleanEnvironmentField({ requiredIn: optional }),
+  WEBHOOK_SECRET_ENCRYPTION_KEY: stringEnvironmentField({
+    requiredIn: optional,
+    secret: true,
+    minLength: 32,
+    maxLength: 8192,
+  }),
   MODEL_API_KEY: stringEnvironmentField({ requiredIn: optional, secret: true, maxLength: 8_192 }),
   MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
     requiredIn: production,
@@ -148,6 +154,7 @@ export interface AdminControlApiProcessConfiguration {
     readonly forcePathStyle: boolean;
   }>;
   readonly providerSecrets: Readonly<{
+    readonly webhookSecretEncryptionKey?: string;
     readonly modelApiKey: string;
     readonly modelCredentialEncryptionKey: string;
     readonly memoryApiKey?: string;
@@ -301,6 +308,9 @@ export function parseAdminControlApiProcessEnvironment(
     ),
     objectStorage,
     providerSecrets: Object.freeze({
+      ...(parsed.values.WEBHOOK_SECRET_ENCRYPTION_KEY === undefined
+        ? {}
+        : { webhookSecretEncryptionKey: parsed.values.WEBHOOK_SECRET_ENCRYPTION_KEY }),
       modelApiKey: parsed.values.MODEL_API_KEY ?? "",
       modelCredentialEncryptionKey:
         parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY ??

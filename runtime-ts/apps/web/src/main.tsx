@@ -1,6 +1,5 @@
 import {
   CalendarClock,
-  KeyRound,
   Cloud,
   LoaderCircle,
   Pencil,
@@ -56,8 +55,6 @@ import {
   readAccountSession,
 } from "./account-access.js";
 import { type AutomationCenterApi, AutomationCenterDialog } from "./automation-center.js";
-import { ApiKeyManager } from "./api-key-manager.js";
-import { WebhookManager } from "./webhook-manager.js";
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { clearAccountDrafts, useConversationDraft } from "./conversation-draft.js";
@@ -176,19 +173,6 @@ type WorkspaceApi = Pick<
 } & Partial<SkillCenterApi & CloudDriveApi & AutomationCenterApi>;
 
 type TeamAwareWorkspaceApi = WorkspaceApi &
-  Partial<
-    Pick<
-      RuntimeApi,
-      | "listApiKeys"
-      | "createApiKey"
-      | "revokeApiKey"
-      | "listWebhooks"
-      | "createWebhook"
-      | "rotateWebhookSecret"
-      | "disableWebhook"
-      | "deleteWebhook"
-    >
-  > &
   Partial<PersonalizationApi> &
   Partial<
     TeamWorkspaceApi &
@@ -372,8 +356,6 @@ function AuthenticatedWorkspace({
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [uploadFiles, setUploadFiles] = useState<readonly File[]>([]);
-  const [apiKeysOpen, setApiKeysOpen] = useState(false);
-  const [webhookContext, setWebhookContext] = useState<{ readonly tenantId: string | null }>();
   const [historyFiles, setHistoryFiles] = useState<readonly HistoryFile[]>([]);
   const [pendingInputs, setPendingInputs] = useState<readonly PendingConversationInput[]>([]);
   const [continuity, setContinuity] =
@@ -444,23 +426,6 @@ function AuthenticatedWorkspace({
   const cloudDriveApi = useMemo(() => resolveCloudDriveApi(apiClient), [apiClient]);
   const teamWorkspaceApi = useMemo(() => resolveTeamWorkspaceApi(apiClient), [apiClient]);
   const personalizationApi = useMemo(() => resolvePersonalizationApi(apiClient), [apiClient]);
-  const webhookApi = useMemo(() => {
-    if (
-      !apiClient.listWebhooks ||
-      !apiClient.createWebhook ||
-      !apiClient.rotateWebhookSecret ||
-      !apiClient.disableWebhook ||
-      !apiClient.deleteWebhook
-    )
-      return undefined;
-    return {
-      listWebhooks: apiClient.listWebhooks.bind(apiClient),
-      createWebhook: apiClient.createWebhook.bind(apiClient),
-      rotateWebhookSecret: apiClient.rotateWebhookSecret.bind(apiClient),
-      disableWebhook: apiClient.disableWebhook.bind(apiClient),
-      deleteWebhook: apiClient.deleteWebhook.bind(apiClient),
-    };
-  }, [apiClient]);
   const attachmentPreviewLoader = useMemo(
     () => apiClient.previewHistoryFile?.bind(apiClient),
     [apiClient],
@@ -522,7 +487,6 @@ function AuthenticatedWorkspace({
   const switchWorkspace = useCallback(
     (teamId: string | undefined, threadId?: string) => {
       apiClient.setTenantId?.(teamId);
-      setWebhookContext(undefined);
       setActiveTeamId(teamId);
       if (teamId !== undefined) setCloudTeamId(teamId);
       // 同一空间内新建空会话只清除选择，不清空已加载的导航投影；否则重复点击会让团队任务永久消失。
@@ -562,7 +526,6 @@ function AuthenticatedWorkspace({
       // 否则后续全局请求会继续携带不可恢复的 X-Tenant-ID。
       if (activeTeamId !== undefined && !items.some((team) => team.id === activeTeamId)) {
         apiClient.setTenantId?.(undefined);
-        setWebhookContext(undefined);
         setActiveTeamId(undefined);
       }
       setSelectedTeamId((current) =>
@@ -1470,29 +1433,6 @@ function AuthenticatedWorkspace({
         className={`workspace ${navigationOpen ? "navigation-open" : ""} ${filePreview ? "has-file-preview" : ""}`}
       >
         {dialog}
-        {apiKeysOpen &&
-          apiClient.listApiKeys !== undefined &&
-          apiClient.createApiKey !== undefined &&
-          apiClient.revokeApiKey !== undefined && (
-            <ApiKeyManager
-              api={{
-                listApiKeys: apiClient.listApiKeys.bind(apiClient),
-                createApiKey: apiClient.createApiKey.bind(apiClient),
-                revokeApiKey: apiClient.revokeApiKey.bind(apiClient),
-              }}
-              onClose={() => setApiKeysOpen(false)}
-            />
-          )}
-        {webhookContext !== undefined &&
-          webhookContext.tenantId === (activeTeamId ?? null) &&
-          webhookApi !== undefined && (
-            <WebhookManager
-              key={webhookContext.tenantId ?? "personal"}
-              tenantId={webhookContext.tenantId}
-              api={webhookApi}
-              onClose={() => setWebhookContext(undefined)}
-            />
-          )}
         <NavigationSidebar
           isCompact={isCompact}
           isOpen={navigationOpen}
@@ -1667,29 +1607,6 @@ function AuthenticatedWorkspace({
               ))
             )}
           </ThreadNavigation>
-          {apiClient.listApiKeys !== undefined &&
-            apiClient.createApiKey !== undefined &&
-            apiClient.revokeApiKey !== undefined &&
-            (activeTeam === undefined ||
-              activeTeam.role === "owner" ||
-              activeTeam.role === "admin") && (
-              <button type="button" className="api-key-entry" onClick={() => setApiKeysOpen(true)}>
-                <KeyRound size={17} />
-                API Key
-              </button>
-            )}
-          {webhookApi !== undefined &&
-            (activeTeam === undefined ||
-              activeTeam.role === "owner" ||
-              activeTeam.role === "admin") && (
-              <button
-                type="button"
-                className="api-key-entry"
-                onClick={() => setWebhookContext({ tenantId: activeTeamId ?? null })}
-              >
-                Webhook 管理
-              </button>
-            )}
           <AccountMenu
             profile={accountProfile}
             {...(selectedTeam === undefined ? {} : { activeTeamName: selectedTeam.displayName })}

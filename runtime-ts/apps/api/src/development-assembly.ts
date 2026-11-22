@@ -1,4 +1,3 @@
-import { WebhookSecretCipher } from "@hoox/persistence/postgres";
 import { randomUUID } from "node:crypto";
 import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@hoox/domain";
 import {
@@ -187,10 +186,6 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           agentDefinitions: persistence.agentDefinitions,
           playground: persistence.playground,
           apiKeys: persistence.apiKeys,
-          webhooks: persistence.webhooks,
-          ...(configuration.webhookSecretEncryptionKey === undefined
-            ? {}
-            : { webhookCipher: new WebhookSecretCipher(configuration.webhookSecretEncryptionKey) }),
           personalizations: persistence.personalizations,
           scheduledTasks: persistence.scheduledTasks,
           ...(persistence.teamCollaboration === undefined

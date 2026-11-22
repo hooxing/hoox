@@ -141,6 +141,26 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("终端用户工作台不渲染集成配置入口", async () => {
+    const legacyApi = {
+      ...apiFixture(),
+      listApiKeys: vi.fn(),
+      createApiKey: vi.fn(),
+      revokeApiKey: vi.fn(),
+      listWebhooks: vi.fn(),
+      createWebhook: vi.fn(),
+      rotateWebhookSecret: vi.fn(),
+      disableWebhook: vi.fn(),
+      deleteWebhook: vi.fn(),
+    };
+    const { container } = mount(legacyApi);
+    await settleEffects();
+    expect(container.querySelector("button.api-key-entry")).toBeNull();
+    expect(container.textContent).not.toContain("API Key");
+    expect(container.textContent).not.toContain("Webhook 管理");
+    expect(legacyApi.listApiKeys).not.toHaveBeenCalled();
+    expect(legacyApi.listWebhooks).not.toHaveBeenCalled();
+  });
   it("恢复选区草稿，空文字也可发送；引用保持旧版本并在成功后清除", async () => {
     const active = thread("reference_thread");
     const reference: FileReference = {

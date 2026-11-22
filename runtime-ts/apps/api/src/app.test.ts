@@ -1340,7 +1340,7 @@ describe("API Key 路由授权", () => {
       url: "/v1/api-keys",
       headers: { authorization: `Bearer ${token}` },
     });
-    expect(management.statusCode).toBe(403);
+    expect(management.statusCode).toBe(404);
     expect(apiKeys.list).not.toHaveBeenCalled();
 
     keyEnabled = false;
@@ -1352,52 +1352,31 @@ describe("API Key 路由授权", () => {
     expect(invalid.statusCode).toBe(401);
     expect(invalid.body).not.toContain(token);
   });
-
-  it("创建响应仅一次包含明文，列表只返回前缀和元数据", async () => {
-    const key = {
-      id: "key_test",
-      tenantId: "tenant_owner_a",
-      integrationUserId: "int_test",
-      prefix: "hoox_sk_abcd",
-      name: "测试服务",
-      scopes: ["threads:read"],
-      createdBy: "user_owner_a",
-      createdAt: baseTime,
-    } as const;
-    const createMock = vi.fn(async () => key);
-    const apiKeys = {
-      authenticateKey: vi.fn(),
-      list: vi.fn(async () => [key]),
-      create: createMock,
-      revoke: vi.fn(),
-    } as unknown as NonNullable<ApiDependencies["apiKeys"]>;
-    const { app } = fixture({ apiKeys });
-    openApps.push(app);
-    const created = await app.inject({
-      method: "POST",
-      url: "/v1/api-keys",
-      headers: { authorization: "Bearer token-a", "content-type": "application/json" },
-      payload: { name: key.name, scopes: ["threads:read"] },
-    });
-    expect(created.statusCode).toBe(200);
-    const token = created.json().data.token as string;
-    expect(token).toMatch(/^hoox_sk_/u);
-    expect(createMock).toHaveBeenCalledWith(
-      expect.objectContaining({ keyHash: expect.any(Buffer) }),
-    );
-    expect(JSON.stringify(createMock.mock.calls[0])).not.toContain(token);
-
-    const listed = await app.inject({
-      method: "GET",
-      url: "/v1/api-keys",
-      headers: { authorization: "Bearer token-a" },
-    });
-    expect(listed.statusCode).toBe(200);
-    expect(listed.body).not.toContain(token);
-  });
 });
 
 describe("Fastify API 契约", () => {
+  it("用户 API 不再公开 API Key 与 Webhook 管理路由", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    for (const [method, url] of [
+      ["GET", "/v1/api-keys"],
+      ["POST", "/v1/api-keys"],
+      ["DELETE", "/v1/api-keys/key_removed"],
+      ["POST", "/v1/api-keys/key_removed/rotate"],
+      ["GET", "/v1/webhooks"],
+      ["POST", "/v1/webhooks"],
+      ["POST", "/v1/webhooks/wh_removed/rotate-secret"],
+      ["POST", "/v1/webhooks/wh_removed/disable"],
+      ["DELETE", "/v1/webhooks/wh_removed"],
+    ] as const) {
+      const response = await app.inject({
+        method,
+        url,
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(response.statusCode).toBe(404);
+    }
+  });
   it("首次管理员入口校验部署令牌，初始化后关闭且普通注册不能提权", async () => {
     let initialized = false;
     const session = {

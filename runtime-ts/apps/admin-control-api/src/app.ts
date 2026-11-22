@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DomainError } from "@hoox/domain";
 import {
   type AdminControlService,
   AdminControlServiceError,
@@ -72,6 +73,7 @@ import {
   AgentDefinitionAccessError,
   type AgentDefinitionAdminRepositoryPort,
   AgentDefinitionValidationError,
+  IntegrationAdminError,
 } from "@hoox/persistence/admin";
 import { PersistenceError } from "@hoox/persistence/postgres";
 import { Type } from "@sinclair/typebox";
@@ -80,6 +82,7 @@ import { EXTERNAL_TOOL_ROUTE_PREFIX, registerExternalToolRoutes } from "./extern
 import { registerAgentDefinitionRoutes } from "./agent-definition-routes.js";
 import type { IdentityAdminService } from "./identity-configuration.js";
 import type { PiModelCatalogPort } from "./pi-model-catalog.js";
+import { registerIntegrationRoutes, type IntegrationAdminPort } from "./integration-routes.js";
 import { registerRunExplorerRoutes, type RunExplorerRouteService } from "./run-explorer-routes.js";
 
 const strict = { additionalProperties: false } as const;
@@ -117,6 +120,7 @@ type ControlServiceContract = Pick<
 >;
 
 export interface AdminControlApiDependencies {
+  readonly integrations?: IntegrationAdminPort;
   readonly sandbox?: SandboxControlServicePort;
   readonly runs?: RunExplorerRouteService;
   readonly externalTools?: ExternalToolAdminService;
@@ -277,6 +281,17 @@ export function createAdminControlApiApp(
       requireJson,
       idempotencyKey: requireIdempotencyKey,
       responseSchemas,
+    });
+  }
+  if (dependencies.integrations) {
+    registerIntegrationRoutes(app, dependencies.integrations, {
+      actor,
+      success,
+      requireJson,
+      responseSchemas,
+      badRequest: () => {
+        throw new AdminControlApiFailure("bad_request");
+      },
     });
   }
   if (dependencies.agents) {
@@ -709,6 +724,16 @@ class AdminControlApiFailure extends Error {
 }
 
 function failureKind(error: unknown, request: FastifyRequest): FailureKind {
+  if (
+    request.routeOptions.url?.startsWith("/v1/admin/control/integrations/") &&
+    error instanceof DomainError
+  )
+    return "bad_request";
+  if (error instanceof IntegrationAdminError) {
+    if (error.code === "NOT_AUTHORIZED") return "unauthorized";
+    if (error.code === "NOT_FOUND") return "not_found";
+    return "dependency_unavailable";
+  }
   if (error instanceof AdminControlApiFailure) return error.kind;
   if (error instanceof Error && error.message === "IDENTITY_ADMIN_NOT_AUTHORIZED")
     return "unauthorized";
@@ -735,7 +760,8 @@ function failureKind(error: unknown, request: FastifyRequest): FailureKind {
   if (
     error instanceof PersistenceError &&
     (request.url.startsWith("/v1/admin/control/agent-definitions") ||
-      request.routeOptions.url?.startsWith(EXTERNAL_TOOL_ROUTE_PREFIX))
+      request.routeOptions.url?.startsWith(EXTERNAL_TOOL_ROUTE_PREFIX) ||
+      request.routeOptions.url?.startsWith("/v1/admin/control/integrations/"))
   ) {
     if (error.code === "CONFLICT") return "conflict";
     if (error.code === "CONSTRAINT_VIOLATION") return "bad_request";

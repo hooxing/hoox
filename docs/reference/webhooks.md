@@ -2,6 +2,12 @@
 
 本文面向配置 Tenant Webhook 的管理员和实现接收端的开发者，说明当前事件、载荷、签名、停用和重试契约。
 
+## 管理入口与权限
+
+Webhook 是部署方把业务系统接入 Hoox 的配置。平台管理员在后台「接入 → Webhook」输入目标 Tenant ID，注册公网 HTTPS 地址、选择事件订阅、轮换密钥、停用或删除订阅，并查看停用时间和原因。普通工作台不提供管理入口；Tenant Owner/Admin 或持有 `webhooks:manage` 的服务 Key 不获得后台管理权。
+
+管理接口使用既有后台管理员身份，前缀为 `/v1/admin/control/integrations/:tenantId/webhooks`；完整路由与审计边界见[后台接入管理](../architecture/admin-control-plane.md#接入管理边界)。用户 API 不注册 `/v1/webhooks` 管理路由。当前没有投递记录查询接口或页面，列表展示订阅状态与停用原因，不等同于逐次投递历史。
+
 ## 事件
 
 订阅类型为 `run.waiting`、`run.requires_action`、`run.succeeded`、`run.failed`、`run.cancelled`、`artifact.published`。`run.requires_action` 专指客户端工具等待事实；普通 `waiting` 不会被解释为该事件。客户端工具等待事件由 C4 在写入等待事实的同一事务产生，因此在 C4 接入前不能订阅到该类投递。
@@ -70,6 +76,6 @@ DNS 使用可取消的独立解析器，不占用 `getaddrinfo` 共享线程池�
 
 轮换密钥只更新订阅；所有之后通过发送前复核的投递（包括积压和重试）都使用新密钥。只有轮换提交时已经通过复核的在途请求可能使用旧密钥（多个 Scheduler 实例可能各有在途请求），接收端可在切换后短暂同时接受新旧密钥。
 
-Webhook 密钥仅创建或轮换时返回一次。数据库只保存用途隔离的 AES-256-GCM 密文；API 与 Scheduler 使用独立 `WEBHOOK_SECRET_ENCRYPTION_KEY` 根密钥，Worker 不接收该根密钥。
+Webhook 密钥仅创建或轮换时返回一次。数据库只保存用途隔离的 AES-256-GCM 密文；Admin Control 与 Scheduler 使用相同的独立 `WEBHOOK_SECRET_ENCRYPTION_KEY` 根密钥，用户 API 与 Worker 不接收该根密钥。未配置时后台的注册与密钥轮换失败关闭，不影响 API Key 管理。
 
 管理 API 的删除采用逻辑删除：订阅从列表隐藏，后续新事件不再选择该订阅，积压不再领取；发送前复核及在途请求遵循停用的边界。删除不可恢复，再次删除、停用或轮换均视为不存在。数据库保留订阅与 Outbox，避免并发事件的外键检查回滚业务状态；物理回收约束见[持久化与数据库](../architecture/persistence-and-database.md#outbox-与后台消费)。

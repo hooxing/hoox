@@ -47,6 +47,39 @@ export class PgIntegrationAdminRepository {
     if (target.rowCount !== 1) throw new IntegrationAdminError("NOT_FOUND");
   }
 
+  async listTenants(actor: string) {
+    return withTransaction(this.pool, async (client) => {
+      await client.query("SELECT set_config('app.user_id',$1,true)", [actor]);
+      const result = await client.query<{
+        tenant_id: string;
+        display_name: string;
+        kind: "personal" | "team";
+        is_default: boolean;
+      }>(
+        `SELECT tenant_id,display_name,kind,is_default
+           FROM admin_integration_tenant_directory
+          ORDER BY is_default DESC,display_name,tenant_id`,
+      );
+      if (result.rowCount === 0) {
+        const authorized = await client.query(
+          "SELECT 1 FROM platform_control_operators WHERE user_id=$1 AND status='active' AND role='admin'",
+          [actor],
+        );
+        if (authorized.rowCount !== 1) throw new IntegrationAdminError("NOT_AUTHORIZED");
+      }
+      return Object.freeze(
+        result.rows.map((row) =>
+          Object.freeze({
+            tenantId: row.tenant_id,
+            displayName: row.display_name,
+            kind: row.kind,
+            isDefault: row.is_default,
+          }),
+        ),
+      );
+    });
+  }
+
   assertAccess(actor: string, tenant: string): Promise<void> {
     return withTransaction(this.pool, (client) => this.authorize(client, actor, tenant));
   }

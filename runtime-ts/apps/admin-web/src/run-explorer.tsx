@@ -1,7 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { AdminApiError } from "./api.js";
 import {
-  type RunContentDto,
   type RunDetailDto,
   type RunExplorerApiContract,
   type RunListFilters,
@@ -74,14 +73,14 @@ function RunRow({
 }) {
   return (
     <tr>
+      <td title={run.userInput ?? "暂无用户输入记录"}>
+        <strong>{run.agentDisplayName ?? "未记录 Agent 名称"}</strong>
+        <div className="run-question">{run.userInput ?? "暂无用户输入记录"}</div>
+        <small>{run.threadTitle}</small>
+        <small>{run.userEmail ?? run.userDisplayName ?? "未知用户"}</small>
+      </td>
       <td>
         <time>{formatDate(run.createdAt)}</time>
-      </td>
-      <td>
-        <code>{run.tenantId}</code>
-      </td>
-      <td>
-        <code>{run.runId}</code>
       </td>
       <td>
         <span className={`run-status ${run.status}`}>{statusLabel(run.status)}</span>
@@ -99,9 +98,17 @@ function RunRow({
         {formatCount(run.usage.outputTokens)}
       </td>
       <td>{formatCount(run.attemptCount)}</td>
-      <td>{run.agentDefinitionId ?? "未记录"}</td>
+      <td>{run.origin ?? "未记录"}</td>
       <td>{run.origin ?? "未记录"}</td>
       <td>
+        <button
+          type="button"
+          className="text-button"
+          onClick={() => void navigator.clipboard.writeText(run.runId).catch(() => {})}
+          title={run.runId}
+        >
+          复制 ID
+        </button>
         <button type="button" className="text-button" onClick={() => onOpen(run)}>
           查看
         </button>
@@ -125,6 +132,7 @@ export function RunExplorerList({
   const [status, setStatus] = useState<RunStatus | "">("");
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
+  const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<RunListFilters>({});
   const [page, setPage] = useState<RunPageDto>();
   const [error, setError] = useState<string>();
@@ -163,6 +171,7 @@ export function RunExplorerList({
       ...(status === "" ? {} : { status }),
       ...(from === undefined ? {} : { createdFrom: from }),
       ...(to === undefined ? {} : { createdTo: to }),
+      ...(search.trim() ? { search: search.trim() } : {}),
     };
     setFilters(next);
     void load(next, false);
@@ -179,6 +188,15 @@ export function RunExplorerList({
         <span className="count">{page?.items.length ?? 0}</span>
       </div>
       <form className="run-filters" onSubmit={submit}>
+        <label>
+          搜索用户问题或 Thread 标题
+          <input
+            aria-label="搜索用户问题"
+            value={search}
+            maxLength={200}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </label>
         <label>
           Tenant
           <input
@@ -226,15 +244,6 @@ export function RunExplorerList({
           查询
         </button>
       </form>
-      <div className="user-directory-note">
-        <strong>隐私边界</strong>
-        <span>
-          列表只包含标识、状态、时间与计数，不返回 Thread 标题、用户输入或模型正文。
-          {page?.contentAccess === true
-            ? "你持有“查看运行正文”权限，正文需在详情页单独打开并会记录审计。"
-            : ""}
-        </span>
-      </div>
       {error !== undefined && (
         <div className="error-banner" role="alert">
           {error}
@@ -249,16 +258,15 @@ export function RunExplorerList({
           <table className="run-table">
             <thead>
               <tr>
+                <th>用户问题 / Agent / 用户</th>
                 <th>创建时间</th>
-                <th>Tenant</th>
-                <th>Run</th>
                 <th>状态</th>
                 <th>耗时（含排队）</th>
                 <th>模型调用</th>
                 <th>工具调用</th>
                 <th>Token 输入 / 输出</th>
                 <th>Attempt</th>
-                <th>Agent</th>
+                <th>Agent ID</th>
                 <th>来源</th>
                 <th>
                   <span className="visually-hidden">操作</span>
@@ -308,6 +316,8 @@ function TimelineRecord({
   const offset =
     origin === undefined || !Number.isFinite(started) ? undefined : Math.max(0, started - origin);
   const text = showContent ? detailText(record) : undefined;
+  const parameters =
+    showContent && record.detail !== undefined ? JSON.stringify(record.detail, null, 2) : undefined;
   return (
     <li className={`run-timeline-record ${record.kind} ${record.status}`}>
       <span className="run-timeline-offset">+{formatDuration(offset)}</span>
@@ -316,6 +326,9 @@ function TimelineRecord({
         <strong>{record.summary}</strong>
         {record.step !== undefined && <small>第 {record.step} 步</small>}
         {text !== undefined && <pre className="run-timeline-content">{text}</pre>}
+        {parameters !== undefined && parameters !== "{}" && (
+          <pre className="run-timeline-content">{parameters}</pre>
+        )}
       </span>
       <span className="run-timeline-duration">{formatDuration(record.durationMs)}</span>
     </li>
@@ -355,7 +368,7 @@ export function RunExplorerDetail({
         const next = await api.getRun(tenantId, runId, attemptId);
         if (cancelled) return;
         setDetail(next);
-        // 只串行刷新非终态 Run 的结构；正文请求必须由操作者显式触发。
+        // 活跃 Run 仍定时刷新；管理员每次详情读取都由服务端独立记录审计。
         if (live && ["queued", "running", "waiting"].includes(next.run.status)) {
           timer = setTimeout(() => void readOutline(), 2000);
         }
@@ -384,7 +397,9 @@ export function RunExplorerDetail({
           </h2>
           <p>
             Tenant <code>{tenantId}</code>
-            {run === undefined ? "" : ` · Thread ${run.threadId}`}
+            {run === undefined
+              ? ""
+              : ` · ${run.threadTitle || "Thread"} ${run.threadId} · ${run.userEmail ?? run.userDisplayName ?? "未知用户"}`}
           </p>
         </div>
         {onBack && (
@@ -455,11 +470,7 @@ export function RunExplorerDetail({
         </label>
       )}
       {detail !== undefined ? (
-        <RunAttemptTimeline
-          key={`${detail.attemptId}/${detail.contentAccess}`}
-          api={api}
-          detail={detail}
-        />
+        <RunAttemptTimeline key={`${detail.attemptId}/${detail.contentAccess}`} detail={detail} />
       ) : (
         !error && (
           <p className="empty-state" role="status">
@@ -471,66 +482,12 @@ export function RunExplorerDetail({
   );
 }
 
-function RunAttemptTimeline({
-  api,
-  detail,
-}: {
-  readonly api: RunExplorerApiContract;
-  readonly detail: RunDetailDto;
-}) {
-  const [content, setContent] = useState<RunContentDto>();
-  const [error, setError] = useState<string>();
-  const [busy, setBusy] = useState(false);
-  const openContent = async () => {
-    if (!detail.contentAccess || !detail.attemptId || busy) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      setContent(await api.readRunContent(detail.run.tenantId, detail.run.runId, detail.attemptId));
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const timeline = content?.timeline ?? detail.timeline;
+function RunAttemptTimeline({ detail }: { readonly detail: RunDetailDto }) {
+  const timeline = detail.timeline;
   const firstRecord = timeline.records[0];
   const origin = firstRecord === undefined ? undefined : Date.parse(firstRecord.startedAt);
   return (
     <>
-      {error && (
-        <div className="error-banner" role="alert">
-          {error}
-        </div>
-      )}
-      <div className="run-content-boundary">
-        {content !== undefined ? (
-          <>
-            <span role="status">
-              正在显示打开时的正文。本次访问已记录审计（<code>{content.auditId}</code>）。
-            </span>
-            <button type="button" className="text-button" onClick={() => setContent(undefined)}>
-              收起正文
-            </button>
-          </>
-        ) : detail.contentAccess ? (
-          <>
-            <span>
-              当前只显示结构与指标。打开正文会读取 Prompt 与模型输出，并以你的身份记录审计。
-            </span>
-            <button
-              type="button"
-              className="quiet-button"
-              disabled={busy || detail.attemptId === undefined}
-              onClick={() => void openContent()}
-            >
-              查看正文
-            </button>
-          </>
-        ) : (
-          <span>当前账号没有“查看运行正文”权限，只显示结构与指标。</span>
-        )}
-      </div>
       {timeline.records.length === 0 ? (
         <p className="empty-state">该 Attempt 尚无持久事件。</p>
       ) : (
@@ -546,7 +503,7 @@ function RunAttemptTimeline({
                 key={record.id}
                 record={record}
                 origin={origin}
-                showContent={content !== undefined}
+                showContent={detail.contentAccess}
               />
             ))}
           </ol>

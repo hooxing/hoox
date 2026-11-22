@@ -1215,9 +1215,7 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("80%");
     expect(container.textContent).toContain("12,500");
     expect(container.textContent).toContain("2,500");
-    const trajectoryLink = container.querySelector<HTMLAnchorElement>(".trajectory-viewer-link");
-    expect(trajectoryLink?.href).toBe("http://127.0.0.1:4188/");
-    expect(trajectoryLink?.target).toBe("_blank");
+    expect(container.querySelector(".trajectory-viewer-link")).toBeNull();
     expect(container.querySelector("iframe")).toBeNull();
 
     act(() => navigationItem(container, "用户管理").click());

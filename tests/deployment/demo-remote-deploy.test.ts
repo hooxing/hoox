@@ -275,7 +275,7 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     expect(result.stderr.match(/已尝试恢复上一应用版本/gu)).toHaveLength(1);
     expect(result.log.match(/ stop api web scheduler worker/gu)).toHaveLength(1);
     expect(result.log).toContain(
-      "up -d --force-recreate postgres minio api web scheduler worker admin-control admin-web trajectory",
+      "up -d --force-recreate postgres minio api web scheduler worker admin-control admin-web",
     );
     expect(result.composeEnv).toContain("HOOX_DEMO_IMAGE=test/previous@sha256:previous");
     if (mode !== "cleanup-failure") {
@@ -373,7 +373,7 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     expect(result.stdout).toContain("已从备份恢复 Demo 运行配置");
     const restore = result.log.indexOf("config restore SELECT 'restored';");
     expect(restore).toBeGreaterThan(result.log.indexOf("run --rm migrate"));
-    expect(restore).toBeLessThan(result.log.indexOf("up -d api web trajectory"));
+    expect(restore).toBeLessThan(result.log.indexOf("up -d api web"));
   });
 
   it("新库已有配置或没有备份时不执行恢复", () => {

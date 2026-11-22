@@ -143,7 +143,7 @@ jobs:
             "DOCKER_CONFIG='$REMOTE_DOCKER_CONFIG' HOOX_DEMO_ROOT='$HOOX_DEMO_ROOT' RELEASE_ID='$RELEASE_ID' HOOX_DEMO_IMAGE='$IMAGE_NAME@$IMAGE_DIGEST' HOOX_DEMO_DOMAIN='$HOOX_DEMO_DOMAIN' HOOX_DEMO_BUCKET='$HOOX_DEMO_BUCKET' '$HOOX_DEMO_ROOT/releases/$RELEASE_ID/remote-deploy.sh'"
           curl --fail --silent --show-error --connect-timeout 10 --max-time 20 --retry-max-time 120 --retry 12 --retry-delay 5 "https://$HOOX_DEMO_DOMAIN/api/ready" >/dev/null
           curl --fail --silent --show-error --connect-timeout 10 --max-time 20 --retry-max-time 120 --retry 12 --retry-delay 5 "https://$HOOX_DEMO_DOMAIN/" >/dev/null
-          curl --fail --silent --show-error --connect-timeout 10 --max-time 20 --retry-max-time 120 --retry 12 --retry-delay 5 "https://$HOOX_DEMO_DOMAIN/trajectory/" >/dev/null
+          curl --fail --location --silent --show-error --connect-timeout 10 --max-time 20 --retry-max-time 120 --retry 12 --retry-delay 5 "https://$HOOX_DEMO_DOMAIN/admin/runs" >/dev/null
 
       - name: 清理发布凭据
         if: always() && steps.ssh.outcome == 'success'

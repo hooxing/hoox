@@ -1,52 +1,103 @@
-import { Alert, Button, Card, Input, Space, Typography } from "antd";
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Alert, Button, Card, Select, Space, Typography } from "antd";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AdminApiError } from "./api.js";
+import { integrationApi, type IntegrationApi } from "./integration-api.js";
 
 export function IntegrationTenant({
   title,
   children,
+  api = integrationApi,
 }: {
   readonly title: string;
+  readonly api?: IntegrationApi;
   readonly children: (tenant: string) => ReactNode;
 }) {
-  const [input, setInput] = useState("");
-  const tenantInputId = useId();
   const [tenant, setTenant] = useState("");
+  const [tenants, setTenants] = useState<Awaited<ReturnType<IntegrationApi["listTenants"]>>>([]);
+  const [tenantError, setTenantError] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void api
+      .listTenants()
+      .then((items) => {
+        if (!active) return;
+        setTenants(items);
+        setTenant(items.find((item) => item.isDefault)?.tenantId ?? "");
+        setTenantError(false);
+      })
+      .catch(() => {
+        if (active) setTenantError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api]);
+  const selected = tenants.find((item) => item.tenantId === tenant);
   return (
     <div className="agent-page">
       <Typography.Title level={2}>{title}</Typography.Title>
-      <Card title="目标 Tenant">
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            setTenant(input.trim());
-          }}
-        >
-          <Space wrap>
-            <label htmlFor={tenantInputId}>
-              Tenant ID
-              <Input
-                id={tenantInputId}
-                required
-                maxLength={128}
-                pattern="[A-Za-z0-9_-]{3,128}"
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-              />
-            </label>
-            <Button htmlType="submit" disabled={!input.trim()}>
-              选择 Tenant
-            </Button>
-          </Space>
-        </form>
+      <Card title="选择接入空间">
+        {title === "API Key" ? (
+          <Typography.Paragraph>
+            API Key 供部署方自己的后端或脚本调用 Hoox API。示例：
+            <code>
+              curl -H 'Authorization: Bearer $HOOX_API_KEY' https://your-hoox.example/v1/agents
+            </code>
+            。详见{" "}
+            <a
+              href="https://github.com/hooxing/hoox/blob/main/docs/reference/development-api.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              API 参考
+            </a>
+            。
+          </Typography.Paragraph>
+        ) : (
+          <Typography.Paragraph>
+            Webhook 在 Run
+            等事件发生时通知你的系统。事件：run.waiting、run.requires_action、run.succeeded、run.failed、run.cancelled、artifact.published。接收端须验证签名，详见{" "}
+            <a
+              href="https://github.com/hooxing/hoox/blob/main/docs/reference/webhooks.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Webhook 签名校验
+            </a>
+            。
+          </Typography.Paragraph>
+        )}
         <Typography.Paragraph type="secondary">
-          按 Tenant ID 选择部署的主 Tenant、个人空间或团队空间；此处仅限平台管理员。
+          通常使用初始化管理员的个人空间；仅在为特定用户或团队空间单独接入时选择其他空间。
         </Typography.Paragraph>
+        {tenantError && (
+          <Alert type="error" title="无法读取空间列表，请确认平台管理员身份后重试。" />
+        )}
+        <div>
+          <label htmlFor="integration-tenant-select">空间</label>
+          <Select
+            id="integration-tenant-select"
+            aria-label="选择空间"
+            showSearch
+            optionFilterProp="label"
+            value={tenant || null}
+            placeholder="请选择空间"
+            options={tenants.map((item) => ({
+              value: item.tenantId,
+              label: `${item.displayName} (${item.tenantId})${item.isDefault ? "（初始化管理员的个人空间）" : item.kind === "personal" ? "（个人空间）" : "（团队空间）"}`,
+            }))}
+            onChange={setTenant}
+            style={{ minWidth: 320 }}
+          />
+        </div>
+        {!tenant && tenants.length > 0 && (
+          <Alert type="info" title="未找到初始化管理员的个人空间，请手动选择目标空间。" />
+        )}
       </Card>
       {tenant && (
         <section key={tenant} aria-label={`Tenant ${tenant}`}>
           <Typography.Paragraph>
-            当前 Tenant：<code>{tenant}</code>
+            当前空间：{selected?.displayName ?? "未知空间"} <code>{tenant}</code>
           </Typography.Paragraph>
           {children(tenant)}
         </section>

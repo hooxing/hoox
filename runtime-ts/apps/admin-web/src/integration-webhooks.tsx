@@ -19,7 +19,7 @@ export function IntegrationWebhooksPage({
   readonly api?: IntegrationApi;
 }) {
   return (
-    <IntegrationTenant title="Webhook">
+    <IntegrationTenant title="Webhook" api={api}>
       {(tenant) => <WebhookEditor api={api} tenant={tenant} />}
     </IntegrationTenant>
   );

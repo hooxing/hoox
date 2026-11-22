@@ -24,6 +24,11 @@ export interface RunSummaryDto {
   readonly tenantId: string;
   readonly runId: string;
   readonly threadId: string;
+  readonly threadTitle: string;
+  readonly userInput?: string;
+  readonly userEmail?: string;
+  readonly userDisplayName?: string;
+  readonly agentDisplayName?: string;
   readonly status: string;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -83,6 +88,7 @@ export interface RunPageDto {
   readonly items: readonly RunSummaryDto[];
   readonly nextCursor?: string;
   readonly contentAccess: boolean;
+  readonly auditId?: string;
 }
 
 export interface RunDetailDto {
@@ -104,6 +110,7 @@ export interface RunListFilters {
   readonly agentDefinitionId?: string;
   readonly agentRevisionId?: string;
   readonly origin?: RunOrigin;
+  readonly search?: string;
   readonly cursor?: string;
   readonly limit?: number;
 }
@@ -130,12 +137,7 @@ export class RunExplorerApi implements RunExplorerApiContract {
   ) {}
 
   listRuns(filters: RunListFilters): Promise<RunPageDto> {
-    const query = new URLSearchParams();
-    for (const [key, value] of Object.entries(filters)) {
-      if (value !== undefined && value !== "") query.set(key, String(value));
-    }
-    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-    return this.request(`/runs${suffix}`);
+    return this.request("/runs", { method: "POST", body: JSON.stringify(filters) });
   }
 
   getRun(tenantId: string, runId: string, attemptId?: string): Promise<RunDetailDto> {
@@ -146,17 +148,22 @@ export class RunExplorerApi implements RunExplorerApiContract {
     return this.request(`${runPath(tenantId, runId)}/content${attemptQuery(attemptId)}`);
   }
 
-  private async request<T>(path: string): Promise<T> {
+  private async request<T>(
+    path: string,
+    requestOptions: { method?: string; body?: string } = {},
+  ): Promise<T> {
     const headers = new Headers({ Accept: "application/json" });
     const authorization = this.authorizationHeader();
     if (authorization !== undefined) headers.set("Authorization", authorization);
+    if (requestOptions.body !== undefined) headers.set("Content-Type", "application/json");
     let response: Response;
     try {
       response = await this.fetcher(`${this.baseUrl}${path}`, {
-        method: "GET",
+        method: requestOptions.method ?? "GET",
         credentials: "same-origin",
         cache: "no-store",
         headers,
+        ...(requestOptions.body === undefined ? {} : { body: requestOptions.body }),
       });
     } catch {
       throw new AdminApiError("无法连接后台控制服务。", 0, true);

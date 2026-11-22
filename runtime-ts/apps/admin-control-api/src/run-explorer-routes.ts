@@ -22,6 +22,7 @@ const RunListQuerySchema = Type.Object(
     agentDefinitionId: Type.Optional(IdentifierSchema),
     agentRevisionId: Type.Optional(IdentifierSchema),
     origin: Type.Optional(Type.Union(RUN_EXPLORER_ORIGINS.map((value) => Type.Literal(value)))),
+    search: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
     cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, default: 50 })),
   },
@@ -44,6 +45,11 @@ const summaryProperties = {
   tenantId: Type.String(),
   runId: Type.String(),
   threadId: Type.String(),
+  threadTitle: Type.String(),
+  userInput: Type.Optional(Type.String()),
+  userEmail: Type.Optional(Type.String()),
+  userDisplayName: Type.Optional(Type.String()),
+  agentDisplayName: Type.Optional(Type.String()),
   status: Type.String(),
   createdAt: Type.String(),
   updatedAt: Type.String(),
@@ -136,6 +142,7 @@ const detailProperties = {
   attemptId: Type.Optional(Type.String()),
   timeline: TimelineSchema,
   contentAccess: Type.Boolean(),
+  auditId: Type.Optional(Type.String()),
 };
 const RunDetailEnvelope = envelope(Type.Object(detailProperties, strict));
 const RunContentEnvelope = envelope(
@@ -166,13 +173,13 @@ interface RunListQuery {
   readonly agentDefinitionId?: string;
   readonly agentRevisionId?: string;
   readonly origin?: RunExplorerOrigin;
+  readonly search?: string;
   readonly cursor?: string;
   readonly limit?: number;
 }
 
 /**
- * 注册后台 Run 浏览器路由。结构接口对所有有效控制面角色开放；正文接口由服务端按
- * `run_content.read` 授权并在每次读取时写入审计，菜单是否可见不参与授权。
+ * 注册后台 Run 浏览器路由。列表筛选放在请求体中，避免关键词进入 URL 日志。
  */
 export function registerRunExplorerRoutes(
   app: FastifyInstance,
@@ -182,11 +189,11 @@ export function registerRunExplorerRoutes(
     readonly success: (request: FastifyRequest, data: unknown) => unknown;
   },
 ): void {
-  app.get<{ Querystring: RunListQuery }>(
+  app.post<{ Body: RunListQuery }>(
     "/v1/admin/control/runs",
-    { schema: { querystring: RunListQuerySchema, response: responses(RunPageEnvelope) } },
+    { schema: { body: RunListQuerySchema, response: responses(RunPageEnvelope) } },
     async (request) =>
-      helpers.success(request, await runs.listRuns(await helpers.actor(request), request.query)),
+      helpers.success(request, await runs.listRuns(await helpers.actor(request), request.body)),
   );
   app.get<{
     Params: { readonly tenantId: string; readonly runId: string };

@@ -192,6 +192,11 @@ rollback() {
       config --services | grep -qx 'admin-control'; then
       restore_services+=(admin-control admin-web)
     fi
+    # 兼容回滚到仍声明独立轨迹服务的旧版本：升级时 --remove-orphans 已删除其容器。
+    if docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
+      config --services | grep -qx 'trajectory'; then
+      restore_services+=(trajectory)
+    fi
     docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
       up -d --force-recreate "${restore_services[@]}" || true
     ln -sfn "$previous_release" "$root/current"

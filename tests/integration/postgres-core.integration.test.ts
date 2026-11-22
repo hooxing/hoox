@@ -1801,6 +1801,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
         manager.user.id,
       ]);
+      await administrativePool.query(
+        `UPDATE "${schema}".runs SET origin='normal' WHERE tenant_id=$1 AND id=$2`,
+        [manager.tenant.id, "run_agent_pinned_runtime"],
+      );
     }
   });
 

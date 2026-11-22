@@ -147,12 +147,6 @@ Schema、超限、畸形 JSON、危险原型键和游标错误统一映射为 40
 
 推荐本地 MinIO 使用 `http://127.0.0.1:19000`。
 
-## 稳定性说明
+## 公开 API 稳定性
 
-本页描述当前 development 产品面，但仓库尚未承诺正式 API 版本稳定性。新增或修改协议时必须：
-
-1. 更新 TypeBox Schema；
-2. 更新 Domain/Protocol 映射；
-3. 补充兼容和越权测试；
-4. 更新本页；
-5. 若改变公开兼容边界，同步更新对应架构文档。
+本页描述工作台使用的 development 接口，不代表所有 `/v1` 路由都允许 API Key 或纳入稳定性承诺。服务端集成的稳定接口、Key 作用域、幂等和 SSE 续连契约见[公开 API v1](public-api.md)；其 OpenAPI 由 Protocol Schema 生成并在 CI 校验。

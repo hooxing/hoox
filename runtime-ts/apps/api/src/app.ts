@@ -124,7 +124,18 @@ export function createApiApp(
       blobs: normalizedDependencies.blobs,
     });
   }
-  registerResourceUploadRoutes(app, normalizedDependencies.resourceUploads, authenticate);
+  registerResourceUploadRoutes(
+    app,
+    normalizedDependencies.resourceUploads,
+    authenticate,
+    normalizedDependencies.resourceFilesystem === undefined ||
+      normalizedDependencies.blobs === undefined
+      ? undefined
+      : {
+          catalog: normalizedDependencies.resourceFilesystem.catalog,
+          blobs: normalizedDependencies.blobs,
+        },
+  );
   registerThreadAndRunRoutes(
     app,
     normalizedDependencies,

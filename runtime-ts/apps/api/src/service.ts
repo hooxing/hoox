@@ -399,6 +399,7 @@ export class ApiService {
         scope: auth.scope,
         run,
         thread: thread.entity,
+        ...(auth.apiKey === undefined ? {} : { origin: "api" as const }),
         inputText,
         ...(skillInvocation === undefined ? {} : { skillInvocation }),
         idempotency,

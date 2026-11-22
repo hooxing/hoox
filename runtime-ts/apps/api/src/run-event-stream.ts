@@ -71,8 +71,8 @@ export async function openRunEventStream(options: {
       resume = done;
       if (signal.aborted || disposed || revision !== readRevision) done();
     });
-  const frame = (event: string, data: unknown) =>
-    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const frame = (event: string, data: unknown, eventId?: string) =>
+    `${eventId === undefined ? "" : `id: ${eventId}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   async function* frames() {
     let value = first;
     try {
@@ -86,10 +86,15 @@ export async function openRunEventStream(options: {
           payload: event.payload,
           occurredAt: event.occurredAt,
         }));
-        yield frame("run-events", {
-          run,
-          page: { attemptId: page.attemptId, items, hasMore: page.hasMore },
-        });
+        const lastEvent = items.at(-1);
+        yield frame(
+          "run-events",
+          {
+            run,
+            page: { attemptId: page.attemptId, items, hasMore: page.hasMore },
+          },
+          lastEvent?.eventId,
+        );
         after = items.at(-1)?.sequence ?? after;
         if (
           !page.hasMore &&

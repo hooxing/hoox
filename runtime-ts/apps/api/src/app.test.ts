@@ -170,6 +170,7 @@ class FakeApiState
   readonly submittedRunSkillInvocations: Array<
     { readonly invocationName: string; readonly args: string } | undefined
   > = [];
+  readonly createdRunOrigins: Array<"normal" | "api" | undefined> = [];
   idempotencyBarrier: AsyncBarrier | undefined;
   beforeThreadCreate: (() => Promise<void> | void) | undefined;
   beforeRunCreate: (() => Promise<void> | void) | undefined;
@@ -308,11 +309,13 @@ class FakeApiState
     readonly scope: TenantScope;
     readonly run: Run;
     readonly thread: Thread;
+    readonly origin?: "normal" | "api";
     readonly inputText: string;
     readonly skillInvocation?: { readonly invocationName: string; readonly args: string };
     readonly idempotency: IdempotentCommand;
   }): Promise<IdempotentCreateResult<Run>> {
     await this.beforeRunCreate?.();
+    this.createdRunOrigins.push(input.origin);
     this.submittedRunSkillInvocations.push(input.skillInvocation);
     return this.idempotent(input.scope, "run", input.idempotency, input.run, () => {
       this.runs.set(key(input.scope, input.run.id), { entity: input.run, version: 0n });
@@ -541,6 +544,7 @@ function fixture(
     readonly enableThreadInputs?: boolean;
     readonly resourceAttachments?: ApiDependencies["resourceAttachments"];
     readonly resourceUploads?: ApiDependencies["resourceUploads"];
+    readonly resourceFilesystem?: ApiDependencies["resourceFilesystem"];
     readonly skillCenter?: ApiDependencies["skillCenter"];
     readonly historyFiles?: ApiDependencies["historyFiles"];
     readonly historyBlobs?: BlobStore;
@@ -686,6 +690,9 @@ function fixture(
       ? {}
       : { resourceAttachments: options.resourceAttachments }),
     ...(options.resourceUploads === undefined ? {} : { resourceUploads: options.resourceUploads }),
+    ...(options.resourceFilesystem === undefined
+      ? {}
+      : { resourceFilesystem: options.resourceFilesystem }),
     ...(options.skillCenter === undefined ? {} : { skillCenter: options.skillCenter }),
     ...(options.historyFiles === undefined ? {} : { historyFiles: options.historyFiles }),
     ...(options.historyBlobs === undefined ? {} : { blobs: options.historyBlobs }),
@@ -1260,6 +1267,164 @@ describe("管理员 Playground 受理", () => {
 });
 
 describe("API Key 路由授权", () => {
+  it("按 API Key 空间授权上传文件下载，并对作用域与空间失败关闭", async () => {
+    const token = createApiKeyToken();
+    const owner = personalBundle("owner_a");
+    let grantedScopes: readonly string[] = ["threads:read"];
+    const file = {
+      resourceId: resourceId("resource_public_1"),
+      versionId: resourceVersionId("resource_version_public_1"),
+      name: "资料.txt",
+      path: "/resources/resource_public_1/resource_version_public_1/资料.txt",
+      mediaType: "text/plain",
+      sizeBytes: 4,
+      object: {
+        tenantId: owner.tenant.id,
+        purpose: "resource" as const,
+        sha256: "a".repeat(64),
+        size: 4,
+        mediaType: "text/plain",
+        incarnationId: "incarnation_public_1",
+        physicalObjectKey: "resources/public-1",
+      },
+    };
+    let driftOnConfirmation = false;
+    let resolveCount = 0;
+    const resolve = vi.fn(async ({ tenantId }: { tenantId: string }) => {
+      resolveCount += 1;
+      if (tenantId !== owner.tenant.id) return undefined;
+      return driftOnConfirmation && resolveCount % 2 === 0
+        ? { ...file, object: { ...file.object, physicalObjectKey: "resources/drifted" } }
+        : file;
+    });
+    const apiKeys = {
+      authenticateKey: vi.fn(async () => ({
+        userId: owner.user.id,
+        tenantId: owner.tenant.id,
+        apiKeyId: "key_test",
+        scopes: grantedScopes,
+      })),
+    } as unknown as NonNullable<ApiDependencies["apiKeys"]>;
+    const blobs = {
+      presignDownload: vi.fn(async () => "https://objects.example.test/signed"),
+    } as unknown as BlobStore;
+    const upload = vi.fn(async () => ({
+      resourceId: file.resourceId,
+      versionId: file.versionId,
+      name: file.name,
+      path: file.path,
+      mediaType: file.mediaType,
+      sizeBytes: file.sizeBytes,
+    }));
+    const { app } = fixture({
+      apiKeys,
+      resourceUploads: { upload },
+      resourceFilesystem: {
+        catalog: { list: async () => [], resolve },
+        capabilities: {} as NonNullable<ApiDependencies["resourceFilesystem"]>["capabilities"],
+      },
+      historyBlobs: blobs,
+    });
+    openApps.push(app);
+    const url = "/v1/resources/resource_public_1/versions/resource_version_public_1/download";
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url,
+          headers: { authorization: `Bearer ${token}` },
+        })
+      ).statusCode,
+    ).toBe(403);
+    grantedScopes = ["runs:read"];
+    const downloaded = await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(downloaded.statusCode).toBe(200);
+    expect(downloaded.json().data).toMatchObject({
+      resourceId: file.resourceId,
+      versionId: file.versionId,
+      url: "https://objects.example.test/signed",
+      expiresInSeconds: 300,
+    });
+    expect(resolve).toHaveBeenCalledTimes(2);
+    driftOnConfirmation = true;
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url,
+          headers: { authorization: `Bearer ${token}` },
+        })
+      ).statusCode,
+    ).toBe(404);
+    grantedScopes = ["runs:create"];
+    const uploaded = await app.inject({
+      method: "POST",
+      url: "/v1/resources/uploads",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/octet-stream",
+        "idempotency-key": "api-key-upload-file-0001",
+        "x-file-name": "notes.txt",
+      },
+      payload: Buffer.from("note"),
+    });
+    expect(uploaded.statusCode).toBe(200);
+    expect(upload).toHaveBeenCalledOnce();
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url,
+          headers: { authorization: `Bearer ${token}`, "x-tenant-id": "tenant_owner_b" },
+        })
+      ).statusCode,
+    ).toBe(404);
+  });
+
+  it("公开创建 Run 时将 API 来源传入持久化边界", async () => {
+    const token = createApiKeyToken();
+    const owner = personalBundle("owner_a");
+    let grantedScopes: readonly ("threads:create" | "runs:create")[] = ["threads:create"];
+    const apiKeys = {
+      authenticateKey: vi.fn(async () => ({
+        userId: owner.user.id,
+        tenantId: owner.tenant.id,
+        apiKeyId: "key_test",
+        scopes: grantedScopes,
+      })),
+    } as unknown as NonNullable<ApiDependencies["apiKeys"]>;
+    const { app, state } = fixture({ apiKeys });
+    openApps.push(app);
+    const thread = await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "idempotency-key": "api-origin-thread-0001",
+      },
+      payload: { title: "API 来源" },
+    });
+    expect(thread.statusCode).toBe(200);
+    grantedScopes = ["runs:create"];
+    const run = await app.inject({
+      method: "POST",
+      url: `/v1/threads/${thread.json().data.id}/runs`,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "idempotency-key": "api-origin-run-000001",
+      },
+      payload: { input: "从 API 启动" },
+    });
+    expect(run.statusCode).toBe(200);
+    expect(state.createdRunOrigins).toEqual(["api"]);
+  });
+
   it("只允许显式声明且具备作用域的路由，并拒绝访问 Key 管理接口", async () => {
     const token = createApiKeyToken();
     const owner = personalBundle("owner_a");
@@ -1280,7 +1445,12 @@ describe("API Key 路由授权", () => {
       create: vi.fn(),
       revoke: vi.fn(),
     } as unknown as NonNullable<ApiDependencies["apiKeys"]>;
-    const { app } = fixture({ apiKeys });
+    const { app } = fixture({
+      apiKeys,
+      enableThreadInputs: true,
+      enableThreadContext: true,
+      enableThreadContinuity: true,
+    });
     openApps.push(app);
 
     const allowedRead = await app.inject({
@@ -1298,6 +1468,21 @@ describe("API Key 路由授权", () => {
     });
     expect(agentsRead.statusCode).toBe(200);
 
+    for (const url of [
+      "/v1/threads/thread_1/inputs/receipt_internal",
+      "/v1/threads/thread_1/context",
+      "/v1/threads/thread_1/continuity",
+    ]) {
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url,
+            headers: { authorization: `Bearer ${token}` },
+          })
+        ).statusCode,
+      ).toBe(403);
+    }
     const createWithoutScope = await app.inject({
       method: "POST",
       url: "/v1/threads",
@@ -2645,6 +2830,16 @@ describe("Fastify API 契约", () => {
       errors.push(error);
     });
     await createModelWireTraceRun(app);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/v1/threads/thread_1/runs/run_1/events/stream",
+          headers: { authorization: "Bearer token-a", "last-event-id": "bad.attempt-4" },
+        })
+      ).statusCode,
+    ).toBe(400);
+    errors.length = 0;
     await app.inject({
       method: "DELETE",
       url: "/v1/threads/thread_1/runs/run_1",
@@ -2654,7 +2849,7 @@ describe("Fastify API 契约", () => {
     const response = await app.inject({
       method: "GET",
       url,
-      headers: { authorization: "Bearer token-a" },
+      headers: { authorization: "Bearer token-a", "last-event-id": "attempt_1-7" },
     });
     expect(errors).toEqual([]);
     expect(response.statusCode).toBe(200);
@@ -2663,6 +2858,7 @@ describe("Fastify API 契约", () => {
     expect(response.body).toContain('"sequence":8');
     expect(response.body).not.toContain('"sequence":7');
     expect(response.body).toContain('event: end\ndata: {"reason":"settled"}');
+    expect(response.body).toContain("id: attempt_1-8\nevent: run-events");
     expect(
       (await app.inject({ method: "GET", url, headers: { authorization: "Bearer token-b" } }))
         .statusCode,
@@ -2674,6 +2870,15 @@ describe("Fastify API 契约", () => {
           method: "GET",
           url: url.replace("after=7", "after=-2"),
           headers: { authorization: "Bearer token-a" },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url,
+          headers: { authorization: "Bearer token-a", "last-event-id": "invalid" },
         })
       ).statusCode,
     ).toBe(400);

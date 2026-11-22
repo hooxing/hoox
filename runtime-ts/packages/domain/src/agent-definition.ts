@@ -66,6 +66,7 @@ export interface AgentRevisionData {
   readonly revision: number;
   readonly status: AgentRevisionStatus;
   readonly content: AgentRevisionContent;
+  readonly versionNotes?: string;
   readonly digest: Sha256Digest;
   readonly createdAt: string;
   readonly createdBy: string;
@@ -261,11 +262,20 @@ export function createAgentDefinition(input: AgentDefinitionData): AgentDefiniti
 export function createAgentRevision(
   input: Omit<AgentRevisionData, "digest"> & { readonly digest: string },
 ): AgentRevision {
+  validateAgentVersionNotes(input.versionNotes);
   return sealEntity("AgentRevision", {
     ...input,
     content: validateAgentRevisionContent(input.content),
     digest: sha256Digest(input.digest),
   });
+}
+
+export function validateAgentVersionNotes(value: string | undefined): void {
+  domainInvariant(
+    value === undefined || (typeof value === "string" && Array.from(value).length <= 2000),
+    "INVALID_ARGUMENT",
+    "版本说明不得超过 2000 字符",
+  );
 }
 
 export function publishAgentRevision(input: {

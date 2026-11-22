@@ -6,7 +6,9 @@ import type {
   AgentPinnedModelReferenceDto,
   AgentRevisionContentDto,
   AgentRevisionDto,
+  AgentRevisionSection,
 } from "@hoox/protocol";
+import { agentRevisionChangedFields } from "@hoox/protocol";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Empty, Input, Modal, Space, Spin, Tag, Typography } from "antd";
 import { type FormEvent, useId, useState } from "react";
@@ -79,8 +81,14 @@ export function AgentDefinitionsPage({
       />
     );
   if (!query.data) return <Spin aria-label="正在读取 Agent 列表" />;
-  const { items, canManage, builtinToolLimit, pinnedModelOptions, externalToolOptions } =
-    query.data;
+  const {
+    items,
+    canManage,
+    builtinToolLimit,
+    pinnedModelOptions,
+    externalToolOptions,
+    skillOptions,
+  } = query.data;
   if (destination.kind === "create") {
     return canManage ? (
       <CreateAgent
@@ -88,6 +96,7 @@ export function AgentDefinitionsPage({
         builtinToolLimit={builtinToolLimit}
         pinnedModelOptions={pinnedModelOptions}
         externalToolOptions={externalToolOptions}
+        skillOptions={skillOptions}
         onOpen={onOpen}
         onBack={onBack}
       />
@@ -105,6 +114,7 @@ export function AgentDefinitionsPage({
         builtinToolLimit={builtinToolLimit}
         pinnedModelOptions={pinnedModelOptions}
         externalToolOptions={externalToolOptions}
+        skillOptions={skillOptions}
         onBack={onBack}
       />
     );
@@ -159,6 +169,7 @@ function CreateAgent({
   builtinToolLimit,
   pinnedModelOptions,
   externalToolOptions,
+  skillOptions,
   onOpen,
   onBack,
 }: {
@@ -166,6 +177,7 @@ function CreateAgent({
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
   readonly externalToolOptions: Readonly<AdminAgentDefinitionList["externalToolOptions"]>;
+  readonly skillOptions: Readonly<AdminAgentDefinitionList["skillOptions"]>;
   readonly onOpen: (id: string) => void;
   readonly onBack: () => void;
 }) {
@@ -184,14 +196,16 @@ function CreateAgent({
         builtinToolLimit={builtinToolLimit}
         pinnedModelOptions={pinnedModelOptions}
         externalToolOptions={externalToolOptions}
+        skillOptions={skillOptions}
         saving={create.isPending}
         onCancel={onBack}
-        onSave={async (content, availability = allTenants) => {
+        onSave={async (content, availability = allTenants, versionNotes) => {
           const result = await create.mutateAsync({
             id,
             revisionId: firstRevision,
             expectedGeneration: 0,
             content,
+            ...(versionNotes === undefined ? {} : { versionNotes }),
             availability,
           });
           await client.invalidateQueries({ queryKey: listKey });
@@ -225,6 +239,7 @@ function AgentHistory({
   builtinToolLimit,
   pinnedModelOptions,
   externalToolOptions,
+  skillOptions,
   onBack,
 }: {
   readonly api: AgentDefinitionApiContract;
@@ -233,6 +248,7 @@ function AgentHistory({
   readonly builtinToolLimit: readonly string[];
   readonly pinnedModelOptions: readonly AgentPinnedModelReferenceDto[];
   readonly externalToolOptions: Readonly<AdminAgentDefinitionList["externalToolOptions"]>;
+  readonly skillOptions: Readonly<AdminAgentDefinitionList["skillOptions"]>;
   readonly onBack: () => void;
 }) {
   const client = useQueryClient();
@@ -407,12 +423,14 @@ function AgentHistory({
               builtinToolLimit={builtinToolLimit}
               pinnedModelOptions={pinnedModelOptions}
               externalToolOptions={externalToolOptions}
+              skillOptions={skillOptions}
               saving={busy}
               onCancel={() => setWork(undefined)}
-              onSave={(content) =>
+              onSave={(content, _availability, versionNotes) =>
                 run(async () => {
                   const result = await api.saveAgentRevision(id, {
                     content,
+                    ...(versionNotes === undefined ? {} : { versionNotes }),
                     expectedGeneration: edit.generation,
                     revisionId: edit.newRevisionId,
                   });
@@ -436,6 +454,16 @@ function AgentHistory({
                     </strong>
                     <Typography.Text type="secondary">
                       {new Date(item.createdAt).toLocaleString()} · {item.createdBy}
+                    </Typography.Text>
+                    <Typography.Text>{notesSummary(item.versionNotes)}</Typography.Text>
+                    <Typography.Text type="secondary">
+                      {item.changedSections === undefined
+                        ? item.revision === 1
+                          ? "初始版本"
+                          : "无可比较的上一版本"
+                        : item.changedSections.length === 0
+                          ? "没有配置变更"
+                          : `改动：${item.changedSections.map((section) => sectionLabels[section]).join("、")}`}
                     </Typography.Text>
                   </div>
                   <RevisionStatus status={item.status} />
@@ -476,7 +504,7 @@ function AgentHistory({
                                 api.publishAgentRevision(id, item.id, {
                                   expectedGeneration: definition.generation,
                                 }),
-                              `已发布版本 ${item.revision}。`,
+                              `已发布版本 ${item.revision}。版本说明在草稿保存时固定。`,
                             )
                           }
                         >
@@ -520,10 +548,18 @@ function AgentHistory({
             {active.isError ? (
               <Alert type="error" showIcon title={active.error.message} />
             ) : active.data ? (
-              <RevisionContent
-                revision={active.data}
-                comparison={compare.isSuccess ? compare.data : undefined}
-              />
+              <>
+                <section className="agent-content-field" aria-label="版本说明全文">
+                  <strong>版本说明</strong>
+                  <pre>
+                    {active.data.versionNotes?.trim() ? active.data.versionNotes : "未填写版本说明"}
+                  </pre>
+                </section>
+                <RevisionContent
+                  revision={active.data}
+                  comparison={compare.isSuccess ? compare.data : undefined}
+                />
+              </>
             ) : (
               <Spin />
             )}
@@ -681,6 +717,22 @@ const contentLabels: Record<keyof AgentRevisionContentDto, string> = {
   memory: "长期记忆",
 };
 
+const sectionLabels: Record<AgentRevisionSection, string> = {
+  instructions: "指令",
+  model: "模型",
+  tools: "工具",
+  skills: "Skill",
+  sandbox: "Sandbox",
+  memory: "记忆",
+  display: "展示信息",
+};
+
+function notesSummary(value: string | undefined): string {
+  const notes = value?.trim().replace(/\s+/gu, " ") || "未填写版本说明";
+  const characters = Array.from(notes);
+  return characters.length > 100 ? `${characters.slice(0, 100).join("")}…` : notes;
+}
+
 function contentText(value: AgentRevisionContentDto[keyof AgentRevisionContentDto]): string {
   if (value === undefined || value === "") return "未设置";
   if (typeof value === "string") return value;
@@ -695,12 +747,11 @@ function RevisionContent({
   readonly revision: AgentRevisionDto;
   readonly comparison: AgentRevisionDto | undefined;
 }) {
-  const fields = (Object.keys(contentLabels) as (keyof AgentRevisionContentDto)[]).filter(
-    (field) =>
-      comparison
-        ? JSON.stringify(revision.content[field]) !== JSON.stringify(comparison.content[field])
-        : revision.content[field] !== undefined,
-  );
+  const fields = comparison
+    ? agentRevisionChangedFields(revision.content, comparison.content)
+    : (Object.keys(contentLabels) as (keyof AgentRevisionContentDto)[]).filter(
+        (field) => revision.content[field] !== undefined,
+      );
   if (fields.length === 0) return <Empty description="两个版本的配置没有差异" />;
   return (
     <div className="agent-revision-content">

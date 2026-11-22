@@ -83,6 +83,14 @@ describe("外部工具 Admin Control ACL", () => {
     expect(bootstrap).not.toContain("runtime_run_external_tool_snapshots");
   });
 
+  it("Agent 版本说明只能随草稿创建，控制面角色仅能更新 Revision 状态", async () => {
+    const bootstrap = await readFile(bootstrapUrl, "utf8");
+    expect(bootstrap).toContain(
+      "GRANT UPDATE(status) ON TABLE ${schema}.agent_revisions TO ${control}",
+    );
+    expect(bootstrap).not.toMatch(/GRANT\s+UPDATE\([^)]*version_notes/iu);
+  });
+
   it("0001+0002 实际建表集合与 Agent、外部工具和 Run 浏览器迁移不存在时的 Runtime 表键完全一致", async () => {
     const migrationSql = await Promise.all([
       readFile(baselineMigrationUrl, "utf8"),

@@ -2567,6 +2567,10 @@ async function assertAdminControlBoundary(
   const agentDefinitionsEnabled =
     enabled && (await hasAgentDefinitionState(client, context.schema));
   if (agentDefinitionsEnabled) {
+    allowed.set("skills", new Set(["SELECT"]));
+    allowed.set("skill_versions", new Set(["SELECT"]));
+  }
+  if (agentDefinitionsEnabled) {
     allowed.set("agent_definitions", new Set(["SELECT", "INSERT"]));
     allowed.set("agent_definition_tenants", new Set(["SELECT", "INSERT", "DELETE"]));
     allowed.set("agent_revisions", new Set(["SELECT", "INSERT"]));
@@ -3723,6 +3727,9 @@ async function grantAdminControlAccess(
          ON TABLE ${schema}.agent_definitions TO ${control};
        GRANT UPDATE(status) ON TABLE ${schema}.agent_revisions TO ${control};
        GRANT USAGE ON SEQUENCE ${schema}.agent_definition_audits_audit_id_seq TO ${control}`,
+    );
+    await client.query(
+      `GRANT SELECT ON TABLE ${schema}.skills,${schema}.skill_versions TO ${control}`,
     );
   }
   if (await hasAdminUserOperationsState(client, context.schema)) {

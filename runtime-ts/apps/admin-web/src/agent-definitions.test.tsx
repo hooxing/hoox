@@ -5,6 +5,7 @@ import { act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, settle, button, field, enter, select } from "./testing/admin-component.js";
 import { AgentDefinitionEditor } from "./agent-definition-editor.js";
+import { AgentSkillSelector } from "./agent-skill-selector.js";
 import { AgentDefinitionsPage } from "./agent-definitions.js";
 import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
@@ -28,6 +29,7 @@ const current: AgentRevisionDto = {
   digest: "b".repeat(64),
   createdAt: timestamp,
   createdBy: "user_example",
+  versionNotes: "新增模型能力",
   content: {
     displayName: "新版助手",
     description: "示例简介",
@@ -48,10 +50,16 @@ const previous: AgentRevisionDto = {
   revision: 1,
   digest: "a".repeat(64),
   content: { ...current.content, displayName: "旧版助手", operatorInstructions: "旧版指令" },
+  versionNotes: "初始版本",
 };
 
-function summary({ content, ...rest }: AgentRevisionDto) {
-  return { ...rest, displayName: content.displayName };
+function summary({ content, versionNotes, ...rest }: AgentRevisionDto) {
+  return {
+    ...rest,
+    displayName: content.displayName,
+    ...(rest.id === previous.id || versionNotes === undefined ? {} : { versionNotes }),
+    changedSections: ["instructions", "display"] as ("instructions" | "display")[],
+  };
 }
 
 function fixture(canManage: boolean) {
@@ -61,6 +69,14 @@ function fixture(canManage: boolean) {
       builtinToolLimit: ["read"],
       pinnedModelOptions: [],
       externalToolOptions: [],
+      skillOptions: [
+        {
+          skillId: "skill_notes",
+          displayName: "会议纪要",
+          description: "整理会议记录",
+          versions: ["2.0.0", "1.0.0"],
+        },
+      ],
       items: [{ definition, revision: summary(current) }],
     })),
     listAgentRevisions: vi.fn(async () => ({
@@ -110,6 +126,9 @@ describe("后台 Agent 管理", () => {
     select(field<HTMLSelectElement>(history, "对比版本"), previous.id);
     await settle();
     expect(history.textContent).toContain("旧版指令");
+    expect(history.textContent).toContain("新增模型能力");
+    expect(history.textContent).toContain("改动：指令、展示信息");
+    expect(history.textContent).toContain("未填写版本说明");
     expect(history.textContent).toContain("新版指令");
     expect(history.textContent).not.toContain("示例简介");
     expect(api.readAgentRevision).toHaveBeenCalledWith(definition.id, previous.id);
@@ -148,6 +167,10 @@ describe("后台 Agent 管理", () => {
     expect(button(container, "保存新草稿").disabled).toBe(true);
     expect(onSave).not.toHaveBeenCalled();
     enter(instructions, "新草稿使用中文回答");
+    enter(
+      field<HTMLTextAreaElement>(container, "版本说明（可选，最多 2000 字符）"),
+      "补充了新行为",
+    );
     select(field<HTMLSelectElement>(container, "工具配置"), "configured");
     expect(container.textContent).not.toContain("执行命令");
     act(() => field<HTMLInputElement>(container, "读取文件").click());
@@ -159,6 +182,7 @@ describe("后台 Agent 管理", () => {
         tools: expect.objectContaining({ builtinTools: ["read"] }),
       }),
       undefined,
+      "补充了新行为",
     );
   });
 
@@ -197,6 +221,7 @@ describe("后台 Agent 管理", () => {
         }),
       }),
       undefined,
+      "",
     );
   });
 
@@ -231,6 +256,7 @@ describe("后台 Agent 管理", () => {
     expect(onSave).toHaveBeenCalledWith(
       expect.objectContaining({ tools: expect.objectContaining({ externalTools: [] }) }),
       undefined,
+      "",
     );
   });
 
@@ -265,6 +291,7 @@ describe("后台 Agent 管理", () => {
         memory: { mode: "configured", longTermEnabled: false },
       }),
       undefined,
+      "",
     );
     select(model, "platform_default");
     act(() => button(container, "保存新草稿").click());
@@ -272,7 +299,75 @@ describe("后台 Agent 管理", () => {
     expect(onSave).toHaveBeenLastCalledWith(
       expect.objectContaining({ model: { mode: "platform_default" } }),
       undefined,
+      "",
     );
+  });
+
+  it("Skill 选择器搜索目录、默认最新版本并允许切换和移除", () => {
+    const onChange = vi.fn();
+    const container = render(
+      <AgentSkillSelector
+        options={[
+          {
+            skillId: "skill_notes",
+            displayName: "会议纪要",
+            description: "整理会议记录",
+            versions: ["2.0.0", "1.0.0"],
+          },
+        ]}
+        value={[]}
+        onChange={onChange}
+      />,
+    );
+    expect(container.textContent).toContain("整理会议记录");
+    act(() => button(container, "添加 会议纪要").click());
+    expect(onChange).toHaveBeenLastCalledWith([{ skillId: "skill_notes", version: "2.0.0" }]);
+
+    const selected = render(
+      <AgentSkillSelector
+        options={[
+          {
+            skillId: "skill_notes",
+            displayName: "会议纪要",
+            description: "整理会议记录",
+            versions: ["2.0.0", "1.0.0"],
+          },
+        ]}
+        value={[{ skillId: "skill_notes", version: "2.0.0" }]}
+        onChange={onChange}
+      />,
+    );
+    select(field<HTMLSelectElement>(selected, "会议纪要 的版本"), "1.0.0");
+    expect(onChange).toHaveBeenLastCalledWith([{ skillId: "skill_notes", version: "1.0.0" }]);
+    act(() => button(selected, "移除 会议纪要").click());
+    expect(onChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it("目录为空时引导管理员发布 Skill", () => {
+    const container = render(<AgentSkillSelector options={[]} value={[]} onChange={vi.fn()} />);
+    expect(container.textContent).toContain("请前往「Skills」页面发布");
+  });
+
+  it("发布时保留草稿已固定的版本说明", async () => {
+    const api = fixture(true);
+    api.listAgentRevisions.mockResolvedValue({
+      definition,
+      items: [{ ...summary(current), status: "draft" }],
+    });
+    const container = render(
+      <AgentDefinitionsPage
+        api={api}
+        destination={{ kind: "detail", id: definition.id }}
+        onOpen={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    await settle();
+    act(() => button(container, "发布").click());
+    await settle();
+    expect(api.publishAgentRevision).toHaveBeenCalledWith(definition.id, current.id, {
+      expectedGeneration: definition.generation,
+    });
   });
 
   it("设置 Tenant 范围提交读取时的 generation", async () => {

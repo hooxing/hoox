@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import {
   agentBuiltinToolLimit,
   agentDefinitionAccess,
+  agentRevisionChangedSections,
   type ControlOperatorRole,
 } from "@hoox/admin-control";
 import {
   DomainError,
   tenantId,
   validateAgentRevisionContent,
+  validateAgentVersionNotes,
   type AgentAvailability,
   type AgentRevisionContent,
 } from "@hoox/domain";
@@ -41,6 +43,7 @@ interface RevisionRow extends QueryResultRow {
   revision: string;
   status: StoredAgentRevision["status"];
   content: AgentRevisionContent;
+  version_notes: string | null;
   content_digest: string;
   created_by: string;
   created_at: Date | string;
@@ -97,6 +100,7 @@ function mapRevision(row: RevisionRow, revoked: boolean): StoredAgentRevision {
     revision: Number(row.revision),
     status: revoked ? "revoked" : row.status,
     content,
+    ...(row.version_notes == null ? {} : { versionNotes: row.version_notes }),
     digest: row.content_digest,
     createdAt: timestamp(row.created_at),
     createdBy: row.created_by,
@@ -111,6 +115,16 @@ export class AgentDefinitionAccessError extends PersistenceError {
 export class AgentDefinitionValidationError extends PersistenceError {
   constructor(message: string) {
     super("CONSTRAINT_VIOLATION", message);
+  }
+}
+
+function versionNotes(value: string | undefined): string | null {
+  try {
+    validateAgentVersionNotes(value);
+    return value ?? null;
+  } catch (error) {
+    if (error instanceof DomainError) throw new AgentDefinitionValidationError(error.message);
+    throw error;
   }
 }
 
@@ -351,7 +365,7 @@ async function scopeIds(
 }
 async function readRevision(client: PoolClient, id: string): Promise<RevisionRow | undefined> {
   const result = await client.query<RevisionRow>(
-    "SELECT id,definition_id,revision::text,status,content,content_digest,created_by,created_at FROM agent_revisions WHERE id=$1",
+    "SELECT id,definition_id,revision::text,status,content,version_notes,content_digest,created_by,created_at FROM agent_revisions WHERE id=$1",
     [id],
   );
   return result.rows[0];
@@ -367,7 +381,7 @@ interface RevisionSummaryRow extends Omit<RevisionRow, "content"> {
   display_name: string;
   revoked: boolean;
 }
-const revisionSummaryColumns = `r.id,r.definition_id,r.revision::text,r.status,r.content_digest,
+const revisionSummaryColumns = `r.id,r.definition_id,r.revision::text,r.status,r.content_digest,r.version_notes,
   r.created_by,r.created_at,r.content->>'displayName' AS display_name,
   EXISTS(SELECT 1 FROM agent_revision_revocations v WHERE v.revision_id=r.id) AS revoked`;
 
@@ -378,6 +392,7 @@ function mapRevisionSummary(row: RevisionSummaryRow): StoredAgentRevisionSummary
     revision: Number(row.revision),
     status: row.revoked ? "revoked" : row.status,
     displayName: row.display_name,
+    ...(row.version_notes == null ? {} : { versionNotes: row.version_notes }),
     digest: row.content_digest,
     createdBy: row.created_by,
     createdAt: timestamp(row.created_at),
@@ -413,6 +428,26 @@ export class PgAgentDefinitionRepository
         canManage,
         builtinToolLimit: canManage ? await builtinToolLimit(client) : [],
         pinnedModelOptions: canManage ? await listPinnedModelOptions(client) : [],
+        skillOptions: canManage
+          ? (
+              await client.query<{
+                skill_id: string;
+                display_name: string;
+                description: string;
+                versions: string[];
+              }>(`SELECT s.id AS skill_id,s.display_name,
+                  (array_agg(v.description ORDER BY v.created_at DESC,v.version DESC))[1] AS description,
+                  array_agg(v.version ORDER BY (v.version=s.recommended_version) DESC,v.created_at DESC,v.version DESC) AS versions
+                FROM skills s JOIN skill_versions v ON v.skill_id=s.id
+                WHERE s.status='active' AND v.status='available'
+                GROUP BY s.id,s.display_name ORDER BY s.display_name,s.id`)
+            ).rows.map((row) => ({
+              skillId: row.skill_id,
+              displayName: row.display_name,
+              description: row.description,
+              versions: row.versions,
+            }))
+          : [],
         externalToolOptions: canManage
           ? (
               await client.query<{
@@ -444,14 +479,24 @@ export class PgAgentDefinitionRepository
     return adminRead(this.pool, actorUserId, async (client, canManage) => {
       const row = await readDefinition(client, definitionId);
       if (!row || (!canManage && row.status === "draft")) return undefined;
-      const revisions = await client.query<RevisionSummaryRow>(
-        `SELECT ${revisionSummaryColumns} FROM agent_revisions r WHERE r.definition_id=$1
+      const revisions = await client.query<RevisionSummaryRow & { content: AgentRevisionContent }>(
+        `SELECT ${revisionSummaryColumns},r.content FROM agent_revisions r WHERE r.definition_id=$1
            AND ($2 OR r.status IN ('published','revoked')) ORDER BY r.revision DESC`,
         [definitionId, canManage],
       );
       return {
         definition: mapDefinition(row, await scopeIds(client, definitionId, true)),
-        items: revisions.rows.map(mapRevisionSummary),
+        items: revisions.rows.map((revision, index) => {
+          const previous = revisions.rows[index + 1];
+          return {
+            ...mapRevisionSummary(revision),
+            ...(previous === undefined
+              ? {}
+              : {
+                  changedSections: agentRevisionChangedSections(revision.content, previous.content),
+                }),
+          };
+        }),
       };
     });
   }
@@ -467,6 +512,7 @@ export class PgAgentDefinitionRepository
   }
 
   async createDraft(input: {
+    versionNotes?: string;
     actorUserId: string;
     id: string;
     availability: AgentAvailability;
@@ -492,13 +538,14 @@ export class PgAgentDefinitionRepository
         );
         await insertScopes(client, input.id, ids, false);
         await client.query(
-          "INSERT INTO agent_revisions(id,definition_id,revision,status,content,content_digest,created_by) VALUES($1,$2,1,'draft',$3,$4,$5)",
+          "INSERT INTO agent_revisions(id,definition_id,revision,status,content,content_digest,created_by,version_notes) VALUES($1,$2,1,'draft',$3,$4,$5,$6)",
           [
             input.revisionId,
             input.id,
             JSON.stringify(normalizedContent),
             digestValue,
             input.actorUserId,
+            versionNotes(input.versionNotes),
           ],
         );
         const row = await readDefinition(client, input.id);
@@ -521,6 +568,7 @@ export class PgAgentDefinitionRepository
   }
 
   async createDraftRevision(input: {
+    versionNotes?: string;
     actorUserId: string;
     definitionId: string;
     revisionId: string;
@@ -548,7 +596,7 @@ export class PgAgentDefinitionRepository
         );
         const revisionNumber = Number(latest.rows[0]?.next_revision);
         await client.query(
-          "INSERT INTO agent_revisions(id,definition_id,revision,status,content,content_digest,created_by) VALUES($1,$2,$3,'draft',$4,$5,$6)",
+          "INSERT INTO agent_revisions(id,definition_id,revision,status,content,content_digest,created_by,version_notes) VALUES($1,$2,$3,'draft',$4,$5,$6,$7)",
           [
             input.revisionId,
             input.definitionId,
@@ -556,6 +604,7 @@ export class PgAgentDefinitionRepository
             JSON.stringify(content),
             digest(content),
             input.actorUserId,
+            versionNotes(input.versionNotes),
           ],
         );
         await client.query(

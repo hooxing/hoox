@@ -1,5 +1,6 @@
 import { normalizeRuntimeToolSelection, RUNTIME_TOOL_NAMES } from "@hoox/protocol";
 import type { ControlOperatorRole } from "./index.js";
+export { agentRevisionChangedSections } from "@hoox/protocol";
 
 export function agentDefinitionAccess(role: ControlOperatorRole | undefined) {
   if (role === undefined) return undefined;

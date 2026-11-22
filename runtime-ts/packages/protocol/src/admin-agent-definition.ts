@@ -5,6 +5,8 @@ import {
   AgentPinnedModelReferenceSchema,
   AgentRevisionContentSchema,
   AgentRevisionDtoSchema,
+  AgentRevisionSectionSchema,
+  AgentVersionNotesSchema,
 } from "./agent-definition.js";
 import { IdSchema } from "./schemas.js";
 
@@ -17,13 +19,19 @@ export const AdminCreateAgentDefinitionSchema = Type.Object(
     revisionId: IdSchema,
     availability: AgentAvailabilitySchema,
     content: AgentRevisionContentSchema,
+    versionNotes: Type.Optional(AgentVersionNotesSchema),
     expectedGeneration,
   },
   strict,
 );
 export type AdminCreateAgentDefinition = Static<typeof AdminCreateAgentDefinitionSchema>;
 export const AdminSaveAgentRevisionSchema = Type.Object(
-  { revisionId: IdSchema, content: AgentRevisionContentSchema, expectedGeneration },
+  {
+    revisionId: IdSchema,
+    content: AgentRevisionContentSchema,
+    versionNotes: Type.Optional(AgentVersionNotesSchema),
+    expectedGeneration,
+  },
   strict,
 );
 export type AdminSaveAgentRevision = Static<typeof AdminSaveAgentRevisionSchema>;
@@ -44,6 +52,7 @@ const AgentRevisionSummarySchema = Type.Object(
   {
     ...Type.Omit(AgentRevisionDtoSchema, ["content"]).properties,
     displayName: Type.String(),
+    changedSections: Type.Optional(Type.Array(AgentRevisionSectionSchema)),
   },
   strict,
 );
@@ -52,6 +61,17 @@ export const AdminAgentDefinitionListSchema = Type.Object(
     canManage: Type.Boolean(),
     builtinToolLimit: Type.Array(Type.String()),
     pinnedModelOptions: Type.Array(AgentPinnedModelReferenceSchema),
+    skillOptions: Type.Array(
+      Type.Object(
+        {
+          skillId: IdSchema,
+          displayName: Type.String(),
+          description: Type.String(),
+          versions: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { minItems: 1 }),
+        },
+        strict,
+      ),
+    ),
     externalToolOptions: Type.Array(
       Type.Object(
         {

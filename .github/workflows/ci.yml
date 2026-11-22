@@ -55,6 +55,9 @@ jobs:
         # 回归脚本清除所有 workspace 生成物；typecheck 必须按依赖拓扑自行构建，不能依赖缓存或前序任务残留。
         run: pnpm check:clean-workspace
 
+      - name: 校验公开 API OpenAPI 产物
+        run: pnpm api:openapi:check
+
       - name: 生产配置契约与依赖漏洞审计
         run: pnpm config:check:production && pnpm security:audit:production
 

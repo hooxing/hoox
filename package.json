@@ -29,6 +29,8 @@
     "build": "corepack pnpm --recursive --sort --if-present build",
     "admin:pi-catalog:generate": "node scripts/generate-admin-pi-model-catalog.mjs",
     "admin:pi-catalog:check": "node scripts/generate-admin-pi-model-catalog.mjs --check",
+    "api:openapi:generate": "node --import tsx scripts/generate-public-openapi.mjs",
+    "api:openapi:check": "node --import tsx scripts/generate-public-openapi.mjs --check",
     "toolchain:check": "node scripts/validate-toolchain-versions.mjs",
     "deps:check": "node scripts/validate-workspace-dependencies.mjs",
     "clean": "corepack pnpm --recursive --if-present clean",

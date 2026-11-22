@@ -4306,6 +4306,9 @@ export async function bootstrapRuntimeAccessOnClient(
       await client.query(
         `GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.run_trajectory_entries TO ${role}`,
       );
+      await client.query(
+        `GRANT SELECT ON TABLE ${schema}.run_trajectory_cleanup_tenants TO ${role}`,
+      );
     }
     if (await hasCleanupConsumerState(client)) {
       await client.query(

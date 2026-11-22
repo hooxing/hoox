@@ -14,6 +14,7 @@ vi.mock("@hoox/persistence/blob", () => ({
   createS3BlobStore: () => ({}),
   createS3StableBlobGarbageCollector: () => ({}),
   PgBlobLifecycleRepository: class {},
+  DurableTraceBlobPersistenceAdapter: class {},
   RUNTIME_BLOB_OBJECT_PREFIX: "agent-runtime",
 }));
 
@@ -136,6 +137,7 @@ describe("生产 Scheduler 装配顺序", () => {
     );
     expect(mocks.gatewayConstructed).toHaveBeenCalledTimes(1);
     expect(mocks.gatewayProbe).toHaveBeenCalledTimes(1);
+    expect(mocks.retentionStarted).not.toHaveBeenCalled();
     expect(mocks.loopStarted).not.toHaveBeenCalled();
     expect(mocks.pool.end).toHaveBeenCalledTimes(3);
   });

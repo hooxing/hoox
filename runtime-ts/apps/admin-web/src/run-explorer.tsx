@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { projectInternalTrajectory } from "@hoox/trajectory";
 import { AdminApiError } from "./api.js";
 import {
@@ -25,29 +25,39 @@ export async function loadTrajectoryPages(
 ) {
   const events: RunTrajectoryPageDto["events"][number][] = [];
   let loadedBytes = 0;
+  let truncatedEvents = 0;
   let cursor: string | undefined;
   let partial = false;
+  let limitReached = false;
   let hasNextPage = true;
   while (hasNextPage) {
     const page = await readPage(tenantId, runId, attemptId, cursor);
-    for (const { agentThreadId: _agentThreadId, ...event } of page.events) {
-      const eventBytes = new TextEncoder().encode(JSON.stringify(event)).byteLength;
-      if (events.length >= limits.events || loadedBytes + eventBytes > limits.bytes) {
-        partial = true;
-        break;
-      }
-      events.push({ ...event, agentThreadId: _agentThreadId });
-      loadedBytes += eventBytes;
+    if (
+      events.length + page.events.length > limits.events ||
+      loadedBytes + page.bytes > limits.bytes
+    ) {
+      partial = true;
+      limitReached = true;
+      onProgress({ events: events.length, bytes: loadedBytes });
+      break;
     }
+    for (const pageEvent of page.events) {
+      if (pageEvent.truncated === true) {
+        partial = true;
+        truncatedEvents += 1;
+      }
+      events.push(pageEvent);
+    }
+    loadedBytes += page.bytes;
     onProgress({ events: events.length, bytes: loadedBytes });
-    hasNextPage = !partial && page.hasMore && page.nextCursor !== undefined;
+    hasNextPage = !limitReached && page.hasMore && page.nextCursor !== undefined;
     if (!hasNextPage) break;
     cursor = page.nextCursor;
   }
   const projection = projectInternalTrajectory(
     events.map(({ agentThreadId: _agentThreadId, ...event }) => event),
   );
-  return { ...projection, partial, loadedEvents: events.length, loadedBytes };
+  return { ...projection, partial, loadedEvents: events.length, loadedBytes, truncatedEvents };
 }
 
 export const runStatusLabels: Readonly<Record<RunStatus, string>> = {
@@ -641,12 +651,32 @@ export function DeepSeekTrajectoryDebugger({
   const [showTurns, setShowTurns] = useState(true);
   const [showCalls, setShowCalls] = useState(true);
   const [showSubcalls, setShowSubcalls] = useState(true);
-  const records = trajectory.records.filter((record) =>
-    `${record.label} ${record.summary} ${JSON.stringify(record.detail)}`
-      .toLocaleLowerCase()
-      .includes(query.trim().toLocaleLowerCase()),
+  const searchIndex = useMemo(
+    () =>
+      trajectory.records.map((record) => ({
+        record,
+        detailJson: JSON.stringify(record.detail, null, 2),
+        searchText:
+          `${record.label} ${record.summary} ${JSON.stringify(record.detail)}`.toLocaleLowerCase(),
+      })),
+    [trajectory.records],
   );
-  const turns = [...new Set(records.map((record) => record.turn))];
+  const groupedRecords = useMemo(() => {
+    const groups = new Map<number, RunTrajectoryRecordDto[]>();
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    for (const indexed of searchIndex) {
+      if (!indexed.searchText.includes(normalizedQuery)) continue;
+      const group = groups.get(indexed.record.turn) ?? [];
+      group.push(indexed.record);
+      groups.set(indexed.record.turn, group);
+    }
+    return [...groups.entries()].map(([turn, turnRecords]) => ({ turn, records: turnRecords }));
+  }, [query, searchIndex]);
+  const records = useMemo(() => groupedRecords.flatMap((group) => group.records), [groupedRecords]);
+  const detailJsonById = useMemo(
+    () => new Map(searchIndex.map(({ record, detailJson }) => [record.id, detailJson])),
+    [searchIndex],
+  );
   const maxOffset = Math.max(
     1,
     ...records.map((record) => record.monotonicOffsetMs + (record.durationMs ?? 0)),
@@ -664,7 +694,10 @@ export function DeepSeekTrajectoryDebugger({
     <section className="trajectory-debugger" aria-label="完整运行轨迹">
       {trajectory.partial && (
         <p className="boundary-note" role="status">
-          已达到读取上限；汇总仅覆盖已加载部分（{trajectory.loadedEvents.toLocaleString()} 条事件，
+          {trajectory.truncatedEvents > 0
+            ? `有 ${trajectory.truncatedEvents.toLocaleString()} 条超大事件仅显示有界占位；`
+            : "已达到读取上限；"}
+          汇总仅覆盖已加载部分（{trajectory.loadedEvents.toLocaleString()} 条事件，
           {(trajectory.loadedBytes / (1024 * 1024)).toFixed(1)} MB）。
         </p>
       )}
@@ -734,61 +767,58 @@ export function DeepSeekTrajectoryDebugger({
         ))}
       </section>
       <div className="trajectory-ledger">
-        {turns.map((turn) => (
+        {groupedRecords.map(({ turn, records: turnRecords }) => (
           <section className="trajectory-turn" key={turn}>
             {showTurns && <h3>第 {turn} 轮</h3>}
-            {records
-              .filter((record) => record.turn === turn)
-              .map((record) => {
-                if (!showCalls && (record.kind === "tool" || record.kind === "subtool"))
-                  return null;
-                if (!showSubcalls && record.kind === "subtool") return null;
-                const isExpanded = expanded.has(record.id);
-                return (
-                  <article
-                    className={`trajectory-entry ${selectedId === record.id ? "selected" : ""}`}
-                    key={record.id}
+            {turnRecords.map((record) => {
+              if (!showCalls && (record.kind === "tool" || record.kind === "subtool")) return null;
+              if (!showSubcalls && record.kind === "subtool") return null;
+              const isExpanded = expanded.has(record.id);
+              return (
+                <article
+                  className={`trajectory-entry ${selectedId === record.id ? "selected" : ""}`}
+                  key={record.id}
+                >
+                  <button
+                    type="button"
+                    className="trajectory-entry-toggle"
+                    onClick={() => {
+                      select(record);
+                      setExpanded((current) => {
+                        const next = new Set(current);
+                        if (next.has(record.id)) next.delete(record.id);
+                        else next.add(record.id);
+                        return next;
+                      });
+                    }}
                   >
-                    <button
-                      type="button"
-                      className="trajectory-entry-toggle"
-                      onClick={() => {
-                        select(record);
-                        setExpanded((current) => {
-                          const next = new Set(current);
-                          if (next.has(record.id)) next.delete(record.id);
-                          else next.add(record.id);
-                          return next;
-                        });
-                      }}
-                    >
-                      <span className={`trajectory-kind ${record.kind}`}>{record.label}</span>
-                      <span className="trajectory-summary">{record.summary}</span>
-                      <span className="trajectory-duration">
-                        {record.durationMs === null ? "—" : formatDuration(record.durationMs)}
-                      </span>
-                    </button>
-                    {isExpanded && (
-                      <div className="trajectory-entry-detail">
-                        <button
-                          type="button"
-                          className="text-button"
-                          onClick={() =>
-                            void navigator.clipboard
-                              .writeText(JSON.stringify(record.detail, null, 2))
-                              .catch(() => {})
-                          }
-                        >
-                          复制 JSON
-                        </button>
-                        <pre className="run-timeline-content">
-                          {JSON.stringify(record.detail, null, 2)}
-                        </pre>
-                      </div>
-                    )}
-                  </article>
-                );
-              })}
+                    <span className={`trajectory-kind ${record.kind}`}>{record.label}</span>
+                    <span className="trajectory-summary">{record.summary}</span>
+                    <span className="trajectory-duration">
+                      {record.durationMs === null ? "—" : formatDuration(record.durationMs)}
+                    </span>
+                  </button>
+                  {isExpanded && (
+                    <div className="trajectory-entry-detail">
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() =>
+                          void navigator.clipboard
+                            .writeText(detailJsonById.get(record.id) ?? "null")
+                            .catch(() => {})
+                        }
+                      >
+                        复制 JSON
+                      </button>
+                      <pre className="run-timeline-content">
+                        {detailJsonById.get(record.id) ?? "null"}
+                      </pre>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
           </section>
         ))}
       </div>

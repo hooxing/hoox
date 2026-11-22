@@ -50,6 +50,10 @@ BEGIN
     migrator_role
   );
   EXECUTE format(
+    'CREATE POLICY run_trajectory_cleanup_directory_policy ON run_trajectory_entries FOR SELECT TO %I USING (true)',
+    migrator_role
+  );
+  EXECUTE format(
     'GRANT SELECT,INSERT,DELETE ON run_trajectory_entries TO %I',
     runtime_role
   );
@@ -58,6 +62,17 @@ BEGIN
     runtime_role
   );
 END $$;
+
+CREATE VIEW run_trajectory_cleanup_tenants WITH (security_barrier=true) AS
+SELECT DISTINCT tenant_id FROM run_trajectory_entries;
+DO $$
+BEGIN
+  EXECUTE format(
+    'GRANT SELECT ON run_trajectory_cleanup_tenants TO %I',
+    current_setting('app.runtime_role')
+  );
+END $$;
+REVOKE ALL ON run_trajectory_cleanup_tenants FROM PUBLIC;
 
 CREATE VIEW admin_run_trajectory_directory WITH (security_barrier=true) AS
 SELECT entry.tenant_id, entry.thread_id, entry.run_id, entry.attempt_id, entry.agent_thread_id, entry.sequence,

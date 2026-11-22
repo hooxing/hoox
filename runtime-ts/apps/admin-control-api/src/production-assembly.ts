@@ -32,7 +32,7 @@ import {
   PgBlobLifecycleRepository,
   RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@hoox/persistence/blob";
-import { PgRunTrajectoryStore } from "@hoox/persistence";
+import { PgRunTrajectoryStore } from "@hoox/persistence/trajectory";
 import { createPostgresPool, probePostgres, WebhookSecretCipher } from "@hoox/persistence/postgres";
 import {
   loadProductionTlsCredentials,

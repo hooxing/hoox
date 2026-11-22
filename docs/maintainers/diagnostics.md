@@ -94,7 +94,7 @@ http://127.0.0.1:4188
 
 development 管理 Web 的“数据运营”页显示“打开内部轨迹”链接。该链接在新窗口打开回环地址，不把轨迹正文交给 Admin API；仍需维护者单独启动上述命令。
 
-Demo 不部署查看器；旧 `/trajectory/` 只重定向到后台运行记录。Worker 仍写入固定数据 epoch 的本地诊断卷，供维护者在 development 环境排障；该卷不由 Admin API 读取。
+Demo 不部署查看器；旧 `/trajectory/` 只重定向到后台运行记录。完整逻辑轨迹按 Attempt 写入配置的 S3/MinIO 对象存储，由后台按管理员权限、独立审计和字节受限分页读取；数据库仅保存索引与保留元数据。Worker 可在 development 额外写入本地镜像供本机查看器使用，该镜像不是后台数据源。轨迹保留期由 Scheduler 全局清理，默认 30 天；清理目录只暴露 Tenant ID，不使用 Worker Coordinator 身份。
 
 可覆盖参数：
 
@@ -113,7 +113,7 @@ Attempt 下拉框支持切换单次 Attempt，默认组合各 Run 的最新 Atte
 
 管理 Web 的“运行记录”是所有部署的统一 Run 调试入口。列表按用户问题或 Thread 标题搜索，并显示 Agent、用户、状态、时间、耗时与 Token；详情直接展示持久事件中的思考、回复、工具参数与结果、错误及 Attempt 时间线。每次管理员详情读取均静默写入正文访问审计。权限边界见[后台控制面与运行配置](../architecture/admin-control-plane.md#run-浏览器与正文访问)。
 
-已发布 Demo 的 `/trajectory/` 与 `/trajectory` 仅兼容重定向到 `/admin/runs`，不再运行轨迹 Web 服务。本地 development 仍可按需运行 `corepack pnpm dev:trajectory` 检查 Worker 在 `model-wire-traces` 下的诊断镜像；这些镜像包含额外的 Pi 原始事件、request 原文和内部阶段计时，不属于 PostgreSQL Run 事实，也不进入后台详情或生产部署。
+已发布 Demo 的 `/trajectory/` 与 `/trajectory` 仅兼容重定向到 `/admin/runs`，不再运行轨迹 Web 服务。本地 development 仍可按需运行 `corepack pnpm dev:trajectory` 检查 Worker 在 `model-wire-traces` 下的诊断镜像；这些本地镜像包含额外的 Pi 原始事件、request 原文和内部阶段计时，不属于 PostgreSQL Run 事实，也不进入后台详情。后台逻辑轨迹保留在共享对象存储中，过期后由 Scheduler 清理；pending Blob 在确认提交状态并释放引用前不会删除索引锚点。
 
 ## 安全约束
 

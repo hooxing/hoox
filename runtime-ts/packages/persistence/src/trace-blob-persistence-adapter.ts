@@ -37,6 +37,15 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
   async persistTrace(
     input: Parameters<TraceBlobPersistencePort["persistTrace"]>[0],
   ): Promise<TraceBlobPersistenceResult> {
+    return await this.persistTraceCancellable(input);
+  }
+
+  async persistTraceCancellable(
+    input: Parameters<TraceBlobPersistencePort["persistTrace"]>[0] & {
+      readonly signal?: AbortSignal;
+    },
+  ): Promise<TraceBlobPersistenceResult> {
+    if (input.signal?.aborted) return { outcome: "unavailable" };
     const operationId = normalizeOperationId(input.idempotencyKey);
     const scope = { tenantId: input.tenantId };
     const uploadId = `trace-${operationId}`;
@@ -60,10 +69,17 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
         if (snapshot === undefined) return { outcome: "unknown" };
       }
       for (let step = 0; step < 32; step += 1) {
+        if (input.signal?.aborted) return { outcome: "unavailable" };
         if (!matchesTraceCommand(snapshot, input.tenantId, input.sha256, input.body.byteLength)) {
           return { outcome: "conflict" };
         }
-        const result = await this.advance(snapshot, input.body, input.sha256, uploadId);
+        const result = await this.advance(
+          snapshot,
+          input.body,
+          input.sha256,
+          uploadId,
+          input.signal,
+        );
         if ("outcome" in result) return result;
         snapshot = result;
       }
@@ -138,19 +154,24 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
     body: Uint8Array,
     sha256: string,
     uploadId: string,
+    signal?: AbortSignal,
   ): Promise<BlobCommitSnapshot | TraceBlobPersistenceResult> {
     const scope = snapshot.scope;
     switch (snapshot.status) {
       case "upload_pending": {
-        const staged = await this.blobs.putStaging({
+        const stagingInput = {
           scope,
-          purpose: "trace",
+          purpose: "trace" as const,
           uploadId,
           body,
           mediaType: "text/plain; charset=utf-8",
           expectedSha256: sha256,
           expectedSize: body.byteLength,
-        });
+        };
+        const staged =
+          signal === undefined
+            ? await this.blobs.putStaging(stagingInput)
+            : await this.blobs.putStaging(stagingInput, { signal });
         const converged = await this.cas(
           snapshot,
           transitionBlobCommit(snapshot, { type: "stage_verified", staged }),
@@ -236,11 +257,12 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
       case "promotion_started": {
         if (snapshot.staged === undefined || snapshot.promotionAuthorization === undefined)
           return { outcome: "conflict" };
-        const stable = await this.blobs.promote(
-          scope,
-          snapshot.staged,
-          snapshot.promotionAuthorization,
-        );
+        const stable =
+          signal === undefined
+            ? await this.blobs.promote(scope, snapshot.staged, snapshot.promotionAuthorization)
+            : await this.blobs.promote(scope, snapshot.staged, snapshot.promotionAuthorization, {
+                signal,
+              });
         return await this.cas(
           snapshot,
           transitionBlobCommit(snapshot, { type: "promotion_succeeded", stable }),

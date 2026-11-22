@@ -33,7 +33,7 @@ import {
   RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@hoox/persistence/blob";
 import { createPostgresPool, probePostgres } from "@hoox/persistence/postgres";
-import { PgRunTrajectoryStore } from "@hoox/persistence";
+import { PgRunTrajectoryStore } from "@hoox/persistence/trajectory";
 import {
   PgAgentControlRepository,
   PgBackedSandboxSessionRegistry,
@@ -1051,10 +1051,32 @@ async function assembleWorkerRuntime(
       new DurableTraceBlobPersistenceAdapter(blobRepository, blobs),
       configuration.model.trajectoryRetentionDays,
     );
+    const trajectorySecrets = new Set(
+      [
+        configuration.model.apiKey,
+        configuration.model.credentialEncryptionKey,
+        configuration.objectStorage.accessKeyId,
+        configuration.objectStorage.secretAccessKey,
+        configuration.sandbox.apiKey,
+        configuration.sandbox.e2b?.apiKey,
+        configuration.sandbox.tencentAgs?.apiKey,
+        configuration.externalToolIdentityRootKey,
+      ].filter((value): value is string => typeof value === "string" && value.length > 0),
+    );
     const internalTrajectoryDiagnostics = Object.freeze({
-      persist: async (record: InternalTrajectoryDiagnosticRecord) => {
+      get knownSecrets() {
+        return [...trajectorySecrets];
+      },
+      addKnownSecrets: (secrets: readonly string[]) => {
+        for (const secret of secrets) trajectorySecrets.add(secret);
+      },
+      persist: async (
+        record: InternalTrajectoryDiagnosticRecord,
+        options?: { signal: AbortSignal },
+      ) => {
+        if (options?.signal.aborted) return;
         const writes = [
-          trajectoryStore.persist(record),
+          trajectoryStore.persist(record, options),
           ...(localInternalTrajectoryDiagnostics === undefined
             ? []
             : [localInternalTrajectoryDiagnostics.persist(record)]),
@@ -1373,6 +1395,7 @@ async function assembleWorkerRuntime(
       configuration.threadContext.compaction,
       configuration.model.maxOutputTokens,
       async (snapshot, compactionSettings, tools) => {
+        if (snapshot?.modelApiKey !== undefined) trajectorySecrets.add(snapshot.modelApiKey);
         if (snapshot?.model === undefined && configuration.model.apiKey === "")
           throw new Error("MODEL_CONFIGURATION_REQUIRED");
         const configuredProvider = snapshot?.model?.configuration;

@@ -121,7 +121,10 @@ export interface RunTrajectoryRecordDto {
 }
 
 export interface RunTrajectoryPageDto {
-  readonly events: readonly (InternalTrajectoryEventV1 & { readonly agentThreadId: string })[];
+  readonly events: readonly (InternalTrajectoryEventV1 & {
+    readonly agentThreadId: string;
+    readonly truncated?: boolean;
+  })[];
   readonly bytes: number;
   readonly nextCursor?: string;
   readonly hasMore: boolean;
@@ -132,6 +135,7 @@ export interface RunTrajectoryDto {
   readonly partial: boolean;
   readonly loadedEvents: number;
   readonly loadedBytes: number;
+  readonly truncatedEvents: number;
   readonly stats: Readonly<{
     turns: number;
     calls: number;

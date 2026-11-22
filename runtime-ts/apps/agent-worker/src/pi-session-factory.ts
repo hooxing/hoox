@@ -776,6 +776,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           return snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_INVALID");
       }
       if (remaining.size) return snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_INVALID");
+      trajectoryRecorder?.addKnownSecrets(
+        snapshots.flatMap(({ credential }) => (credential === undefined ? [] : [credential])),
+      );
       return snapshots;
     };
     const externalSnapshots = await readExternalSnapshots();

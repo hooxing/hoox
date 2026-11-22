@@ -478,13 +478,39 @@ describe("运行详情", () => {
       () => undefined,
       {
         events: 2,
-        bytes: 1024,
+        bytes: 60,
       },
     );
     expect(capped.partial).toBe(true);
-    expect(capped.loadedEvents).toBe(2);
-    expect(capped.stats.events).toBe(2);
+    expect(capped.loadedEvents).toBe(1);
+    expect(capped.stats.events).toBe(1);
     const partialView = render(<DeepSeekTrajectoryDebugger trajectory={capped} />);
+    expect(partialView.textContent).toContain("汇总仅覆盖已加载部分");
+  });
+
+  it("超大事件占位明确标记部分汇总", async () => {
+    const oversized = {
+      schemaVersion: 1 as const,
+      sequence: 1,
+      occurredAt: "2026-11-22T00:00:00.000Z",
+      monotonicOffsetMs: 1,
+      source: "pi" as const,
+      type: "large_event",
+      event: { $cubeInternalType: "truncated", originalSize: 3_000_000 },
+      agentThreadId: "agent-a",
+      truncated: true,
+    };
+    const trajectory = await loadTrajectoryPages(
+      async () => ({ events: [oversized], bytes: 0, hasMore: false }),
+      "tenant_a",
+      "run_a",
+      "attempt_a",
+      () => undefined,
+    );
+    expect(trajectory.partial).toBe(true);
+    expect(trajectory.truncatedEvents).toBe(1);
+    const partialView = render(<DeepSeekTrajectoryDebugger trajectory={trajectory} />);
+    expect(partialView.textContent).toContain("超大事件仅显示有界占位");
     expect(partialView.textContent).toContain("汇总仅覆盖已加载部分");
   });
 

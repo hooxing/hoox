@@ -112,6 +112,47 @@ describe("InternalTrajectoryAttemptRecorder", () => {
     expect(JSON.stringify(persist.mock.calls)).not.toContain("secret");
   });
 
+  it("在所有字符串中替换运行时秘密并识别命令行和序列化凭据", async () => {
+    const persist = vi.fn(async (_record: InternalTrajectoryDiagnosticRecord) => undefined);
+    const recorder = new InternalTrajectoryAttemptRecorder(
+      { tenantId: "tenant_1", threadId: "thread_1", runId: "run_1", attemptId: "attempt_1" },
+      { persist },
+    );
+    recorder.addKnownSecrets(["external-secret-value"]);
+    recorder.record("pi", "tool_execution_start", {
+      command: `curl -H "Authorization: Bearer external-secret-value" --api-key external-secret-value`,
+      serialized: '{"webhookSecret":"webhook-value","password":"p@ss"}',
+      nested: { token: "token-value" },
+      unrelated: "contains external-secret-value",
+    });
+    await recorder.drain();
+    const serialized = JSON.stringify(persist.mock.calls[0]?.[0].event.event);
+    expect(serialized).not.toMatch(/external-secret-value|webhook-value|p@ss|token-value/u);
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  it("队列有界，写入超时会取消且 drain 不等待诊断后端", async () => {
+    let signal: AbortSignal | undefined;
+    const failureObserver = vi.fn();
+    const recorder = new InternalTrajectoryAttemptRecorder(
+      { tenantId: "tenant_1", threadId: "thread_1", runId: "run_1", attemptId: "attempt_1" },
+      {
+        persist: vi.fn((_record, options) => {
+          signal = options?.signal;
+          return new Promise<void>(() => undefined);
+        }),
+        onFailure: failureObserver,
+      },
+      undefined,
+      { queueLimit: 1, writeDeadlineMs: 10 },
+    );
+    recorder.record("pi", "turn_start", {});
+    recorder.record("pi", "turn_start", {});
+    await recorder.drain();
+    expect(signal?.aborted).toBe(true);
+    expect(failureObserver).toHaveBeenCalledTimes(2);
+  });
+
   it("诊断失败不阻断后续事件", async () => {
     const persisted: number[] = [];
     const failureObserver = vi.fn();

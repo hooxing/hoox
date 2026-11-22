@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { listRunTrajectoryCleanupTenants } from "@hoox/persistence";
+import { listRunTrajectoryCleanupTenants } from "@hoox/persistence/trajectory";
 
 export interface RunTrajectoryRetentionStore {
   cleanupExpired(tenantId: string, limit?: number): Promise<number>;

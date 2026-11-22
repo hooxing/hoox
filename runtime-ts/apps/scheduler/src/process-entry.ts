@@ -20,7 +20,8 @@ import {
   probePostgres,
   WebhookSecretCipher,
 } from "@hoox/persistence/postgres";
-import { PgRunTrajectoryStore } from "@hoox/persistence";
+import { PgRunTrajectoryStore } from "@hoox/persistence/trajectory";
+import { DurableTraceBlobPersistenceAdapter } from "@hoox/persistence/blob";
 import { WebhookDispatcher } from "./webhook-dispatcher.js";
 import { runRunTrajectoryRetentionPass } from "./run-trajectory-retention.js";
 import { PgThreadContinuityMetrics, PgThreadTitleGenerationStore } from "@hoox/persistence/thread";
@@ -561,26 +562,17 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         undefined,
         configuration.trajectoryRetentionDays,
         gc,
+        new DurableTraceBlobPersistenceAdapter(blobRepository, blobs),
       );
       const runTrajectoryCleanup = async () => {
         if (trajectoryCleanupInFlight !== undefined) return trajectoryCleanupInFlight;
-        trajectoryCleanupInFlight = runRunTrajectoryRetentionPass(
-          coordinatorPool,
-          trajectoryStore,
-          () => console.error("运行轨迹保留清理失败"),
+        trajectoryCleanupInFlight = runRunTrajectoryRetentionPass(pool, trajectoryStore, () =>
+          console.error("运行轨迹保留清理失败"),
         ).finally(() => {
           trajectoryCleanupInFlight = undefined;
         });
         return trajectoryCleanupInFlight;
       };
-      void runTrajectoryCleanup().catch(() => console.error("运行轨迹保留清理协调失败"));
-      trajectoryTimer = setInterval(
-        () => {
-          void runTrajectoryCleanup().catch(() => console.error("运行轨迹保留清理协调失败"));
-        },
-        24 * 60 * 60 * 1000,
-      );
-      trajectoryTimer.unref?.();
       if (webhookPool !== undefined && configuration.webhookDispatch !== undefined) {
         await probePostgres(webhookPool, configuration.webhookDispatch.role);
         const dispatcher = new WebhookDispatcher({
@@ -589,10 +581,6 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
           owner: configuration.cleanup.workerId,
         });
         webhookDispatcher = dispatcher;
-        // 定时补满空闲槽位；单次投递受绝对截止时间约束，慢接收端只占用自己的槽位。
-        webhookTimer = setInterval(() => {
-          void dispatcher.pump();
-        }, 500);
       }
       // 角色身份和 RLS 绕过属性必须在 cleanup loop 产生任何远端副作用前证明安全。
       await probePostgres(pool, configuration.databaseRuntimeRole);
@@ -653,6 +641,20 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         configuration.threadSandbox.lifecycleTimeoutMs,
       );
       if (await managed.isConfigured()) await managed.probe();
+      void runTrajectoryCleanup().catch(() => console.error("运行轨迹保留清理协调失败"));
+      trajectoryTimer = setInterval(
+        () => {
+          void runTrajectoryCleanup().catch(() => console.error("运行轨迹保留清理协调失败"));
+        },
+        24 * 60 * 60 * 1000,
+      );
+      trajectoryTimer.unref?.();
+      if (webhookDispatcher !== undefined) {
+        // 定时补满空闲槽位；单次投递受绝对截止时间约束，慢接收端只占用自己的槽位。
+        webhookTimer = setInterval(() => {
+          void webhookDispatcher?.pump();
+        }, 500);
+      }
       const consumer = new SandboxCleanupConsumer(
         new PgSandboxCleanupConsumerStore(pool),
         new SandboxCleanupRouterResolver(

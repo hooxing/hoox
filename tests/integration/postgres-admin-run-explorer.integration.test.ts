@@ -8,7 +8,10 @@ import {
   enqueueWebhookEvent,
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
-import { PgRunTrajectoryStore } from "../../runtime-ts/packages/persistence/src/run-trajectory-store.js";
+import {
+  listRunTrajectoryCleanupTenants,
+  PgRunTrajectoryStore,
+} from "../../runtime-ts/packages/persistence/src/run-trajectory-store.js";
 import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
 import {
   createPostgresPool,
@@ -239,6 +242,28 @@ async function auditRows() {
 }
 
 describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
+  it("Runtime 清理身份只通过受限目录视图枚举有轨迹的 Tenant", async () => {
+    const client = await administrator.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL search_path TO "${schema}"`);
+      await client.query(
+        `INSERT INTO run_trajectory_entries(
+         tenant_id,thread_id,run_id,attempt_id,sequence,source,event_type,occurred_at,
+         monotonic_offset_ms,sha256,size,persistence_status,blob_operation_id,expires_at
+       ) VALUES('tenant_a','thread_1','run_a2','run_a2_attempt',1,'runtime','test',now(),
+         0,repeat('a',64),1,'pending','trace-'||repeat('b',64),now()+interval '1 day')`,
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+    await expect(listRunTrajectoryCleanupTenants(runtime)).resolves.toEqual(["tenant_a"]);
+  });
+
   it("管理员列表显示问题并支持关键词搜索，接入目录固定初始化管理员空间", async () => {
     const explorer = service();
     const allRuns = await explorer.listRuns("user_admin");
@@ -609,7 +634,7 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
         attemptId: "run_a2_attempt",
         limit: 50,
       }),
-    ).resolves.toMatchObject({ events: [], bytes: 0, hasMore: false });
+    ).resolves.toMatchObject({ records: [], bytes: 0, hasMore: false });
     expect(await auditRows()).toContainEqual({
       actor_user_id: "user_admin",
       tenant_id: "tenant_a",

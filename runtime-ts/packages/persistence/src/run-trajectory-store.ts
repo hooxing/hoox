@@ -5,6 +5,9 @@ import type { BlobStore, StableBlobGcPort, StableBlobRef } from "./blob-store.js
 import { PersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";
 
+export const RUN_TRAJECTORY_PAGE_BYTE_BUDGET = 2 * 1024 * 1024;
+const RUN_TRAJECTORY_READ_CONCURRENCY = 4;
+
 export interface RunTrajectoryEventInput {
   readonly context: {
     readonly tenantId: string;
@@ -34,11 +37,28 @@ export interface RunTrajectoryPageInput {
   readonly afterCursor?: Readonly<{ occurredAt: string; agentThreadId: string; sequence: number }>;
 }
 
+export interface CancellableTraceBlobPersistencePort extends TraceBlobPersistencePort {
+  persistTraceCancellable?(
+    input: Parameters<TraceBlobPersistencePort["persistTrace"]>[0] & {
+      readonly signal?: AbortSignal;
+    },
+  ): ReturnType<TraceBlobPersistencePort["persistTrace"]>;
+}
+
+export interface RunTrajectoryRetentionRecoveryPort {
+  recoverForRetention(input: {
+    readonly tenantId: string;
+    readonly operationId: string;
+    readonly sha256: string;
+    readonly size: number;
+  }): Promise<"completed" | "abandoned" | "deferred" | "retry" | "conflict">;
+}
+
 export async function listRunTrajectoryCleanupTenants(
-  coordinatorPool: Pool,
+  cleanupDirectoryPool: Pool,
 ): Promise<readonly string[]> {
-  const result = await coordinatorPool.query<{ readonly tenant_id: string }>(
-    "SELECT tenant_id FROM worker_tenant_assignments ORDER BY tenant_id",
+  const result = await cleanupDirectoryPool.query<{ readonly tenant_id: string }>(
+    "SELECT tenant_id FROM run_trajectory_cleanup_tenants ORDER BY tenant_id",
   );
   return Object.freeze(result.rows.map((row) => row.tenant_id));
 }
@@ -92,16 +112,21 @@ export class PgRunTrajectoryStore {
   constructor(
     private readonly pool: Pool,
     private readonly blobs: BlobStore,
-    private readonly traceBlobs: TraceBlobPersistencePort | undefined,
+    private readonly traceBlobs: CancellableTraceBlobPersistencePort | undefined,
     private readonly retentionDays = 30,
     private readonly gc?: StableBlobGcPort,
+    private readonly retentionRecovery?: RunTrajectoryRetentionRecoveryPort,
   ) {
     if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > 365) {
       throw new TypeError("运行轨迹保留天数无效");
     }
   }
 
-  async persist(input: RunTrajectoryEventInput): Promise<void> {
+  async persist(
+    input: RunTrajectoryEventInput,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<void> {
+    if (options?.signal?.aborted) return;
     const { context, event } = input;
     const body = Buffer.from(JSON.stringify(event), "utf8");
     const sha256 = createHash("sha256").update(body).digest("hex");
@@ -150,19 +175,26 @@ export class PgRunTrajectoryStore {
       }
     });
 
-    const result = await this.traceBlobs.persistTrace({
+    const traceInput = {
       tenantId: context.tenantId,
       idempotencyKey,
       body,
       sha256,
-    });
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
+    };
+    const result =
+      this.traceBlobs.persistTraceCancellable === undefined
+        ? await this.traceBlobs.persistTrace(traceInput)
+        : await this.traceBlobs.persistTraceCancellable(traceInput);
     if (result.outcome !== "persisted" && result.outcome !== "replayed") {
-      await this.markUnavailable(
-        context.tenantId,
-        context.attemptId,
-        agentThreadId,
-        event.sequence,
-      );
+      if (result.outcome !== "unknown") {
+        await this.markUnavailable(
+          context.tenantId,
+          context.attemptId,
+          agentThreadId,
+          event.sequence,
+        );
+      }
       throw new PersistenceError("UNAVAILABLE", "运行轨迹对象写入失败");
     }
     if (result.blob.size !== body.byteLength || result.blob.sha256 !== sha256) {
@@ -233,35 +265,77 @@ export class PgRunTrajectoryStore {
         rows.release();
       }
     })();
-    const hasMore = page.length > input.limit;
-    const selected = page.slice(0, input.limit);
-    const records = await Promise.all(
-      selected.map(async (row) => {
-        const blob: StableBlobRef = {
-          kind: "stable",
-          tenantId: input.tenantId,
-          purpose: "trace",
-          sha256: String(row.sha256),
-          size: Number(row.size),
-          mediaType: String(row.blob_media_type),
-          incarnationId: String(row.incarnation_id),
-          physicalObjectKey: String(row.physical_object_key),
-        };
-        const body = await this.blobs.getBytes({ tenantId: input.tenantId }, blob);
-        const event = parseTrajectoryEvent(
-          JSON.parse(Buffer.from(body).toString("utf8")) as unknown,
-        );
-        return Object.freeze({
-          ...event,
-          agentThreadId: String(row.agent_thread_id),
-          storedAt: new Date(row.occurred_at as Date).toISOString(),
-        });
-      }),
-    );
+    let selectedBytes = 0;
+    let byteLimited = false;
+    const selected = [] as typeof page;
+    for (const row of page.slice(0, input.limit)) {
+      const rowBytes = Number(row.size);
+      if (selected.length > 0 && selectedBytes + rowBytes > RUN_TRAJECTORY_PAGE_BYTE_BUDGET) {
+        byteLimited = true;
+        break;
+      }
+      selected.push(row);
+      selectedBytes += rowBytes;
+      if (rowBytes > RUN_TRAJECTORY_PAGE_BYTE_BUDGET) {
+        byteLimited = true;
+        break;
+      }
+    }
+    const hasMore = byteLimited || page.length > selected.length;
+    const records: (StoredTrajectoryEvent & {
+      readonly agentThreadId: string;
+      readonly storedAt: string;
+      readonly truncated?: boolean;
+    })[] = [];
+    for (let offset = 0; offset < selected.length; offset += RUN_TRAJECTORY_READ_CONCURRENCY) {
+      const batch = selected.slice(offset, offset + RUN_TRAJECTORY_READ_CONCURRENCY);
+      const loaded = await Promise.all(
+        batch.map(async (row) => {
+          if (Number(row.size) > RUN_TRAJECTORY_PAGE_BYTE_BUDGET) {
+            return Object.freeze({
+              schemaVersion: 1 as const,
+              sequence: Number(row.sequence),
+              occurredAt: new Date(row.occurred_at as Date).toISOString(),
+              monotonicOffsetMs: Number(row.monotonic_offset_ms),
+              source: row.source as "pi" | "runtime",
+              type: String(row.event_type),
+              event: { $cubeInternalType: "truncated", originalSize: Number(row.size) },
+              agentThreadId: String(row.agent_thread_id),
+              storedAt: new Date(row.occurred_at as Date).toISOString(),
+              truncated: true,
+            });
+          }
+          const blob: StableBlobRef = {
+            kind: "stable",
+            tenantId: input.tenantId,
+            purpose: "trace",
+            sha256: String(row.sha256),
+            size: Number(row.size),
+            mediaType: String(row.blob_media_type),
+            incarnationId: String(row.incarnation_id),
+            physicalObjectKey: String(row.physical_object_key),
+          };
+          const body = await this.blobs.getBytes({ tenantId: input.tenantId }, blob);
+          const event = parseTrajectoryEvent(
+            JSON.parse(Buffer.from(body).toString("utf8")) as unknown,
+          );
+          return Object.freeze({
+            ...event,
+            agentThreadId: String(row.agent_thread_id),
+            storedAt: new Date(row.occurred_at as Date).toISOString(),
+          });
+        }),
+      );
+      records.push(...loaded);
+    }
     const last = selected.at(-1);
     return Object.freeze({
       records: Object.freeze(records),
-      bytes: selected.reduce((total, row) => total + Number(row.size), 0),
+      bytes: selected.reduce(
+        (total, row) =>
+          total + (Number(row.size) > RUN_TRAJECTORY_PAGE_BYTE_BUDGET ? 0 : Number(row.size)),
+        0,
+      ),
       hasMore,
       ...(hasMore && last !== undefined
         ? {
@@ -288,6 +362,8 @@ export class PgRunTrajectoryStore {
         readonly agent_thread_id: string;
         readonly sequence: string;
         readonly blob_reference_id: string | null;
+        readonly persistence_status: "pending" | "stored" | "unavailable";
+        readonly blob_operation_id: string;
         readonly sha256: string;
         readonly size: string;
         readonly blob_media_type: string | null;
@@ -295,12 +371,16 @@ export class PgRunTrajectoryStore {
         readonly physical_object_key: string | null;
       }>(
         `SELECT entry.tenant_id,entry.attempt_id,entry.agent_thread_id,entry.sequence::text,
-                entry.blob_reference_id,entry.sha256,entry.size::text,
+                COALESCE(entry.blob_reference_id,reference.reference_id) AS blob_reference_id,
+                entry.persistence_status,entry.blob_operation_id,entry.sha256,entry.size::text,
                 reference.media_type AS blob_media_type,reference.incarnation_id::text,
                 reference.physical_object_key
            FROM run_trajectory_entries entry
            LEFT JOIN blob_references reference
-             ON reference.tenant_id=entry.tenant_id AND reference.reference_id=entry.blob_reference_id
+             ON reference.tenant_id=entry.tenant_id
+            AND (reference.reference_id=entry.blob_reference_id OR
+                 (entry.blob_reference_id IS NULL AND reference.operation_id=entry.blob_operation_id
+                  AND reference.state='stable' AND reference.purpose='trace'))
           WHERE entry.tenant_id=$1 AND entry.expires_at<=clock_timestamp()
           ORDER BY entry.expires_at,entry.attempt_id,entry.agent_thread_id,entry.sequence
           LIMIT $2 FOR UPDATE OF entry SKIP LOCKED`,
@@ -320,6 +400,34 @@ export class PgRunTrajectoryStore {
     });
     let removed = 0;
     for (const row of expired) {
+      if (row.persistence_status === "pending") {
+        if (this.retentionRecovery === undefined) continue;
+        const recovered = await this.retentionRecovery.recoverForRetention({
+          tenantId,
+          operationId: row.blob_operation_id,
+          sha256: row.sha256,
+          size: Number(row.size),
+        });
+        if (recovered === "deferred" || recovered === "retry" || recovered === "conflict") continue;
+        if (recovered === "completed") {
+          await withTenantTransaction(this.pool, { tenantId }, async (client) => {
+            await client.query(
+              `UPDATE run_trajectory_entries entry
+                  SET persistence_status='stored',blob_reference_id=reference.reference_id,
+                      updated_at=clock_timestamp()
+                 FROM blob_references reference
+                WHERE entry.tenant_id=$1 AND entry.attempt_id=$2 AND entry.agent_thread_id=$3
+                  AND entry.sequence=$4 AND entry.persistence_status='pending'
+                  AND reference.tenant_id=entry.tenant_id
+                  AND reference.operation_id=entry.blob_operation_id
+                  AND reference.state='stable' AND reference.purpose='trace'`,
+              [tenantId, row.attempt_id, row.agent_thread_id, row.sequence],
+            );
+          });
+          removed += await this.cleanupExpired(tenantId, 1);
+          continue;
+        }
+      }
       if (row.blob_reference_id !== null) {
         if (
           this.gc === undefined ||

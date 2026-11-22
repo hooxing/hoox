@@ -193,7 +193,10 @@ export interface RunTrajectoryReaderPort {
       sequence: number;
     }>;
   }): Promise<{
-    readonly records: readonly (InternalTrajectoryEventV1 & { readonly agentThreadId: string })[];
+    readonly records: readonly (InternalTrajectoryEventV1 & {
+      readonly agentThreadId: string;
+      readonly truncated?: boolean;
+    })[];
     readonly hasMore: boolean;
     readonly nextCursor?: string;
     readonly bytes: number;
@@ -201,7 +204,10 @@ export interface RunTrajectoryReaderPort {
 }
 
 export interface RunTrajectoryPage {
-  readonly events: readonly (InternalTrajectoryEventV1 & { readonly agentThreadId: string })[];
+  readonly events: readonly (InternalTrajectoryEventV1 & {
+    readonly agentThreadId: string;
+    readonly truncated?: boolean;
+  })[];
   readonly bytes: number;
   readonly hasMore: boolean;
   readonly nextCursor?: string;

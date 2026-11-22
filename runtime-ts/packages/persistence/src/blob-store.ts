@@ -180,11 +180,15 @@ export interface BlobObjectHead {
 }
 
 export interface BlobStore {
-  putStaging(input: PutStagingBlobInput): Promise<StagedBlobRef>;
+  putStaging(
+    input: PutStagingBlobInput,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<StagedBlobRef>;
   promote(
     scope: TenantBlobScope,
     staged: StagedBlobRef,
     authorization: PromotionAuthorizationRef,
+    options?: { readonly signal?: AbortSignal },
   ): Promise<StableBlobRef>;
   head(scope: TenantBlobScope, blob: BlobRef): Promise<BlobObjectHead | undefined>;
   read(scope: TenantBlobScope, blob: BlobRef): AsyncIterable<Uint8Array>;

@@ -40,7 +40,11 @@ it("Webhook 保留数据卷升级：旧 Tenant 经角色预置与迁移后可完
     workerCoordinatorRole: role("worker"),
     adminControlRole: role("admin"),
   };
-  const roles = { ...legacy, webhookDispatcherRole: role("webhook") };
+  const roles = {
+    ...legacy,
+    webhookDispatcherRole: role("webhook"),
+    trajectoryDirectoryRole: role("trajectory_directory"),
+  };
   const cluster = createPostgresPool({ connectionString: bootstrap });
   const password = randomBytes(24).toString("hex");
   const pools: Pool[] = [];

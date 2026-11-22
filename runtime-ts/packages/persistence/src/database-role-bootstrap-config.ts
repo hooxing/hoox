@@ -16,6 +16,7 @@ const roleBindings: readonly RoleEnvironmentBinding[] = [
     urlKey: "DATABASE_WORKER_COORDINATOR_URL",
   },
   { roleKey: "DATABASE_TEAM_COORDINATOR_ROLE", urlKey: "DATABASE_TEAM_COORDINATOR_URL" },
+  { roleKey: "DATABASE_TRAJECTORY_DIRECTORY_ROLE", urlKey: "DATABASE_TRAJECTORY_DIRECTORY_URL" },
   { roleKey: "DATABASE_ADMIN_CONTROL_ROLE", urlKey: "ADMIN_CONTROL_DATABASE_URL" },
   { roleKey: "DATABASE_WEBHOOK_DISPATCHER_ROLE", urlKey: "WEBHOOK_DISPATCHER_DATABASE_URL" },
 ];
@@ -77,7 +78,7 @@ export function readDatabaseRoleBootstrapConfiguration(
     return { role, password };
   });
   if (new Set(credentials.map(({ role }) => role)).size !== credentials.length) {
-    throw new TypeError("七个数据库应用角色必须互不相同");
+    throw new TypeError("数据库应用角色必须互不相同");
   }
   return { bootstrapUrl: bootstrapUrl.toString(), credentials };
 }

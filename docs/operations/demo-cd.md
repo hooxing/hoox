@@ -75,11 +75,11 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 
 | 文件 | 所需内容和关系 |
 | --- | --- |
-| `infra.env` | PostgreSQL 初始化账号、数据库及各独立角色和密码（含 Webhook Dispatcher），MinIO root、运行时与 Skill 发布账号，以及桶名；从 `infra.env.example` 起草。PostgreSQL 初始化脚本在新数据卷初始化时执行，每次发布也会幂等补齐缺失角色；已有角色不会被修改，修改此文件不会自动轮换已有数据库角色密码。 |
+| `infra.env` | PostgreSQL 初始化账号、数据库及各独立角色和密码（含 Webhook Dispatcher 与轨迹目录角色），MinIO root、运行时与 Skill 发布账号，以及桶名；从 `infra.env.example` 起草。PostgreSQL 初始化脚本在新数据卷初始化时执行，每次发布也会幂等补齐缺失角色；已有角色不会被修改，修改此文件不会自动轮换已有数据库角色密码。 |
 | `migration.env` | 迁移连接 `MIGRATION_DATABASE_URL`、schema 和迁移角色等迁移契约；连接指向宿主机回环 `127.0.0.1:15432`，身份与 `infra.env` 中的 migrator 一致。 |
 | `api.env` | 从 `api.env.example` 起草，补齐运行时数据库、身份、游标和 S3 等 API 必需配置；数据库和 S3 身份对应 `infra.env` 的运行时账号，S3 内部地址使用 `127.0.0.1:19000`。 |
 | `admin-control.env` | 从同名示例起草，使用独立 Admin Control、Skill Publisher 数据库角色和 Skill Publisher S3 账号；`BETTER_AUTH_SECRET` 与 API 相同，设置独立的 `DEV_ADMIN_CONTROL_TOKEN` 和稳定加密根。 |
-| `scheduler.env` | Scheduler 所需数据库角色、进程身份和稳定加密根，以及 Webhook Dispatcher 角色、连接与 `WEBHOOK_SECRET_ENCRYPTION_KEY`（从 `scheduler.env.example` 起草）；租户 ID 由发布脚本注入。不要注入 S3 或主模型调用密钥。 |
+| `scheduler.env` | Scheduler 所需数据库角色、进程身份和稳定加密根，以及 Webhook Dispatcher 角色、连接与 `WEBHOOK_SECRET_ENCRYPTION_KEY`（从 `scheduler.env.example` 起草）；租户 ID 由发布脚本注入。配置与 Worker 同 bucket 的轨迹清理 S3 凭据；禁止注入 Worker Coordinator 或主模型调用密钥。 |
 | `worker.env` | Worker 所需数据库角色、S3 运行时账号、进程身份和稳定加密根；租户 ID 由发布脚本注入。 |
 | `demo-account.env` | `DEMO_ACCOUNT_DISPLAY_NAME`、`DEMO_ACCOUNT_EMAIL`、`DEMO_ACCOUNT_PASSWORD`，供脚本创建或登录固定 Demo 管理员。文件由 shell `source` 读取，值须是有效 shell 赋值；已有账号不会因修改文件而自动改密码。 |
 
@@ -114,11 +114,11 @@ ls -l /opt/hoox-demo/shared/*.env
 
 PostgreSQL 数据卷保留时，Docker 不会重新执行初始化脚本。发布脚本因此在迁移前以容器内 `infra.env` 幂等执行 `postgres-init.sh`：只创建缺失的角色、授予 CONNECT 并确保 Schema 存在，不修改已有角色的密码或属性；角色安全属性仍由迁移前置检查失败关闭。
 
-引入新的受限角色（如 Webhook Dispatcher）时，发布前必须在服务器共享配置中补齐以下字段，否则发布在拉取镜像前以退出码 2 失败，不改动当前版本：
+发布前必须在服务器共享配置中补齐 Scheduler 的 Webhook 投递与轨迹目录身份，否则发布在拉取镜像前以退出码 2 失败，不改动当前版本：
 
-1. `infra.env`：`DATABASE_WEBHOOK_DISPATCHER_ROLE` 与 `DATABASE_WEBHOOK_DISPATCHER_PASSWORD`（随机强密码）。
-2. `migration.env`：与 `infra.env` 相同的 `DATABASE_WEBHOOK_DISPATCHER_ROLE`。
-3. `scheduler.env`：相同的 `DATABASE_WEBHOOK_DISPATCHER_ROLE`，用户名、密码和数据库名与 `infra.env` 一致、指向 `127.0.0.1:15432` 的 `WEBHOOK_DISPATCHER_DATABASE_URL`，以及不少于 32 字节的 `WEBHOOK_SECRET_ENCRYPTION_KEY`。
+1. `infra.env`：`DATABASE_WEBHOOK_DISPATCHER_ROLE` 与 `DATABASE_WEBHOOK_DISPATCHER_PASSWORD`（随机强密码），以及独立的 `DATABASE_TRAJECTORY_DIRECTORY_ROLE` 与 `DATABASE_TRAJECTORY_DIRECTORY_PASSWORD`。
+2. `migration.env`：与 `infra.env` 相同的 `DATABASE_WEBHOOK_DISPATCHER_ROLE` 和 `DATABASE_TRAJECTORY_DIRECTORY_ROLE`。
+3. `scheduler.env`：目录身份使用 `DATABASE_TRAJECTORY_DIRECTORY_ROLE` 和 `DATABASE_TRAJECTORY_DIRECTORY_URL`（与投递连接相同的主机和数据库，不同角色和口令）；移除 `DATABASE_WORKER_COORDINATOR_URL` 和 `DATABASE_WORKER_COORDINATOR_ROLE`。投递使用相同的 `DATABASE_WEBHOOK_DISPATCHER_ROLE`，用户名、密码和数据库名与 `infra.env` 一致、指向 `127.0.0.1:15432` 的 `WEBHOOK_DISPATCHER_DATABASE_URL`，以及不少于 32 字节的 `WEBHOOK_SECRET_ENCRYPTION_KEY`。
 4. `api.env`：与 `scheduler.env` 完全相同的 `WEBHOOK_SECRET_ENCRYPTION_KEY`。该加密根必须稳定并安全备份，更换会使已登记的 Webhook 密钥无法解密。
 
 发布成功后，可在工作台注册指向受控 HTTPS 接收端的 Webhook，触发一次 Run 并确认接收端收到可验签的事件，作为保留数据卷升级路径的投递烟测。
@@ -132,7 +132,7 @@ PostgreSQL 数据卷保留时，Docker 不会重新执行初始化脚本。发�
 3. 目标主机先核对 Webhook Dispatcher 配置（见“保留数据卷升级”），不一致时在改动任何发布状态前失败；随后拉取 digest，启动 PostgreSQL 与 MinIO，经 TCP 确认 PostgreSQL 就绪后幂等执行初始化脚本补齐缺失的受限角色，并验证 Dispatcher 能以配置的凭据登录，再幂等创建对象桶并执行只向前的数据库迁移。
 4. 以现有管理员用户 ID 或安全占位值启动 API、用户 Web 和 Admin Control，验证本机探针后生成 root-only Admin Control Bearer Token 配置，再原子安装不含 HTTP Basic 的 Nginx 配置。
 5. 在受限数据库连接中检查固定 Demo 账号是否已存在，仅在缺失时通过公开 HTTPS Better Auth 路径注册；已有账号继续使用原凭据。该账号是部署脚本托管的固定演示管理员，脚本将其邮箱状态幂等标记为已验证，再使用同一账号登录并交换 Hoox Session；普通用户仍必须通过 SMTP 验证码完成邮箱验证。账号查询结果无效、初始化失败或登录失败均终止发布并恢复上一应用版本，HTTP 失败只记录状态码，不输出响应正文。随后查询其用户与个人 Tenant，将用户幂等提升为有效平台控制管理员和 Skill 发布管理员。发布脚本只在 `0600` 临时 curl 配置中保存本次验收使用的 Hoox access token。
-6. 将实际管理员用户同时注入 API 与 Admin Control，将个人 Tenant 注入 Scheduler 与 Worker，并强制重建应用容器。API 以该用户 ID 作为 Demo 后台会话闸门；Worker 默认把诊断镜像写入跨发布共享轨迹卷。
+6. 将实际管理员用户同时注入 API 与 Admin Control，将个人 Tenant 注入 Scheduler 与 Worker，并强制重建应用容器。API 以该用户 ID 作为 Demo 后台会话闸门；Worker 将完整逻辑轨迹写入共享对象存储，Scheduler 负责按保留期清理，不需要本地诊断轨迹卷。
 7. 检查应用服务持续运行，并确认 Worker 无重启且已完成依赖探测、启动消费循环；Worker 启动失败或超过两分钟仍未完成时触发应用镜像回退，API readiness 成功不能替代 Worker 验收。随后检查用户端 readiness、后台 readiness、后台页面、无会话后台 API 的 `401`，以及带管理员 Hoox 会话的后台概览，再切换 `/opt/hoox-demo/current`。只保留最近五个 release 目录；Worker 诊断卷不随 release 目录清理。
 
 发布工作流串行执行，不会为新提交取消正在迁移或恢复的发布。提交新鲜度以发布前最后一次 GitHub API 核验为准；核验后到发布完成期间仍可能出现新提交，新提交通过 CI 后再发布。首次引入门禁前的旧 SHA 不包含门禁脚本，重跑对应旧工作流可能直接失败，应等待当前 `main` CI 或从 `main` 手工重试。

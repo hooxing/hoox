@@ -92,8 +92,117 @@ describe("InternalTrajectoryAttemptRecorder", () => {
     ]);
   });
 
+  it("在诊断数据离开记录器前移除认证头和凭据字段", async () => {
+    const persist = vi.fn(async (_record: InternalTrajectoryDiagnosticRecord) => undefined);
+    const recorder = new InternalTrajectoryAttemptRecorder(
+      { tenantId: "tenant_1", threadId: "thread_1", runId: "run_1", attemptId: "attempt_1" },
+      { persist },
+    );
+    recorder.record("pi", "request", {
+      headers: { authorization: "Bearer secret", "x-api-key": "key-secret" },
+      apiKey: "provider-secret",
+      prompt: "保留请求逻辑内容",
+    });
+    await recorder.drain();
+    expect(persist.mock.calls[0]?.[0].event.event).toEqual({
+      apiKey: "[REDACTED]",
+      headers: "[REDACTED]",
+      prompt: "保留请求逻辑内容",
+    });
+    expect(JSON.stringify(persist.mock.calls)).not.toContain("secret");
+  });
+
+  it("在所有字符串中替换运行时秘密并识别命令行和序列化凭据", async () => {
+    const persist = vi.fn(async (_record: InternalTrajectoryDiagnosticRecord) => undefined);
+    const recorder = new InternalTrajectoryAttemptRecorder(
+      { tenantId: "tenant_1", threadId: "thread_1", runId: "run_1", attemptId: "attempt_1" },
+      { persist },
+    );
+    recorder.addKnownSecrets(["external-secret-value"]);
+    recorder.record("pi", "tool_execution_start", {
+      command: `curl -H "Authorization: Bearer external-secret-value" --api-key external-secret-value`,
+      serialized: '{"webhookSecret":"webhook-value","password":"p@ss"}',
+      nested: { token: "token-value" },
+      unrelated: "contains external-secret-value",
+    });
+    await recorder.drain();
+    const serialized = JSON.stringify(persist.mock.calls[0]?.[0].event.event);
+    expect(serialized).not.toMatch(/external-secret-value|webhook-value|p@ss|token-value/u);
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  it.each([
+    "Authorization: Basic PRIVATE",
+    "Authorization: Bearer PRIVATE",
+    "Authorization: Token PRIVATE",
+    'Authorization: Digest realm="test", response="PRIVATE"',
+    "Authorization: Custom-Scheme opaque PRIVATE",
+    "Authorization:\r\n Custom PRIVATE",
+    "key=PRIVATE&location=x",
+    '{"value":"PRIVATE","name":"Authorization"}',
+    '{"Authorization":"Basic PRIVATE"}',
+    '{"X-Api-Key":"PRIVATE"}',
+    '{"X-Client-Token":"PRIVATE"}',
+    '{"Session-Secret":"PRIVATE"}',
+    '{"Cookie":"id=a; session=PRIVATE"}',
+    '{"label":"token","X-Api-Key":"PRIVATE"}',
+    '{"X.Acme-Token":"PRIVATE"}',
+    '{"X-Secret":["PRIVATE"]}',
+    "Set-Cookie: id=a; other=PRIVATE",
+    "curl -H 'Authorization: Other PRIVATE'",
+    'curl --header="X-Key: PRIVATE"',
+    "curl -u user:PRIVATE",
+    "curl --user 'user:pass PRIVATE'",
+    "https://user:PRIVATE@example.invalid/index",
+    "//user:PRIVATE@example.invalid",
+    'https://example.invalid/?key="PRIVATE VALUE"',
+    "https://example.invalid/?token=PRIVATE",
+    "https://example.invalid/?q=1&key=PRIVATE",
+    '[["Authorization","Custom PRIVATE"]]',
+    JSON.stringify('{"X-Api-Key":"PRIVATE"}'),
+    JSON.stringify('{"Authorization":"Custom PRIVATE"}'),
+    "Basic PRIVATE",
+    "Bearer PRIVATE",
+    "Token PRIVATE",
+    'Digest realm="test", response="PRIVATE"',
+  ])("未注册凭据也不能进入 persist（样例 %#）", async (text) => {
+    const persist = vi.fn(async (_record: InternalTrajectoryDiagnosticRecord) => undefined);
+    const recorder = new InternalTrajectoryAttemptRecorder(
+      { tenantId: "tenant_a", threadId: "thread_a", runId: "run_a", attemptId: "attempt_a" },
+      { persist },
+    );
+    recorder.record("pi", "request", { text });
+    await recorder.drain();
+    const result = JSON.stringify(persist.mock.calls[0]?.[0].event.event);
+    expect(result.includes("PRIVATE")).toBe(false);
+    expect(result).toContain("[REDACTED]");
+  });
+
+  it("队列有界，写入超时会取消且 drain 不等待诊断后端", async () => {
+    let signal: AbortSignal | undefined;
+    const failureObserver = vi.fn();
+    const recorder = new InternalTrajectoryAttemptRecorder(
+      { tenantId: "tenant_1", threadId: "thread_1", runId: "run_1", attemptId: "attempt_1" },
+      {
+        persist: vi.fn((_record, options) => {
+          signal = options?.signal;
+          return new Promise<void>(() => undefined);
+        }),
+        onFailure: failureObserver,
+      },
+      undefined,
+      { queueLimit: 1, writeDeadlineMs: 10 },
+    );
+    recorder.record("pi", "turn_start", {});
+    recorder.record("pi", "turn_start", {});
+    await recorder.drain();
+    expect(signal?.aborted).toBe(true);
+    expect(failureObserver).toHaveBeenCalledTimes(2);
+  });
+
   it("诊断失败不阻断后续事件", async () => {
     const persisted: number[] = [];
+    const failureObserver = vi.fn();
     const recorder = new InternalTrajectoryAttemptRecorder(
       {
         tenantId: "tenant_1",
@@ -106,11 +215,13 @@ describe("InternalTrajectoryAttemptRecorder", () => {
           if (record.event.sequence === 1) throw new Error("disk full");
           persisted.push(record.event.sequence);
         }),
+        onFailure: failureObserver,
       },
     );
     recorder.record("pi", "agent_start", { type: "agent_start" });
     recorder.record("pi", "turn_start", { type: "turn_start" });
     await recorder.drain();
     expect(persisted).toEqual([2]);
+    expect(failureObserver).toHaveBeenCalledWith({ attemptId: "attempt_1", sequence: 1 });
   });
 });

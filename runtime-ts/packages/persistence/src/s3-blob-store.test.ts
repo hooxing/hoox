@@ -119,6 +119,23 @@ describe("S3BlobStore", () => {
     });
   });
 
+  it("将诊断取消信号传递到对象存储 PUT", async () => {
+    const client = new FakeS3ObjectClient();
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
+    const controller = new AbortController();
+    await store.putStaging(
+      {
+        scope: { tenantId: "tenant_a" },
+        purpose: "trace",
+        uploadId: "cancelable-trace",
+        body: bytes("trace"),
+        mediaType: "application/json",
+      },
+      { signal: controller.signal },
+    );
+    expect(client.putSignals).toEqual([controller.signal]);
+  });
+
   it("条件写消除 HEAD 到 PUT 的并发覆盖", async () => {
     const sameClient = new FakeS3ObjectClient();
     const sameStore = new S3BlobStore(sameClient, promotionAuthorizations, config);
@@ -2459,6 +2476,7 @@ const promotionAuthorizations = new InMemoryPromotionAuthorizations();
 class FakeS3ObjectClient implements S3ObjectClient {
   readonly objects = new Map<string, StoredObject>();
   readonly putKeys: string[] = [];
+  readonly putSignals: (AbortSignal | undefined)[] = [];
   readonly copyKeys: S3CopyObjectInput[] = [];
   readonly presignInputs: S3PresignInput[] = [];
   readonly deleteHooks: Array<() => Promise<void>> = [];
@@ -2484,8 +2502,9 @@ class FakeS3ObjectClient implements S3ObjectClient {
     this.failNextHead = true;
   }
 
-  async put(input: S3PutObjectInput): Promise<void> {
+  async put(input: S3PutObjectInput, signal?: AbortSignal): Promise<void> {
     this.putKeys.push(input.key);
+    this.putSignals.push(signal);
     if (this.objects.has(input.key)) {
       throw new BlobStoreError("BLOB_PRECONDITION_FAILED", "fake conditional conflict");
     }

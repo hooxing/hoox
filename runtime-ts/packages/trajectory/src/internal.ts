@@ -34,7 +34,19 @@ export interface InternalTrajectoryDiagnosticRecord {
 
 /** 敏感内部诊断端口；实现失败不得改变 Agent 或 durable Run 语义。 */
 export interface InternalTrajectoryDiagnosticsPort {
-  persist(record: InternalTrajectoryDiagnosticRecord): Promise<void>;
+  readonly knownSecrets?: readonly string[];
+  addKnownSecrets?(secrets: readonly string[]): void;
+  persist(
+    record: InternalTrajectoryDiagnosticRecord,
+    options?: { readonly signal: AbortSignal },
+  ): Promise<void>;
+  onFailure?(failure: { readonly attemptId: string; readonly sequence: number }): void;
+}
+
+export interface InternalTrajectoryRecorderOptions {
+  readonly knownSecrets?: readonly string[];
+  readonly queueLimit?: number;
+  readonly writeDeadlineMs?: number;
 }
 
 export interface InternalTrajectoryClock {
@@ -137,6 +149,92 @@ function tagged(type: string, value?: string): InternalTrajectoryValue {
   return value === undefined ? { $cubeInternalType: type } : { $cubeInternalType: type, value };
 }
 
+const secretProperty =
+  /(?:authorization|proxy-authorization|cookie|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|credential|webhook[-_]?(?:key|secret))/iu;
+
+const credentialSuffix =
+  "(?:authorization|cookie|api[-_]?key|token|secret|password|credential|webhook[-_]?key)";
+
+const quotedValue = String.raw`(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`;
+const serializedCredential = new RegExp(
+  String.raw`(${credentialSuffix}["']\s*:\s*)${quotedValue}`,
+  "giu",
+);
+// 元组中的逗号也可能是下一个 JSON 字段的开始；不重写有歧义的键边界。
+const ambiguousCredential = new RegExp(
+  String.raw`${credentialSuffix}["']\s*(?:,|:\s*[^"'\s])|["']name["']\s*:\s*["'][\w.-]*${credentialSuffix}["']`,
+  "iu",
+);
+const shellArgument = String.raw`(?:${quotedValue}|\\.|[^\s"'\\])+`;
+const secretTextPatterns = [
+  new RegExp(String.raw`(${credentialSuffix}\\+["']\s*:\s*)[^\r\n]+`, "giu"),
+  /(\/\/)[^\s/?#@]+(?=@)/giu,
+  new RegExp(
+    String.raw`((?:^|[?&;])(?:[\w.-]*${credentialSuffix}|key)=)(?:${quotedValue}|[^\s&#]*)`,
+    "giu",
+  ),
+  // 裸头不能按空格、引号或逗号切词：认证方案可扩展，Digest 和 Cookie 的值可能由多段组成。
+  new RegExp(
+    String.raw`(${credentialSuffix}[ \t]*[:=][ \t]*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*`,
+    "giu",
+  ),
+  new RegExp(
+    String.raw`(\B(?:-H|-u|--header\b|--user\b|--(?:api[-_]?key|token|secret|password|credential)\b)[= \t]*)${shellArgument}`,
+    "giu",
+  ),
+  /(\b(?:bearer|basic|token)[ \t]+)[^\s,"'`;]+/giu,
+  /(\bdigest[ \t]+)[^\r\n]+/giu,
+];
+
+function redactString(value: string, knownSecrets: readonly string[]): string {
+  if (ambiguousCredential.test(value)) return "[REDACTED]";
+  let result = value.replace(serializedCredential, '$1"[REDACTED]"');
+  for (const pattern of secretTextPatterns) {
+    result = result.replace(pattern, (_match, prefix: string) => `${prefix}[REDACTED]`);
+  }
+  for (const secret of knownSecrets) {
+    if (secret.length === 0 || !value.includes(secret)) continue;
+    // 结构脱敏可能只覆盖注册值的一部分，交叠时宁可隐藏整个字符串。
+    if (result !== value) return "[REDACTED]";
+    result = result.replaceAll(secret, "[REDACTED]");
+  }
+  return result;
+}
+
+function collectKnownSecrets(value: InternalTrajectoryValue, secrets: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectKnownSecrets(item, secrets);
+    return;
+  }
+  if (typeof value !== "object" || value === null) return;
+  for (const [key, item] of Object.entries(value)) {
+    if (key.toLowerCase() === "headers") {
+      collectKnownSecrets(item, secrets);
+    } else if (secretProperty.test(key)) {
+      if (typeof item === "string" && item.length > 0) secrets.add(item);
+      else if (typeof item === "object" && item !== null) {
+        const serialized = JSON.stringify(item);
+        if (serialized.length > 0) secrets.add(serialized);
+      }
+    } else collectKnownSecrets(item, secrets);
+  }
+}
+
+function redactSensitiveValues(
+  value: InternalTrajectoryValue,
+  knownSecrets: readonly string[],
+): InternalTrajectoryValue {
+  if (typeof value === "string") return redactString(value, knownSecrets);
+  if (Array.isArray(value)) return value.map((item) => redactSensitiveValues(item, knownSecrets));
+  if (typeof value !== "object" || value === null) return value;
+  const entries = Object.entries(value).map(([key, item]) => {
+    if (key.toLowerCase() === "headers") return [key, "[REDACTED]"] as const;
+    if (secretProperty.test(key)) return [key, "[REDACTED]"] as const;
+    return [key, redactSensitiveValues(item, knownSecrets)] as const;
+  });
+  return Object.fromEntries(entries);
+}
+
 function propertyPath(parent: string, key: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(key)
     ? `${parent}.${key}`
@@ -154,38 +252,113 @@ export class InternalTrajectoryAttemptRecorder {
   readonly #startedAtMonotonicMs: number;
   #nextSequence = 1;
   #chain: Promise<void> = Promise.resolve();
+  #queued = 0;
+  readonly #knownSecrets: Set<string>;
+  readonly #queueLimit: number;
+  readonly #writeDeadlineMs: number;
 
   constructor(
     context: InternalTrajectoryContext,
     diagnostics: InternalTrajectoryDiagnosticsPort,
     clock: InternalTrajectoryClock = systemClock,
+    options: InternalTrajectoryRecorderOptions = {},
   ) {
     this.#context = Object.freeze({ ...context });
     this.#diagnostics = diagnostics;
     this.#clock = clock;
     this.#startedAtMonotonicMs = clock.monotonicNow();
+    this.#knownSecrets = new Set(
+      [...(diagnostics.knownSecrets ?? []), ...(options.knownSecrets ?? [])].filter(
+        (secret) => secret.length > 0,
+      ),
+    );
+    this.#queueLimit = options.queueLimit ?? 128;
+    this.#writeDeadlineMs = options.writeDeadlineMs ?? 2_000;
+    if (!Number.isSafeInteger(this.#queueLimit) || this.#queueLimit < 1) {
+      throw new TypeError("运行轨迹队列上限无效");
+    }
+    if (!Number.isSafeInteger(this.#writeDeadlineMs) || this.#writeDeadlineMs < 1) {
+      throw new TypeError("运行轨迹写入截止时间无效");
+    }
   }
 
   record(source: InternalTrajectoryEventV1["source"], type: string, event: unknown): void {
+    if (this.#queued >= this.#queueLimit) {
+      this.#reportFailure(this.#nextSequence++);
+      return;
+    }
+    const sequence = this.#nextSequence++;
+    const snapshot = snapshotInternalTrajectoryValue(event);
+    const secrets = new Set([...this.#knownSecrets, ...(this.#diagnostics.knownSecrets ?? [])]);
+    collectKnownSecrets(snapshot, secrets);
     const record: InternalTrajectoryDiagnosticRecord = {
       context: this.#context,
       event: {
         schemaVersion: 1,
-        sequence: this.#nextSequence++,
+        sequence,
         occurredAt: this.#clock.now().toISOString(),
         monotonicOffsetMs: Math.max(0, this.#clock.monotonicNow() - this.#startedAtMonotonicMs),
         source,
         type,
-        event: snapshotInternalTrajectoryValue(event),
+        event: redactSensitiveValues(snapshot, [...secrets]),
       },
     };
+    this.#queued += 1;
     this.#chain = this.#chain
       .catch(() => undefined)
-      .then(() => this.#diagnostics.persist(record))
-      .catch(() => undefined);
+      .then(() => this.#persistWithDeadline(record))
+      .catch(() => {
+        this.#reportFailure(record.event.sequence);
+      });
+  }
+
+  addKnownSecrets(secrets: readonly string[]): void {
+    const filteredSecrets = secrets.filter((secret) => secret.length > 0);
+    for (const secret of filteredSecrets) this.#knownSecrets.add(secret);
+    this.#diagnostics.addKnownSecrets?.(filteredSecrets);
   }
 
   async drain(): Promise<void> {
-    await this.#chain.catch(() => undefined);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.#chain.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, this.#writeDeadlineMs + 10);
+        timeout.unref?.();
+      }),
+    ]);
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+
+  async #persistWithDeadline(record: InternalTrajectoryDiagnosticRecord): Promise<void> {
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const operation = Promise.resolve()
+      .then(() => this.#diagnostics.persist(record, { signal: controller.signal }))
+      .finally(() => {
+        this.#queued -= 1;
+      });
+    try {
+      await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort();
+            reject(new Error("RUN_TRAJECTORY_DEADLINE_EXCEEDED"));
+          }, this.#writeDeadlineMs);
+          timeout.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
+  #reportFailure(sequence: number): void {
+    try {
+      this.#diagnostics.onFailure?.({ attemptId: this.#context.attemptId, sequence });
+    } catch {
+      return;
+    }
   }
 }

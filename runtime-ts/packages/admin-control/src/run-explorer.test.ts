@@ -271,4 +271,40 @@ describe("Run 列表查询", () => {
       "分页游标无效",
     );
   });
+
+  it("轨迹接口按页返回原始事件和字节数，不提前投影", async () => {
+    const event = {
+      schemaVersion: 1 as const,
+      sequence: 1,
+      occurredAt: "2026-11-19T00:00:01.000Z",
+      monotonicOffsetMs: 10,
+      source: "runtime" as const,
+      type: "prompt",
+      event: { type: "prompt", text: "原始事件" },
+    };
+    const reader = {
+      readPage: vi.fn(async () => ({
+        records: [{ ...event, agentThreadId: "agent_a", agentTurnId: "turn_a" }],
+        bytes: 128,
+        hasMore: true,
+        nextCursor: "stable-cursor",
+      })),
+    };
+    const service = new RunExplorerService(repository("admin"), () => "audit_page", reader);
+    await expect(
+      service.readTrajectory("user_admin", "tenant_a", "run_1", "attempt_2"),
+    ).resolves.toEqual({
+      events: [{ ...event, agentThreadId: "agent_a", agentTurnId: "turn_a" }],
+      bytes: 128,
+      hasMore: true,
+      nextCursor: "stable-cursor",
+    });
+    expect(reader.readPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorUserId: "user_admin",
+        auditId: "audit_page",
+        limit: 100,
+      }),
+    );
+  });
 });

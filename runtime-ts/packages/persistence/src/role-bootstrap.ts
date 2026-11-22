@@ -222,6 +222,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["model_wire_trace_cleanup_items", new Set(["SELECT", "INSERT"])],
   ["model_wire_trace_expiry_tombstones", new Set(["SELECT", "INSERT"])],
   ["model_wire_trace_records", new Set(["SELECT", "INSERT", "DELETE"])],
+  ["run_trajectory_entries", new Set(["SELECT", "INSERT", "DELETE"])],
   ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["blob_lifecycles", new Set(["SELECT", "INSERT"])],
   ["blob_incarnations", new Set(["SELECT", "INSERT"])],
@@ -344,6 +345,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["api_keys", new Set(["last_used_at"])],
+  ["run_trajectory_entries", new Set(["persistence_status", "blob_reference_id", "updated_at"])],
   // Agent 定义、Run 浏览器审计和外部工具版本均不得由 Runtime 执行列级更新。
   [
     "threads",
@@ -876,6 +878,14 @@ async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   return result.rows[0]?.present === true;
 }
 
+async function hasRunTrajectoryState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.run_trajectory_entries',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunDispatchState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     // 允许迁移序号留孔，因此 ACL 以实际表及关键列为准，而不是“版本 >= 5”的猜测。
@@ -1225,6 +1235,14 @@ async function hasAdminRunExplorerState(client: PoolClient, schema: string): Pro
   return result.rows[0]?.present === true;
 }
 
+async function hasAdminRunTrajectoryState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.admin_run_trajectory_directory',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAdminIntegrationTenantDirectoryState(
   client: PoolClient,
   schema: string,
@@ -1252,6 +1270,7 @@ const adminRunExplorerViews = [
   "admin_run_directory",
   "admin_run_event_outline",
   "admin_run_event_content",
+  "admin_run_trajectory_directory",
 ] as const;
 
 async function hasRunCompactionSettingsState(client: PoolClient, schema: string): Promise<boolean> {
@@ -1386,6 +1405,7 @@ export async function activeTablePolicy(
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
   }
+  if (!(await hasRunTrajectoryState(client, schema))) policy.delete("run_trajectory_entries");
   if (!(await hasRunDispatchState(client, schema))) {
     for (const table of runDispatchTables) policy.delete(table);
   }
@@ -1580,6 +1600,7 @@ export async function activeColumnUpdatePolicy(
         ? new Set(["last_used_at", "revoked_at"])
         : new Set(["last_used_at"]),
     );
+  if (!(await hasRunTrajectoryState(client, schema))) policy.delete("run_trajectory_entries");
   if (await hasInstallationState(client, schema)) {
     policy.set("installation_state", new Set(["administrator_user_id", "initialized_at"]));
   }
@@ -1799,6 +1820,7 @@ export interface MigrationSecurityContext {
   readonly teamCoordinatorRole: string;
   readonly adminControlRole: string;
   readonly webhookDispatcherRole?: string;
+  readonly trajectoryDirectoryRole?: string;
   readonly schema: string;
 }
 
@@ -1814,23 +1836,13 @@ function validateContext(context: MigrationSecurityContext): void {
   quoteIdentifier(context.workerCoordinatorRole);
   quoteIdentifier(context.teamCoordinatorRole);
   quoteIdentifier(context.adminControlRole);
+  if (context.trajectoryDirectoryRole !== undefined)
+    quoteIdentifier(context.trajectoryDirectoryRole);
   if (context.webhookDispatcherRole !== undefined) quoteIdentifier(context.webhookDispatcherRole);
   assertSafeSchemaName(context.schema);
-  if (
-    new Set([
-      context.runtimeRole,
-      context.migratorRole,
-      context.skillPublisherRole,
-      context.workerCoordinatorRole,
-      context.teamCoordinatorRole,
-      context.adminControlRole,
-      ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
-    ]).size !== (context.webhookDispatcherRole === undefined ? 6 : 7)
-  ) {
-    throw new PersistenceError(
-      "CONSTRAINT_VIOLATION",
-      "Runtime、Migrator、Skill Publisher、Worker Coordinator、Team Coordinator 与 Admin Control 必须使用不同角色",
-    );
+  const roles = databaseRoles(context);
+  if (new Set(roles).size !== roles.length) {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "数据库应用身份必须使用不同角色");
   }
 }
 
@@ -2205,6 +2217,11 @@ export async function assertMigrationContextSafe(
     ...context,
     workerCoordinatorRole: context.adminControlRole,
   });
+  if (context.trajectoryDirectoryRole !== undefined)
+    await assertWorkerCoordinatorContextSafe(client, {
+      ...context,
+      workerCoordinatorRole: context.trajectoryDirectoryRole,
+    });
   if (context.webhookDispatcherRole !== undefined)
     await assertWorkerCoordinatorContextSafe(client, {
       ...context,
@@ -2236,6 +2253,12 @@ async function assertBootstrapContextSafe(
     },
     true,
   );
+  if (context.trajectoryDirectoryRole !== undefined)
+    await assertWorkerCoordinatorContextSafe(
+      client,
+      { ...context, workerCoordinatorRole: context.trajectoryDirectoryRole },
+      true,
+    );
   if (context.webhookDispatcherRole !== undefined)
     await assertWorkerCoordinatorContextSafe(
       client,
@@ -2267,6 +2290,7 @@ export function databaseRoles(context: MigrationSecurityContext): readonly strin
     context.teamCoordinatorRole,
     context.adminControlRole,
     ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
+    ...(context.trajectoryDirectoryRole === undefined ? [] : [context.trajectoryDirectoryRole]),
   ];
 }
 
@@ -2520,6 +2544,8 @@ async function assertAdminControlBoundary(
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
   const runExplorerEnabled = enabled && (await hasAdminRunExplorerState(client, context.schema));
+  const runTrajectoryEnabled =
+    enabled && (await hasAdminRunTrajectoryState(client, context.schema));
   const integrationTenantDirectoryEnabled =
     enabled && (await hasAdminIntegrationTenantDirectoryState(client, context.schema));
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
@@ -2768,7 +2794,9 @@ async function assertAdminControlBoundary(
             ? externalToolAdminEnabled
             : row.view_name === "admin_integration_tenant_directory"
               ? integrationTenantDirectoryEnabled
-              : runExplorerEnabled;
+              : row.view_name === "admin_run_trajectory_directory"
+                ? runTrajectoryEnabled
+                : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3760,9 +3788,15 @@ async function grantAdminControlAccess(
   }
   if (await hasAdminRunExplorerState(client, context.schema)) {
     // 只授予视图读取与审计写入；Run、Attempt、事件与指标底表仍对 Admin Control 零 ACL。
+    const trajectoryView = (await hasAdminRunTrajectoryState(client, context.schema))
+      ? `, ${schema}.admin_run_trajectory_directory`
+      : "";
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
-       GRANT SELECT ON TABLE ${adminRunExplorerViews.map((view) => `${schema}.${view}`).join(",")} TO ${control}`,
+       GRANT SELECT ON TABLE ${adminRunExplorerViews
+         .filter((view) => view !== "admin_run_trajectory_directory")
+         .map((view) => `${schema}.${view}`)
+         .join(",")}${trajectoryView} TO ${control}`,
     );
   }
   if (await hasAdminIntegrationTenantDirectoryState(client, context.schema)) {
@@ -3909,10 +3943,10 @@ async function resolveWebhookDispatcherColumns(
 const webhookTenantPolicies = ["tenant_webhooks_tenant_policy", "webhook_outbox_tenant_policy"];
 
 /**
- * 找出当前配置之外仍与 Webhook 表关联的角色：表/列 ACL 的被授予者，或任何 Webhook 策略绑定的角色。
- * 这些通常是更换前的 Dispatcher；表所有者与当前上下文中的角色不在结果内。
+ * 找出当前配置之外仍与 Webhook 表或轨迹目录关联的角色：表/列 ACL 的被授予者，或任何 Webhook 策略绑定的角色。
+ * 这些通常是更换前的 Scheduler 专用角色；表所有者与当前上下文中的角色不在结果内。
  */
-async function findStaleWebhookRoles(
+async function findStaleSchedulerRoles(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<readonly string[]> {
@@ -3937,7 +3971,11 @@ async function findStaleWebhookRoles(
       WHERE role_state.rolname <> ALL($3::text[])
         AND NOT EXISTS (SELECT 1 FROM target WHERE target.relowner=role_state.oid)
       ORDER BY 1`,
-    [context.schema, [...webhookTables], [...databaseRoles(context)]],
+    [
+      context.schema,
+      [...webhookTables, "run_trajectory_cleanup_tenants"],
+      [...databaseRoles(context)],
+    ],
   );
   return result.rows.map((row) => row.role_name);
 }
@@ -4180,7 +4218,7 @@ export async function bootstrapRuntimeAccessOnClient(
   const schema = quoteIdentifier(context.schema);
   // 更换 Dispatcher 等角色后，旧角色仍可能保留 Schema/表/列 ACL 或 Webhook 策略绑定；
   // 必须在重新授权前与当前角色一起撤销，否则旧凭据仍能访问投递记录。
-  const staleWebhookRoles = await findStaleWebhookRoles(client, context);
+  const staleSchedulerRoles = await findStaleSchedulerRoles(client, context);
   const revokedRoles = [
     "PUBLIC",
     ...[
@@ -4190,7 +4228,8 @@ export async function bootstrapRuntimeAccessOnClient(
       context.teamCoordinatorRole,
       context.adminControlRole,
       ...(context.webhookDispatcherRole === undefined ? [] : [context.webhookDispatcherRole]),
-      ...staleWebhookRoles,
+      ...(context.trajectoryDirectoryRole === undefined ? [] : [context.trajectoryDirectoryRole]),
+      ...staleSchedulerRoles,
     ].map(quoteIdentifier),
   ].join(", ");
   await client.query(`REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM ${revokedRoles}`);
@@ -4312,6 +4351,20 @@ export async function bootstrapRuntimeAccessOnClient(
        ${schema}.mutation_receipts
        TO ${role}`,
     );
+    if (await hasRunTrajectoryState(client, context.schema)) {
+      await client.query(
+        `GRANT UPDATE(persistence_status,blob_reference_id,updated_at)
+         ON TABLE ${schema}.run_trajectory_entries TO ${role}`,
+      );
+      await client.query(
+        `GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.run_trajectory_entries TO ${role}`,
+      );
+      if (context.trajectoryDirectoryRole !== undefined) {
+        const directory = quoteIdentifier(context.trajectoryDirectoryRole);
+        await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${directory};
+          GRANT SELECT ON TABLE ${schema}.run_trajectory_cleanup_tenants TO ${directory}`);
+      }
+    }
     if (await hasCleanupConsumerState(client)) {
       await client.query(
         `GRANT UPDATE(claim_token, claim_generation, claimed_by, claim_lease_expires_at, retry_at, attempt_count, remote_call_started_at) ON TABLE ${schema}.cleanup_outbox TO ${role}`,
@@ -4817,7 +4870,7 @@ export async function bootstrapRuntimeAccessOnClient(
   await grantTeamCoordinatorAccess(client, context);
   await grantAdminControlAccess(client, context);
   await assertActiveRuntimeWhitelist(client, context);
-  await assertWebhookBoundary(client, context, staleWebhookRoles);
+  await assertWebhookBoundary(client, context, staleSchedulerRoles);
 }
 
 /** 独立、可重复的 ACL bootstrap；角色与 Schema preflight 始终先于任何 ACL 变更。 */
@@ -4837,27 +4890,24 @@ export async function teardownRuntimeSchemaAccessOnClient(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
-  const role = quoteIdentifier(context.runtimeRole);
-  const publisherRole = quoteIdentifier(context.skillPublisherRole);
-  const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
-  const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
-  const adminControlRole = quoteIdentifier(context.adminControlRole);
-  const webhookDispatcherRole =
-    context.webhookDispatcherRole === undefined
-      ? undefined
-      : quoteIdentifier(context.webhookDispatcherRole);
+  const grantees = [
+    "PUBLIC",
+    ...databaseRoles(context)
+      .filter((role) => role !== context.migratorRole)
+      .map(quoteIdentifier),
+  ].join(", ");
   const schema = quoteIdentifier(context.schema);
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
+       FROM ${grantees}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
+       FROM ${grantees}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}, ${adminControlRole}${webhookDispatcherRole === undefined ? "" : `, ${webhookDispatcherRole}`}`,
+       FROM ${grantees}`,
   );
   await assertRuntimeAccessRemoved(client, context);
 }

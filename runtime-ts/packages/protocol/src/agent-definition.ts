@@ -85,6 +85,49 @@ export const AgentRevisionContentSchema = Type.Object(
   { ...strict, $id: "v1.AgentRevisionContent" },
 );
 export type AgentRevisionContentDto = Static<typeof AgentRevisionContentSchema>;
+export const AgentVersionNotesSchema = Type.String({ maxLength: 2000 });
+
+function comparable(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(comparable).join(",")}]`;
+  return `{${Object.entries(value)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${comparable(item)}`)
+    .join(",")}}`;
+}
+
+type ComparableAgentContent = { readonly [Field in keyof AgentRevisionContentDto]: unknown };
+export function agentRevisionChangedFields(
+  current: ComparableAgentContent,
+  previous: ComparableAgentContent,
+): (keyof AgentRevisionContentDto)[] {
+  return (
+    Object.keys(AgentRevisionContentSchema.properties) as (keyof AgentRevisionContentDto)[]
+  ).filter((field) => comparable(current[field]) !== comparable(previous[field]));
+}
+
+const sectionFields = {
+  instructions: ["operatorInstructions", "replyLanguage"],
+  model: ["model"],
+  tools: ["tools"],
+  skills: ["skillVersions", "includeTenantSkills"],
+  sandbox: ["sandboxTemplateId", "sandboxIdleAction"],
+  memory: ["memory"],
+  display: ["displayName", "description", "avatarRef", "welcomeMessage", "suggestedQuestions"],
+} as const satisfies Record<string, readonly (keyof AgentRevisionContentDto)[]>;
+export type AgentRevisionSection = keyof typeof sectionFields;
+export const AgentRevisionSectionSchema = Type.Union(
+  (Object.keys(sectionFields) as AgentRevisionSection[]).map((section) => Type.Literal(section)),
+);
+export function agentRevisionChangedSections(
+  current: ComparableAgentContent,
+  previous: ComparableAgentContent,
+): AgentRevisionSection[] {
+  const fields = agentRevisionChangedFields(current, previous);
+  return (Object.keys(sectionFields) as AgentRevisionSection[]).filter((section) =>
+    sectionFields[section].some((field) => fields.includes(field)),
+  );
+}
 export const AgentDefinitionStatusSchema = Type.Union([
   Type.Literal("draft"),
   Type.Literal("published"),
@@ -116,6 +159,7 @@ export const AgentRevisionDtoSchema = Type.Object(
     revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     status: AgentRevisionStatusSchema,
     content: AgentRevisionContentSchema,
+    versionNotes: Type.Optional(AgentVersionNotesSchema),
     digest: Sha256DigestSchema,
     createdAt: IsoTimestampSchema,
     createdBy: IdSchema,
@@ -128,6 +172,7 @@ export const CreateAgentDefinitionRequestSchema = Type.Object(
     id: IdSchema,
     availability: AgentAvailabilitySchema,
     content: AgentRevisionContentSchema,
+    versionNotes: Type.Optional(AgentVersionNotesSchema),
     idempotencyKey: boundedText(200),
     expectedGeneration: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   },
@@ -169,6 +214,7 @@ export const CreateAgentRevisionRequestSchema = Type.Object(
     definitionId: IdSchema,
     revisionId: IdSchema,
     content: AgentRevisionContentSchema,
+    versionNotes: Type.Optional(AgentVersionNotesSchema),
     idempotencyKey: boundedText(200),
     expectedGeneration: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   },

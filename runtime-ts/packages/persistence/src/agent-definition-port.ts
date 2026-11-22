@@ -15,11 +15,13 @@ export interface StoredAgentRevision {
   readonly revision: number;
   readonly status: "draft" | "published" | "revoked";
   readonly content: AgentRevisionContent;
+  readonly versionNotes?: string;
   readonly digest: string;
   readonly createdAt: string;
   readonly createdBy: string;
 }
 export interface CreateAgentDefinitionDraftInput {
+  readonly versionNotes?: string;
   readonly actorUserId: string;
   readonly id: string;
   readonly availability: AgentAvailability;
@@ -29,6 +31,7 @@ export interface CreateAgentDefinitionDraftInput {
   readonly expectedGeneration: number;
 }
 export interface CreateAgentRevisionDraftInput {
+  readonly versionNotes?: string;
   readonly actorUserId: string;
   readonly definitionId: string;
   readonly revisionId: string;
@@ -83,6 +86,15 @@ export interface SetAgentAvailabilityInput extends AgentDefinitionCommandInput {
 
 export interface StoredAgentRevisionSummary extends Omit<StoredAgentRevision, "content"> {
   readonly displayName: string;
+  readonly changedSections?: readonly (
+    | "instructions"
+    | "model"
+    | "tools"
+    | "skills"
+    | "sandbox"
+    | "memory"
+    | "display"
+  )[];
 }
 
 export interface AgentDefinitionAdminRepositoryPort
@@ -93,6 +105,12 @@ export interface AgentDefinitionAdminRepositoryPort
   listDefinitions(actorUserId: string): Promise<{
     readonly canManage: boolean;
     readonly builtinToolLimit: readonly string[];
+    readonly skillOptions: readonly {
+      readonly skillId: string;
+      readonly displayName: string;
+      readonly description: string;
+      readonly versions: readonly string[];
+    }[];
     readonly pinnedModelOptions: readonly Extract<
       AgentRevisionContent["model"],
       { mode: "pinned" }

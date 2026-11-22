@@ -1863,6 +1863,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         id,
         revisionId: first,
         content,
+        versionNotes: "首个草稿说明",
         expectedGeneration: 0,
         availability: { mode: "selected_tenants", tenantIds: [operator.tenant.id] },
       };
@@ -1877,6 +1878,11 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
       expect(oversized.statusCode).toBe(400);
       expect(oversized.json().error.message).toContain("operatorInstructions");
+      const oversizedNotes = await write(route, "agent-admin-create", {
+        ...draft,
+        versionNotes: "说".repeat(2001),
+      });
+      expect(oversizedNotes.statusCode).toBe(400);
       const { service, configurations, context, providerKey } = pinnedModelFixture();
       const provider = await service.createModelDraft(
         context(operator.user.id, "pinned-model-admin-draft"),
@@ -1963,6 +1969,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         expectedGeneration: 0,
         revisionId: second,
         content: { ...content, displayName: "草稿第二版", model: pinned },
+        versionNotes: "固定专用模型",
       });
       expect(saved.statusCode).toBe(201);
       expect(saved.json().data).toMatchObject({
@@ -1985,11 +1992,34 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           })
         ).statusCode,
       ).toBe(200);
+      await expect(
+        withTransaction(adminControlPool, async (client) => {
+          await client.query("SELECT set_config('app.user_id',$1,true)", [operator.user.id]);
+          await client.query(
+            "UPDATE agent_revisions SET version_notes='发布后不可改' WHERE id=$1",
+            [first],
+          );
+        }),
+      ).rejects.toThrow();
+      const adminHistory = await read(revisions);
+      expect(adminHistory.json().data.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: second,
+            versionNotes: "固定专用模型",
+            changedSections: expect.arrayContaining(["model", "display"]),
+          }),
+        ]),
+      );
       const history = await read(revisions, "Bearer viewer");
       expect(history.statusCode).toBe(200);
       expect(history.json().data.items.map((item: { id: string }) => item.id)).toEqual([first]);
+      expect(history.json().data.items[0].versionNotes).toBe("首个草稿说明");
       expect((await read(`${revisions}/${first}`, "Bearer viewer")).json().data.content).toEqual(
         content,
+      );
+      expect((await read(`${revisions}/${first}`, "Bearer viewer")).json().data.versionNotes).toBe(
+        "首个草稿说明",
       );
       expect((await read(`${revisions}/${second}`, "Bearer viewer")).statusCode).toBe(404);
       expect((await read(`${revisions}/${second}`)).json().data.content.displayName).toBe(

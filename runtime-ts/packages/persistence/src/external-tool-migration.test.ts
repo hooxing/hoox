@@ -20,6 +20,16 @@ describe("外部工具迁移契约", () => {
   });
 });
 
+describe("Agent Revision 版本说明迁移契约", () => {
+  it("只追加可选的 2000 字符后台字段，不增加数据库更新程序", async () => {
+    const migration = (await loadMigrations()).find((item) => item.name === "agent_revision_notes");
+    expect(migration?.upSql).toContain("ADD COLUMN version_notes text");
+    expect(migration?.upSql).toContain("char_length(version_notes) <= 2000");
+    expect(migration?.upSql).not.toMatch(/CREATE\s+(?:FUNCTION|TRIGGER)/iu);
+    expect(migration?.downSql).toContain("DROP COLUMN version_notes");
+  });
+});
+
 describe("外部工具远程名称迁移契约", () => {
   it("以追加迁移为 MCP 版本固定原始工具名并约束 HTTP 为空", async () => {
     const migrations = await loadMigrations();

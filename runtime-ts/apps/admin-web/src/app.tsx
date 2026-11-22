@@ -50,6 +50,8 @@ import {
 } from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
 import { ExternalToolsPage } from "./external-tools.js";
+import { IntegrationApiKeysPage } from "./integration-api-keys.js";
+import { IntegrationWebhooksPage } from "./integration-webhooks.js";
 import { InstallationProgress } from "./installation-progress.js";
 import { PlaygroundPage } from "./playground.js";
 import { RunExplorerDetail, RunExplorerList } from "./run-explorer.js";
@@ -983,6 +985,14 @@ const navigation: NonNullable<MenuProps["items"]> = [
       { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
     ],
   },
+  {
+    type: "group",
+    label: "接入",
+    children: [
+      { key: "/integration-api-keys", icon: <SafetyCertificateOutlined />, label: "API Key" },
+      { key: "/integration-webhooks", icon: <ToolOutlined />, label: "Webhook" },
+    ],
+  },
 ];
 
 const pageMetadata: Readonly<
@@ -997,6 +1007,8 @@ const pageMetadata: Readonly<
     description: "用户、对话与运行可靠性指标",
   },
   "/external-tools": { title: "外部工具", description: "管理 MCP 草稿、发布批次和 HTTP 工具预览" },
+  "/integration-api-keys": { title: "API Key", description: "按 Tenant 管理部署方的集成凭据" },
+  "/integration-webhooks": { title: "Webhook", description: "按 Tenant 管理部署方的事件订阅" },
   "/playground": { title: "Playground", description: "测试 Agent 草稿与已发布版本，查看执行轨迹" },
   "/agent-definitions": {
     title: "Agent 管理",
@@ -1188,6 +1200,8 @@ function AdminPlatform({
         </Header>
         <Content className="platform-content">
           <Routes>
+            <Route path="/integration-api-keys" element={<IntegrationApiKeysPage />} />
+            <Route path="/integration-webhooks" element={<IntegrationWebhooksPage />} />
             <Route
               path="/overview"
               element={

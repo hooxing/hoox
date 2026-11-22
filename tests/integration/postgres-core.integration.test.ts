@@ -93,6 +93,8 @@ import {
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
 import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
+import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
+import { WebhookSecretCipher } from "../../runtime-ts/packages/persistence/src/webhook-crypto.js";
 import {
   enqueueRunStatusWebhook,
   enqueueWebhookEvent,
@@ -5603,6 +5605,316 @@ function itWithSqlStateDiagnostic(title: string, test: () => Promise<void>): voi
 }
 
 describe("PostgreSQL API Key 隔离与集成身份", () => {
+  itWithSqlStateDiagnostic("后台接入只允许平台管理员，跨 Tenant 管理与审计原子提交", async () => {
+    const manager = await createFixture("integration_manager");
+    const target = await createFixture("integration_target");
+    const other = await createFixture("integration_other");
+    const viewer = await createFixture("integration_viewer");
+    const operator = await createFixture("integration_operator");
+    const disabled = await createFixture("integration_disabled");
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active'),($2,'viewer','active'),($3,'operator','active'),($4,'admin','disabled')",
+      [manager.user.id, viewer.user.id, operator.user.id, disabled.user.id],
+    );
+    const actors = new Map(
+      [manager, target, viewer, operator, disabled].map((item) => [
+        `Bearer ${item.user.id}`,
+        item.user.id,
+      ]),
+    );
+    const cipher = new WebhookSecretCipher(
+      "integration-test-webhook-root-placeholder-at-least-32-bytes",
+    );
+    const integrations = new PgIntegrationAdminRepository(adminControlPool, cipher);
+    const { createAdminControlApiApp } = await import(
+      "../../runtime-ts/apps/admin-control-api/src/app.js"
+    );
+    const app = createAdminControlApiApp({
+      integrations,
+      auth: {
+        async resolve(input) {
+          const id = actors.get(input.authorization ?? "");
+          return id === undefined ? undefined : { userId: id };
+        },
+      },
+      control: {} as AdminControlApiDependencies["control"],
+      identity: {} as AdminControlApiDependencies["identity"],
+      modelCatalog: {} as AdminControlApiDependencies["modelCatalog"],
+      skills: {} as AdminControlApiDependencies["skills"],
+      readiness: { async probe() {} },
+    });
+    const base = `/v1/admin/control/integrations/${target.tenant.id}`;
+    const alternate = `/v1/admin/control/integrations/${other.tenant.id}`;
+    const headers = { authorization: `Bearer ${manager.user.id}` };
+    try {
+      for (const member of [target, viewer, operator, disabled]) {
+        for (const [method, path, payload] of [
+          ["GET", "/api-keys", undefined],
+          ["POST", "/api-keys", { name: "拒绝", scopes: ["threads:read"] }],
+          ["POST", "/api-keys/key_unknown/rotate", undefined],
+          ["DELETE", "/api-keys/key_unknown", undefined],
+          ["GET", "/webhooks", undefined],
+          [
+            "POST",
+            "/webhooks",
+            { name: "拒绝", endpointUrl: "https://1.1.1.1/events", eventTypes: ["run.succeeded"] },
+          ],
+          ["POST", "/webhooks/wh_unknown/rotate-secret", undefined],
+          ["POST", "/webhooks/wh_unknown/disable", undefined],
+          ["DELETE", "/webhooks/wh_unknown", undefined],
+        ] as const) {
+          const response = await app.inject({
+            method,
+            url: base + path,
+            headers: { authorization: `Bearer ${member.user.id}` },
+            ...(payload === undefined ? {} : { payload }),
+          });
+          expect(response.statusCode).toBe(401);
+        }
+      }
+      expect((await app.inject({ method: "GET", url: `${base}/api-keys` })).statusCode).toBe(401);
+      const created = await app.inject({
+        method: "POST",
+        url: `${base}/api-keys`,
+        headers,
+        payload: {
+          name: "后台集成",
+          scopes: ["threads:read", "runs:create"],
+          expiresAt: "2099-01-01T00:00:00.000Z",
+        },
+      });
+      expect(created.statusCode).toBe(200);
+      const { key, token } = created.json().data;
+      expect(typeof token === "string" && token.startsWith("hoox_sk_")).toBe(true);
+      expect(created.headers["cache-control"]).toContain("no-store");
+      expect(key.integrationUserId).toBeUndefined();
+      const authentication = new PgApiKeyRepository(runtimePool);
+      const principal = await authentication.authenticateKey({
+        token,
+        now: new Date().toISOString(),
+      });
+      expect(principal?.tenantId).toBe(target.tenant.id);
+      const listed = await app.inject({ method: "GET", url: `${base}/api-keys`, headers });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json().data.items.map((item: { id: string }) => item.id)).toContain(key.id);
+      expect(listed.body.includes(token)).toBe(false);
+      const foreign = await app.inject({ method: "GET", url: `${alternate}/api-keys`, headers });
+      expect(foreign.json().data.items).toEqual([]);
+      for (const [method, path] of [
+        ["POST", `/api-keys/${key.id}/rotate`],
+        ["DELETE", `/api-keys/${key.id}`],
+      ] as const) {
+        expect((await app.inject({ method, url: alternate + path, headers })).statusCode).toBe(404);
+      }
+      const rotated = await app.inject({
+        method: "POST",
+        url: `${base}/api-keys/${key.id}/rotate`,
+        headers,
+      });
+      expect(rotated.statusCode).toBe(200);
+      const newToken = rotated.json().data.token;
+      expect(newToken !== token).toBe(true);
+      expect(
+        await authentication.authenticateKey({ token, now: new Date().toISOString() }),
+      ).toBeUndefined();
+      expect(
+        (await authentication.authenticateKey({ token: newToken, now: new Date().toISOString() }))
+          ?.userId,
+      ).toBe(principal?.userId);
+      expect(rotated.json().data.key.expiresAt).toBe(key.expiresAt);
+      const revoked = await app.inject({
+        method: "DELETE",
+        url: `${base}/api-keys/${key.id}`,
+        headers,
+      });
+      expect(revoked.statusCode).toBe(200);
+      expect(
+        await authentication.authenticateKey({ token: newToken, now: new Date().toISOString() }),
+      ).toBeUndefined();
+      expect(
+        (await app.inject({ method: "POST", url: `${base}/api-keys/${key.id}/rotate`, headers }))
+          .statusCode,
+      ).toBe(404);
+      const membership = await withTenantTransaction(migratorPool, target.scope, (client) =>
+        client.query("SELECT status FROM memberships WHERE tenant_id=$1 AND user_id=$2", [
+          target.tenant.id,
+          principal?.userId,
+        ]),
+      );
+      expect(membership.rows[0]?.status).toBe("revoked");
+
+      const registered = await app.inject({
+        method: "POST",
+        url: `${base}/webhooks`,
+        headers,
+        payload: {
+          name: "业务回调",
+          endpointUrl: "https://1.1.1.1/events",
+          eventTypes: ["run.succeeded", "artifact.published"],
+        },
+      });
+      expect(registered.statusCode).toBe(200);
+      const { webhook, secret } = registered.json().data;
+      const subscriptions = await app.inject({ method: "GET", url: `${base}/webhooks`, headers });
+      expect(subscriptions.statusCode).toBe(200);
+      expect(subscriptions.body.includes(secret)).toBe(false);
+      expect(
+        (await app.inject({ method: "GET", url: `${alternate}/webhooks`, headers })).json().data
+          .items,
+      ).toEqual([]);
+      for (const [method, path] of [
+        ["POST", `/webhooks/${webhook.id}/rotate-secret`],
+        ["POST", `/webhooks/${webhook.id}/disable`],
+        ["DELETE", `/webhooks/${webhook.id}`],
+      ] as const) {
+        expect((await app.inject({ method, url: alternate + path, headers })).statusCode).toBe(404);
+      }
+      const changed = await app.inject({
+        method: "POST",
+        url: `${base}/webhooks/${webhook.id}/rotate-secret`,
+        headers,
+      });
+      expect(changed.statusCode).toBe(200);
+      expect(changed.json().data.secret !== secret).toBe(true);
+      const stored = await administrativePool.query(
+        `SELECT secret_ciphertext FROM "${schema}".tenant_webhooks WHERE tenant_id=$1 AND id=$2`,
+        [target.tenant.id, webhook.id],
+      );
+      expect(
+        cipher.decrypt(target.tenant.id, webhook.id, stored.rows[0]?.secret_ciphertext) ===
+          changed.json().data.secret,
+      ).toBe(true);
+      const stopped = await app.inject({
+        method: "POST",
+        url: `${base}/webhooks/${webhook.id}/disable`,
+        headers,
+      });
+      expect(stopped.statusCode).toBe(200);
+      expect(stopped.json().data.webhook.disabledReason).toBe("disabled_by_owner");
+      expect(
+        (await app.inject({ method: "DELETE", url: `${base}/webhooks/${webhook.id}`, headers }))
+          .statusCode,
+      ).toBe(200);
+      expect(
+        (await app.inject({ method: "GET", url: `${base}/webhooks`, headers })).json().data.items,
+      ).toEqual([]);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `${base}/webhooks/${webhook.id}/rotate-secret`,
+            headers,
+          })
+        ).statusCode,
+      ).toBe(404);
+
+      const audits = await migratorPool.query(
+        "SELECT actor_user_id,tenant_id,action,object_id FROM integration_admin_audits WHERE tenant_id=$1 ORDER BY occurred_at,id",
+        [target.tenant.id],
+      );
+      const writes = audits.rows.filter((row) => !row.action.endsWith(".list"));
+      expect(writes.map((row) => row.action)).toEqual([
+        "api_key.create",
+        "api_key.rotate",
+        "api_key.revoke",
+        "webhook.create",
+        "webhook.rotate",
+        "webhook.disable",
+        "webhook.delete",
+      ]);
+      expect(writes.every((row) => row.actor_user_id === manager.user.id)).toBe(true);
+      expect(
+        JSON.stringify(audits.rows).includes(token) || JSON.stringify(audits.rows).includes(secret),
+      ).toBe(false);
+      expect(
+        (
+          await migratorPool.query(
+            "SELECT count(*)::int AS count FROM integration_admin_audits WHERE actor_user_id=ANY($1::text[])",
+            [[target.user.id, viewer.user.id, operator.user.id, disabled.user.id]],
+          )
+        ).rows[0]?.count,
+      ).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  itWithSqlStateDiagnostic(
+    "Admin Control 的集成授权限制列与 Tenant，审计失败回滚创建",
+    async () => {
+      const manager = await createFixture("integration_acl_manager");
+      const target = await createFixture("integration_acl_target");
+      const other = await createFixture("integration_acl_other");
+      await migratorPool.query(
+        "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+        [manager.user.id],
+      );
+      const integrations = new PgIntegrationAdminRepository(adminControlPool);
+      const created = await integrations.createKey(manager.user.id, target.tenant.id, {
+        name: "列级权限",
+        scopes: ["threads:read"],
+      });
+      await withTransaction(adminControlPool, async (client) => {
+        await client.query(
+          "SELECT set_config('app.user_id',$1,true),set_config('app.integration_admin_user_id',$1,true),set_config('app.tenant_id',$2,true)",
+          [manager.user.id, target.tenant.id],
+        );
+        expect((await client.query("SELECT id FROM tenants")).rows).toEqual([
+          { id: target.tenant.id },
+        ]);
+        expect(
+          (await client.query("SELECT id FROM api_keys WHERE tenant_id=$1", [other.tenant.id]))
+            .rows,
+        ).toHaveLength(0);
+        expect(
+          (
+            await client.query(
+              "UPDATE memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2",
+              [target.tenant.id, target.user.id],
+            )
+          ).rowCount,
+        ).toBe(0);
+      });
+      for (const sql of [
+        "SELECT * FROM tenants",
+        "SELECT * FROM app_users",
+        "SELECT * FROM memberships",
+        "SELECT id FROM threads",
+        "SELECT id FROM runs",
+        "SELECT id FROM webhook_outbox",
+        "SELECT secret_ciphertext FROM tenant_webhooks",
+        "UPDATE api_keys SET scopes=ARRAY['runs:create']",
+        "UPDATE tenant_webhooks SET endpoint_url='https://1.1.1.1/'",
+      ]) {
+        await expect(adminControlPool.query(sql)).rejects.toMatchObject({ code: "42501" });
+      }
+      await migratorPool.query(
+        `REVOKE INSERT ON integration_admin_audits FROM "${adminControlRole}"`,
+      );
+      try {
+        await expect(
+          integrations.createKey(manager.user.id, target.tenant.id, {
+            name: "必须回滚",
+            scopes: ["threads:read"],
+          }),
+        ).rejects.toBeDefined();
+      } finally {
+        await migratorPool.query(
+          `GRANT INSERT ON integration_admin_audits TO "${adminControlRole}"`,
+        );
+      }
+      expect(
+        (await integrations.listKeys(manager.user.id, target.tenant.id)).map((key) => key.id),
+      ).toEqual([created.key.id]);
+      const orphan = await withTenantTransaction(migratorPool, target.scope, (client) =>
+        client.query(
+          "SELECT count(*)::int AS count FROM memberships m JOIN app_users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND u.kind='integration'",
+          [target.tenant.id],
+        ),
+      );
+      expect(orphan.rows[0]?.count).toBe(1);
+    },
+  );
   itWithSqlStateDiagnostic(
     "仅持久化哈希，按 Tenant 隔离并在吊销后同步禁用集成 Membership",
     async () => {

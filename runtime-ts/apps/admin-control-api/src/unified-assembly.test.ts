@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("@hoox/tool-router", () => ({ probeMcpEndpoint: mocks.probeMcpEndpoint }));
 
 vi.mock("@hoox/persistence/admin", () => ({
+  PgIntegrationAdminRepository: class {},
   probeS3StableSkillPublisher: mocks.probePublisher,
   ModelProviderCredentialCipher: class {},
   ExternalToolCredentialCipher: class {},

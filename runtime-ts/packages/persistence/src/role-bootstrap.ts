@@ -1461,6 +1461,9 @@ export async function activeTablePolicy(
   if (await hasExternalToolAdminState(client, schema)) {
     for (const table of externalToolAdminTables) policy.set(table, new Set());
   }
+  if (await hasIntegrationAdminState(client, schema)) {
+    policy.set("integration_admin_audits", new Set());
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -2472,6 +2475,7 @@ async function assertAdminControlBoundary(
   const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
   const externalToolsEnabled = enabled && (await hasExternalToolState(client, context.schema));
   const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
+  const integrationsEnabled = enabled && (await hasIntegrationAdminState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
     enabled
       ? [
@@ -2490,6 +2494,13 @@ async function assertAdminControlBoundary(
     allowed.set("external_tool_versions", new Set(["SELECT", "INSERT"]));
     allowed.set("external_tool_credentials", new Set(["INSERT"]));
     allowed.set("external_tool_revocations", new Set(["SELECT", "INSERT"]));
+  }
+  if (integrationsEnabled) {
+    allowed.set("api_keys", new Set(["SELECT", "INSERT"]));
+    allowed.set("app_users", new Set(["INSERT"]));
+    allowed.set("memberships", new Set(["INSERT"]));
+    allowed.set("tenant_webhooks", new Set(["INSERT"]));
+    allowed.set("integration_admin_audits", new Set(["SELECT", "INSERT"]));
   }
   const externalToolAdminEnabled =
     enabled && (await hasExternalToolAdminState(client, context.schema));
@@ -2577,6 +2588,11 @@ async function assertAdminControlBoundary(
         ]
       : [],
   );
+  if (integrationsEnabled) {
+    updatePolicy.set("api_keys", new Set(["key_hash", "key_prefix", "revoked_at"]));
+    updatePolicy.set("memberships", new Set(["status"]));
+    updatePolicy.set("tenant_webhooks", new Set(webhookRuntimeUpdateColumns));
+  }
   if (sandboxEnabled)
     updatePolicy.set("sandbox_control_head", new Set(["generation", "routing_revision"]));
   if (agentDefinitionsEnabled)
@@ -2623,6 +2639,12 @@ async function assertAdminControlBoundary(
   }
 
   const selectPolicy = new Map<string, ReadonlySet<string>>();
+  if (integrationsEnabled) {
+    selectPolicy.set("app_users", new Set(["id", "kind"]));
+    selectPolicy.set("tenants", new Set(["id"]));
+    selectPolicy.set("memberships", new Set(["tenant_id", "user_id", "role", "status"]));
+    selectPolicy.set("tenant_webhooks", new Set(webhookAdminSelectColumns));
+  }
   if (userOperationsEnabled) {
     selectPolicy.set(
       "user_accounts",
@@ -3515,6 +3537,42 @@ async function grantAdminControlAccess(
   if (!(await hasAdminControlState(client, context.schema))) return;
   const schema = quoteIdentifier(context.schema);
   const control = quoteIdentifier(context.adminControlRole);
+  if (await hasIntegrationAdminState(client, context.schema)) {
+    const isolatedUsers = await client.query<{ present: boolean }>(
+      "SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1 AND tablename='app_users' AND policyname='integration_admin_users_manage') AS present",
+      [context.schema],
+    );
+    if (isolatedUsers.rows[0]?.present) {
+      await client.query(`ALTER POLICY app_users_tenant_policy ON ${schema}.app_users TO ${quoteIdentifier(context.runtimeRole)},${quoteIdentifier(context.teamCoordinatorRole)},${quoteIdentifier(context.migratorRole)};
+        ALTER POLICY integration_admin_users_manage ON ${schema}.app_users TO ${control}`);
+    }
+    for (const [table, policy] of [
+      ["platform_control_operators", "integration_admin_actor"],
+      ["api_keys", "integration_admin_guard"],
+      ["api_keys", "integration_admin_key_update"],
+      ["memberships", "integration_admin_guard"],
+      ["memberships", "integration_admin_membership_update"],
+      ["app_users", "integration_admin_guard"],
+      ["tenants", "integration_admin_guard"],
+      ["tenant_webhooks", "integration_admin_manage"],
+      ["integration_admin_audits", "integration_admin_audits_admin"],
+    ] as const) {
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${control}`,
+      );
+    }
+    await client.query(`ALTER POLICY integration_admin_audits_migrator ON ${schema}.integration_admin_audits TO ${quoteIdentifier(context.migratorRole)};
+      GRANT SELECT,INSERT ON ${schema}.api_keys,${schema}.integration_admin_audits TO ${control};
+      GRANT INSERT ON ${schema}.tenant_webhooks TO ${control};
+      GRANT SELECT(${webhookAdminSelectColumns.join(",")}) ON ${schema}.tenant_webhooks TO ${control};
+      GRANT INSERT ON ${schema}.app_users,${schema}.memberships TO ${control};
+      GRANT SELECT(id,kind) ON ${schema}.app_users TO ${control};
+      GRANT SELECT(id) ON ${schema}.tenants TO ${control};
+      GRANT SELECT(tenant_id,user_id,role,status) ON ${schema}.memberships TO ${control};
+      GRANT UPDATE(key_hash,key_prefix,revoked_at) ON ${schema}.api_keys TO ${control};
+      GRANT UPDATE(status) ON ${schema}.memberships TO ${control};
+      GRANT UPDATE(secret_ciphertext,disabled_at,disabled_reason) ON ${schema}.tenant_webhooks TO ${control}`);
+  }
   if (await hasInstallationState(client, context.schema)) {
     const runtime = quoteIdentifier(context.runtimeRole);
     await client.query(`
@@ -3638,6 +3696,14 @@ async function grantAdminControlAccess(
   }
 }
 
+async function hasIntegrationAdminState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.integration_admin_audits',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasWebhookState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.tenant_webhooks', $1::text)) IS NOT NULL
@@ -3650,6 +3716,16 @@ async function hasWebhookState(client: PoolClient, schema: string): Promise<bool
 const webhookTables = ["tenant_webhooks", "webhook_outbox"] as const;
 const webhookColumnPrivileges = ["SELECT", "INSERT", "UPDATE", "REFERENCES"] as const;
 const webhookRuntimeUpdateColumns = ["secret_ciphertext", "disabled_at", "disabled_reason"];
+const webhookAdminSelectColumns = [
+  "tenant_id",
+  "id",
+  "name",
+  "endpoint_url",
+  "event_types",
+  "created_at",
+  "disabled_at",
+  "disabled_reason",
+];
 // Team Coordinator 只为解散时的批量取消入队，读取筛选订阅所需的最少列。
 const webhookTeamSelectColumns = ["tenant_id", "id", "event_types", "disabled_at"];
 // 入队使用 ON CONFLICT 去重，PostgreSQL 要求对仲裁唯一键列持有 SELECT；不开放其他 Outbox 列。
@@ -3836,6 +3912,7 @@ async function assertWebhookBoundary(
 ): Promise<void> {
   const present = await hasWebhookState(client, context.schema);
   const teamEnabled = present && (await hasTeamCollaborationState(client, context.schema));
+  const integrationsEnabled = present && (await hasIntegrationAdminState(client, context.schema));
   const dispatcherColumns =
     present && context.webhookDispatcherRole !== undefined
       ? await resolveWebhookDispatcherColumns(client, context.schema)
@@ -3865,12 +3942,18 @@ async function assertWebhookBoundary(
     ],
     ...staleRoles.map((role) => [role, none] as const),
   ];
-  for (const role of [
-    context.skillPublisherRole,
-    context.workerCoordinatorRole,
-    context.adminControlRole,
-  ])
+  for (const role of [context.skillPublisherRole, context.workerCoordinatorRole])
     checks.push([role, none]);
+  checks.push([
+    context.adminControlRole,
+    integrationsEnabled
+      ? (table, column, privilege) =>
+          table === "tenant_webhooks" &&
+          ((privilege === "SELECT" && webhookAdminSelectColumns.includes(column)) ||
+            privilege === "INSERT" ||
+            (privilege === "UPDATE" && webhookRuntimeUpdateColumns.includes(column)))
+      : none,
+  ]);
   if (context.webhookDispatcherRole !== undefined)
     checks.push([
       context.webhookDispatcherRole,
@@ -3928,6 +4011,8 @@ async function assertWebhookBoundary(
         "webhook_outbox_dispatcher_policy",
       ].map((name) => [name, context.webhookDispatcherRole ?? "PUBLIC"] as const),
     ]);
+    if (integrationsEnabled)
+      expectedBindings.set("integration_admin_manage", context.adminControlRole);
     if (bindings.rows.length !== expectedBindings.size)
       throw new PersistenceError("CONSTRAINT_VIOLATION", "Webhook RLS 策略集合偏离白名单");
     for (const row of bindings.rows) {

@@ -159,8 +159,8 @@ Worker 只能按 Run 快照读取外部工具版本与凭据，授权在接入 A
 
 ### 8.1 服务凭据
 
-- 新增 Tenant 持有的 API Key，带作用域（读 Thread、创建 Run、提交工具结果、管理 Webhook 等）、到期时间和备注。
-- 只保存哈希，明文只在创建时显示一次；支持轮换与吊销，所有使用记录可审计。
+- Tenant 持有的 API Key 带业务作用域（读 Thread、创建 Run、提交工具结果等）、到期时间和备注。它是部署方的集成配置，只由平台管理员在后台按 Tenant 管理，不属于终端用户工作台能力，也不因持有 Key 而获得集成管理权。
+- 只保存哈希，明文在创建或轮换时各显示一次；支持轮换与吊销，所有使用记录可审计。当前管理与身份边界见[身份、账号与会话](../architecture/identity-and-session.md#服务凭据与集成身份)。
 - API Key 认证后，服务端仍然从 Membership 和 PostgreSQL RLS 重建 `TenantScope`，不新增绕过 RLS 的路径。
 
 ### 8.2 终端用户映射
@@ -181,7 +181,7 @@ Worker 只能按 Run 快照读取外部工具版本与凭据，授权在接入 A
 
 ### 8.4 Webhook
 
-- Tenant 注册 Webhook 地址与订阅的事件类型：Run 进入 `waiting`/`requires_action`、成功、失败、取消，以及 Artifact 发布。
+- 平台管理员在后台为目标 Tenant 注册 Webhook 地址与订阅的事件类型：Run 进入 `waiting`/`requires_action`、成功、失败、取消，以及 Artifact 发布。终端用户、Tenant Owner/Admin 和 API Key 不获得 Webhook 管理权；当前接口见[Webhook 参考](../reference/webhooks.md)。
 - 投递经数据库 Outbox，至少一次投递，带事件 ID、HMAC 签名和时间戳；接收方按事件 ID 去重。
 - 失败按退避重试；超过上限后停用该 Webhook，并在后台显示原因。
 
@@ -230,6 +230,7 @@ Worker 只能按 Run 快照读取外部工具版本与凭据，授权在接入 A
 | 问题 | 决定 | 影响的工作包 |
 | --- | --- | --- |
 | AgentDefinition 归属 | 只归平台，由管理员创建和发布；个人和团队只有使用权，永远不能创建或发布 Agent（见 4.4） | A1、A4 |
+| 接入配置管理归属 | API Key 与 Webhook 属于部署方集成配置，只由平台管理员在后台按 Tenant 管理；不在终端用户工作台或用户 API 暴露管理能力 | C1、C5 |
 | 终端用户映射模型 | 集成身份持有 API Key，终端用户 ID 映射为内部 User 并各有个人空间；业务方组织可映射为团队空间（见 8.2） | C3 |
 | Thread 是否锁定 Revision | 不锁定，每个 Run 使用当时已发布的 Revision（见 4.5） | A3 |
 | Agent 配置文件格式 | YAML，顶层 `schemaVersion: 1`，凭据只写引用 | E1 |

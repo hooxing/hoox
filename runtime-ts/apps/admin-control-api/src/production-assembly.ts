@@ -17,6 +17,7 @@ import {
   ExternalToolDraftCredentialCipher,
   PgExternalToolAdminRepository,
   PgAdminControlRepository,
+  PgIntegrationAdminRepository,
   PgAdminRunExplorerRepository,
   PgAgentDefinitionRepository,
   PgIdentityConfigurationRepository,
@@ -26,7 +27,7 @@ import {
   probeS3StableSkillPublisher,
   S3StableSkillPublisher,
 } from "@hoox/persistence/admin";
-import { createPostgresPool, probePostgres } from "@hoox/persistence/postgres";
+import { createPostgresPool, probePostgres, WebhookSecretCipher } from "@hoox/persistence/postgres";
 import {
   loadProductionTlsCredentials,
   type ProcessSignalSource,
@@ -157,6 +158,12 @@ async function assembleRealService(
       new ModelProviderCredentialCipher(configuration.providerSecrets.modelCredentialEncryptionKey),
     );
     const dependencies = {
+      integrations: new PgIntegrationAdminRepository(
+        controlPool,
+        configuration.providerSecrets.webhookSecretEncryptionKey === undefined
+          ? undefined
+          : new WebhookSecretCipher(configuration.providerSecrets.webhookSecretEncryptionKey),
+      ),
       sandbox: {
         overview: sandboxRepository.overview.bind(sandboxRepository),
         saveProfile: sandboxRepository.saveProfile.bind(sandboxRepository),

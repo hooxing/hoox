@@ -6,7 +6,6 @@ function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
     BETTER_AUTH_SECRET: "test-better-auth-secret-at-least-thirty-two-bytes",
-    WEBHOOK_SECRET_ENCRYPTION_KEY: "test-webhook-encryption-root-at-least-thirty-two-bytes",
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_SCHEMA: "runtime",
     DATABASE_RUNTIME_ROLE: "runtime",
@@ -54,6 +53,17 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
 }
 
 describe("API 进程入口", () => {
+  it("用户 API 不读取 Webhook 密钥根配置", () => {
+    expect(
+      "webhookSecretEncryptionKey" in parseApiProcessEnvironment(productionEnvironment()),
+    ).toBe(false);
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        WEBHOOK_SECRET_ENCRYPTION_KEY: "webhook-root-placeholder-at-least-32-bytes",
+      }),
+    ).toThrow("UNKNOWN:WEBHOOK_SECRET_ENCRYPTION_KEY");
+  });
   it("Thread 串行队列开关缺省开启且允许显式关闭", () => {
     const defaultEnvironment = developmentEnvironment();
     delete defaultEnvironment.THREAD_SERIAL_QUEUE_V2_ENABLED;

@@ -944,37 +944,4 @@ describe("RuntimeApi", () => {
       "/api/v1/me/history-files/resource_history/versions/version_history/download",
     );
   });
-  it.each([
-    { tenantId: "tenant_opened", expected: "tenant_opened", label: "固定团队" },
-    { tenantId: null, expected: null, label: "固定个人空间" },
-    { tenantId: undefined, expected: "tenant_switched", label: "省略时兼容活动空间" },
-  ])("所有 Webhook 管理请求隔离 Tenant：$label", async ({ tenantId, expected }) => {
-    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      Response.json({ data: { items: [] } }),
-    );
-    const api = new RuntimeApi(fetcher, "/api");
-    api.setTenantId("tenant_opened");
-    api.setTenantId("tenant_switched");
-    const input = {
-      name: "测试回调",
-      endpointUrl: "https://hooks.example.invalid/hoox",
-      eventTypes: ["run.succeeded" as const],
-    };
-    await api.listWebhooks(tenantId);
-    await api.createWebhook(input, tenantId);
-    await api.rotateWebhookSecret("hook/one", tenantId);
-    await api.disableWebhook("hook/one", tenantId);
-    await api.deleteWebhook("hook/one", tenantId);
-    expect(fetcher.mock.calls.map(([path, init]) => [path, init?.method ?? "GET"])).toEqual([
-      ["/api/v1/webhooks", "GET"],
-      ["/api/v1/webhooks", "POST"],
-      ["/api/v1/webhooks/hook%2Fone/rotate-secret", "POST"],
-      ["/api/v1/webhooks/hook%2Fone/disable", "POST"],
-      ["/api/v1/webhooks/hook%2Fone", "DELETE"],
-    ]);
-    for (const [, init] of fetcher.mock.calls) {
-      expect(new Headers(init?.headers).get("X-Tenant-ID")).toBe(expected);
-    }
-    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual(input);
-  });
 });

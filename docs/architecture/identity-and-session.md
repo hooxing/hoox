@@ -29,11 +29,13 @@ Better Auth 与 Hoox API 同进程运行，不需要独立身份服务。它负�
 
 ## 服务凭据与集成身份
 
-Tenant API Key 用于服务到服务访问，与 Hoox Session 是不同凭据。Key 只以 `hoox_sk_` 前缀加高熵随机串交付；数据库只保存 SHA-256 哈希、可公开前缀和元数据，创建响应是唯一能读取明文的地方。列表只返回前缀、名称、备注、作用域、创建/到期/吊销/最近使用时间。Key 可到期或吊销，最近使用时间按五分钟窗口节流更新。
+Tenant API Key 是部署方系统接入 Hoox 的服务凭据，与终端用户 Hoox Session 不同。只有有效的平台 `admin` 能在后台「接入 → API Key」按目标 Tenant 创建、列出、轮换和吊销；Tenant Owner/Admin、普通用户会话和 API Key 本身都不获得管理权。工作台没有集成管理入口，用户 API 不注册 `/v1/api-keys` 或 `/v1/webhooks` 管理路由；后台接口见[接入管理边界](admin-control-plane.md#接入管理边界)。
 
-每个 Key 创建独立 `integration` User，并在所属 Tenant 创建 `member` Membership；个人 Tenant 仍只允许人类 Owner 管理，集成身份以 Member 加入，不获得个人空间管理权。该身份没有登录账号，不可登录工作台；创建者只作为审计元数据，离开 Tenant 不会改变 Key 身份。吊销不可恢复；Runtime 在同一事务内先将未吊销 Key 写入吊销时间，再将对应 `integration` Membership 从 active 改为 revoked。仅授予所需列级 UPDATE，并由 Runtime 专属 RESTRICTIVE RLS 策略限制目标身份、旧状态和新状态；已吊销 Key 不再满足 UPDATE 的旧行策略，因此不能恢复。任一步未恰好更新目标行都会回滚整个事务。之后请求同时无法通过凭据校验或 Membership 授权。该身份模型可供终端用户映射复用，但映射本身不属于此边界。
+Key 只以 `hoox_sk_` 前缀加高熵随机串交付；数据库只保存 SHA-256 哈希、可公开前缀和元数据，创建或轮换成功响应各返回一次明文，列表不能取回。列表只返回前缀、名称、备注、作用域、创建/到期/吊销/最近使用时间。轮换立即替换旧哈希，保留原 Key ID、集成 User、作用域和到期时间；已到期或吊销的 Key 不能轮换。最近使用时间按五分钟窗口节流更新。
 
-API Key 认证成功后，API 仍使用该集成 User 从 Membership 重建 `TenantScope`，所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。API Key 管理、登录会话、账号与团队成员管理均为人类会话边界；Webhook 管理允许人类 Owner/Admin 与持有 `webhooks:manage` 作用域的 API Key。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
+每个 Key 创建独立 `integration` User，并在所属 Tenant 创建 `member` Membership；集成身份不获得个人或团队空间管理权。该身份没有登录账号，不可登录工作台；创建者只作为审计元数据，离开 Tenant 不会改变 Key 身份。吊销不可恢复；后台复用持久化仓储，在同一事务内先将未吊销 Key 写入吊销时间，再将对应 `integration` Membership 从 active 改为 revoked，并写入管理审计。Admin Control 只有所需列级 UPDATE，专属 RESTRICTIVE RLS 进一步限制有效平台管理员、目标 Tenant、集成 Membership 和旧状态；不能撤销人类成员或恢复已吊销的身份。任一步失败都会回滚整个事务。之后请求同时无法通过凭据校验或 Membership 授权。该身份模型可供终端用户映射复用，但映射本身不属于此边界。
+
+API Key 认证成功后，API 仍使用该集成 User 从 Membership 重建 `TenantScope`，所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。登录会话、账号与团队成员管理不接受 API Key；API Key 与 Webhook 管理由后台平台管理员授权，已有 `webhooks:manage` 作用域不赋予后台管理权。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
 
 ## 可配置登录方式
 

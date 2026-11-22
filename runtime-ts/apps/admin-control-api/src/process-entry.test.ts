@@ -77,6 +77,23 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
 }
 
 describe("后台控制 API 进程入口", () => {
+  it("接入管理读取独立 Webhook 根密钥，并拒绝过短配置", () => {
+    const root = "webhook-root-placeholder-at-least-32-bytes";
+    expect(
+      parseAdminControlApiProcessEnvironment(
+        developmentEnvironment({ WEBHOOK_SECRET_ENCRYPTION_KEY: root }),
+      ).providerSecrets.webhookSecretEncryptionKey === root,
+    ).toBe(true);
+    expect(
+      parseAdminControlApiProcessEnvironment(developmentEnvironment()).providerSecrets
+        .webhookSecretEncryptionKey,
+    ).toBeUndefined();
+    expect(() =>
+      parseAdminControlApiProcessEnvironment(
+        developmentEnvironment({ WEBHOOK_SECRET_ENCRYPTION_KEY: "short-placeholder" }),
+      ),
+    ).toThrow("WEBHOOK_SECRET_ENCRYPTION_KEY");
+  });
   it("空安装可同时省略开发管理员令牌与模型密钥，保留稳定加密根", () => {
     const environment = developmentEnvironment({
       MODEL_CREDENTIAL_ENCRYPTION_KEY: "installation-root-at-least-thirty-two-bytes",

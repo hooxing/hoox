@@ -26,7 +26,7 @@ export const TenantWebhookSchema = Type.Object(
 export type TenantWebhookDto = Static<typeof TenantWebhookSchema>;
 export const CreateWebhookRequestSchema = Type.Object(
   {
-    name: Type.String({ minLength: 1, maxLength: 120 }),
+    name: Type.String({ minLength: 1, maxLength: 120, pattern: "\\S" }),
     endpointUrl: Type.String({ maxLength: 2048 }),
     eventTypes: Type.Array(WebhookEventTypeSchema, { minItems: 1, uniqueItems: true }),
   },

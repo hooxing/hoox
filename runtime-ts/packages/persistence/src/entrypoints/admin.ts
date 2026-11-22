@@ -11,3 +11,4 @@ export * from "../pg-external-tools.js";
 export * from "../pg-agent-definition.js";
 export * from "../agent-definition-port.js";
 export * from "../pg-external-tool-admin.js";
+export * from "../pg-integration-admin.js";

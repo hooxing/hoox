@@ -35,7 +35,7 @@ Key 只以 `hoox_sk_` 前缀加高熵随机串交付；数据库只保存 SHA-25
 
 每个 Key 创建独立 `integration` User，并在所属 Tenant 创建 `member` Membership；集成身份不获得个人或团队空间管理权。该身份没有登录账号，不可登录工作台；创建者只作为审计元数据，离开 Tenant 不会改变 Key 身份。吊销不可恢复；后台复用持久化仓储，在同一事务内先将未吊销 Key 写入吊销时间，再将对应 `integration` Membership 从 active 改为 revoked，并写入管理审计。Admin Control 只有所需列级 UPDATE，专属 RESTRICTIVE RLS 进一步限制有效平台管理员、目标 Tenant、集成 Membership 和旧状态；不能撤销人类成员或恢复已吊销的身份。任一步失败都会回滚整个事务。之后请求同时无法通过凭据校验或 Membership 授权。该身份模型可供终端用户映射复用，但映射本身不属于此边界。
 
-API Key 认证成功后，API 仍使用该集成 User 从 Membership 重建 `TenantScope`，所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。登录会话、账号与团队成员管理不接受 API Key；API Key 与 Webhook 管理由后台平台管理员授权，已有 `webhooks:manage` 作用域不赋予后台管理权。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
+API Key 认证成功后，API 仍使用该集成 User 从 Membership 重建 `TenantScope`，所有业务数据访问继续受 RLS 约束。作用域是额外的路由权限：仅公开 API 契约显式声明所需作用域的路由接受 API Key；未声明作用域的路由默认只接受人类会话。公开路由与错误、分页、幂等和 SSE 契约见[公开 API v1](../reference/public-api.md)。登录会话、账号与团队成员管理不接受 API Key；API Key 与 Webhook 管理由后台平台管理员授权，已有 `webhooks:manage` 作用域不赋予后台管理权。无效或跨 Tenant 凭据不泄漏 Key 存在性，返回统一认证/不存在错误；作用域不足使用既有错误信封返回 403。
 
 ## 可配置登录方式
 

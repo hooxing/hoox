@@ -1,0 +1,3006 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Hoox Public API",
+    "version": "1.0.0",
+    "description": "Hoox 对外承诺的 v1 API。内部工作台路由不属于此兼容契约。"
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Hoox API Key"
+      }
+    },
+    "schemas": {
+      "v1.AvailableAgentList": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "maxItems": 1000,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/v1.AvailableAgentDto"
+            }
+          }
+        }
+      },
+      "v1.AvailableAgentDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["id", "displayName", "description", "suggestedQuestions"],
+        "properties": {
+          "id": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "displayName": {
+            "minLength": 1,
+            "maxLength": 200,
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "avatarRef": {
+            "minLength": 1,
+            "maxLength": 512,
+            "type": "string"
+          },
+          "welcomeMessage": {
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "suggestedQuestions": {
+            "maxItems": 12,
+            "type": "array",
+            "items": {
+              "minLength": 1,
+              "maxLength": 500,
+              "type": "string"
+            }
+          }
+        }
+      },
+      "v1.ErrorEnvelope": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["version", "requestId", "error"],
+        "properties": {
+          "version": {
+            "const": "v1",
+            "type": "string"
+          },
+          "requestId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "error": {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["code", "message", "retryable"],
+            "properties": {
+              "code": {
+                "anyOf": [
+                  {
+                    "const": "INVALID_REQUEST",
+                    "type": "string"
+                  },
+                  {
+                    "const": "UNSUPPORTED_MEDIA_TYPE",
+                    "type": "string"
+                  },
+                  {
+                    "const": "UNAUTHORIZED",
+                    "type": "string"
+                  },
+                  {
+                    "const": "FORBIDDEN",
+                    "type": "string"
+                  },
+                  {
+                    "const": "NOT_FOUND",
+                    "type": "string"
+                  },
+                  {
+                    "const": "CONFLICT",
+                    "type": "string"
+                  },
+                  {
+                    "const": "AGENT_REVISION_UNAVAILABLE",
+                    "type": "string"
+                  },
+                  {
+                    "const": "INVALID_STATE",
+                    "type": "string"
+                  },
+                  {
+                    "const": "RATE_LIMITED",
+                    "type": "string"
+                  },
+                  {
+                    "const": "DEPENDENCY_UNAVAILABLE",
+                    "type": "string"
+                  },
+                  {
+                    "const": "INTERNAL",
+                    "type": "string"
+                  }
+                ]
+              },
+              "message": {
+                "minLength": 1,
+                "maxLength": 500,
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "v1.ThreadDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "tenantId",
+          "createdByUserId",
+          "title",
+          "status",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "tenantId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "createdByUserId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "agentDefinitionId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "title": {
+            "minLength": 1,
+            "maxLength": 200,
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "active",
+                "type": "string"
+              },
+              {
+                "const": "archived",
+                "type": "string"
+              }
+            ]
+          },
+          "createdAt": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+            "format": "hoox-iso-utc-timestamp-v1",
+            "type": "string"
+          },
+          "updatedAt": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+            "format": "hoox-iso-utc-timestamp-v1",
+            "type": "string"
+          }
+        }
+      },
+      "v1.ThreadPageDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/v1.ThreadDto"
+            }
+          },
+          "nextCursor": {
+            "minLength": 1,
+            "maxLength": 512,
+            "type": "string"
+          }
+        }
+      },
+      "v1.ThreadRunPageDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/v1.RunDto"
+            }
+          }
+        }
+      },
+      "v1.RunDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["id", "tenantId", "threadId", "status", "createdAt", "updatedAt"],
+        "properties": {
+          "id": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "tenantId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "threadId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "queued",
+                "type": "string"
+              },
+              {
+                "const": "running",
+                "type": "string"
+              },
+              {
+                "const": "waiting",
+                "type": "string"
+              },
+              {
+                "const": "succeeded",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "type": "string"
+              }
+            ]
+          },
+          "executionStatus": {
+            "const": "recovery_required",
+            "type": "string"
+          },
+          "createdAt": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+            "format": "hoox-iso-utc-timestamp-v1",
+            "type": "string"
+          },
+          "updatedAt": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+            "format": "hoox-iso-utc-timestamp-v1",
+            "type": "string"
+          }
+        }
+      },
+      "v1.RunEventPageDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "attemptId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "items": {
+            "maxItems": 200,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/v1.RunEventDto"
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        }
+      },
+      "v1.RunEventDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["eventId", "sequence", "type", "kind", "payload", "occurredAt"],
+        "properties": {
+          "eventId": {
+            "minLength": 3,
+            "maxLength": 256,
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "minLength": 1,
+            "maxLength": 128,
+            "type": "string"
+          },
+          "kind": {
+            "minLength": 1,
+            "maxLength": 128,
+            "type": "string"
+          },
+          "payload": {
+            "type": "object",
+            "patternProperties": {
+              "^(.*)$": {}
+            }
+          },
+          "occurredAt": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+            "format": "hoox-iso-utc-timestamp-v1",
+            "type": "string"
+          }
+        }
+      },
+      "v1.UploadedResourceDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["resourceId", "versionId", "name", "path", "mediaType", "sizeBytes"],
+        "properties": {
+          "resourceId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "versionId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "maxLength": 255,
+            "type": "string"
+          },
+          "path": {
+            "pattern": "^/resources/",
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "mediaType": {
+            "minLength": 3,
+            "maxLength": 255,
+            "type": "string"
+          },
+          "sizeBytes": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          }
+        }
+      },
+      "v1.ResourceDownloadDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "resourceId",
+          "versionId",
+          "name",
+          "mediaType",
+          "sizeBytes",
+          "url",
+          "expiresInSeconds"
+        ],
+        "properties": {
+          "resourceId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "versionId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "maxLength": 255,
+            "type": "string"
+          },
+          "mediaType": {
+            "minLength": 1,
+            "maxLength": 255,
+            "type": "string"
+          },
+          "sizeBytes": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "url": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "expiresInSeconds": {
+            "minimum": 1,
+            "maximum": 3600,
+            "type": "integer"
+          }
+        }
+      },
+      "v1.ArtifactListDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "maxItems": 200,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/v1.ArtifactDto"
+            }
+          }
+        }
+      },
+      "v1.ArtifactDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "tenantId",
+          "threadId",
+          "runId",
+          "resourceVersionId",
+          "name",
+          "status",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "tenantId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "threadId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "runId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "resourceVersionId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "replacesArtifactId": {
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "maxLength": 255,
+            "type": "string"
+          },
+          "mediaType": {
+            "minLength": 1,
+            "maxLength": 255,
+            "type": "string"
+          },
+          "sizeBytes": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "publishing",
+                "type": "string"
+              },
+              {
+                "const": "published",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "type": "string"
+              }
+            ]
+          },
+          "createdAt": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+            "format": "hoox-iso-utc-timestamp-v1",
+            "type": "string"
+          },
+          "updatedAt": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+            "format": "hoox-iso-utc-timestamp-v1",
+            "type": "string"
+          }
+        }
+      },
+      "v1.ArtifactDeliveryDto": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["artifact", "url", "expiresInSeconds", "disposition"],
+            "properties": {
+              "artifact": {
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "id",
+                  "tenantId",
+                  "threadId",
+                  "runId",
+                  "resourceVersionId",
+                  "name",
+                  "status",
+                  "createdAt",
+                  "updatedAt"
+                ],
+                "properties": {
+                  "id": {
+                    "minLength": 3,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                    "type": "string"
+                  },
+                  "tenantId": {
+                    "minLength": 3,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                    "type": "string"
+                  },
+                  "threadId": {
+                    "minLength": 3,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                    "type": "string"
+                  },
+                  "runId": {
+                    "minLength": 3,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                    "type": "string"
+                  },
+                  "resourceVersionId": {
+                    "minLength": 3,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                    "type": "string"
+                  },
+                  "replacesArtifactId": {
+                    "minLength": 3,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                    "type": "string"
+                  },
+                  "name": {
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "type": "string"
+                  },
+                  "mediaType": {
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "type": "string"
+                  },
+                  "sizeBytes": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "const": "publishing",
+                        "type": "string"
+                      },
+                      {
+                        "const": "published",
+                        "type": "string"
+                      },
+                      {
+                        "const": "failed",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "createdAt": {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                    "format": "hoox-iso-utc-timestamp-v1",
+                    "type": "string"
+                  },
+                  "updatedAt": {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                    "format": "hoox-iso-utc-timestamp-v1",
+                    "type": "string"
+                  }
+                }
+              },
+              "url": {
+                "minLength": 1,
+                "maxLength": 8192,
+                "type": "string"
+              },
+              "expiresInSeconds": {
+                "minimum": 1,
+                "maximum": 900,
+                "type": "integer"
+              },
+              "disposition": {
+                "anyOf": [
+                  {
+                    "const": "preview",
+                    "type": "string"
+                  },
+                  {
+                    "const": "download",
+                    "type": "string"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "$ref": "#/components/schemas/v1.ArtifactTextPreviewDto"
+          }
+        ]
+      },
+      "v1.ArtifactTextPreviewDto": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["artifact", "text", "disposition"],
+        "properties": {
+          "artifact": {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "tenantId",
+              "threadId",
+              "runId",
+              "resourceVersionId",
+              "name",
+              "status",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "id": {
+                "minLength": 3,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                "type": "string"
+              },
+              "tenantId": {
+                "minLength": 3,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                "type": "string"
+              },
+              "threadId": {
+                "minLength": 3,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                "type": "string"
+              },
+              "runId": {
+                "minLength": 3,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                "type": "string"
+              },
+              "resourceVersionId": {
+                "minLength": 3,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                "type": "string"
+              },
+              "replacesArtifactId": {
+                "minLength": 3,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "maxLength": 255,
+                "type": "string"
+              },
+              "mediaType": {
+                "minLength": 1,
+                "maxLength": 255,
+                "type": "string"
+              },
+              "sizeBytes": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "const": "publishing",
+                    "type": "string"
+                  },
+                  {
+                    "const": "published",
+                    "type": "string"
+                  },
+                  {
+                    "const": "failed",
+                    "type": "string"
+                  }
+                ]
+              },
+              "createdAt": {
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                "format": "hoox-iso-utc-timestamp-v1",
+                "type": "string"
+              },
+              "updatedAt": {
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                "format": "hoox-iso-utc-timestamp-v1",
+                "type": "string"
+              }
+            }
+          },
+          "text": {
+            "maxLength": 1048576,
+            "type": "string"
+          },
+          "disposition": {
+            "const": "preview",
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v1/agents": {
+      "get": {
+        "operationId": "listAgents",
+        "summary": "列出当前空间可用 Agent",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "threads:read",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.AvailableAgentList"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads": {
+      "post": {
+        "operationId": "createThread",
+        "summary": "创建 Thread",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "threads:create",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                  "title": {
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "type": "string"
+                  },
+                  "agentDefinitionId": {
+                    "minLength": 3,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.ThreadDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "幂等键冲突或资源状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "不支持的媒体类型",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listThreads",
+        "summary": "分页列出 Thread",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "threads:read",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.ThreadPageDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}": {
+      "get": {
+        "operationId": "getThread",
+        "summary": "查询 Thread",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "threads:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.ThreadDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}/runs": {
+      "get": {
+        "operationId": "listThreadRuns",
+        "summary": "列出 Thread 的最近 Run",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.ThreadRunPageDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createRun",
+        "summary": "创建 Run",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:create",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "type": "object",
+                "required": ["input"],
+                "properties": {
+                  "input": {
+                    "minLength": 1,
+                    "maxLength": 1048576,
+                    "type": "string"
+                  },
+                  "skillInvocation": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": ["skill"],
+                    "properties": {
+                      "skill": {
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                        "type": "string"
+                      },
+                      "args": {
+                        "maxLength": 16384,
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.RunDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "幂等键冲突或资源状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "不支持的媒体类型",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}/runs/{runId}": {
+      "get": {
+        "operationId": "getRun",
+        "summary": "查询 Run",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.RunDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelRun",
+        "summary": "取消 Run",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:create",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.RunDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "当前状态不支持该操作",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}/runs/{runId}/events": {
+      "get": {
+        "operationId": "listRunEvents",
+        "summary": "分页读取 Run 事件",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minimum": -1,
+              "maximum": 9007199254740991,
+              "default": -1,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.RunEventPageDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}/runs/{runId}/events/stream": {
+      "get": {
+        "operationId": "streamRunEvents",
+        "summary": "订阅 Run 事件",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minimum": -1,
+              "maximum": 9007199254740991,
+              "default": -1,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "attemptId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "description": "SSE 续连游标；格式为 attemptId-sequence。",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/resources/uploads": {
+      "post": {
+        "operationId": "uploadResource",
+        "summary": "上传文件",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:create",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+            }
+          },
+          {
+            "name": "X-File-Name",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          },
+          {
+            "name": "X-File-Media-Type",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.UploadedResourceDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "幂等键冲突或资源状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "不支持的媒体类型",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/resources/{resourceId}/versions/{versionId}/download": {
+      "get": {
+        "operationId": "downloadResource",
+        "summary": "下载已上传文件",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "resourceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "versionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.ResourceDownloadDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}/runs/{runId}/artifacts": {
+      "get": {
+        "operationId": "listArtifacts",
+        "summary": "列出已发布 Artifact",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.ArtifactListDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/preview": {
+      "get": {
+        "operationId": "previewArtifact",
+        "summary": "预览 Artifact",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.ArtifactDeliveryDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "当前状态不支持该操作",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/download": {
+      "get": {
+        "operationId": "downloadArtifact",
+        "summary": "下载 Artifact",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/v1.ArtifactDeliveryDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "当前状态不支持该操作",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/content": {
+      "get": {
+        "operationId": "readArtifactContent",
+        "summary": "读取 Artifact 原始内容",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

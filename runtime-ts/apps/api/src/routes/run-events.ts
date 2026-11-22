@@ -11,7 +11,7 @@ import {
 } from "@hoox/protocol";
 import type { FastifyInstance } from "fastify";
 import type { ApiDependencies } from "../dependencies.js";
-import { success } from "../http.js";
+import { headerValues, success } from "../http.js";
 import type { AuthenticateRequest } from "../request-auth.js";
 import { openRunEventStream } from "../run-event-stream.js";
 import { ApiFailure, type ApiService } from "../service.js";
@@ -40,6 +40,7 @@ export function registerRunEventRoutes(
       async (request, reply) => {
         const experience = dependencies.experience;
         if (experience === undefined) throw new ApiFailure("not_found");
+        const cursor = streamCursor(request.query, headerValues(request, "last-event-id"));
         const auth = await authenticate(request, "runs:read");
         await service.getRun(auth, request.params.threadId, request.params.runId);
         if (eventStreamsClosing) throw new ApiFailure("dependency_unavailable");
@@ -49,7 +50,7 @@ export function registerRunEventRoutes(
         reply.raw.once("close", abort);
         try {
           const stream = await openRunEventStream({
-            cursor: request.query,
+            cursor,
             signal: controller.signal,
             watch: (wake) =>
               experience.watchEvents?.(
@@ -133,6 +134,26 @@ export function registerRunEventRoutes(
       },
     );
   }
+}
+
+function streamCursor(
+  query: RunEventStreamQuery,
+  lastEventIds: readonly string[],
+): RunEventStreamQuery {
+  if (lastEventIds.length === 0) return query;
+  if (lastEventIds.length !== 1) throw new ApiFailure("bad_request");
+  const match = /^(.+)-(0|[1-9][0-9]*)$/u.exec(lastEventIds[0] ?? "");
+  if (match === null) throw new ApiFailure("bad_request");
+  const after = Number(match[2]);
+  const attemptId = match[1];
+  if (
+    !Number.isSafeInteger(after) ||
+    attemptId === undefined ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(attemptId)
+  ) {
+    throw new ApiFailure("bad_request");
+  }
+  return { after, attemptId };
 }
 
 const publicAgentEventTypes = new Set([

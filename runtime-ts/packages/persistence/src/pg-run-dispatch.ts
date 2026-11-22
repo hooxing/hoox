@@ -134,11 +134,11 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
         }
 
         const run = await client.query<QueryResultRow>(
-          `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
-           VALUES ($1,$2,$3,'queued',clock_timestamp(),clock_timestamp())
+          `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
+           VALUES ($1,$2,$3,'queued',clock_timestamp(),clock_timestamp(),$4)
            RETURNING id AS run_id,tenant_id,thread_id,status AS run_status,
                      created_at AS run_created_at,updated_at AS run_updated_at`,
-          [input.scope.tenantId, input.run.id, input.run.threadId],
+          [input.scope.tenantId, input.run.id, input.run.threadId, input.origin ?? "normal"],
         );
         const runRow = run.rows[0];
         if (runRow === undefined) throw new TypeError("创建 Run 未返回数据");

@@ -1699,6 +1699,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           scope: manager.scope,
           thread,
           run,
+          origin: "api",
           inputText: "执行",
           idempotency: {
             key: "pinned-runtime-create-run",
@@ -1706,6 +1707,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           },
         }),
       ).toMatchObject({ outcome: "created" });
+      const createdOrigin = await withTenantTransaction(runtimePool, manager.scope, (client) =>
+        client.query<{ readonly origin: string }>("SELECT origin FROM runs WHERE id=$1", [run.id]),
+      );
+      expect(createdOrigin.rows[0]?.origin).toBe("api");
       const scope = { tenantId: manager.tenant.id, runId: run.id };
       const runtime = new PgRuntimeControlConfigurationRepository(
         runtimePool,
@@ -1796,6 +1801,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await migratorPool.query("DELETE FROM admin_control_active_configs WHERE activated_by=$1", [
         manager.user.id,
       ]);
+      await administrativePool.query(
+        `UPDATE "${schema}".runs SET origin='normal' WHERE tenant_id=$1 AND id=$2`,
+        [manager.tenant.id, "run_agent_pinned_runtime"],
+      );
     }
   });
 

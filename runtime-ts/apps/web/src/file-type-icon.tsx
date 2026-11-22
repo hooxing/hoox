@@ -1,39 +1,39 @@
-import codeIcon from "@hoox/vendor-file-type-icons/code.svg";
-import gifIcon from "@hoox/vendor-file-type-icons/gif.svg";
-import configIcon from "@hoox/vendor-file-type-icons/config.svg";
-import blankIcon from "@hoox/vendor-file-type-icons/unknown.svg";
-import docxIcon from "@hoox/vendor-file-type-icons/docx.svg";
-import xlsxIcon from "@hoox/vendor-file-type-icons/xlsx.svg";
-import pptxIcon from "@hoox/vendor-file-type-icons/pptx.svg";
-import pdfIcon from "@hoox/vendor-file-type-icons/pdf.svg";
-import txtIcon from "@hoox/vendor-file-type-icons/text.svg";
-import zipIcon from "@hoox/vendor-file-type-icons/archive.svg";
-import imageIcon from "@hoox/vendor-file-type-icons/image.svg";
-import mp3Icon from "@hoox/vendor-file-type-icons/audio.svg";
-import mp4Icon from "@hoox/vendor-file-type-icons/video.svg";
+import {
+  FileArchive,
+  FileAudio,
+  FileCode,
+  FileCog,
+  FileImage,
+  FileQuestion,
+  FileSpreadsheet,
+  FileText,
+  FileVideo,
+  Presentation,
+  type LucideIcon,
+} from "lucide-react";
 
 const icons = {
-  gif: gifIcon,
-  config: configIcon,
-  blank: blankIcon,
-  docx: docxIcon,
-  xlsx: xlsxIcon,
-  pptx: pptxIcon,
-  pdf: pdfIcon,
-  csv: xlsxIcon,
-  txt: txtIcon,
-  md: txtIcon,
-  json: codeIcon,
-  html: codeIcon,
-  xml: codeIcon,
-  js: codeIcon,
-  py: codeIcon,
-  zip: zipIcon,
-  image: imageIcon,
-  mp3: mp3Icon,
-  mp4: mp4Icon,
-  svg: imageIcon,
-};
+  gif: FileImage,
+  config: FileCog,
+  blank: FileQuestion,
+  docx: FileText,
+  xlsx: FileSpreadsheet,
+  pptx: Presentation,
+  pdf: FileText,
+  csv: FileSpreadsheet,
+  txt: FileText,
+  md: FileText,
+  json: FileCode,
+  html: FileCode,
+  xml: FileCode,
+  js: FileCode,
+  py: FileCode,
+  zip: FileArchive,
+  image: FileImage,
+  mp3: FileAudio,
+  mp4: FileVideo,
+  svg: FileImage,
+} satisfies Readonly<Record<string, LucideIcon>>;
 
 const extensionIcons: Readonly<Record<string, keyof typeof icons>> = {
   doc: "docx",
@@ -154,21 +154,15 @@ export function FileTypeIcon({
   readonly size?: 24 | 32 | 48;
 }) {
   const kind = fileIconKind(name, mediaType);
+  const Icon = icons[kind];
   return (
     <span
       className="file-type-icon"
       data-file-icon={kind}
       aria-hidden="true"
-      style={{
-        display: "inline-block",
-        flexShrink: 0,
-        width: size,
-        height: size,
-        backgroundImage: `url("${icons[kind]}")`,
-        backgroundPosition: "center",
-        backgroundRepeat: "no-repeat",
-        backgroundSize: "contain",
-      }}
-    />
+      style={{ display: "inline-flex", flexShrink: 0, width: size, height: size }}
+    >
+      <Icon size={size} strokeWidth={1.75} />
+    </span>
   );
 }

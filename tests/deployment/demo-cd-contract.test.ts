@@ -82,6 +82,15 @@ describe("Demo 持续部署契约", () => {
     expect(dockerfile).not.toContain("anthropic-skills-pptx");
   });
 
+  it("后台关键词不进入 Fastify 或 Demo Nginx 访问日志", () => {
+    const api = source("runtime-ts/apps/admin-control-api/src/app.ts");
+    const routes = source("runtime-ts/apps/admin-control-api/src/run-explorer-routes.ts");
+    const nginx = source("deploy/demo/nginx.conf.template");
+    expect(api).toContain('"req.body"');
+    expect(routes).toContain('app.post<{ Body: RunListQuery }>(\n    "/v1/admin/control/runs"');
+    expect(nginx).not.toContain("$request_body");
+  });
+
   it("CD 所依赖的主 CI 同步 pnpm hook，并完整预置 Admin Control 数据库角色", () => {
     expect(source("Dockerfile.demo")).toContain(".pnpmfile.cjs ./");
 
@@ -114,7 +123,7 @@ describe("Demo 持续部署契约", () => {
     expect(compose).toContain("DEV_ADMIN_CONTROL_USER_ID: ${DEMO_ADMIN_USER_ID");
     expect(compose).toContain("runtime-ts/apps/admin-web/dist");
     expect(compose).toContain('MODEL_WIRE_TRACE_ENABLED: "true"');
-    expect(compose).toContain("trajectory_data:/opt/hoox/model-wire-traces");
+    expect(compose).not.toContain("trajectory_data:/opt/hoox/model-wire-traces");
     expect(compose).toContain("read_only: true");
     expect(compose).toContain("no-new-privileges:true");
     expect(compose).toMatch(/cap_drop:\s*\n\s+- ALL/u);
@@ -125,7 +134,7 @@ describe("Demo 持续部署契约", () => {
     expect(compose).toContain("mc admin policy attach runtime readwrite");
     expect(compose).toContain("name: hoox-demo-postgres-data-20261120");
     expect(compose).toContain("name: hoox-demo-minio-data-20261120");
-    expect(compose).toContain("name: hoox-demo-trajectory-data-20260903");
+    expect(compose).not.toContain("trajectory_data:");
     expect(compose).not.toContain("name: hoox-demo-trajectory-${HOOX_DEMO_RELEASE_ID");
     expect(compose).not.toMatch(/^\s*name: hoox-demo-(?:postgres|minio)-data\s*$/gmu);
   });
@@ -162,6 +171,9 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("admin_access_token");
     expect(deploy).toContain("--force-recreate api admin-control admin-web scheduler worker");
     expect(deploy).toContain("compose up -d --force-recreate postgres minio");
+    expect(deploy).toContain(
+      "compose up -d --remove-orphans --force-recreate api admin-control admin-web scheduler worker",
+    );
     expect(deploy).toContain("HOOX_DEMO_RELEASE_ID");
     expect(deploy).not.toContain("/trajectory/api/");
     expect(deploy).not.toContain('docker volume rm "hoox-demo-trajectory-$old_release_id"');

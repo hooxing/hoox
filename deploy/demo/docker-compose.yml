@@ -140,8 +140,6 @@ services:
       AGENT_WORKER_TENANT_ID: ${DEMO_TENANT_ID:-tenant_demo_pending}
       DEV_AUTH_USER_A_TENANT_ID: ${DEMO_TENANT_ID:-tenant_demo_pending}
       MODEL_WIRE_TRACE_ENABLED: "true"
-    volumes:
-      - trajectory_data:/opt/hoox/model-wire-traces
     command: ["node", "runtime-ts/apps/agent-worker/dist/development-main.js"]
     depends_on:
       postgres:
@@ -155,5 +153,3 @@ volumes:
     name: hoox-demo-postgres-data-20261120
   minio_data:
     name: hoox-demo-minio-data-20261120
-  trajectory_data:
-    name: hoox-demo-trajectory-data-20260903

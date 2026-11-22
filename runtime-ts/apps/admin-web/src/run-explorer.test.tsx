@@ -309,7 +309,7 @@ describe("运行详情", () => {
 });
 
 describe("运行记录 API 客户端", () => {
-  it("只发送非空筛选，并对路径参数编码且禁用缓存", async () => {
+  it("筛选放在 POST 请求体且不进入 URL，并对路径参数编码且禁用缓存", async () => {
     const fetcher = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
         new Response(JSON.stringify({ data: { items: [], contentAccess: false } }), {
@@ -318,12 +318,18 @@ describe("运行记录 API 客户端", () => {
     );
     const api = new RunExplorerApi(fetcher, "/v1/admin/control", () => "Bearer token");
 
-    await api.listRuns({ tenantId: "tenant_a", status: "failed", createdFrom: "" });
+    await api.listRuns({
+      tenantId: "tenant_a",
+      status: "failed",
+      search: "PRIVATE SEARCH",
+      createdFrom: "",
+    });
     await api.readRunContent("tenant/a", "run 1", "attempt_1");
 
-    expect(fetcher.mock.calls[0]?.[0]).toBe(
-      "/v1/admin/control/runs?tenantId=tenant_a&status=failed",
-    );
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/v1/admin/control/runs");
+    expect(fetcher.mock.calls[0]?.[0]).not.toContain("PRIVATE SEARCH");
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "POST", cache: "no-store" });
+    expect(fetcher.mock.calls[0]?.[1]?.body).toContain("PRIVATE SEARCH");
     expect(fetcher.mock.calls[1]?.[0]).toBe(
       "/v1/admin/control/runs/tenant%2Fa/run%201/content?attemptId=attempt_1",
     );

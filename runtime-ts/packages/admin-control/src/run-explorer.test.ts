@@ -131,18 +131,49 @@ describe("Run 浏览器权限", () => {
     const first = await service.getRunDetail("user_admin", "tenant_a", "run_1", "attempt_1");
     const second = await service.getRunDetail("user_admin", "tenant_a", "run_1");
 
-    expect(first.auditId).toBe("run_content_1");
-    expect(second.auditId).toBe("run_content_2");
+    expect(first.auditId).toBe("run_content_3");
+    expect(second.auditId).toBe("run_content_6");
     expect(store.readContent).toHaveBeenNthCalledWith(1, {
       actorUserId: "user_admin",
       tenantId: "tenant_a",
       runId: "run_1",
       attemptId: "attempt_1",
-      auditId: "run_content_1",
+      auditId: "run_content_3",
     });
-    expect(store.readContent.mock.calls[1]?.[0]).toMatchObject({ attemptId: "attempt_2" });
+    expect(store.readContent.mock.calls[1]?.[0]).toMatchObject({
+      attemptId: "attempt_2",
+      auditId: "run_content_6",
+    });
     expect(JSON.stringify(first.timeline)).toContain(secret);
     expect(store.readContent).toHaveBeenCalledTimes(2);
+  });
+
+  it("admin 查看没有 Attempt 的 Run 时审计用户输入读取", async () => {
+    const store = repository("admin");
+    const {
+      latestAttemptId: _latestAttemptId,
+      latestAttemptStatus: _latestAttemptStatus,
+      ...withoutAttempt
+    } = run();
+    store.getRun.mockResolvedValue({ ...withoutAttempt, attempts: [], attemptCount: 0 });
+    const service = new RunExplorerService(store, () => "run_detail_audit_1");
+    const detail = await service.getRunDetail("user_admin", "tenant_a", "run_1");
+    expect(detail.run.userInput).toBe(`${secret} 问题`);
+    expect(store.getRun).toHaveBeenCalledWith({
+      actorUserId: "user_admin",
+      tenantId: "tenant_a",
+      runId: "run_1",
+      inputAuditId: "run_detail_audit_1",
+    });
+  });
+
+  it("无 Attempt 输入读取的审计失败时不返回详情正文", async () => {
+    const store = repository("admin");
+    store.getRun.mockRejectedValue(new Error("audit unavailable"));
+    const service = new RunExplorerService(store, () => "run_detail_audit_1");
+    await expect(service.getRunDetail("user_admin", "tenant_a", "run_1")).rejects.toThrow(
+      "audit unavailable",
+    );
   });
 
   it("不存在的 Run 或不属于该 Run 的 Attempt 返回 NOT_FOUND 且不写审计", async () => {
@@ -184,6 +215,20 @@ describe("Run 列表查询", () => {
       tenantId: "tenant_a",
       runId: "run_2",
     });
+  });
+
+  it("admin 列表查询将审计元数据传给同一存储读取", async () => {
+    const store = repository("admin");
+    const service = new RunExplorerService(store, () => "run_list_audit_1");
+    await service.listRuns("user_admin", { search: "密钥词", limit: 2 });
+    expect(store.listRuns).toHaveBeenCalledWith(
+      expect.objectContaining({
+        audit: {
+          auditId: "run_list_audit_1",
+          querySummary: expect.objectContaining({ search: "密钥词", limit: 2 }),
+        },
+      }),
+    );
   });
 
   it("把预留的 Agent 与来源筛选原样交给存储层", async () => {

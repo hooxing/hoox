@@ -179,8 +179,7 @@ interface RunListQuery {
 }
 
 /**
- * 注册后台 Run 浏览器路由。结构接口对所有有效控制面角色开放；正文接口由服务端按
- * `run_content.read` 授权并在每次读取时写入审计，菜单是否可见不参与授权。
+ * 注册后台 Run 浏览器路由。列表筛选放在请求体中，避免关键词进入 URL 日志。
  */
 export function registerRunExplorerRoutes(
   app: FastifyInstance,
@@ -190,11 +189,11 @@ export function registerRunExplorerRoutes(
     readonly success: (request: FastifyRequest, data: unknown) => unknown;
   },
 ): void {
-  app.get<{ Querystring: RunListQuery }>(
+  app.post<{ Body: RunListQuery }>(
     "/v1/admin/control/runs",
-    { schema: { querystring: RunListQuerySchema, response: responses(RunPageEnvelope) } },
+    { schema: { body: RunListQuerySchema, response: responses(RunPageEnvelope) } },
     async (request) =>
-      helpers.success(request, await runs.listRuns(await helpers.actor(request), request.query)),
+      helpers.success(request, await runs.listRuns(await helpers.actor(request), request.body)),
   );
   app.get<{
     Params: { readonly tenantId: string; readonly runId: string };

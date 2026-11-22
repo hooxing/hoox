@@ -147,11 +147,16 @@ export interface RunExplorerRepository {
     readonly search?: string;
     readonly after?: RunExplorerCursor;
     readonly limit: number;
+    readonly audit?: {
+      readonly auditId: string;
+      readonly querySummary: Readonly<Record<string, unknown>>;
+    };
   }): Promise<readonly RunExplorerSummary[]>;
   getRun(input: {
     readonly actorUserId: string;
     readonly tenantId: string;
     readonly runId: string;
+    readonly inputAuditId?: string;
   }): Promise<RunExplorerRunRecord | undefined>;
   /** 读取正文已在数据库内剥离的事件结构。 */
   readOutline(input: {
@@ -295,6 +300,7 @@ export class RunExplorerService {
     const agentRevisionId = identifier(query.agentRevisionId, "Revision");
     const search = query.search?.trim();
     if (search !== undefined && search.length > 200) throw new TypeError("关键词过长");
+    const auditId = capabilities.includes("run_content.read") ? this.auditId() : undefined;
     const rows = await this.repository.listRuns({
       actorUserId,
       ...(tenantId === undefined ? {} : { tenantId }),
@@ -307,6 +313,25 @@ export class RunExplorerService {
       ...(search === undefined || search.length === 0 ? {} : { search }),
       ...(query.cursor === undefined ? {} : { after: decodeRunExplorerCursor(query.cursor) }),
       limit: limit + 1,
+      ...(auditId === undefined
+        ? {}
+        : {
+            audit: {
+              auditId,
+              querySummary: {
+                tenantId: tenantId ?? null,
+                status: query.status ?? null,
+                createdFrom: createdFrom ?? null,
+                createdTo: createdTo ?? null,
+                agentDefinitionId: agentDefinitionId ?? null,
+                agentRevisionId: agentRevisionId ?? null,
+                origin: query.origin ?? null,
+                search: search ?? null,
+                cursor: query.cursor === undefined ? null : "provided",
+                limit,
+              },
+            },
+          }),
     });
     const items = rows
       .slice(0, limit)
@@ -327,11 +352,17 @@ export class RunExplorerService {
     });
   }
 
-  private async requireRun(actorUserId: string, tenantId: string, runId: string) {
+  private async requireRun(
+    actorUserId: string,
+    tenantId: string,
+    runId: string,
+    inputAuditId?: string,
+  ) {
     const run = await this.repository.getRun({
       actorUserId,
       tenantId: identifier(tenantId, "Tenant") ?? tenantId,
       runId: identifier(runId, "Run") ?? runId,
+      ...(inputAuditId === undefined ? {} : { inputAuditId }),
     });
     if (run === undefined) throw new RunExplorerError("NOT_FOUND");
     return run;
@@ -345,7 +376,8 @@ export class RunExplorerService {
     attemptId?: string,
   ): Promise<RunExplorerDetail> {
     const capabilities = await this.capabilities(actorUserId);
-    const run = await this.requireRun(actorUserId, tenantId, runId);
+    const inputAuditId = capabilities.includes("run_content.read") ? this.auditId() : undefined;
+    const run = await this.requireRun(actorUserId, tenantId, runId, inputAuditId);
     const selected = selectAttempt(run, identifier(attemptId, "Attempt"));
     const timeline =
       selected === undefined
@@ -383,7 +415,7 @@ export class RunExplorerService {
   ): Promise<RunExplorerContent> {
     const capabilities = await this.capabilities(actorUserId);
     if (!capabilities.includes("run_content.read")) throw new RunExplorerError("NOT_AUTHORIZED");
-    const run = await this.requireRun(actorUserId, tenantId, runId);
+    const run = await this.requireRun(actorUserId, tenantId, runId, this.auditId());
     const selected = selectAttempt(run, identifier(attemptId, "Attempt"));
     if (selected === undefined) throw new RunExplorerError("NOT_FOUND");
     const auditId = this.auditId();

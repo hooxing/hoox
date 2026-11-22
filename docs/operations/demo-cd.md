@@ -10,7 +10,7 @@
 - API、Web、Admin Control 与 Admin Web 使用 host network，分别只监听 `127.0.0.1:3001`、`127.0.0.1:4173`、`127.0.0.1:3003` 和 `127.0.0.1:4174`。
 - 宿主机 Nginx 在 `hoox.aisay.cc` 提供 TLS。`/api/` 转发用户 API，`/agent-runtime-demo/` 转发 Demo 对象桶，其余普通路径转发用户 Web；`/admin/` 提供后台静态页面，`/v1/admin/` 通过内部 `auth_request` 校验 Hoox 会话后转发统一后台 API；旧 `/trajectory` 与 `/trajectory/` 返回 `308 /admin/runs`。
 - Admin Web 从同源工作台的 `hoox.auth-session.v2` 读取未过期 Hoox access token。Nginx 仅在会话属于配置的 Demo 管理员用户时放行后台 API；上游 `Authorization` 由 root-only 配置覆盖为 Admin Control development Token。
-- Worker 继续把 development 诊断镜像写入固定数据 epoch 轨迹卷以支持本机排障；Demo 不运行读取该卷的 Trajectory Web 服务。后台运行记录通过受限 PostgreSQL 投影读取持久 Run 事件。
+- Worker 可把 development 诊断镜像写入容器本地文件系统以支持容器内排障；Demo 不持久化该镜像，也不运行 Trajectory Web 服务。后台运行记录通过受限 PostgreSQL 投影读取持久 Run 事件。升级时 Compose 使用 `--remove-orphans` 清除旧版独立轨迹容器，但不删除数据库或对象存储数据卷。
 - Demo 使用 development 装配以复用单机入口，但必须同时设置 `DEMO_PUBLIC_ACCESS_ENABLED=true`、`DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc`、`DEMO_ADMIN_USER_ID=<Demo 管理员用户 ID>` 和 `DEV_AUTH_ENABLED=false`。固定开发身份、缺失管理员用户、明文 origin 和非回环 API 监听都会在解析期失败。
 
 ## 用户 Web 入口
@@ -160,10 +160,10 @@ docker compose --project-name hoox-demo \
 
 ## 失败与回滚
 
-- 发布开始前缺失契约或共享配置时直接退出，不改变运行中的应用。远程脚本进入发布阶段后，命令失败和显式验收失败都会由主 shell 执行一次恢复：停止候选应用容器，并在存在上一 release 时恢复上一镜像和应用进程，继续挂载同一稳定诊断卷；恢复中的清理失败不会阻止其余恢复动作，也不会覆盖原始失败退出码。
+- 发布开始前缺失契约或共享配置时直接退出，不改变运行中的应用。远程脚本进入发布阶段后，命令失败和显式验收失败都会由主 shell 执行一次恢复：停止候选应用容器，并在存在上一 release 时恢复上一镜像和应用进程；恢复中的清理失败不会阻止其余恢复动作，也不会覆盖原始失败退出码。
 - Nginx 候选配置失败时恢复上一站点配置；Admin Control Token 文件继续留在 root-only 路径并由后续成功发布覆盖。旧版 htpasswd 可能为回滚到仍使用 HTTP Basic 的上一 release 而暂时保留，但现行配置不会引用它。
 - 数据库迁移只向前执行，脚本绝不自动运行 down；若新迁移与旧镜像不兼容，必须停服并按该迁移说明和备份方案处理。
-- PostgreSQL、MinIO 和 Worker 诊断数据卷都不随应用回滚或旧 release 目录清理删除。诊断卷固定为 `hoox-demo-trajectory-data-20260903`；未来只能通过显式数据 epoch 切换执行受控轮换，自动发布不得删除。
+- PostgreSQL 与 MinIO 数据卷不随应用回滚或旧 release 目录清理删除。Worker 诊断镜像不再写入共享卷，因此不作为升级保留数据。
 - 需要一次性舍弃 Demo 测试数据时，只能在 Compose 中把 PostgreSQL 与 MinIO 命名卷成对切换到同一个新数据 epoch。2026-11 迁移基线压缩后，数据卷切换到 `20261118` epoch：新卷由初始化脚本重建角色与 Schema，再执行基线迁移；旧 `20260826` 卷保留给回滚到压缩前镜像。2026-11-20 因修复迁移回退依赖顺序（down 文件变化导致 checksum 变化），切换到 `20261120` epoch；旧 `20261118` 卷保留给回滚，确认后由运维人员手工删除。
   旧卷必须保留到候选 release 完成全部验收，以便失败时由上一 release 重新挂载；新版本稳定并处理外部 Sandbox 残留后，
   才可按确切卷名清理旧卷。发布脚本在候选和回滚时都必须显式强制重建 PostgreSQL 与 MinIO，不能依赖 Compose 自动

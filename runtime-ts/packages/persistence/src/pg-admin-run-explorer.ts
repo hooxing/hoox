@@ -195,7 +195,7 @@ export class PgAdminRunExplorerRepository implements RunExplorerRepository {
   async listRuns(
     input: Parameters<RunExplorerRepository["listRuns"]>[0],
   ): Promise<readonly RunExplorerSummary[]> {
-    return await this.read(input.actorUserId, "读取 Run 列表", async (client) => {
+    const operation = async (client: PoolClient) => {
       const result = await client.query<DirectoryRow>(
         `SELECT ${directoryColumns}
            FROM admin_run_directory
@@ -226,21 +226,53 @@ export class PgAdminRunExplorerRepository implements RunExplorerRepository {
           input.limit,
         ],
       );
+      if (input.audit !== undefined) {
+        await client.query(
+          `INSERT INTO admin_run_content_access_audits(audit_id,actor_user_id,tenant_id,run_id,attempt_id,query_summary,returned_run_count)
+           VALUES($1,$2,'*','*',NULL,$3::jsonb,$4)`,
+          [
+            input.audit.auditId,
+            input.actorUserId,
+            JSON.stringify(input.audit.querySummary),
+            Math.min(result.rows.length, input.limit - 1),
+          ],
+        );
+      }
       return Object.freeze(result.rows.map((row) => summary(mapRun(row))));
-    });
+    };
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        await client.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
+        return operation(client);
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "读取 Run 列表");
+    }
   }
 
   async getRun(
     input: Parameters<RunExplorerRepository["getRun"]>[0],
   ): Promise<RunExplorerRunRecord | undefined> {
-    return await this.read(input.actorUserId, "读取 Run 摘要", async (client) => {
-      const result = await client.query<DirectoryRow>(
-        `SELECT ${directoryColumns} FROM admin_run_directory WHERE tenant_id=$1 AND run_id=$2`,
-        [input.tenantId, input.runId],
-      );
-      const row = result.rows[0];
-      return row === undefined ? undefined : mapRun(row);
-    });
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        await client.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
+        const result = await client.query<DirectoryRow>(
+          `SELECT ${directoryColumns} FROM admin_run_directory WHERE tenant_id=$1 AND run_id=$2`,
+          [input.tenantId, input.runId],
+        );
+        const row = result.rows[0];
+        if (row !== undefined && input.inputAuditId !== undefined) {
+          await client.query(
+            `INSERT INTO admin_run_content_access_audits(audit_id,actor_user_id,tenant_id,run_id,attempt_id,query_summary,returned_run_count)
+             VALUES($1,$2,$3,$4,NULL,'{"type":"run_detail_input"}'::jsonb,1)`,
+            [input.inputAuditId, input.actorUserId, input.tenantId, input.runId],
+          );
+        }
+        return row === undefined ? undefined : mapRun(row);
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "读取 Run 摘要");
+    }
   }
 
   async readOutline(

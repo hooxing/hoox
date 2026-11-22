@@ -412,7 +412,7 @@ printf '%s\n' \
       --set=demo_user_id="$admin_user_id" \
       --quiet
 write_compose_env "$image" "$tenant_id" "$admin_user_id"
-compose up -d --force-recreate api admin-control admin-web scheduler worker
+compose up -d --remove-orphans --force-recreate api admin-control admin-web scheduler worker
 wait_http "http://127.0.0.1:3003/live"
 wait_http "http://127.0.0.1:4174/"
 sleep 10

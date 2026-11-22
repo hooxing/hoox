@@ -218,10 +218,11 @@ afterAll(async () => {
   await administrator?.end();
 });
 
+let auditSequence = 0;
+
 function service(auditIds: string[] = []) {
-  let next = 0;
   return new RunExplorerService(new PgAdminRunExplorerRepository(control), () => {
-    const id = `run_content_audit_${unique}_${next++}`;
+    const id = `run_content_audit_${unique}_${auditSequence++}`;
     auditIds.push(id);
     return id;
   });
@@ -230,6 +231,7 @@ function service(auditIds: string[] = []) {
 async function auditRows() {
   const result = await administrator.query(
     `SELECT actor_user_id,tenant_id,run_id,attempt_id FROM "${schema}".admin_run_content_access_audits
+      WHERE attempt_id IS NOT NULL
       ORDER BY created_at`,
   );
   return result.rows;
@@ -513,7 +515,7 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
     const explorer = service(auditIds);
     const content = await explorer.readRunContent("user_admin", "tenant_a", "run_a2");
     expect(JSON.stringify(content.timeline)).toContain(`${secret} 回复`);
-    expect(content.auditId).toBe(auditIds[0]);
+    expect(content.auditId).toBe(auditIds[1]);
     await explorer.readRunContent("user_admin", "tenant_a", "run_a2", "run_a2_attempt");
     expect(await auditRows()).toEqual([
       {
@@ -534,12 +536,31 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
     try {
       await client.query("BEGIN READ ONLY");
       await client.query("SELECT set_config('app.user_id','user_admin',true)");
-      await client.query("SELECT set_config('app.run_content_audit_id',$1,true)", [auditIds[0]]);
+      await client.query("SELECT set_config('app.run_content_audit_id',$1,true)", [
+        content.auditId,
+      ]);
       expect((await client.query("SELECT * FROM admin_run_event_content")).rows).toEqual([]);
       await client.query("COMMIT");
     } finally {
       client.release();
     }
+  });
+
+  it("admin 列表读取用户输入时同事务记录筛选摘要和返回数，不保存正文", async () => {
+    const auditIds: string[] = [];
+    const explorer = service(auditIds);
+    const page = await explorer.listRuns("user_admin", { search: "run_a1", limit: 10 });
+    expect(page.items).toHaveLength(1);
+    const result = await administrator.query(
+      `SELECT query_summary,returned_run_count FROM "${schema}".admin_run_content_access_audits
+       WHERE audit_id=$1`,
+      [auditIds[0]],
+    );
+    expect(result.rows[0]).toMatchObject({
+      query_summary: expect.objectContaining({ search: "run_a1", limit: 10 }),
+      returned_run_count: 1,
+    });
+    expect(JSON.stringify(result.rows[0])).not.toContain(secret);
   });
 
   it("Admin Control 不取得 Run 底表权限，非控制面会话看不到任何视图行", async () => {

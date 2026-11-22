@@ -1,4 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { projectInternalTrajectory } from "@hoox/trajectory";
 import { AdminApiError } from "./api.js";
 import {
   type RunDetailDto,
@@ -7,9 +8,47 @@ import {
   type RunPageDto,
   type RunStatus,
   type RunSummaryDto,
+  type RunTrajectoryDto,
+  type RunTrajectoryPageDto,
+  type RunTrajectoryRecordDto,
   type RunTimelineRecordDto,
   runStatuses,
 } from "./run-explorer-api.js";
+
+export async function loadTrajectoryPages(
+  readPage: NonNullable<RunExplorerApiContract["readTrajectory"]>,
+  tenantId: string,
+  runId: string,
+  attemptId: string,
+  onProgress: (progress: { readonly events: number; readonly bytes: number }) => void,
+  limits = { events: 50_000, bytes: 20 * 1024 * 1024 },
+) {
+  const events: RunTrajectoryPageDto["events"][number][] = [];
+  let loadedBytes = 0;
+  let cursor: string | undefined;
+  let partial = false;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const page = await readPage(tenantId, runId, attemptId, cursor);
+    for (const { agentThreadId: _agentThreadId, ...event } of page.events) {
+      const eventBytes = new TextEncoder().encode(JSON.stringify(event)).byteLength;
+      if (events.length >= limits.events || loadedBytes + eventBytes > limits.bytes) {
+        partial = true;
+        break;
+      }
+      events.push({ ...event, agentThreadId: _agentThreadId });
+      loadedBytes += eventBytes;
+    }
+    onProgress({ events: events.length, bytes: loadedBytes });
+    hasNextPage = !partial && page.hasMore && page.nextCursor !== undefined;
+    if (!hasNextPage) break;
+    cursor = page.nextCursor;
+  }
+  const projection = projectInternalTrajectory(
+    events.map(({ agentThreadId: _agentThreadId, ...event }) => event),
+  );
+  return { ...projection, partial, loadedEvents: events.length, loadedBytes };
+}
 
 export const runStatusLabels: Readonly<Record<RunStatus, string>> = {
   queued: "排队中",
@@ -470,7 +509,13 @@ export function RunExplorerDetail({
         </label>
       )}
       {detail !== undefined ? (
-        <RunAttemptTimeline key={`${detail.attemptId}/${detail.contentAccess}`} detail={detail} />
+        <RunAttemptTimeline
+          key={`${detail.attemptId}/${detail.contentAccess}`}
+          api={api}
+          tenantId={tenantId}
+          runId={runId}
+          detail={detail}
+        />
       ) : (
         !error && (
           <p className="empty-state" role="status">
@@ -482,14 +527,85 @@ export function RunExplorerDetail({
   );
 }
 
-function RunAttemptTimeline({ detail }: { readonly detail: RunDetailDto }) {
+function RunAttemptTimeline({
+  api,
+  tenantId,
+  runId,
+  detail,
+}: {
+  readonly api: RunExplorerApiContract;
+  readonly tenantId: string;
+  readonly runId: string;
+  readonly detail: RunDetailDto;
+}) {
+  const [trajectory, setTrajectory] = useState<RunTrajectoryDto>();
+  const [trajectoryError, setTrajectoryError] = useState(false);
+  const [trajectoryProgress, setTrajectoryProgress] = useState({
+    events: 0,
+    bytes: 0,
+    loading: false,
+  });
+  useEffect(() => {
+    let cancelled = false;
+    setTrajectory(undefined);
+    setTrajectoryError(false);
+    setTrajectoryProgress({ events: 0, bytes: 0, loading: false });
+    if (detail.attemptId === undefined || api.readTrajectory === undefined) return;
+    const attemptId = detail.attemptId;
+    const readPage = api.readTrajectory;
+    const readAllPages = async () => {
+      setTrajectoryProgress({ events: 0, bytes: 0, loading: true });
+      try {
+        const result = await loadTrajectoryPages(
+          readPage,
+          tenantId,
+          runId,
+          attemptId,
+          (progress) => {
+            if (!cancelled) setTrajectoryProgress({ ...progress, loading: true });
+          },
+        );
+        if (cancelled) return;
+        setTrajectory(result);
+        setTrajectoryProgress({
+          events: result.loadedEvents,
+          bytes: result.loadedBytes,
+          loading: false,
+        });
+      } catch {
+        if (!cancelled) setTrajectoryError(true);
+      }
+    };
+    void readAllPages();
+    return () => {
+      cancelled = true;
+    };
+  }, [api, tenantId, runId, detail.attemptId]);
+
+  if (trajectory !== undefined && (trajectory.records.length > 0 || trajectory.partial)) {
+    return <DeepSeekTrajectoryDebugger trajectory={trajectory} />;
+  }
   const timeline = detail.timeline;
   const firstRecord = timeline.records[0];
   const origin = firstRecord === undefined ? undefined : Date.parse(firstRecord.startedAt);
   return (
     <>
+      {trajectoryError && (
+        <p className="boundary-note" role="alert">
+          完整轨迹读取失败；以下显示现有持久事件时间线，请稍后重试。
+        </p>
+      )}
+      {trajectoryProgress.loading && (
+        <p className="boundary-note" role="status">
+          正在读取完整轨迹：{trajectoryProgress.events.toLocaleString()} 条事件，
+          {(trajectoryProgress.bytes / (1024 * 1024)).toFixed(1)} MB
+        </p>
+      )}
+      {trajectory !== undefined && trajectory.records.length === 0 && (
+        <p className="boundary-note">该 Run 早于完整轨迹记录，以下显示现有持久事件时间线。</p>
+      )}
       {timeline.records.length === 0 ? (
-        <p className="empty-state">该 Attempt 尚无持久事件。</p>
+        <p className="empty-state">该 Run 早于完整轨迹记录；该 Attempt 尚无持久事件。</p>
       ) : (
         <>
           <p className="boundary-note">
@@ -510,5 +626,197 @@ function RunAttemptTimeline({ detail }: { readonly detail: RunDetailDto }) {
         </>
       )}
     </>
+  );
+}
+
+export function DeepSeekTrajectoryDebugger({
+  trajectory,
+}: {
+  readonly trajectory: RunTrajectoryDto;
+}) {
+  const [query, setQuery] = useState("");
+  const [selectedId, setSelectedId] = useState<string>();
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [showDuration, setShowDuration] = useState(true);
+  const [showTurns, setShowTurns] = useState(true);
+  const [showCalls, setShowCalls] = useState(true);
+  const [showSubcalls, setShowSubcalls] = useState(true);
+  const records = trajectory.records.filter((record) =>
+    `${record.label} ${record.summary} ${JSON.stringify(record.detail)}`
+      .toLocaleLowerCase()
+      .includes(query.trim().toLocaleLowerCase()),
+  );
+  const turns = [...new Set(records.map((record) => record.turn))];
+  const maxOffset = Math.max(
+    1,
+    ...records.map((record) => record.monotonicOffsetMs + (record.durationMs ?? 0)),
+  );
+  const usage = trajectory.stats;
+  const tokenTotal =
+    usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  const contextPercent =
+    usage.contextWindowTokens === undefined || usage.contextWindowTokens === 0
+      ? undefined
+      : Math.min(100, Math.round((usage.inputTokens / usage.contextWindowTokens) * 100));
+  const select = (record: RunTrajectoryRecordDto) => setSelectedId(record.id);
+
+  return (
+    <section className="trajectory-debugger" aria-label="完整运行轨迹">
+      {trajectory.partial && (
+        <p className="boundary-note" role="status">
+          已达到读取上限；汇总仅覆盖已加载部分（{trajectory.loadedEvents.toLocaleString()} 条事件，
+          {(trajectory.loadedBytes / (1024 * 1024)).toFixed(1)} MB）。
+        </p>
+      )}
+      <div className="trajectory-toolbar" role="toolbar" aria-label="轨迹视图控制">
+        <label>
+          <input
+            type="checkbox"
+            checked={showDuration}
+            onChange={(event) => setShowDuration(event.target.checked)}
+          />
+          时长
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={showTurns}
+            onChange={(event) => setShowTurns(event.target.checked)}
+          />
+          轮次
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={showCalls}
+            onChange={(event) => setShowCalls(event.target.checked)}
+          />
+          调用
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={showSubcalls}
+            onChange={(event) => setShowSubcalls(event.target.checked)}
+          />
+          子调用
+        </label>
+        <input
+          aria-label="搜索轨迹"
+          placeholder="搜索轨迹内容"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
+      <section className="trajectory-timeline" aria-label="轨迹时间轴">
+        {(["input", "model", "tools"] as const).map((lane) => (
+          <div className="trajectory-lane" key={lane}>
+            <strong>{lane === "input" ? "输入" : lane === "model" ? "模型" : "工具"}</strong>
+            <div className="trajectory-lane-track">
+              {records
+                .filter((record) => record.lane === lane)
+                .map((record) => (
+                  <button
+                    type="button"
+                    key={record.id}
+                    aria-label={`${record.label} ${record.summary}`}
+                    aria-pressed={selectedId === record.id}
+                    className={`trajectory-bar ${record.kind} ${selectedId === record.id ? "selected" : ""}`}
+                    style={{
+                      left: `${Math.max(0, (record.monotonicOffsetMs / maxOffset) * 100)}%`,
+                      width: `${Math.max(1.5, ((showDuration ? (record.durationMs ?? 0) : 1) / maxOffset) * 100)}%`,
+                    }}
+                    onClick={() => select(record)}
+                  />
+                ))}
+            </div>
+          </div>
+        ))}
+      </section>
+      <div className="trajectory-ledger">
+        {turns.map((turn) => (
+          <section className="trajectory-turn" key={turn}>
+            {showTurns && <h3>第 {turn} 轮</h3>}
+            {records
+              .filter((record) => record.turn === turn)
+              .map((record) => {
+                if (!showCalls && (record.kind === "tool" || record.kind === "subtool"))
+                  return null;
+                if (!showSubcalls && record.kind === "subtool") return null;
+                const isExpanded = expanded.has(record.id);
+                return (
+                  <article
+                    className={`trajectory-entry ${selectedId === record.id ? "selected" : ""}`}
+                    key={record.id}
+                  >
+                    <button
+                      type="button"
+                      className="trajectory-entry-toggle"
+                      onClick={() => {
+                        select(record);
+                        setExpanded((current) => {
+                          const next = new Set(current);
+                          if (next.has(record.id)) next.delete(record.id);
+                          else next.add(record.id);
+                          return next;
+                        });
+                      }}
+                    >
+                      <span className={`trajectory-kind ${record.kind}`}>{record.label}</span>
+                      <span className="trajectory-summary">{record.summary}</span>
+                      <span className="trajectory-duration">
+                        {record.durationMs === null ? "—" : formatDuration(record.durationMs)}
+                      </span>
+                    </button>
+                    {isExpanded && (
+                      <div className="trajectory-entry-detail">
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() =>
+                            void navigator.clipboard
+                              .writeText(JSON.stringify(record.detail, null, 2))
+                              .catch(() => {})
+                          }
+                        >
+                          复制 JSON
+                        </button>
+                        <pre className="run-timeline-content">
+                          {JSON.stringify(record.detail, null, 2)}
+                        </pre>
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+          </section>
+        ))}
+      </div>
+      <section className="trajectory-summary-stats" aria-label="轨迹汇总">
+        <span>轮次 {usage.turns}</span>
+        <span>
+          调用 {usage.calls}（失败 {usage.failedCalls}）
+        </span>
+        <span>
+          生成速度{" "}
+          {usage.outputTokensPerSecond === null
+            ? "—"
+            : `${usage.outputTokensPerSecond.toFixed(1)} tok/s`}
+        </span>
+        <span>总 Token {formatCount(tokenTotal)}</span>
+        <span>
+          缓存命中率{" "}
+          {usage.cacheHitRate === null ? "—" : `${Math.round(usage.cacheHitRate * 100)}%`}
+        </span>
+        <span>上下文占用 {contextPercent === undefined ? "—" : `${contextPercent}%`}</span>
+      </section>
+      {trajectory.records.length === 0 && (
+        <p className="empty-state">
+          {trajectory.partial
+            ? "已加载部分暂无可投影记录。"
+            : "该 Run 早于完整轨迹记录，以下可查看现有事件时间线。"}
+        </p>
+      )}
+    </section>
   );
 }

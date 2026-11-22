@@ -1,16 +1,23 @@
 // @vitest-environment jsdom
 
 import { act } from "react";
+import type { InternalTrajectoryEventV1 } from "@hoox/trajectory";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
-import { RunExplorerDetail, RunExplorerList } from "./run-explorer.js";
+import {
+  DeepSeekTrajectoryDebugger,
+  loadTrajectoryPages,
+  RunExplorerDetail,
+  RunExplorerList,
+} from "./run-explorer.js";
 import {
   RunExplorerApi,
   type RunExplorerApiContract,
   type RunDetailDto,
   type RunSummaryDto,
+  type RunTrajectoryPageDto,
 } from "./run-explorer-api.js";
 
 const roots: Root[] = [];
@@ -233,6 +240,266 @@ describe("运行详情", () => {
     expect(container.textContent).toContain(secret);
     expect(container.querySelector(".run-timeline-content")?.textContent).toBe(secret);
     expect(container.textContent).not.toContain("查看正文");
+  });
+
+  it("显示按轮分组的轨迹并联动搜索、展开、复制与汇总", async () => {
+    const rawEvents = [
+      {
+        schemaVersion: 1 as const,
+        sequence: 1,
+        occurredAt: "2026-11-19T00:00:01.000Z",
+        monotonicOffsetMs: 0,
+        source: "runtime" as const,
+        type: "prompt",
+        event: { type: "prompt", text: "生成月报" },
+      },
+      {
+        schemaVersion: 1 as const,
+        sequence: 2,
+        occurredAt: "2026-11-19T00:00:01.100Z",
+        monotonicOffsetMs: 100,
+        source: "pi" as const,
+        type: "turn_start",
+        event: { type: "turn_start" },
+      },
+      {
+        schemaVersion: 1 as const,
+        sequence: 3,
+        occurredAt: "2026-11-19T00:00:01.200Z",
+        monotonicOffsetMs: 200,
+        source: "pi" as const,
+        type: "message_start",
+        event: { type: "message_start", message: { role: "assistant" } },
+      },
+      {
+        schemaVersion: 1 as const,
+        sequence: 4,
+        occurredAt: "2026-11-19T00:00:03.200Z",
+        monotonicOffsetMs: 2200,
+        source: "pi" as const,
+        type: "message_end",
+        event: {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "已完成" }],
+            usage: { input: 120, output: 60, cacheRead: 30, cacheWrite: 0 },
+          },
+        },
+      },
+      {
+        schemaVersion: 1 as const,
+        sequence: 5,
+        occurredAt: "2026-11-19T00:00:03.300Z",
+        monotonicOffsetMs: 2300,
+        source: "pi" as const,
+        type: "tool_execution_start",
+        event: { type: "tool_execution_start", toolName: "bash", toolCallId: "call-1" },
+      },
+      {
+        schemaVersion: 1 as const,
+        sequence: 6,
+        occurredAt: "2026-11-19T00:00:03.325Z",
+        monotonicOffsetMs: 2325,
+        source: "pi" as const,
+        type: "tool_execution_end",
+        event: {
+          type: "tool_execution_end",
+          toolName: "bash",
+          toolCallId: "call-1",
+          args: { command: "pwd" },
+          result: "/workspace",
+        },
+      },
+    ].map((event) => ({
+      ...event,
+      agentThreadId: "agent-a",
+    })) as unknown as RunTrajectoryPageDto["events"];
+    const api = {
+      ...apiFixture(true),
+      readTrajectory: vi.fn(async (_tenantId, _runId, _attemptId, cursor) =>
+        cursor === undefined
+          ? {
+              events: rawEvents.slice(0, 3),
+              bytes: 100,
+              hasMore: true,
+              nextCursor: "cursor-1",
+            }
+          : { events: rawEvents.slice(3), bytes: 100, hasMore: false },
+      ),
+    } satisfies RunExplorerApiContract;
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const container = render(<RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" />);
+    await settle();
+
+    expect(api.readTrajectory).toHaveBeenNthCalledWith(
+      1,
+      "tenant_a",
+      "run_1",
+      "attempt_1",
+      undefined,
+    );
+    expect(api.readTrajectory).toHaveBeenNthCalledWith(
+      2,
+      "tenant_a",
+      "run_1",
+      "attempt_1",
+      "cursor-1",
+    );
+    expect(api.readTrajectory).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("第 1 轮");
+    expect(container.textContent).toContain("30.0 tok/s");
+    expect(container.textContent).toContain("20%");
+    const bar = container.querySelector<HTMLButtonElement>('[aria-label^="bash"]');
+    if (bar === null) throw new Error("缺少轨迹泳道记录");
+    act(() => bar.click());
+    expect(container.querySelector(".trajectory-entry.selected")?.textContent).toContain("bash");
+
+    const toggle = [
+      ...container.querySelectorAll<HTMLButtonElement>(".trajectory-entry-toggle"),
+    ].find((candidate) => candidate.textContent?.includes("bash"));
+    if (toggle === undefined) throw new Error("缺少轨迹账本行");
+    act(() => toggle.click());
+    expect(container.textContent).toContain('"command": "pwd"');
+    await act(async () => button(container, "复制 JSON").click());
+    expect(writeText).toHaveBeenCalledWith(
+      JSON.stringify(
+        {
+          type: "tool_execution",
+          sequenceStart: 5,
+          sequenceEnd: 6,
+          rawEventCount: 2,
+          callId: "call-1",
+          name: "bash",
+          start: {
+            type: "tool_execution_start",
+            toolName: "bash",
+            toolCallId: "call-1",
+          },
+          updates: [],
+          end: {
+            type: "tool_execution_end",
+            toolName: "bash",
+            toolCallId: "call-1",
+            args: { command: "pwd" },
+            result: "/workspace",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const search = container.querySelector<HTMLInputElement>('[aria-label="搜索轨迹"]');
+    if (search === null) throw new Error("缺少轨迹搜索框");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        search,
+        "bash",
+      );
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.querySelectorAll(".trajectory-entry-toggle")).toHaveLength(1);
+  });
+
+  it("跨页聚合完整记录并在读取上限处标记部分汇总", async () => {
+    const event = (sequence: number, type: string, body: Record<string, unknown>) => ({
+      schemaVersion: 1 as const,
+      sequence,
+      occurredAt: "2026-11-19T00:00:01.000Z",
+      monotonicOffsetMs: sequence * 10,
+      source: "pi" as const,
+      type,
+      event: body as InternalTrajectoryEventV1["event"],
+      agentThreadId: "agent-a",
+    });
+    const pages = [
+      {
+        events: [
+          event(1, "message_start", { type: "message_start", message: { role: "assistant" } }),
+        ],
+        bytes: 50,
+        hasMore: true,
+        nextCursor: "cursor-1",
+      },
+      {
+        events: [
+          event(2, "message_update", {
+            type: "message_update",
+            assistantMessageEvent: {
+              type: "text_delta",
+              delta: "跨页",
+              partial: { role: "assistant" },
+            },
+          }),
+          event(3, "message_end", {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "跨页完成" }],
+              usage: { input: 2, output: 4 },
+            },
+          }),
+        ],
+        bytes: 80,
+        hasMore: false,
+      },
+    ];
+    const firstPage = pages[0];
+    const secondPage = pages[1];
+    if (firstPage === undefined || secondPage === undefined) {
+      throw new Error("轨迹分页夹具不完整");
+    }
+    const readPage = vi.fn(
+      async (_tenantId: string, _runId: string, _attemptId: string, cursor?: string) =>
+        cursor === undefined ? firstPage : secondPage,
+    );
+    const progress: { events: number; bytes: number }[] = [];
+    const complete = await loadTrajectoryPages(
+      readPage,
+      "tenant_a",
+      "run_a",
+      "attempt_a",
+      (value) => progress.push(value),
+    );
+    expect(readPage).toHaveBeenCalledTimes(2);
+    expect(complete.partial).toBe(false);
+    expect(complete.stats.events).toBe(3);
+    expect(complete.records).toHaveLength(1);
+    expect(complete.stats.outputTokens).toBe(4);
+    expect(progress.at(-1)?.events).toBe(3);
+
+    const capped = await loadTrajectoryPages(
+      readPage,
+      "tenant_a",
+      "run_a",
+      "attempt_a",
+      () => undefined,
+      {
+        events: 2,
+        bytes: 1024,
+      },
+    );
+    expect(capped.partial).toBe(true);
+    expect(capped.loadedEvents).toBe(2);
+    expect(capped.stats.events).toBe(2);
+    const partialView = render(<DeepSeekTrajectoryDebugger trajectory={capped} />);
+    expect(partialView.textContent).toContain("汇总仅覆盖已加载部分");
+  });
+
+  it("轨迹接口故障明确提示，不伪装成旧 Run", async () => {
+    const api = {
+      ...apiFixture(true),
+      readTrajectory: vi.fn(async () => {
+        throw new Error("unavailable");
+      }),
+    } satisfies RunExplorerApiContract;
+    const container = render(<RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" />);
+    await settle();
+    expect(container.textContent).toContain("完整轨迹读取失败");
+    expect(container.textContent).not.toContain("早于完整轨迹记录");
+    expect(container.querySelector(".run-timeline")).not.toBeNull();
   });
 
   it("实时侧栏从排队串行刷新到终态", async () => {

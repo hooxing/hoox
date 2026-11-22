@@ -127,6 +127,9 @@ importers:
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@hoox/trajectory':
+        specifier: workspace:*
+        version: link:../../packages/trajectory
       '@hoox/ui-theme':
         specifier: workspace:*
         version: link:../../packages/ui-theme
@@ -146,6 +149,9 @@ importers:
         specifier: 7.18.2
         version: 7.18.2(react-dom@19.1.1(react@19.1.1))(react@19.1.1)
     devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
       '@types/react':
         specifier: 19.1.13
         version: 19.1.13

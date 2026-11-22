@@ -4875,3 +4875,158 @@ button:disabled {
 .ant-tag {
   font-weight: var(--weight-normal);
 }
+
+.trajectory-debugger {
+  padding: 0 26px 20px;
+}
+
+.trajectory-toolbar {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  border-bottom: 1px solid #e7eae8;
+  padding: 10px 0;
+  background: #fff;
+}
+
+.trajectory-toolbar label {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  color: #44544b;
+  font-size: 12px;
+}
+
+.trajectory-toolbar > input[type="text"],
+.trajectory-toolbar > input:not([type]) {
+  min-width: 180px;
+  margin-left: auto;
+}
+
+.trajectory-timeline {
+  display: grid;
+  gap: 8px;
+  padding: 16px 0;
+}
+
+.trajectory-lane {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  color: #66756d;
+  font-size: 12px;
+}
+
+.trajectory-lane-track {
+  position: relative;
+  height: 24px;
+  border-radius: 5px;
+  background: #f5f8f6;
+}
+
+.trajectory-bar {
+  position: absolute;
+  top: 4px;
+  height: 16px;
+  min-width: 5px;
+  border: 0;
+  border-radius: 4px;
+  background: #67a789;
+  cursor: pointer;
+}
+
+.trajectory-bar.assistant,
+.trajectory-bar.reasoning {
+  background: #7798c5;
+}
+
+.trajectory-bar.tool,
+.trajectory-bar.subtool {
+  background: #d39a55;
+}
+
+.trajectory-bar.selected {
+  outline: 2px solid #184f3a;
+  outline-offset: 1px;
+}
+
+.trajectory-turn h3 {
+  margin: 10px 0 4px;
+  color: #44544b;
+  font-size: 13px;
+}
+
+.trajectory-entry {
+  border-bottom: 1px solid #eef1ef;
+}
+
+.trajectory-entry.selected {
+  border-radius: 6px;
+  background: #f3f7f4;
+}
+
+.trajectory-entry-toggle {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 88px minmax(0, 1fr) 80px;
+  gap: 10px;
+  align-items: center;
+  border: 0;
+  padding: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.trajectory-kind {
+  color: #176b4d;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trajectory-kind.tool,
+.trajectory-kind.subtool {
+  color: #98611e;
+}
+
+.trajectory-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trajectory-duration {
+  color: #66756d;
+  font-size: 12px;
+  text-align: right;
+}
+
+.trajectory-summary-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  border-top: 1px solid #e7eae8;
+  padding: 12px 0 0;
+  color: #44544b;
+  font-size: 12px;
+}
+
+@media (max-width: 720px) {
+  .trajectory-debugger {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .trajectory-entry-toggle {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .trajectory-duration {
+    display: none;
+  }
+}

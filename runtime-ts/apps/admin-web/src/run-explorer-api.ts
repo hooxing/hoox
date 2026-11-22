@@ -1,3 +1,4 @@
+import type { InternalTrajectoryEventV1 } from "@hoox/trajectory";
 import { adminAuthorizationHeader } from "./admin-session.js";
 import { AdminApiError } from "./api.js";
 
@@ -98,6 +99,55 @@ export interface RunDetailDto {
   readonly contentAccess: boolean;
 }
 
+export interface RunTrajectoryRecordDto {
+  readonly id: string;
+  readonly turn: number;
+  readonly lane: "input" | "model" | "tools";
+  readonly kind: string;
+  readonly label: string;
+  readonly summary: string;
+  readonly startedAt: string;
+  readonly monotonicOffsetMs: number;
+  readonly durationMs: number | null;
+  readonly isError: boolean;
+  readonly detail: unknown;
+  readonly usage?: Readonly<{
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  }>;
+}
+
+export interface RunTrajectoryPageDto {
+  readonly events: readonly (InternalTrajectoryEventV1 & { readonly agentThreadId: string })[];
+  readonly bytes: number;
+  readonly nextCursor?: string;
+  readonly hasMore: boolean;
+}
+
+export interface RunTrajectoryDto {
+  readonly records: readonly RunTrajectoryRecordDto[];
+  readonly partial: boolean;
+  readonly loadedEvents: number;
+  readonly loadedBytes: number;
+  readonly stats: Readonly<{
+    turns: number;
+    calls: number;
+    failedCalls: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    modelDurationMs: number;
+    outputTokensPerSecond: number | null;
+    cacheHitRate: number | null;
+    durationMs: number;
+    contextWindowTokens?: number;
+  }>;
+}
+
 export interface RunContentDto extends RunDetailDto {
   readonly auditId: string;
 }
@@ -120,6 +170,12 @@ export interface RunExplorerApiContract {
   getRun(tenantId: string, runId: string, attemptId?: string): Promise<RunDetailDto>;
   /** 每次调用都会在服务端写入一条正文访问审计；结果不得进入跨页面缓存。 */
   readRunContent(tenantId: string, runId: string, attemptId?: string): Promise<RunContentDto>;
+  readTrajectory?(
+    tenantId: string,
+    runId: string,
+    attemptId: string,
+    cursor?: string,
+  ): Promise<RunTrajectoryPageDto>;
 }
 
 function messageFor(status: number): string {
@@ -146,6 +202,17 @@ export class RunExplorerApi implements RunExplorerApiContract {
 
   readRunContent(tenantId: string, runId: string, attemptId?: string): Promise<RunContentDto> {
     return this.request(`${runPath(tenantId, runId)}/content${attemptQuery(attemptId)}`);
+  }
+
+  readTrajectory(
+    tenantId: string,
+    runId: string,
+    attemptId: string,
+    cursor?: string,
+  ): Promise<RunTrajectoryPageDto> {
+    const query = new URLSearchParams({ attemptId });
+    if (cursor !== undefined) query.set("cursor", cursor);
+    return this.request(`${runPath(tenantId, runId)}/trajectory?${query.toString()}`);
   }
 
   private async request<T>(

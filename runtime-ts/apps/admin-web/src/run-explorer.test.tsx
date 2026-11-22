@@ -566,7 +566,10 @@ describe("运行详情", () => {
         monotonicOffsetMs: n * 2 - 1,
         source: "pi" as const,
         type: "message_start",
-        event: { type: "message_start", message: { role: "assistant" } } as InternalTrajectoryEventV1["event"],
+        event: {
+          type: "message_start",
+          message: { role: "assistant" },
+        } as InternalTrajectoryEventV1["event"],
         agentThreadId: "",
         agentTurnId: "",
       },

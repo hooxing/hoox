@@ -17,6 +17,7 @@ LEFT JOIN LATERAL (
     count(DISTINCT (run.tenant_id,run.id))::bigint AS run_count
   FROM threads thread LEFT JOIN runs run ON run.tenant_id=thread.tenant_id AND run.thread_id=thread.id
   WHERE thread.created_by_user_id=account.user_id
+    AND NOT thread.is_playground
 ) conversation ON true
 LEFT JOIN LATERAL (
   SELECT max(candidate.created_at) AS last_active_at,

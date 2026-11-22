@@ -43,7 +43,7 @@ Windows PowerShell 可用 `Copy-Item .env.example .env`。编辑 `.env`，至少
 
 业务迁移不能创建集群级登录角色。首次准备专用数据库时，由 Database Admin：
 
-1. 创建互不相同且没有角色成员关系的 Migrator、Runtime、Skill Publisher、Admin Control、Worker Coordinator 和 Team Coordinator 登录角色；
+1. 创建互不相同且没有角色成员关系的 Migrator、Runtime、Skill Publisher、Admin Control、Worker Coordinator、Team Coordinator、Webhook Dispatcher 与轨迹目录登录角色；
 2. 撤销目标数据库对 `PUBLIC` 和应用角色的默认权限，只按需授予 `CONNECT`；
 3. 创建专用业务 Schema，并只让 Migrator 成为 Schema owner；
 4. 确认其他常驻角色不是数据库、Schema、表、序列或 routine owner；

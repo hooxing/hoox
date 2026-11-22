@@ -9,6 +9,7 @@ psql --set=ON_ERROR_STOP=1 --quiet --username "$POSTGRES_USER" --dbname "$POSTGR
   --set=migrator_role="$DATABASE_MIGRATOR_ROLE" \
   --set=skill_role="$DATABASE_SKILL_PUBLISHER_ROLE" \
   --set=worker_role="$DATABASE_WORKER_COORDINATOR_ROLE" \
+  --set=directory_role="$DATABASE_TRAJECTORY_DIRECTORY_ROLE" \
   --set=team_role="$DATABASE_TEAM_COORDINATOR_ROLE" \
   --set=webhook_role="$DATABASE_WEBHOOK_DISPATCHER_ROLE" \
   --set=admin_role="$DATABASE_ADMIN_CONTROL_ROLE" \
@@ -17,6 +18,7 @@ psql --set=ON_ERROR_STOP=1 --quiet --username "$POSTGRES_USER" --dbname "$POSTGR
 \getenv migrator_password DATABASE_MIGRATOR_PASSWORD
 \getenv skill_password DATABASE_SKILL_PUBLISHER_PASSWORD
 \getenv worker_password DATABASE_WORKER_COORDINATOR_PASSWORD
+\getenv directory_password DATABASE_TRAJECTORY_DIRECTORY_PASSWORD
 \getenv team_password DATABASE_TEAM_COORDINATOR_PASSWORD
 \getenv webhook_password DATABASE_WEBHOOK_DISPATCHER_PASSWORD
 \getenv admin_password DATABASE_ADMIN_CONTROL_PASSWORD
@@ -27,13 +29,14 @@ SELECT format('CREATE ROLE %I LOGIN NOINHERIT PASSWORD %L', wanted.role_name, wa
     (:'migrator_role', :'migrator_password'),
     (:'skill_role', :'skill_password'),
     (:'worker_role', :'worker_password'),
+    (:'directory_role', :'directory_password'),
     (:'team_role', :'team_password'),
     (:'admin_role', :'admin_password'),
     (:'webhook_role', :'webhook_password')
   ) AS wanted(role_name, role_password)
  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = wanted.role_name)
 \gexec
-GRANT CONNECT ON DATABASE :"database_name" TO :"runtime_role", :"migrator_role", :"skill_role", :"worker_role", :"team_role", :"admin_role", :"webhook_role";
+GRANT CONNECT ON DATABASE :"database_name" TO :"directory_role", :"runtime_role", :"migrator_role", :"skill_role", :"worker_role", :"team_role", :"admin_role", :"webhook_role";
 CREATE SCHEMA IF NOT EXISTS :"runtime_schema" AUTHORIZATION :"migrator_role";
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 SQL

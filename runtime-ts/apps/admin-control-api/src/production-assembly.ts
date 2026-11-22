@@ -27,6 +27,12 @@ import {
   probeS3StableSkillPublisher,
   S3StableSkillPublisher,
 } from "@hoox/persistence/admin";
+import {
+  createS3BlobStore,
+  PgBlobLifecycleRepository,
+  RUNTIME_BLOB_OBJECT_PREFIX,
+} from "@hoox/persistence/blob";
+import { PgRunTrajectoryStore } from "@hoox/persistence/trajectory";
 import { createPostgresPool, probePostgres, WebhookSecretCipher } from "@hoox/persistence/postgres";
 import {
   loadProductionTlsCredentials,
@@ -150,6 +156,15 @@ async function assembleRealService(
       new ModelProviderCredentialCipher(configuration.providerSecrets.modelCredentialEncryptionKey),
       configuration.providerSecrets.modelApiKey,
     );
+    const trajectoryBlobs = createS3BlobStore(
+      {
+        ...configuration.trajectoryObjectStorage,
+        prefix: RUNTIME_BLOB_OBJECT_PREFIX,
+        maxBlobSizeBytes: 32 * 1024 * 1024,
+      },
+      new PgBlobLifecycleRepository(controlPool, { objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX }),
+    );
+    const trajectoryStore = new PgRunTrajectoryStore(controlPool, trajectoryBlobs, undefined, 30);
     const controlPostgresProbe = () => probePostgres(controlPool, input.expectedRole);
     const skillPostgresProbe = () => probePostgres(skillPublisherPool, input.expectedPublisherRole);
     const objectStorageProbe = () => probeS3StableSkillPublisher(activePublisher);
@@ -203,6 +218,7 @@ async function assembleRealService(
       runs: new RunExplorerService(
         new PgAdminRunExplorerRepository(controlPool),
         () => `run_content_${randomUUID().replaceAll("-", "")}`,
+        trajectoryStore,
       ),
       auth: input.auth,
       identity: createIdentityAdminService({

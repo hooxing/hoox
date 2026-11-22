@@ -96,10 +96,10 @@ export interface S3PresignInput {
  * 写操作抛出的 BlobStoreError 必须用 result 标明结果是否可能已经发生。
  */
 export interface S3ObjectClient {
-  put(input: S3PutObjectInput): Promise<void>;
-  head(key: string): Promise<S3ObjectMetadata | undefined>;
+  put(input: S3PutObjectInput, signal?: AbortSignal): Promise<void>;
+  head(key: string, signal?: AbortSignal): Promise<S3ObjectMetadata | undefined>;
   get(key: string): Promise<S3GetObjectResult | undefined>;
-  copy(input: S3CopyObjectInput): Promise<void>;
+  copy(input: S3CopyObjectInput, signal?: AbortSignal): Promise<void>;
   delete(key: string): Promise<void>;
   presignGet(input: S3PresignInput): Promise<string>;
 }
@@ -120,7 +120,10 @@ export class S3BlobStore implements BlobStore {
     this.maxBlobSizeBytes = assertMaxBlobSize(config.maxBlobSizeBytes);
   }
 
-  async putStaging(input: PutStagingBlobInput): Promise<StagedBlobRef> {
+  async putStaging(
+    input: PutStagingBlobInput,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<StagedBlobRef> {
     assertTenantScope(input.scope);
     assertBlobPurpose(input.purpose);
     assertUploadId(input.uploadId);
@@ -136,7 +139,7 @@ export class S3BlobStore implements BlobStore {
       ...descriptor,
     };
     const key = this.keyFor(blob);
-    const existing = await this.client.head(key);
+    const existing = await this.headObject(key, options?.signal);
     if (existing !== undefined) {
       assertProviderBlobSizeWithin(existing.size, this.maxBlobSizeBytes);
       assertStoredDescriptor(existing, descriptor, "BLOB_IDEMPOTENCY_CONFLICT");
@@ -144,15 +147,19 @@ export class S3BlobStore implements BlobStore {
     }
 
     try {
-      await this.client.put({ key, body: input.body, descriptor });
+      if (options?.signal === undefined) {
+        await this.client.put({ key, body: input.body, descriptor });
+      } else {
+        await this.client.put({ key, body: input.body, descriptor }, options.signal);
+      }
     } catch (error) {
-      if (await this.resolveWriteResult(key, descriptor, error)) {
+      if (await this.resolveWriteResult(key, descriptor, error, options?.signal)) {
         return blob;
       }
       throw normalizeWriteError(error, "staging 对象上传失败，结果可能未知");
     }
 
-    await this.assertWritten(key, descriptor);
+    await this.assertWritten(key, descriptor, options?.signal);
     return blob;
   }
 
@@ -160,6 +167,7 @@ export class S3BlobStore implements BlobStore {
     scope: TenantBlobScope,
     staged: StagedBlobRef,
     authorizationRef: PromotionAuthorizationRef,
+    options?: { readonly signal?: AbortSignal },
   ): Promise<StableBlobRef> {
     assertBlobRef(scope, staged);
     assertPromotionAuthorizationRef(scope, authorizationRef);
@@ -199,7 +207,7 @@ export class S3BlobStore implements BlobStore {
       }
       const completedStable = stableFromAuthorization(staged, completedAuthorization);
       try {
-        const completedHead = await this.client.head(this.keyFor(completedStable));
+        const completedHead = await this.headObject(this.keyFor(completedStable), options?.signal);
         if (completedHead === undefined) {
           throw new Error("已完成 promotion 的物理对象缺失");
         }
@@ -290,7 +298,7 @@ export class S3BlobStore implements BlobStore {
     const sourceKey = this.keyFor(staged);
     let stagedHead: S3ObjectMetadata | undefined;
     try {
-      stagedHead = await this.client.head(sourceKey);
+      stagedHead = await this.headObject(sourceKey, options?.signal);
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "not_copied");
       throw error;
@@ -311,7 +319,7 @@ export class S3BlobStore implements BlobStore {
     const destinationKey = this.keyFor(stable);
     let existing: S3ObjectMetadata | undefined;
     try {
-      existing = await this.client.head(destinationKey);
+      existing = await this.headObject(destinationKey, options?.signal);
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "not_copied");
       throw error;
@@ -360,11 +368,15 @@ export class S3BlobStore implements BlobStore {
     execution = issued.execution;
 
     try {
-      await this.client.copy({ sourceKey, destinationKey });
+      if (options?.signal === undefined) {
+        await this.client.copy({ sourceKey, destinationKey });
+      } else {
+        await this.client.copy({ sourceKey, destinationKey }, options.signal);
+      }
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "unknown");
       try {
-        if (await this.resolveWriteResult(destinationKey, stable, error)) {
+        if (await this.resolveWriteResult(destinationKey, stable, error, options?.signal)) {
           await this.completePromotionOutcome(scope, execution, "succeeded");
           return stable;
         }
@@ -375,7 +387,7 @@ export class S3BlobStore implements BlobStore {
     }
 
     try {
-      await this.assertWritten(destinationKey, stable);
+      await this.assertWritten(destinationKey, stable, options?.signal);
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "unknown");
       throw promotionResultUnknown("COPY 返回成功但固定 destination 未确认", error);
@@ -492,10 +504,21 @@ export class S3BlobStore implements BlobStore {
     return keyFor(this.prefix, blob);
   }
 
-  private async assertWritten(key: string, descriptor: BlobDescriptor): Promise<void> {
+  private async headObject(
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<S3ObjectMetadata | undefined> {
+    return signal === undefined ? this.client.head(key) : this.client.head(key, signal);
+  }
+
+  private async assertWritten(
+    key: string,
+    descriptor: BlobDescriptor,
+    signal?: AbortSignal,
+  ): Promise<void> {
     let metadata: S3ObjectMetadata | undefined;
     try {
-      metadata = await this.client.head(key);
+      metadata = await this.headObject(key, signal);
     } catch (error) {
       throw unknownAfterVerificationFailure("写操作返回成功，但 HEAD 校验失败", error);
     }
@@ -511,9 +534,10 @@ export class S3BlobStore implements BlobStore {
     key: string,
     descriptor: BlobDescriptor,
     originalError: unknown,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     try {
-      const metadata = await this.client.head(key);
+      const metadata = await this.headObject(key, signal);
       if (metadata === undefined) {
         return false;
       }
@@ -860,30 +884,32 @@ class AwsS3ObjectClient implements S3ObjectClient {
     private readonly bucket: string,
   ) {}
 
-  async put(input: S3PutObjectInput): Promise<void> {
+  async put(input: S3PutObjectInput, signal?: AbortSignal): Promise<void> {
     try {
-      await this.client.send(
-        new PutObjectCommand({
-          Bucket: this.bucket,
-          Key: input.key,
-          Body: input.body,
-          ContentLength: input.descriptor.size,
-          ContentType: input.descriptor.mediaType,
-          Metadata: { sha256: input.descriptor.sha256 },
-          CacheControl: "private, no-store",
-          IfNoneMatch: "*",
-        }),
-      );
+      const command = new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: input.key,
+        Body: input.body,
+        ContentLength: input.descriptor.size,
+        ContentType: input.descriptor.mediaType,
+        Metadata: { sha256: input.descriptor.sha256 },
+        CacheControl: "private, no-store",
+        IfNoneMatch: "*",
+      });
+      if (signal === undefined) await this.client.send(command);
+      else await this.client.send(command, { abortSignal: signal });
     } catch (error) {
       throw awsOperationError(error, true);
     }
   }
 
-  async head(key: string): Promise<S3ObjectMetadata | undefined> {
+  async head(key: string, signal?: AbortSignal): Promise<S3ObjectMetadata | undefined> {
     try {
-      const result = await this.client.send(
-        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
-      );
+      const command = new HeadObjectCommand({ Bucket: this.bucket, Key: key });
+      const result =
+        signal === undefined
+          ? await this.client.send(command)
+          : await this.client.send(command, { abortSignal: signal });
       const sha256 = result.Metadata?.sha256;
       if (
         result.ContentLength === undefined ||
@@ -932,17 +958,17 @@ class AwsS3ObjectClient implements S3ObjectClient {
     }
   }
 
-  async copy(input: S3CopyObjectInput): Promise<void> {
+  async copy(input: S3CopyObjectInput, signal?: AbortSignal): Promise<void> {
     try {
-      await this.client.send(
-        new CopyObjectCommand({
-          Bucket: this.bucket,
-          Key: input.destinationKey,
-          CopySource: `${encodeURIComponent(this.bucket)}/${encodeKey(input.sourceKey)}`,
-          MetadataDirective: "COPY",
-          CacheControl: "private, no-store",
-        }),
-      );
+      const command = new CopyObjectCommand({
+        Bucket: this.bucket,
+        Key: input.destinationKey,
+        CopySource: `${encodeURIComponent(this.bucket)}/${encodeKey(input.sourceKey)}`,
+        MetadataDirective: "COPY",
+        CacheControl: "private, no-store",
+      });
+      if (signal === undefined) await this.client.send(command);
+      else await this.client.send(command, { abortSignal: signal });
     } catch (error) {
       throw awsOperationError(error, true);
     }

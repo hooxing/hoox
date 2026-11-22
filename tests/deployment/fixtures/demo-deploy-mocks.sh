@@ -13,9 +13,11 @@ docker() {
   if [[ "$*" == *'--entrypoint node scheduler --input-type=module -e'* ]]; then
     local probe="${!#}" scheduler_url
     scheduler_url="$(sed -n 's/^WEBHOOK_DISPATCHER_DATABASE_URL=//p' "$HOOX_DEMO_ROOT/shared/scheduler.env" | tail -n 1)"
+    local directory_url
+    directory_url="$(sed -n 's/^DATABASE_TRAJECTORY_DIRECTORY_URL=//p' "$HOOX_DEMO_ROOT/shared/scheduler.env" | tail -n 1)"
     (
       cd "$HOOX_DEMO_ROOT"
-      WEBHOOK_DISPATCHER_DATABASE_URL="$scheduler_url" node --input-type=module -e "$probe"
+      DATABASE_TRAJECTORY_DIRECTORY_URL="$directory_url" WEBHOOK_DISPATCHER_DATABASE_URL="$scheduler_url" node --input-type=module -e "$probe"
     )
     return
   fi

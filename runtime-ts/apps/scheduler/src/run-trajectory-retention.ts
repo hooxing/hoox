@@ -1,0 +1,27 @@
+import type { Pool } from "pg";
+import { listRunTrajectoryCleanupTenants } from "@hoox/persistence/trajectory";
+
+export interface RunTrajectoryRetentionStore {
+  cleanupExpired(tenantId: string, limit?: number): Promise<number>;
+}
+
+export async function runRunTrajectoryRetentionPass(
+  directory: Pool,
+  store: RunTrajectoryRetentionStore,
+  onFailure: () => void = () => undefined,
+): Promise<number> {
+  const tenants = await listRunTrajectoryCleanupTenants(directory);
+  let removed = 0;
+  for (const tenantId of tenants) {
+    try {
+      for (let batch = 0; batch < 100; batch += 1) {
+        const count = await store.cleanupExpired(tenantId, 100);
+        removed += count;
+        if (count < 100) break;
+      }
+    } catch {
+      onFailure();
+    }
+  }
+  return removed;
+}

@@ -32,37 +32,46 @@ shared_value() {
   sed -n "s/^$2=//p" "$shared_dir/$1" | tail -n 1
 }
 
-# Webhook Dispatcher 跨 infra、migration、scheduler 与 api 四份配置；任一缺失或不一致都会让
-# 迁移或投递失败，必须在改动任何发布状态前失败关闭。只比较值，不输出任何秘密。
-verify_webhook_configuration() {
-  local LC_ALL=C role scheduler_url scheduler_key encoded decoded database
+# 目录读取与 Webhook 投递使用独立凭据。部署前跨文件校对，不将密码或 DSN 写入日志。
+verify_scheduler_database() {
+  local LC_ALL=C role_key="DATABASE_${1}_ROLE" password_key="DATABASE_${1}_PASSWORD" url_key="$2"
+  local role scheduler_url encoded decoded database
   database="$(shared_value infra.env POSTGRES_DB)"
-  role="$(shared_value infra.env DATABASE_WEBHOOK_DISPATCHER_ROLE)"
+  role="$(shared_value infra.env "$role_key")"
   if [[ ! "$role" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] ||
-    [[ -z "$(shared_value infra.env DATABASE_WEBHOOK_DISPATCHER_PASSWORD)" ]]; then
-    echo "Demo infra.env 缺少有效的 Webhook Dispatcher 数据库角色或密码" >&2
+    [[ -z "$(shared_value infra.env "$password_key")" ]]; then
+    echo "Demo infra.env 缺少有效的 $1 数据库角色或密码" >&2
     return 1
   fi
-  if [[ "$(shared_value migration.env DATABASE_WEBHOOK_DISPATCHER_ROLE)" != "$role" ]]; then
-    echo "Demo migration.env 的 Webhook Dispatcher 角色与 infra.env 不一致" >&2
+  if [[ "$(shared_value migration.env "$role_key")" != "$role" ]]; then
+    echo "Demo migration.env 的 $1 角色与 infra.env 不一致" >&2
     return 1
   fi
-  scheduler_url="$(shared_value scheduler.env WEBHOOK_DISPATCHER_DATABASE_URL)"
-  if [[ "$(shared_value scheduler.env DATABASE_WEBHOOK_DISPATCHER_ROLE)" != "$role" ]] ||
+  scheduler_url="$(shared_value scheduler.env "$url_key")"
+  if [[ "$(shared_value scheduler.env "$role_key")" != "$role" ]] ||
     [[ ! "$scheduler_url" =~ ^postgres(ql)?://([^:@/]+):([^@/?#]+)@127\.0\.0\.1:15432/([^/?#]+)$ ]] ||
     [[ "${BASH_REMATCH[2]}" != "$role" || "${BASH_REMATCH[4]}" != "$database" ]]; then
-    echo "Demo scheduler.env 的 Webhook Dispatcher 角色或连接与 infra.env 不一致" >&2
+    echo "Demo scheduler.env 的 $1 角色或连接与 infra.env 不一致" >&2
     return 1
   fi
   encoded="${BASH_REMATCH[3]}"
   # 按 URL 百分号编码比较密码；不能把反斜杠直接交给 printf %b，也不允许 NUL。
   if [[ "$encoded" == *'\'* || "$encoded" == *'%00'* || "${encoded//%[[:xdigit:]][[:xdigit:]]/}" == *'%'* ]]; then
-    echo "Demo scheduler.env 的 Webhook Dispatcher 密码编码无效" >&2
+    echo "Demo scheduler.env 的 $1 密码编码无效" >&2
     return 1
   fi
   printf -v decoded '%b' "${encoded//%/\\x}"
-  if [[ "$decoded" != "$(shared_value infra.env DATABASE_WEBHOOK_DISPATCHER_PASSWORD)" ]]; then
-    echo "Demo scheduler.env 的 Webhook Dispatcher 凭据与 infra.env 不一致" >&2
+  if [[ "$decoded" != "$(shared_value infra.env "$password_key")" ]]; then
+    echo "Demo scheduler.env 的 $1 凭据与 infra.env 不一致" >&2
+    return 1
+  fi
+}
+verify_scheduler_configuration() {
+  local scheduler_key
+  verify_scheduler_database WEBHOOK_DISPATCHER WEBHOOK_DISPATCHER_DATABASE_URL || return 1
+  verify_scheduler_database TRAJECTORY_DIRECTORY DATABASE_TRAJECTORY_DIRECTORY_URL || return 1
+  if [[ -n "$(shared_value scheduler.env DATABASE_WORKER_COORDINATOR_URL)" ]]; then
+    echo "Demo scheduler.env 不得包含 Worker Coordinator 凭据" >&2
     return 1
   fi
   scheduler_key="$(shared_value scheduler.env WEBHOOK_SECRET_ENCRYPTION_KEY)"
@@ -72,7 +81,7 @@ verify_webhook_configuration() {
     return 1
   fi
 }
-if ! verify_webhook_configuration; then
+if ! verify_scheduler_configuration; then
   exit 2
 fi
 
@@ -236,22 +245,21 @@ compose exec -T postgres sh /docker-entrypoint-initdb.d/10-hoox-demo.sh
 # pg 仅声明在 Scheduler 包中，必须从该包解析，且不得把底层连接错误中的凭据写入日志。
 compose --profile ops run --rm --no-deps --entrypoint node scheduler --input-type=module -e '
   import { createRequire } from "node:module";
-  let client;
-  try {
-    if (!process.env.WEBHOOK_DISPATCHER_DATABASE_URL) throw new Error();
-    const { Client } = createRequire(`${process.cwd()}/runtime-ts/apps/scheduler/package.json`)("pg");
-    client = new Client({
-      connectionString: process.env.WEBHOOK_DISPATCHER_DATABASE_URL,
-      connectionTimeoutMillis: 10000,
-      query_timeout: 10000,
-    });
-    await client.connect();
-    await client.query("SELECT 1");
-  } catch {
-    console.error("Demo Scheduler 的 Webhook Dispatcher 数据库认证探针失败，已停止迁移");
-    process.exitCode = 1;
-  } finally {
-    await client?.end().catch(() => {});
+  const { Client } = createRequire(`${process.cwd()}/runtime-ts/apps/scheduler/package.json`)("pg");
+  for (const key of ["WEBHOOK_DISPATCHER_DATABASE_URL", "DATABASE_TRAJECTORY_DIRECTORY_URL"]) {
+    let client;
+    try {
+      if (!process.env[key]) throw new Error();
+      client = new Client({connectionString: process.env[key], connectionTimeoutMillis: 10000, query_timeout: 10000});
+      await client.connect();
+      await client.query("SELECT 1");
+    } catch {
+      console.error(`Demo Scheduler 的 ${key} 数据库认证探针失败，已停止迁移`);
+      process.exitCode = 1;
+      break;
+    } finally {
+      await client?.end().catch(() => {});
+    }
   }
 '
 compose --profile ops run --rm minio-init

@@ -11,7 +11,17 @@ function productionEnvironment(): Record<string, string> {
     RUNTIME_ENV: "production",
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_RUNTIME_ROLE: "runtime",
+    DATABASE_TRAJECTORY_DIRECTORY_URL:
+      "postgresql://trajectory_directory:credential@database:5432/runtime?sslmode=verify-full",
+    DATABASE_TRAJECTORY_DIRECTORY_ROLE: "trajectory_directory",
     DATABASE_SCHEMA: "runtime",
+    S3_ENDPOINT: "https://s3.invalid",
+    S3_BUCKET: "runtime-test",
+    S3_REGION: "us-east-1",
+    S3_ACCESS_KEY_ID: "test-access-key",
+    S3_SECRET_ACCESS_KEY: "test-secret-key",
+    S3_FORCE_PATH_STYLE: "false",
+    RUN_TRAJECTORY_RETENTION_DAYS: "30",
     WEBHOOK_SECRET_ENCRYPTION_KEY: "test-webhook-encryption-root-at-least-thirty-two-bytes",
     WEBHOOK_DISPATCHER_DATABASE_URL:
       "postgresql://webhook_dispatcher:credential@database:5432/runtime?sslmode=verify-full",
@@ -31,7 +41,16 @@ function developmentEnvironment(): Record<string, string> {
     RUNTIME_ENV: "development",
     DATABASE_URL: "postgresql://runtime:credential@127.0.0.1:5432/runtime",
     DATABASE_RUNTIME_ROLE: "runtime",
+    DATABASE_TRAJECTORY_DIRECTORY_URL:
+      "postgresql://trajectory_directory:credential@127.0.0.1:5432/runtime",
+    DATABASE_TRAJECTORY_DIRECTORY_ROLE: "trajectory_directory",
     DATABASE_SCHEMA: "runtime",
+    S3_ENDPOINT: "http://127.0.0.1:19000",
+    S3_BUCKET: "runtime-test",
+    S3_REGION: "us-east-1",
+    S3_ACCESS_KEY_ID: "test-access-key",
+    S3_SECRET_ACCESS_KEY: "test-secret-key",
+    S3_FORCE_PATH_STYLE: "true",
     CUBESANDBOX_API_URL: "http://127.0.0.1:18080",
     SCHEDULER_TENANT_ID: "tenant-a",
     SCHEDULER_WORKER_ID: "scheduler-development",
@@ -205,6 +224,34 @@ describe("Scheduler 进程入口", () => {
     ).toThrow("HISTORY_TITLE_CLAIM_LEASE_MS");
   });
 
+  it("Coordinator 凭据不能代替目录身份，也不进入 Scheduler 配置", () => {
+    expect(() =>
+      selectSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_WORKER_COORDINATOR_URL: "forbidden",
+      }),
+    ).toThrow("禁止注入");
+    const selected = selectSchedulerProcessEnvironment({
+      ...developmentEnvironment(),
+      DATABASE_WORKER_COORDINATOR_URL: "forbidden",
+      DATABASE_WORKER_COORDINATOR_ROLE: "worker_coordinator",
+    });
+    expect(selected).not.toHaveProperty("DATABASE_WORKER_COORDINATOR_URL");
+    expect(selected).not.toHaveProperty("DATABASE_WORKER_COORDINATOR_ROLE");
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...selected,
+        DATABASE_TRAJECTORY_DIRECTORY_URL: undefined,
+      }),
+    ).toThrow("DATABASE_TRAJECTORY_DIRECTORY_URL");
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...selected,
+        DATABASE_TRAJECTORY_DIRECTORY_ROLE: "runtime",
+      }),
+    ).toThrow("角色必须与");
+  });
+
   it("Scheduler 显式启用 E2B 时构造 Provider 路由配置", () => {
     const configuration = parseSchedulerProcessEnvironment({
       ...productionEnvironment(),
@@ -246,16 +293,18 @@ describe("Scheduler 进程入口", () => {
     ).toThrow("UNKNOWN:UNUSED_FLAG");
   });
 
-  it("宿主 S3 密钥不属于 Scheduler 声明配置，也不会进入投影", () => {
+  it("Scheduler 显式接收轨迹保留所需的共享 S3 凭据", () => {
     const selected = selectSchedulerProcessEnvironment({
       ...productionEnvironment(),
       S3_ENDPOINT: "https://object-storage.invalid",
       S3_ACCESS_KEY_ID: "must-not-enter-scheduler",
       S3_SECRET_ACCESS_KEY: "must-not-enter-scheduler",
     });
-    expect(selected).not.toHaveProperty("S3_ENDPOINT");
-    expect(selected).not.toHaveProperty("S3_ACCESS_KEY_ID");
-    expect(selected).not.toHaveProperty("S3_SECRET_ACCESS_KEY");
+    expect(selected).toMatchObject({
+      S3_ENDPOINT: "https://object-storage.invalid",
+      S3_ACCESS_KEY_ID: "must-not-enter-scheduler",
+      S3_SECRET_ACCESS_KEY: "must-not-enter-scheduler",
+    });
   });
 
   it("按 UTF-8 与领域 Tenant ID 在启动前拒绝永久配置错误", () => {

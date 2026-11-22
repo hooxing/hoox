@@ -80,6 +80,9 @@ export default defineConfig({
       "@hoox/persistence/thread": fileURLToPath(
         new URL("./runtime-ts/packages/persistence/src/entrypoints/thread.ts", import.meta.url),
       ),
+      "@hoox/persistence/trajectory": fileURLToPath(
+        new URL("./runtime-ts/packages/persistence/src/entrypoints/trajectory.ts", import.meta.url),
+      ),
       "@hoox/persistence": fileURLToPath(
         new URL("./runtime-ts/packages/persistence/src/index.ts", import.meta.url),
       ),

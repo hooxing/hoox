@@ -27,13 +27,16 @@ afterEach(() => {
 const webhookKey = "webhook-root-placeholder-at-least-32-bytes";
 const webhookFiles = {
   infra:
-    "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\nDATABASE_WEBHOOK_DISPATCHER_PASSWORD=placeholder-password\n",
-  migration: "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\n",
+    "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\nDATABASE_WEBHOOK_DISPATCHER_PASSWORD=placeholder-password\nDATABASE_TRAJECTORY_DIRECTORY_ROLE=trajectory_directory\nDATABASE_TRAJECTORY_DIRECTORY_PASSWORD=directory-placeholder\n",
+  migration:
+    "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\nDATABASE_TRAJECTORY_DIRECTORY_ROLE=trajectory_directory\n",
   api: `WEBHOOK_SECRET_ENCRYPTION_KEY=${webhookKey}\n`,
   scheduler: [
     `WEBHOOK_SECRET_ENCRYPTION_KEY=${webhookKey}`,
     "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher",
     "WEBHOOK_DISPATCHER_DATABASE_URL=postgresql://hoox_demo_webhook_dispatcher:placeholder-password@127.0.0.1:15432/test_db",
+    "DATABASE_TRAJECTORY_DIRECTORY_ROLE=trajectory_directory",
+    "DATABASE_TRAJECTORY_DIRECTORY_URL=postgresql://trajectory_directory:directory-placeholder@127.0.0.1:15432/test_db",
     "",
   ].join("\n"),
 };
@@ -60,11 +63,11 @@ exports.Client = class {
   }
   async connect() {
     appendFileSync(process.env.MOCK_LOG, "dispatcher connect\\n");
-    if (this.options.connectionString !== process.env.WEBHOOK_DISPATCHER_DATABASE_URL ||
+    if (![process.env.WEBHOOK_DISPATCHER_DATABASE_URL,process.env.DATABASE_TRAJECTORY_DIRECTORY_URL].includes(this.options.connectionString) ||
         !this.options.connectionString || !this.options.connectionTimeoutMillis) {
       throw new Error("探针必须使用 Scheduler DSN 和有限连接超时");
     }
-    if (process.env.MOCK_MODE === "dispatcher-auth-failure") {
+    if (process.env.MOCK_MODE === "dispatcher-auth-failure" || (process.env.MOCK_MODE === "directory-auth-failure" && this.options.connectionString === process.env.DATABASE_TRAJECTORY_DIRECTORY_URL)) {
       throw new Error(this.options.connectionString);
     }
   }
@@ -142,6 +145,16 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
   it.each([
     ["infra.env", "POSTGRES_DB=test_db\n", "infra.env"],
     ["migration.env", "", "migration.env"],
+    [
+      "scheduler.env",
+      webhookFiles.scheduler.replace(/^DATABASE_TRAJECTORY_DIRECTORY_URL=.*$/mu, ""),
+      "scheduler.env",
+    ],
+    [
+      "scheduler.env",
+      `${webhookFiles.scheduler}DATABASE_WORKER_COORDINATOR_URL=forbidden\n`,
+      "scheduler.env",
+    ],
     ["migration.env", "DATABASE_WEBHOOK_DISPATCHER_ROLE=other_role\n", "migration.env"],
     [
       "scheduler.env",
@@ -180,7 +193,7 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
       "WEBHOOK_SECRET_ENCRYPTION_KEY=different-key-placeholder-at-least-32-bytes\n",
       "api.env",
     ],
-  ])("Webhook 配置 %s 缺失或不一致时在任何发布动作前失败", (file, value, message) => {
+  ])("Scheduler 配置 %s 缺失或不一致时在任何发布动作前失败", (file, value, message) => {
     const result = deploy("success", undefined, { [file]: value });
     expect(result.status, result.stderr).toBe(2);
     expect(result.stderr).toContain(message);
@@ -188,7 +201,7 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     expect(result.composeEnv).toBe("HOOX_DEMO_IMAGE=test/previous@sha256:previous\n");
   });
 
-  it.each(["dispatcher-auth-failure", "dispatcher-query-failure"])(
+  it.each(["dispatcher-auth-failure", "dispatcher-query-failure", "directory-auth-failure"])(
     "%s 时关闭 Scheduler 探针连接、隐藏凭据并在迁移前停止",
     (mode) => {
       const result = deploy(mode);

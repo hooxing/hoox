@@ -84,6 +84,14 @@ it("Webhook 保留数据卷升级：旧 Tenant 经角色预置与迁移后可完
     await admin.query(
       `INSERT INTO app_users(id,created_at) VALUES ('user_demo',now()); INSERT INTO tenants(id,kind,owner_user_id,created_at) VALUES ('tenant_demo','personal','user_demo',now())`,
     );
+    await admin.query(
+      `INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at)
+         VALUES ('tenant_demo','membership_demo','user_demo','owner','active',now());
+       INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+         VALUES ('tenant_demo','thread_demo','user_demo','Demo','active',now(),now());
+       INSERT INTO runs(tenant_id,id,thread_id,status,version,created_at,updated_at)
+         VALUES ('tenant_demo','run_demo','thread_demo','running',1,now(),now())`,
+    );
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -108,6 +116,9 @@ it("Webhook 保留数据卷升级：旧 Tenant 经角色预置与迁移后可完
         throw new Error("保留数据卷的 PostgreSQL 角色预置失败");
     }
     await migrateUp(migrator, { ...roles, schema });
+    expect((await admin.query("SELECT id,origin FROM runs")).rows).toEqual([
+      { id: "run_demo", origin: "normal" },
+    ]);
     const key = join(scratch, "tls.key");
     const cert = join(scratch, "tls.crt");
     if (
@@ -170,15 +181,32 @@ it("Webhook 保留数据卷升级：旧 Tenant 经角色预置与迁移后可完
         eventTypes: ["run.succeeded"],
         secret: cipher.encrypt(scope.tenantId, "wh_demo", secret),
       });
-      await withTenantTransaction(runtime, scope, (client) =>
-        enqueueRunStatusWebhook(client, {
+      await withTenantTransaction(runtime, scope, async (client) => {
+        const transitioned = await client.query(
+          `UPDATE runs SET status='succeeded',version=version+1,updated_at=clock_timestamp()
+            WHERE tenant_id=$1 AND id=$2 AND status='running' AND version=1`,
+          [scope.tenantId, "run_demo"],
+        );
+        expect(transitioned.rowCount).toBe(1);
+        await enqueueRunStatusWebhook(client, {
           tenantId: scope.tenantId,
           runId: "run_demo",
           runVersion: 2,
           status: "succeeded",
           occurredAt: new Date().toISOString(),
-        }),
-      );
+        });
+        await enqueueRunStatusWebhook(client, {
+          tenantId: scope.tenantId,
+          runId: "run_missing",
+          runVersion: 2,
+          status: "succeeded",
+          occurredAt: new Date().toISOString(),
+        });
+      });
+      expect(
+        (await admin.query("SELECT source_run_id,source_run_origin,state FROM webhook_outbox"))
+          .rows,
+      ).toEqual([{ source_run_id: "run_demo", source_run_origin: "normal", state: "pending" }]);
       const dispatcher = new WebhookDispatcher({
         store: new PgWebhookOutboxStore(pool(roles.webhookDispatcherRole)),
         cipher,

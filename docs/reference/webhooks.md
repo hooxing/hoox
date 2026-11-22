@@ -4,7 +4,7 @@
 
 ## 管理入口与权限
 
-Webhook 是部署方把业务系统接入 Hoox 的配置。平台管理员在后台「接入 → Webhook」输入目标 Tenant ID，注册公网 HTTPS 地址、选择事件订阅、轮换密钥、停用或删除订阅，并查看停用时间和原因。普通工作台不提供管理入口；Tenant Owner/Admin 或持有 `webhooks:manage` 的服务 Key 不获得后台管理权。
+Webhook 用于 Hoox 在 Run 完成等事件发生时通知部署方系统。平台管理员在后台「接入 → Webhook」选择目标空间，注册公网 HTTPS 地址、选择事件订阅、轮换密钥、停用或删除订阅，并查看停用时间和原因。选择器默认定位初始化管理员的个人空间；只有为特定用户或团队空间单独接入时才选择其他空间。普通工作台不提供管理入口；Tenant Owner/Admin 或持有 `webhooks:manage` 的服务 Key 不获得后台管理权。
 
 管理接口使用既有后台管理员身份，前缀为 `/v1/admin/control/integrations/:tenantId/webhooks`；完整路由与审计边界见[后台接入管理](../architecture/admin-control-plane.md#接入管理边界)。用户 API 不注册 `/v1/webhooks` 管理路由。当前没有投递记录查询接口或页面，列表展示订阅状态与停用原因，不等同于逐次投递历史。
 

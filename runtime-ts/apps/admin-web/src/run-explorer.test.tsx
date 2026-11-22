@@ -20,6 +20,10 @@ const summary: RunSummaryDto = {
   tenantId: "tenant_a",
   runId: "run_1",
   threadId: "thread_1",
+  threadTitle: "无法导出报告",
+  userInput: "运行后无法导出报告",
+  userEmail: "operator@example.invalid",
+  agentDisplayName: "报表助手",
   status: "failed",
   createdAt: "2026-11-19T00:00:00.000Z",
   updatedAt: "2026-11-19T00:00:12.000Z",
@@ -88,7 +92,23 @@ function apiFixture(contentAccess: boolean) {
       ...(filters.cursor === undefined ? { nextCursor: "cursor-1" } : {}),
       contentAccess,
     })),
-    getRun: vi.fn(async () => detail(contentAccess)),
+    getRun: vi.fn(async () => {
+      const base = detail(contentAccess);
+      return contentAccess
+        ? {
+            ...base,
+            auditId: "run_content_audit_1",
+            timeline: {
+              ...base.timeline,
+              records: base.timeline.records.map((record) => ({
+                ...record,
+                summary: secret,
+                detail: { text: secret },
+              })),
+            },
+          }
+        : base;
+    }),
     readRunContent: vi.fn(async () => {
       const base = detail(true);
       return {
@@ -146,11 +166,25 @@ describe("运行记录列表", () => {
     await settle();
 
     const row = container.querySelector("tbody tr");
-    expect(row?.textContent).toContain("run_1");
+    expect(row?.querySelector('[title="run_1"]')).not.toBeNull();
     expect(row?.textContent).toContain("失败");
     expect(row?.textContent).toContain("12.0 s");
     expect(row?.textContent).toContain("2,000 / 300");
-    expect(row?.textContent).toContain("未记录");
+    expect(row?.textContent).toContain("运行后无法导出报告");
+    expect(row?.textContent).toContain("报表助手");
+
+    const search = container.querySelector<HTMLInputElement>('[aria-label="搜索用户问题"]');
+    if (!search) throw new Error("缺少用户问题搜索字段");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        search,
+        "导出报告",
+      );
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button(container, "查询").click());
+    await settle();
+    expect(api.listRuns).toHaveBeenLastCalledWith({ search: "导出报告" });
 
     const status = container.querySelector<HTMLSelectElement>('select[aria-label="状态"]');
     if (status === null) throw new Error("缺少状态筛选");
@@ -160,11 +194,15 @@ describe("运行记录列表", () => {
     });
     await act(async () => button(container, "查询").click());
     await settle();
-    expect(api.listRuns).toHaveBeenLastCalledWith({ status: "failed" });
+    expect(api.listRuns).toHaveBeenLastCalledWith({ status: "failed", search: "导出报告" });
 
     await act(async () => button(container, "加载更多").click());
     await settle();
-    expect(api.listRuns).toHaveBeenLastCalledWith({ status: "failed", cursor: "cursor-1" });
+    expect(api.listRuns).toHaveBeenLastCalledWith({
+      status: "failed",
+      search: "导出报告",
+      cursor: "cursor-1",
+    });
     expect(container.querySelectorAll("tbody tr")).toHaveLength(2);
 
     act(() => button(container, "查看").click());
@@ -173,7 +211,7 @@ describe("运行记录列表", () => {
 });
 
 describe("运行详情", () => {
-  it("没有正文权限时只展示结构，不提供正文入口", async () => {
+  it("非管理员详情只展示结构且不含正文", async () => {
     const api = apiFixture(false);
     const container = render(
       <RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" onBack={vi.fn()} />,
@@ -181,31 +219,23 @@ describe("运行详情", () => {
     await settle();
 
     expect(container.textContent).toContain("模型回复");
-    expect(container.textContent).toContain("没有“查看运行正文”权限");
+    expect(container.textContent).not.toContain(secret);
     expect(container.textContent).not.toContain("查看正文");
     expect(api.readRunContent).not.toHaveBeenCalled();
   });
 
-  it("持有正文权限时需主动打开正文，并显示审计号", async () => {
+  it("管理员打开详情即展示正文，后台静默记录审计", async () => {
     const api = apiFixture(true);
     const container = render(
       <RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" onBack={vi.fn()} />,
     );
     await settle();
-    expect(container.textContent).not.toContain(secret);
-    expect(api.readRunContent).not.toHaveBeenCalled();
-
-    await act(async () => button(container, "查看正文").click());
-    await settle();
-
-    expect(api.readRunContent).toHaveBeenCalledWith("tenant_a", "run_1", "attempt_1");
+    expect(container.textContent).toContain(secret);
     expect(container.querySelector(".run-timeline-content")?.textContent).toBe(secret);
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "run_content_audit_1",
-    );
+    expect(container.textContent).not.toContain("查看正文");
   });
 
-  it("实时侧栏从排队串行刷新到终态，人工查看正文只写一次审计", async () => {
+  it("实时侧栏从排队串行刷新到终态", async () => {
     vi.useFakeTimers();
     const api = apiFixture(true);
     const base = detail(true);
@@ -220,39 +250,29 @@ describe("运行详情", () => {
     expect(container.textContent).toContain("排队中");
     await act(async () => vi.advanceTimersByTimeAsync(2000));
     expect(container.textContent).toContain("等待回答");
-    expect(api.readRunContent).not.toHaveBeenCalled();
-    await act(async () => button(container, "查看正文").click());
-    expect(container.textContent).toContain("run_content_audit_1");
     await act(async () => vi.advanceTimersByTimeAsync(20_000));
     expect(api.getRun).toHaveBeenCalledTimes(3);
     expect(container.textContent).toContain("成功");
-    expect(api.readRunContent).toHaveBeenCalledTimes(1);
-    act(() => button(container, "收起正文").click());
-    expect(container.textContent).not.toContain(secret);
+    expect(api.readRunContent).not.toHaveBeenCalled();
     expect(container.textContent).toContain("模型回复");
   });
 
-  it("刷新发现正文权限已收回，丢弃在途的旧正文响应", async () => {
+  it("刷新发现操作者失去正文权限后只显示结构", async () => {
     vi.useFakeTimers();
     const api = apiFixture(true);
     const base = detail(true);
     api.getRun
       .mockResolvedValueOnce({ ...base, run: { ...base.run, status: "running" } })
       .mockResolvedValueOnce(detail(false));
-    const result = await api.readRunContent();
-    const pending = Promise.withResolvers<typeof result>();
-    api.readRunContent.mockClear().mockReturnValueOnce(pending.promise);
     const container = render(
       <RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" live />,
     );
     await settle();
-    act(() => button(container, "查看正文").click());
     await act(async () => vi.advanceTimersByTimeAsync(2000));
-    await act(async () => pending.resolve(result));
-    expect(container.textContent).toContain("只显示结构与指标");
+    expect(container.textContent).toContain("模型回复");
     expect(container.textContent).not.toContain(secret);
     expect(container.textContent).not.toContain("run_content_audit_1");
-    expect(api.readRunContent).toHaveBeenCalledTimes(1);
+    expect(api.readRunContent).not.toHaveBeenCalled();
   });
 
   it("慢请求不重叠；离开侧栏后迟到的结构响应不再排队刷新", async () => {

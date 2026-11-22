@@ -16,6 +16,8 @@ function run(overrides: Partial<RunExplorerRunRecord> = {}): RunExplorerRunRecor
     tenantId: "tenant_a",
     runId: "run_1",
     threadId: "thread_1",
+    threadTitle: "故障排查问题",
+    userInput: "SECRET-用户正文 问题",
     status: "succeeded",
     createdAt: "2026-11-19T00:00:00.000Z",
     updatedAt: "2026-11-19T00:01:00.000Z",
@@ -121,13 +123,13 @@ describe("Run 浏览器权限", () => {
     },
   );
 
-  it("admin 读取正文时每次生成新的审计号并交给同一读取调用", async () => {
+  it("admin 打开详情直接读取正文且每次写入审计", async () => {
     const store = repository("admin");
     let sequence = 0;
     const service = new RunExplorerService(store, () => `run_content_${++sequence}`);
 
-    const first = await service.readRunContent("user_admin", "tenant_a", "run_1", "attempt_1");
-    const second = await service.readRunContent("user_admin", "tenant_a", "run_1");
+    const first = await service.getRunDetail("user_admin", "tenant_a", "run_1", "attempt_1");
+    const second = await service.getRunDetail("user_admin", "tenant_a", "run_1");
 
     expect(first.auditId).toBe("run_content_1");
     expect(second.auditId).toBe("run_content_2");
@@ -140,6 +142,7 @@ describe("Run 浏览器权限", () => {
     });
     expect(store.readContent.mock.calls[1]?.[0]).toMatchObject({ attemptId: "attempt_2" });
     expect(JSON.stringify(first.timeline)).toContain(secret);
+    expect(store.readContent).toHaveBeenCalledTimes(2);
   });
 
   it("不存在的 Run 或不属于该 Run 的 Attempt 返回 NOT_FOUND 且不写审计", async () => {
@@ -195,6 +198,7 @@ describe("Run 列表查询", () => {
       agentDefinitionId: "agent_default",
       agentRevisionId: "rev_1",
       origin: "playground",
+      search: "退款失败",
       cursor,
     });
     expect(page.contentAccess).toBe(true);
@@ -202,6 +206,7 @@ describe("Run 列表查询", () => {
       agentDefinitionId: "agent_default",
       agentRevisionId: "rev_1",
       origin: "playground",
+      search: "退款失败",
       after: { createdAt: "2026-11-19T00:00:00.000Z", tenantId: "tenant_a", runId: "run_9" },
     });
   });

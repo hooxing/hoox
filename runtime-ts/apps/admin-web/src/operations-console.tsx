@@ -41,14 +41,6 @@ function formatRate(value: number | null): string {
     : `${(value * 100).toLocaleString("zh-CN", { maximumFractionDigits: 1 })}%`;
 }
 
-export function trajectoryViewerUrl(input: {
-  readonly development: boolean;
-  readonly baseUrl: string;
-}): string | undefined {
-  if (input.development) return "http://127.0.0.1:4188";
-  return input.baseUrl === "/admin/" ? "/trajectory/" : undefined;
-}
-
 export function ControlDataUnavailable({
   title,
   description,
@@ -71,10 +63,6 @@ export function ControlDataUnavailable({
 export function OperationsDashboard({ value }: { readonly value: AdminControlOverviewDto }) {
   const stats = value.statistics;
   const usage = stats.modelUsage24h;
-  const trajectoryUrl = trajectoryViewerUrl({
-    development: import.meta.env.DEV,
-    baseUrl: import.meta.env.BASE_URL,
-  });
   return (
     <div className="operations-dashboard">
       <section className="operations-summary">
@@ -85,16 +73,6 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
         </div>
         <div className="operations-summary-actions">
           <time>数据生成于 {formatDate(stats.generatedAt)}</time>
-          {trajectoryUrl !== undefined && (
-            <a
-              className="trajectory-viewer-link"
-              href={trajectoryUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              打开内部轨迹
-            </a>
-          )}
         </div>
       </section>
 

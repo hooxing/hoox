@@ -24,6 +24,11 @@ export interface RunSummaryDto {
   readonly tenantId: string;
   readonly runId: string;
   readonly threadId: string;
+  readonly threadTitle: string;
+  readonly userInput?: string;
+  readonly userEmail?: string;
+  readonly userDisplayName?: string;
+  readonly agentDisplayName?: string;
   readonly status: string;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -83,6 +88,7 @@ export interface RunPageDto {
   readonly items: readonly RunSummaryDto[];
   readonly nextCursor?: string;
   readonly contentAccess: boolean;
+  readonly auditId?: string;
 }
 
 export interface RunDetailDto {
@@ -104,6 +110,7 @@ export interface RunListFilters {
   readonly agentDefinitionId?: string;
   readonly agentRevisionId?: string;
   readonly origin?: RunOrigin;
+  readonly search?: string;
   readonly cursor?: string;
   readonly limit?: number;
 }

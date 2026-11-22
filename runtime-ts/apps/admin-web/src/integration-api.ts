@@ -12,6 +12,30 @@ export class IntegrationApi {
     private readonly fetcher: typeof fetch = (input, init) => globalThis.fetch(input, init),
   ) {}
 
+  async listTenants() {
+    const headers = new Headers({ Accept: "application/json" });
+    const authorization = adminAuthorizationHeader();
+    if (authorization !== undefined) headers.set("Authorization", authorization);
+    const response = await this.fetcher("/v1/admin/control/integrations/tenants", {
+      method: "GET",
+      headers,
+      credentials: "same-origin",
+      cache: "no-store",
+    }).catch(() => {
+      throw new AdminApiError("无法读取 Tenant 列表。", 0, true);
+    });
+    if (!response.ok)
+      throw new AdminApiError(
+        "仅平台管理员可读取 Tenant 列表。",
+        response.status,
+        response.status >= 500,
+      );
+    const body: unknown = await response.json().catch(() => undefined);
+    if (typeof body !== "object" || body === null || !("data" in body))
+      throw new AdminApiError("后台控制服务返回了无法识别的数据。", 502, true);
+    return (body as { data: { items: readonly IntegrationTenantDto[] } }).data.items;
+  }
+
   private async request<T>(
     tenant: string,
     path: string,
@@ -103,6 +127,13 @@ export class IntegrationApi {
       "DELETE",
     );
   }
+}
+
+export interface IntegrationTenantDto {
+  readonly tenantId: string;
+  readonly displayName: string;
+  readonly kind: "personal" | "team";
+  readonly isDefault: boolean;
 }
 
 export const integrationApi = new IntegrationApi();

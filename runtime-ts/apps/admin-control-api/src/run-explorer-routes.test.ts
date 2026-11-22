@@ -10,6 +10,8 @@ const summary = {
   tenantId: "tenant_a",
   runId: "run_1",
   threadId: "thread_1",
+  threadTitle: "问题标题",
+  userInput: "用户问题内容",
   status: "succeeded" as const,
   createdAt: "2026-11-19T00:00:00.000Z",
   updatedAt: "2026-11-19T00:00:10.000Z",
@@ -140,7 +142,7 @@ describe("后台 Run 浏览器 API", () => {
     await app.close();
   });
 
-  it("admin 读取正文时返回审计号与正文", async () => {
+  it("admin 打开详情直接读取正文并写入审计", async () => {
     const { app, repository } = fixture("admin");
     const response = await app.inject({
       method: "GET",

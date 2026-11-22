@@ -109,7 +109,7 @@ Tenant assignment 负责发现和公平选择。启用维护的 Worker 先领取
 | Scheduler | 清理、恢复、定时任务和可重试后台协调 | 读取不需要的 S3/模型秘密或扫描未授权 Tenant |
 | Web | 用户交互和公开协议消费 | 依赖数据库、内部 Repository 或 development 秘密 |
 | Admin API | 模型、记忆、配置、统计及 Skill 发布管理；内部隔离两套数据库连接 | 复用普通 Runtime 权限或合并 Admin Control 与 Skill Publisher 数据库角色 |
-| Trajectory Viewer | 仅在受控 development 环境读取内部诊断 | 暴露为公开产品 API 或生产默认入口 |
+| Trajectory Viewer | 本地 development 读取内部诊断；Demo URL 重定向到后台运行记录 | 作为独立 Demo 服务或生产入口 |
 
 后台统计通过 Migrator 拥有的受限视图跨 Tenant 聚合。底表保留 FORCE RLS；专属读取策略只面向 Migrator，并要求有效平台操作者，用户目录另要求管理员。Admin Control 不增加业务底表读取权限，普通 Runtime 仍按 Tenant 隔离。策略在数据库角色引导时重绑定至当前 Migrator，具体取舍见 [后台控制面与运行配置](admin-control-plane.md)。
 

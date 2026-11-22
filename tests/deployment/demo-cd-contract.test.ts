@@ -23,7 +23,7 @@ describe("Demo 持续部署契约", () => {
     expect(workflow).not.toContain("docker/setup-qemu-action");
     expect(workflow.match(/secrets\.DEMO_GHCR_TOKEN/gu)).toHaveLength(2);
     expect(workflow).not.toContain("secrets.GITHUB_TOKEN");
-    expect(workflow).toContain('"https://$HOOX_DEMO_DOMAIN/trajectory/"');
+    expect(workflow).toContain('"https://$HOOX_DEMO_DOMAIN/admin/runs"');
     const actions = [...workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gmu)].map((match) => match[1]);
     expect(actions.length).toBeGreaterThan(0);
     expect(actions.every((action) => /@[0-9a-f]{40}$/u.test(action ?? ""))).toBe(true);
@@ -69,7 +69,7 @@ describe("Demo 持续部署契约", () => {
     expect(dockerfile).toContain('--filter "@hoox/scheduler..."');
     expect(dockerfile).toContain('--filter "@hoox/web..."');
     expect(dockerfile).toContain('--filter "@hoox/admin-control-api..."');
-    expect(dockerfile).toContain('--filter "@hoox/trajectory-web..."');
+    expect(dockerfile).not.toContain("trajectory-web");
     expect(dockerfile).toContain("RUN mkdir -p model-wire-traces");
     expect(dockerfile).toContain("pnpm --filter @hoox/admin-web build:demo");
     expect(dockerfile).not.toContain("&& pnpm build");
@@ -101,21 +101,19 @@ describe("Demo 持续部署契约", () => {
     expect(prepare).toContain("AS admin_control_safe");
   });
 
-  it("数据库和对象存储只绑定回环，七个应用容器采用只读非特权运行边界", () => {
+  it("数据库和对象存储只绑定回环，Demo 不再运行独立轨迹容器", () => {
     const compose = source("deploy/demo/docker-compose.yml");
     expect(compose).toContain('"127.0.0.1:15432:5432"');
     expect(compose).toContain('"127.0.0.1:19000:9000"');
     expect(compose).toContain('"127.0.0.1:19001:9001"');
     expect(compose).toContain("admin-control:");
     expect(compose).toContain("admin-web:");
-    expect(compose).toContain("trajectory:");
+    expect(compose).not.toContain("trajectory:");
     expect(compose).toContain("shared/admin-control.env");
     expect(compose).toContain("DEMO_ADMIN_USER_ID: ${DEMO_ADMIN_USER_ID");
     expect(compose).toContain("DEV_ADMIN_CONTROL_USER_ID: ${DEMO_ADMIN_USER_ID");
     expect(compose).toContain("runtime-ts/apps/admin-web/dist");
-    expect(compose).toContain("runtime-ts/apps/trajectory-web/dist/bin.js");
     expect(compose).toContain('MODEL_WIRE_TRACE_ENABLED: "true"');
-    expect(compose).toContain("trajectory_data:/opt/hoox/model-wire-traces:ro");
     expect(compose).toContain("trajectory_data:/opt/hoox/model-wire-traces");
     expect(compose).toContain("read_only: true");
     expect(compose).toContain("no-new-privileges:true");
@@ -146,10 +144,7 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("restore_services=(postgres minio api web scheduler worker)");
     expect(deploy).toContain('up -d --force-recreate "' + "$" + '{restore_services[@]}"');
     expect(deploy).toContain("restore_services+=(admin-control admin-web)");
-    expect(deploy).toContain("restore_services+=(trajectory)");
-    expect(deploy).toContain(
-      "for service in api web admin-control admin-web trajectory scheduler worker",
-    );
+    expect(deploy).toContain("for service in api web admin-control admin-web scheduler worker");
     expect(deploy).toContain("rollback()");
     expect(deploy).toContain("数据库迁移不会自动回退");
     expect(deploy).toContain("/api/api/auth/sign-in/email");
@@ -165,13 +160,10 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("-o root -g root -m 0600");
     expect(deploy).toContain("https://$domain/v1/admin/control/overview");
     expect(deploy).toContain("admin_access_token");
-    expect(deploy).toContain(
-      "--force-recreate api admin-control admin-web trajectory scheduler worker",
-    );
+    expect(deploy).toContain("--force-recreate api admin-control admin-web scheduler worker");
     expect(deploy).toContain("compose up -d --force-recreate postgres minio");
     expect(deploy).toContain("HOOX_DEMO_RELEASE_ID");
-    expect(deploy).toContain("https://$domain/trajectory/api/threads");
-    expect(deploy).toContain("Demo 轨迹 API 未拒绝无会话请求");
+    expect(deploy).not.toContain("/trajectory/api/");
     expect(deploy).not.toContain('docker volume rm "hoox-demo-trajectory-$old_release_id"');
     expect(deploy).not.toContain('docker volume rm "hoox-demo-trajectory-data-20260903"');
     expect(deploy).not.toContain("admin_netrc");
@@ -191,8 +183,8 @@ describe("Demo 持续部署契约", () => {
     expect(nginx).toContain("location ^~ /admin/");
     expect(nginx).toContain("location ^~ /v1/admin/");
     expect(nginx).toContain("location = /trajectory");
-    expect(nginx).toContain("location = /trajectory/");
-    expect(nginx).toContain("location ^~ /trajectory/api/");
+    expect(nginx).toContain("return 308 /admin/runs;");
+    expect(nginx).toContain("location ^~ /trajectory/");
     expect(nginx).not.toContain("auth_basic");
     expect(nginx).toContain("location = /_hoox_demo_admin_access");
     expect(nginx).toContain("auth_request /_hoox_demo_admin_access");
@@ -201,9 +193,7 @@ describe("Demo 持续部署契约", () => {
     expect(nginx).toContain("proxy_pass http://127.0.0.1:3001/");
     expect(nginx).toContain("proxy_pass http://127.0.0.1:3003");
     expect(nginx).toContain("proxy_pass http://127.0.0.1:4174/");
-    expect(nginx).toContain("proxy_pass http://127.0.0.1:4188/");
-    expect(nginx).toContain("proxy_pass http://127.0.0.1:4188/api/");
-    expect(nginx).toContain('proxy_set_header Authorization ""');
+    expect(nginx).not.toContain("127.0.0.1:4188");
     expect(nginx).toContain("proxy_pass http://127.0.0.1:19000");
     expect(nginx).not.toContain("DEV_ADMIN_CONTROL_TOKEN");
     expect(apiExample).toContain("DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc");

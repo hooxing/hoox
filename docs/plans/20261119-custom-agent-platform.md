@@ -69,7 +69,7 @@
 
 | WP | 内容 | 主要位置 | 依赖 | 验收 |
 | --- | --- | --- | --- | --- |
-| D1 | 后台 Run 浏览器：把现有轨迹查看能力产品化进 `admin-web`；按 Agent、Revision、Tenant、状态、来源筛选；新增受审计的正文访问权限 | `trajectory`、`admin-control`、`admin-control-api`、`admin-web` | 基础部分无依赖；Agent 筛选需要 A1、A3 | 无权限时看不到正文；每次正文访问有审计 |
+| D1 | 统一后台 Run 浏览器：列表显示并搜索用户问题；详情展示持久事件完整正文，按 Attempt 切换并每次读取审计；兼容重定向旧轨迹 URL，移除 Demo 独立服务 | `trajectory`、`admin-control`、`admin-control-api`、`admin-web`、`persistence`、Demo 部署 | 基础部分无依赖；Agent 筛选需要 A1、A3 | 管理员详情正文自动可见且每次读取有审计；非管理员正文请求拒绝；旧 URL 重定向并无独立 Demo 服务 |
 | D2 | Playground：选择草稿运行、`origin=playground`、实时轨迹侧栏、工具 Mock | `admin-web`、`api` 或 `admin-control-api`、`agent-worker` 中 Mock 路由 | A3、A4、D1；Mock 需要 B1 | Mock 绝不影响正常 Run |
 | D3 | 指标与成本：在现有 Token 指标上增加 Agent 与 Revision 维度、成功率、工具失败率、延迟分位数、成本 | `persistence` 聚合视图、`admin-control`、`admin-web` 运营页 | A3 | 聚合视图不暴露正文；单价未配置时成本显示为未知 |
 | D4 | 终端用户反馈：工作台与公开 API 的点赞、点踩、附言，关联 Run 与 Revision | `api`、`web`、`persistence` | A5；API 部分需要 C2 | 反馈与 Run 的关联和权限测试 |

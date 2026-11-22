@@ -6,11 +6,11 @@
 
 - GitHub Actions 只接受本仓库 `main` push 的成功“持续集成”自动触发，也允许维护者在 `main` 手工重试。两种入口都要求发布 SHA 仍是 `main` 当前提交，且该 SHA 最新的 `ci.yml` push 运行已经成功；手工入口不能绕过 CI。
 - 镜像推送到 GHCR，并以不可变 digest 交给目标主机；目标主机不从 Git 仓库现场构建。
-- 单机 Docker Compose 运行 PostgreSQL、MinIO、API、Web、Admin Control、Admin Web、Trajectory、Scheduler 和 Worker。PostgreSQL 与 MinIO 端口只绑定宿主机回环地址。
-- API、Web、Admin Control、Admin Web 与 Trajectory 使用 host network，并分别只监听 `127.0.0.1:3001`、`127.0.0.1:4173`、`127.0.0.1:3003`、`127.0.0.1:4174` 和 `127.0.0.1:4188`。
-- 宿主机 Nginx 在 `hoox.aisay.cc` 提供 TLS。`/api/` 转发用户 API，`/agent-runtime-demo/` 转发 Demo 对象桶，其余普通路径转发用户 Web；`/admin/` 提供后台静态页面，`/v1/admin/` 通过内部 `auth_request` 校验 Hoox 会话后转发统一后台 API；`/trajectory/` 提供轨迹页面外壳，`/trajectory/api/` 只允许 Demo 管理员会话访问。
-- Admin Web 与 Trajectory 页面从同源工作台的 `hoox.auth-session.v2` 读取未过期 Hoox access token。Nginx 仅在会话属于配置的 Demo 管理员用户时放行后台和轨迹 API；后台 API 的上游 `Authorization` 会由 root-only 配置覆盖为 Admin Control development Token，轨迹 API 则在鉴权后清空 `Authorization`，查看器进程不会接收 Hoox Session。
-- Worker 与 Trajectory 共享固定数据 epoch 的跨发布轨迹卷：Worker 可写，查看器只读。应用发布、回滚和旧 release 目录清理都继续挂载并保留同一轨迹历史。
+- 单机 Docker Compose 运行 PostgreSQL、MinIO、API、Web、Admin Control、Admin Web、Scheduler 和 Worker。PostgreSQL 与 MinIO 端口只绑定宿主机回环地址。
+- API、Web、Admin Control 与 Admin Web 使用 host network，分别只监听 `127.0.0.1:3001`、`127.0.0.1:4173`、`127.0.0.1:3003` 和 `127.0.0.1:4174`。
+- 宿主机 Nginx 在 `hoox.aisay.cc` 提供 TLS。`/api/` 转发用户 API，`/agent-runtime-demo/` 转发 Demo 对象桶，其余普通路径转发用户 Web；`/admin/` 提供后台静态页面，`/v1/admin/` 通过内部 `auth_request` 校验 Hoox 会话后转发统一后台 API；旧 `/trajectory` 与 `/trajectory/` 返回 `308 /admin/runs`。
+- Admin Web 从同源工作台的 `hoox.auth-session.v2` 读取未过期 Hoox access token。Nginx 仅在会话属于配置的 Demo 管理员用户时放行后台 API；上游 `Authorization` 由 root-only 配置覆盖为 Admin Control development Token。
+- Worker 继续把 development 诊断镜像写入固定数据 epoch 轨迹卷以支持本机排障；Demo 不运行读取该卷的 Trajectory Web 服务。后台运行记录通过受限 PostgreSQL 投影读取持久 Run 事件。
 - Demo 使用 development 装配以复用单机入口，但必须同时设置 `DEMO_PUBLIC_ACCESS_ENABLED=true`、`DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc`、`DEMO_ADMIN_USER_ID=<Demo 管理员用户 ID>` 和 `DEV_AUTH_ENABLED=false`。固定开发身份、缺失管理员用户、明文 origin 和非回环 API 监听都会在解析期失败。
 
 ## 用户 Web 入口
@@ -56,7 +56,7 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 ### 1. 准备主机、域名和证书
 
 1. 准备可从 GitHub Actions 经 SSH 访问的 Linux ARM64 主机，安装 Docker Engine、Compose v2、Nginx、Certbot、curl、Python 3 和 sudo；确认部署用户可运行 `docker compose version`、访问 Docker socket，并能无交互地安装及重载 Nginx 配置。
-2. 将 `hoox.aisay.cc` 的 DNS 指向目标主机，开放公网 TCP 80、443；SSH 访问按部署网络限制。确认宿主机的 3001、3003、4173、4174、4188、15432、19000、19001 端口未被占用。PostgreSQL、MinIO 和应用监听回环地址，不要将其端口直接开放到公网。
+2. 将 `hoox.aisay.cc` 的 DNS 指向目标主机，开放公网 TCP 80、443；SSH 访问按部署网络限制。确认宿主机的 3001、3003、4173、4174、15432、19000、19001 端口未被占用。PostgreSQL、MinIO 和应用监听回环地址，不要将其端口直接开放到公网。
 3. 以有权限的账号创建目录，再将其所有权交给部署用户：
 
    ```bash
@@ -130,10 +130,10 @@ PostgreSQL 数据卷保留时，Docker 不会重新执行初始化脚本。发�
 1. 检出触发事件对应的实际提交，通过 GitHub API 核对 `main` 当前 SHA 和同提交最新 CI，再在 GitHub 托管 ARM64 Runner 上使用固定 commit 的 Action 构建镜像并推送 GHCR。构建后、配置 SSH 前再次核对；排队、重跑或构建期间已过期的发布会跳过后续远端操作，GitHub API 不可用或最新 CI 未通过时失败关闭。
 2. 上传 `deploy/demo` 中的 Compose、初始化、Nginx 和远程发布契约到新的 release 目录。
 3. 目标主机先核对 Webhook Dispatcher 配置（见“保留数据卷升级”），不一致时在改动任何发布状态前失败；随后拉取 digest，启动 PostgreSQL 与 MinIO，经 TCP 确认 PostgreSQL 就绪后幂等执行初始化脚本补齐缺失的受限角色，并验证 Dispatcher 能以配置的凭据登录，再幂等创建对象桶并执行只向前的数据库迁移。
-4. 以现有管理员用户 ID 或安全占位值启动 API、用户 Web 与只读 Trajectory，验证本机探针后生成 root-only Admin Control Bearer Token 配置，再原子安装不含 HTTP Basic 的 Nginx 配置。
+4. 以现有管理员用户 ID 或安全占位值启动 API、用户 Web 和 Admin Control，验证本机探针后生成 root-only Admin Control Bearer Token 配置，再原子安装不含 HTTP Basic 的 Nginx 配置。
 5. 在受限数据库连接中检查固定 Demo 账号是否已存在，仅在缺失时通过公开 HTTPS Better Auth 路径注册；已有账号继续使用原凭据。该账号是部署脚本托管的固定演示管理员，脚本将其邮箱状态幂等标记为已验证，再使用同一账号登录并交换 Hoox Session；普通用户仍必须通过 SMTP 验证码完成邮箱验证。账号查询结果无效、初始化失败或登录失败均终止发布并恢复上一应用版本，HTTP 失败只记录状态码，不输出响应正文。随后查询其用户与个人 Tenant，将用户幂等提升为有效平台控制管理员和 Skill 发布管理员。发布脚本只在 `0600` 临时 curl 配置中保存本次验收使用的 Hoox access token。
-6. 将实际管理员用户同时注入 API 与 Admin Control，将个人 Tenant 注入 Scheduler 与 Worker，并强制重建这些应用容器及 Trajectory。API 以该用户 ID 作为 Demo 后台与轨迹会话闸门；Worker 默认把诊断镜像写入跨发布共享轨迹卷。
-7. 检查七个应用服务持续运行，并确认 Worker 无重启且已完成依赖探测、启动消费循环；Worker 启动失败或超过两分钟仍未完成时触发应用镜像回退，API readiness 成功不能替代 Worker 验收。随后检查用户端 readiness、后台 readiness、后台与轨迹页面外壳、无会话后台及轨迹 API 的 `401`，以及带管理员 Hoox 会话的后台概览和轨迹列表 API，再切换 `/opt/hoox-demo/current`。只保留最近五个 release 目录；轨迹卷不随 release 目录清理。
+6. 将实际管理员用户同时注入 API 与 Admin Control，将个人 Tenant 注入 Scheduler 与 Worker，并强制重建应用容器。API 以该用户 ID 作为 Demo 后台会话闸门；Worker 默认把诊断镜像写入跨发布共享轨迹卷。
+7. 检查应用服务持续运行，并确认 Worker 无重启且已完成依赖探测、启动消费循环；Worker 启动失败或超过两分钟仍未完成时触发应用镜像回退，API readiness 成功不能替代 Worker 验收。随后检查用户端 readiness、后台 readiness、后台页面、无会话后台 API 的 `401`，以及带管理员 Hoox 会话的后台概览，再切换 `/opt/hoox-demo/current`。只保留最近五个 release 目录；Worker 诊断卷不随 release 目录清理。
 
 发布工作流串行执行，不会为新提交取消正在迁移或恢复的发布。提交新鲜度以发布前最后一次 GitHub API 核验为准；核验后到发布完成期间仍可能出现新提交，新提交通过 CI 后再发布。首次引入门禁前的旧 SHA 不包含门禁脚本，重跑对应旧工作流可能直接失败，应等待当前 `main` CI 或从 `main` 手工重试。
 
@@ -148,24 +148,22 @@ curl --fail https://hoox.aisay.cc/
 curl --fail https://hoox.aisay.cc/app
 curl --fail https://hoox.aisay.cc/api/ready
 curl --fail https://hoox.aisay.cc/admin/
-curl --fail https://hoox.aisay.cc/trajectory/
+curl --fail --location https://hoox.aisay.cc/trajectory/
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   https://hoox.aisay.cc/v1/admin/control/overview)" = "401"
-test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  https://hoox.aisay.cc/trajectory/api/threads)" = "401"
 docker compose --project-name hoox-demo \
   --env-file /opt/hoox-demo/shared/compose.env \
   -f /opt/hoox-demo/current/docker-compose.yml ps
 ```
 
-`/` 展示公开介绍页，首页的工作台入口应跳转到 `/app`；两条路径均应支持直接访问和刷新。未登录访问 `/admin/` 与 `/trajectory/` 应成功加载不含敏感数据的页面外壳；未携带 Hoox Bearer 的 `/v1/admin/` 与 `/trajectory/api/` 必须返回 `401`。在同源工作台使用 Demo 管理员账号登录后，再打开 `/admin/` 和 `/trajectory/`，后台应能读取管理数据，轨迹页应能读取稳定轨迹数据 epoch 中自启用后的 Run/Attempt。还应创建 Thread、触发一次 Run，并确认 Worker 能消费同一 Tenant 的 dispatch，且轨迹页出现对应记录。账号密码保存在运维人员的受限凭据文件中，不得复制到 issue、PR、Actions 日志或本页。
+`/` 展示公开介绍页，首页的工作台入口应跳转到 `/app`；两条路径均应支持直接访问和刷新。未登录访问 `/admin/` 应成功加载不含敏感数据的页面外壳；旧 `/trajectory/` 应重定向到 `/admin/runs`。未携带 Hoox Bearer 的 `/v1/admin/` 必须返回 `401`。在同源工作台使用 Demo 管理员账号登录后，后台应能读取管理数据与运行记录。还应创建 Thread、触发一次 Run，并确认 Worker 能消费同一 Tenant 的 dispatch，Run 出现在后台运行记录中。账号密码保存在运维人员的受限凭据文件中，不得复制到 issue、PR、Actions 日志或本页。
 
 ## 失败与回滚
 
-- 发布开始前缺失契约或共享配置时直接退出，不改变运行中的应用。远程脚本进入发布阶段后，命令失败和显式验收失败都会由主 shell 执行一次恢复：停止候选应用容器，并在存在上一 release 时恢复上一镜像和应用进程，继续挂载同一稳定轨迹卷。上一 release 不含后台或 Trajectory 服务时，只恢复其实际声明的服务；恢复中的清理失败不会阻止其余恢复动作，也不会覆盖原始失败退出码。
+- 发布开始前缺失契约或共享配置时直接退出，不改变运行中的应用。远程脚本进入发布阶段后，命令失败和显式验收失败都会由主 shell 执行一次恢复：停止候选应用容器，并在存在上一 release 时恢复上一镜像和应用进程，继续挂载同一稳定诊断卷；恢复中的清理失败不会阻止其余恢复动作，也不会覆盖原始失败退出码。
 - Nginx 候选配置失败时恢复上一站点配置；Admin Control Token 文件继续留在 root-only 路径并由后续成功发布覆盖。旧版 htpasswd 可能为回滚到仍使用 HTTP Basic 的上一 release 而暂时保留，但现行配置不会引用它。
 - 数据库迁移只向前执行，脚本绝不自动运行 down；若新迁移与旧镜像不兼容，必须停服并按该迁移说明和备份方案处理。
-- PostgreSQL、MinIO 和轨迹数据卷都不随应用回滚或旧 release 目录清理删除。轨迹卷固定为 `hoox-demo-trajectory-data-20260903`；未来只能通过显式数据 epoch 切换执行受控轮换，自动发布不得删除。
+- PostgreSQL、MinIO 和 Worker 诊断数据卷都不随应用回滚或旧 release 目录清理删除。诊断卷固定为 `hoox-demo-trajectory-data-20260903`；未来只能通过显式数据 epoch 切换执行受控轮换，自动发布不得删除。
 - 需要一次性舍弃 Demo 测试数据时，只能在 Compose 中把 PostgreSQL 与 MinIO 命名卷成对切换到同一个新数据 epoch。2026-11 迁移基线压缩后，数据卷切换到 `20261118` epoch：新卷由初始化脚本重建角色与 Schema，再执行基线迁移；旧 `20260826` 卷保留给回滚到压缩前镜像。2026-11-20 因修复迁移回退依赖顺序（down 文件变化导致 checksum 变化），切换到 `20261120` epoch；旧 `20261118` 卷保留给回滚，确认后由运维人员手工删除。
   旧卷必须保留到候选 release 完成全部验收，以便失败时由上一 release 重新挂载；新版本稳定并处理外部 Sandbox 残留后，
   才可按确切卷名清理旧卷。发布脚本在候选和回滚时都必须显式强制重建 PostgreSQL 与 MinIO，不能依赖 Compose 自动

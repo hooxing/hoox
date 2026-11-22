@@ -26,9 +26,9 @@
 | `@hoox/web` | 用户工作台 | `runtime-ts/apps/web` |
 | `@hoox/admin-control-api` | 模型、记忆、配置、统计及 Skill 路由的统一管理 API | `runtime-ts/apps/admin-control-api` |
 | `@hoox/admin-web` | 后台管理界面 | `runtime-ts/apps/admin-web` |
-| `@hoox/trajectory-web` | development 内部轨迹查看器 | `runtime-ts/apps/trajectory-web` |
+| `@hoox/trajectory-web` | development 本地诊断镜像查看器；Demo 由后台运行记录取代 | `runtime-ts/apps/trajectory-web` |
 
-`api`、`agent-worker` 和 `scheduler` 是生产 Runtime 的三个核心进程。后台管理面使用独立身份；统一 Admin API 内部继续隔离 Admin Control 与 Skill Publisher 的数据库角色和发布凭据。`@hoox/skill-admin-api` 是由统一进程装配的 Skill 路由模块，不是独立部署进程。Trajectory Viewer 属于内部诊断工具，不是公开产品入口。
+`api`、`agent-worker` 和 `scheduler` 是生产 Runtime 的三个核心进程。后台管理面使用独立身份；统一 Admin API 内部继续隔离 Admin Control 与 Skill Publisher 的数据库角色和发布凭据。`@hoox/skill-admin-api` 是由统一进程装配的 Skill 路由模块，不是独立部署进程。Demo 不部署 Trajectory Viewer，旧 URL 重定向至后台运行记录。
 
 ### HTTP API 内部入口
 

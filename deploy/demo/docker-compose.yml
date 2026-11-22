@@ -121,15 +121,6 @@ services:
       STATIC_LISTEN_PORT: "4174"
     command: ["node", "scripts/demo-static-server.mjs"]
 
-  trajectory:
-    <<: *runtime
-    command: ["node", "runtime-ts/apps/trajectory-web/dist/bin.js"]
-    volumes:
-      - trajectory_data:/opt/hoox/model-wire-traces:ro
-    depends_on:
-      api:
-        condition: service_started
-
   scheduler:
     <<: *runtime
     env_file:

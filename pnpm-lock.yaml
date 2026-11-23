@@ -622,6 +622,8 @@ importers:
         specifier: 2.39.0
         version: 2.39.0
 
+  runtime-ts/packages/sdk: {}
+
   runtime-ts/packages/skill:
     dependencies:
       '@hoox/domain':

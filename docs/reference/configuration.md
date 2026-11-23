@@ -41,7 +41,8 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 ### 对象存储
 
 - 本地 MinIO 由 Compose 管理，默认宿主端口为 `19000`，控制台为 `19001`。
-- API/Worker 使用的 S3 凭据与 Skill Publisher 凭据必须分离。Admin Control API 读取后台运行轨迹时也须配置同 bucket 的 `S3_*` 端点与凭据。
+- API、Worker、Scheduler 和 Admin Control 均须配置非空的 `S3_ENDPOINT`、`S3_BUCKET`、`S3_REGION`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` 与 `S3_FORCE_PATH_STYLE`（仅接受 `true` 或 `false`）。Scheduler 用于轨迹 Blob 恢复和保留期清理，Admin Control 用于读取；即使尚无轨迹或关闭模型原始报文诊断，这些字段仍是启动必填项。
+- 四个进程必须访问同一对象桶，但可使用按服务授权的独立凭据；这些 `S3_*` 凭据与 `SKILL_PUBLISHER_S3_*` 发布凭据必须分离。Admin Control 的轨迹读取只需 trace 对象读权限；Scheduler 还需恢复 pending Blob 的复制写入和删除权限，不能只授予只读或删除权限。Demo 当前仍复用 `infra.env` 初始化的运行时 S3 用户，尚未按轨迹前缀拆分策略。
 - 面向浏览器的 `S3_PUBLIC_ENDPOINT` 必须和 API/Web origin 隔离。
 - 不要执行 `docker compose down -v`，除非明确要删除本地 MinIO 数据。
 
@@ -126,9 +127,9 @@ production 示例是字段合集，不是共享 env 文件。部署平台应至�
 | 服务 | 必需类别 | 不应获得 |
 | --- | --- | --- |
 | API | PostgreSQL、Better Auth 根秘密、JWT 兼容身份、S3 下载签名、TLS/公开 origin | 模型密钥、Sandbox 执行密钥、MinIO root、迁移器凭据 |
-| Scheduler | PostgreSQL、平台共享加密根；Sandbox 与标题模型可由后台接入 | S3 读写密钥、主模型调用密钥、API JWT 私钥 |
+| Scheduler | PostgreSQL、平台共享加密根、轨迹恢复与清理所需的六项 `S3_*`；Sandbox 与标题模型可由后台接入 | Skill 发布凭据、主模型调用密钥、API JWT 私钥 |
 | Agent Worker | PostgreSQL、S3、平台加密根；可选 OTLP 请求头；Sandbox 与主模型可由后台接入 | API 身份签名私钥、Admin 管理凭据 |
-| Admin API | 独立管理身份、Admin Control PG、与 API 同值的 Better Auth 根秘密、Skill Publisher PG 与发布对象存储凭据 | 普通 Runtime 的其他全量秘密 |
+| Admin API | 独立管理身份、Admin Control PG、与 API 同值的 Better Auth 根秘密、Skill Publisher PG 与发布对象存储凭据、轨迹读取所需的六项 `S3_*` | Worker 执行密钥、普通 Runtime 的其他全量秘密 |
 
 生产进程拒绝 development 变量、环境代理、危险 `NODE_*` 和 OpenSSL 配置覆盖；私有 CA 只能通过明确允许的通道注入。
 

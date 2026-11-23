@@ -45,7 +45,7 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
    - `DEMO_SSH_KNOWN_HOSTS`：经人工核对指纹后的完整 known-hosts 行；
    - `DEMO_GHCR_TOKEN`：具备 `write:packages` 的部署专用令牌，用于发布和目标主机拉取 GHCR 镜像。
 5. 在 `/opt/hoox-demo/shared` 创建 `infra.env`、`migration.env`、`api.env`、`admin-control.env`、`scheduler.env`、`worker.env` 和 `demo-account.env`，全部设为 `0600`。真实密码、连接串、Admin Control Token 和 Provider Key 只能存在于目标主机秘密文件或 GitHub Secrets，不得进入仓库和发布日志。
-6. `admin-control.env` 必须使用 Admin Control 与 Skill Publisher 两个最小权限数据库连接，复用 API 的 `BETTER_AUTH_SECRET`，使用回环 MinIO endpoint 和独立 Skill Publisher S3 用户，并配置随机、URL 安全且不少于 32 字符的 `DEV_ADMIN_CONTROL_TOKEN`。字段归属以 `deploy/demo/admin-control.env.example` 为准。
+6. `admin-control.env` 必须使用 Admin Control 与 Skill Publisher 两个最小权限数据库连接，复用 API 的 `BETTER_AUTH_SECRET`，使用回环 MinIO endpoint，分别配置轨迹读取的 `S3_*` 与独立 Skill Publisher 的 `SKILL_PUBLISHER_S3_*`，并配置随机、URL 安全且不少于 32 字符的 `DEV_ADMIN_CONTROL_TOKEN`。字段归属以 `deploy/demo/admin-control.env.example` 为准。
 
 `deploy/demo/*.env.example` 只说明字段归属，不能直接作为凭据文件。API、Admin Control、Scheduler 和 Worker 必须各自只获得其进程需要的配置；MinIO root 与 PostgreSQL bootstrap 密码不得注入应用容器。
 
@@ -78,10 +78,14 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 | `infra.env` | PostgreSQL 初始化账号、数据库及各独立角色和密码（含 Webhook Dispatcher 与轨迹目录角色），MinIO root、运行时与 Skill 发布账号，以及桶名；从 `infra.env.example` 起草。PostgreSQL 初始化脚本在新数据卷初始化时执行，每次发布也会幂等补齐缺失角色；已有角色不会被修改，修改此文件不会自动轮换已有数据库角色密码。 |
 | `migration.env` | 迁移连接 `MIGRATION_DATABASE_URL`、schema 和迁移角色等迁移契约；连接指向宿主机回环 `127.0.0.1:15432`，身份与 `infra.env` 中的 migrator 一致。 |
 | `api.env` | 从 `api.env.example` 起草，补齐运行时数据库、身份、游标和 S3 等 API 必需配置；数据库和 S3 身份对应 `infra.env` 的运行时账号，S3 内部地址使用 `127.0.0.1:19000`。 |
-| `admin-control.env` | 从同名示例起草，使用独立 Admin Control、Skill Publisher 数据库角色和 Skill Publisher S3 账号；`BETTER_AUTH_SECRET` 与 API 相同，设置独立的 `DEV_ADMIN_CONTROL_TOKEN` 和稳定加密根。 |
+| `admin-control.env` | 从同名示例起草，使用独立 Admin Control、Skill Publisher 数据库角色；轨迹读取须配置六项 `S3_*`，Skill 发布另用独立的 `SKILL_PUBLISHER_S3_*` 账号；`BETTER_AUTH_SECRET` 与 API 相同，设置独立的 `DEV_ADMIN_CONTROL_TOKEN` 和稳定加密根。 |
 | `scheduler.env` | Scheduler 所需数据库角色、进程身份和稳定加密根，以及 Webhook Dispatcher 角色、连接与 `WEBHOOK_SECRET_ENCRYPTION_KEY`（从 `scheduler.env.example` 起草）；租户 ID 由发布脚本注入。配置与 Worker 同 bucket 的轨迹清理 S3 凭据；禁止注入 Worker Coordinator 或主模型调用密钥。 |
 | `worker.env` | Worker 所需数据库角色、S3 运行时账号、进程身份和稳定加密根；租户 ID 由发布脚本注入。 |
 | `demo-account.env` | `DEMO_ACCOUNT_DISPLAY_NAME`、`DEMO_ACCOUNT_EMAIL`、`DEMO_ACCOUNT_PASSWORD`，供脚本创建或登录固定 Demo 管理员。文件由 shell `source` 读取，值须是有效 shell 赋值；已有账号不会因修改文件而自动改密码。 |
+
+`scheduler.env` 与 `admin-control.env` 都必须显式包含 `S3_ENDPOINT=http://127.0.0.1:19000`、`S3_BUCKET=agent-runtime-demo`、`S3_REGION=us-east-1`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` 和 `S3_FORCE_PATH_STYLE=true`。端点与桶必须指向 Worker 的同一存储；Demo 当前使用 `infra.env` 中运行时 S3 用户的凭据，不能误填 Skill Publisher 或 MinIO root 凭据。这六项必须写成不加引号、无空白、无行尾注释、不含 `$` 的单行 `KEY=值`（LF 换行），每个键恰好出现一次；预检不执行 env 文件，也不实现 dotenv/Compose 的完整语法，其他写法一律以格式无效拒绝，以免预检与运行时解析不一致。`minio-init` 当前为运行时与 Skill Publisher 用户绑定通用 `readwrite` 策略，尚未自动创建 Scheduler/Admin Control 的受限用户。生产应按[配置参考](../reference/configuration.md#对象存储)分别授权，而不是照搬 Demo 的宽权限。
+
+发布脚本在拉取镜像、改写 `compose.env` 或停止现有容器之前校验这两个文件的六项 `S3_*`：缺失、空值或非法路径风格布尔值均以退出码 2 失败，只报告文件与变量名，不输出值。其他格式和服务权限仍由进程解析与实际依赖检查校验。Scheduler 启动时的环境解析错误输出变量名和 `MISSING`/`INVALID` 等稳定分类，不输出配置值或底层异常。
 
 仓库目前只为 `infra.env`、`api.env`、`admin-control.env` 和 `scheduler.env` 提供 Demo 局部示例，其余文件需要按当前进程契约准备。生成密码和密钥时避免出现在命令历史、终端录屏、日志或提交中；连接串中的特殊字符需按 URL 规则编码。`infra.env` 同样被 shell 读取，必须同时满足 shell 与 Compose env 文件解析。完成后核对权限及文件存在性，避免打印文件内容：
 
@@ -161,6 +165,7 @@ docker compose --project-name hoox-demo \
 ## 失败与回滚
 
 - 发布开始前缺失契约或共享配置时直接退出，不改变运行中的应用。远程脚本进入发布阶段后，命令失败和显式验收失败都会由主 shell 执行一次恢复：停止候选应用容器，并在存在上一 release 时恢复上一镜像和应用进程；恢复中的清理失败不会阻止其余恢复动作，也不会覆盖原始失败退出码。
+- 上一镜像从发布前的 `shared/compose.env` 读取；回滚重新原子写入上一镜像、release 目录、release ID 和既有 Demo 身份，再以旧 Compose 强制重建 PostgreSQL、MinIO、API、Web、Scheduler、Worker，以及旧版存在的 Admin Control、Admin Web 或独立轨迹服务。所有 Compose 调用均屏蔽调用方的镜像、发布目录和 Demo 身份插值变量，只使用 `compose.env`，避免新镜像环境覆盖回滚配置；运维检查必须核对容器实际镜像，不能仅凭 `current` 软链或“已尝试恢复”日志判断回滚成功。
 - Nginx 候选配置失败时恢复上一站点配置；Admin Control Token 文件继续留在 root-only 路径并由后续成功发布覆盖。旧版 htpasswd 可能为回滚到仍使用 HTTP Basic 的上一 release 而暂时保留，但现行配置不会引用它。
 - 数据库迁移只向前执行，脚本绝不自动运行 down；若新迁移与旧镜像不兼容，必须停服并按该迁移说明和备份方案处理。
 - PostgreSQL 与 MinIO 数据卷不随应用回滚或旧 release 目录清理删除。Worker 诊断镜像不再写入共享卷，因此不作为升级保留数据。

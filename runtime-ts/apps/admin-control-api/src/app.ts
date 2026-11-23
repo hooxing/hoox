@@ -14,6 +14,7 @@ import {
 } from "@hoox/admin-control";
 import type { AuthContextResolver } from "@hoox/identity/auth";
 import {
+  AgentConfigurationError,
   AdminControlOverviewSuccessEnvelopeSchema,
   AgentMetricsQueryDtoSchema,
   AgentMetricsSuccessEnvelopeSchema,
@@ -197,7 +198,13 @@ export function createAdminControlApiApp(
       failure,
       validationMessage(error, request, failure),
     );
-    await reply.status(response.status).send(response.body);
+    await reply
+      .status(response.status)
+      .send(
+        error instanceof AgentConfigurationError
+          ? { ...response.body, validationErrors: error.errors }
+          : response.body,
+      );
   });
 
   app.get("/live", async (request) =>
@@ -747,6 +754,7 @@ class AdminControlApiFailure extends Error {
 }
 
 function failureKind(error: unknown, request: FastifyRequest): FailureKind {
+  if (error instanceof AgentConfigurationError) return "bad_request";
   if (
     request.routeOptions.url?.startsWith("/v1/admin/control/integrations/") &&
     error instanceof DomainError
@@ -828,6 +836,7 @@ function validationMessage(
   request: FastifyRequest,
   kind: FailureKind,
 ): string | undefined {
+  if (error instanceof AgentConfigurationError) return "Agent 配置文件校验失败";
   if (error instanceof ExternalToolAdminError) return error.message;
   if (kind !== "bad_request" || request.routeOptions.url?.startsWith(EXTERNAL_TOOL_ROUTE_PREFIX))
     return undefined;

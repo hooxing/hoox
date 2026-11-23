@@ -1,8 +1,10 @@
-import { tenantId } from "@hoox/domain";
+import { tenantId, validateAgentRevisionContent } from "@hoox/domain";
+import { createHash } from "node:crypto";
 import {
   type AgentDefinitionAdminRepositoryPort,
   AgentDefinitionValidationError,
 } from "@hoox/persistence/admin";
+import { PersistenceError } from "@hoox/persistence/postgres";
 import {
   AdminAgentDefinitionListSchema,
   type AdminAgentGeneration,
@@ -19,11 +21,15 @@ import {
   AgentDefinitionDtoSchema,
   AgentDefinitionResponseSchema,
   AgentRevisionDtoSchema,
+  AgentConfigurationError,
+  AgentConfigurationImportRequestSchema,
+  parseAgentConfiguration,
+  serializeAgentConfiguration,
   IdSchema,
   successEnvelopeSchema,
 } from "@hoox/protocol";
 import { type TSchema, Type } from "@sinclair/typebox";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 const base = "/v1/admin/control/agent-definitions";
 const strict = { additionalProperties: false } as const;
@@ -31,6 +37,8 @@ const definitionPath = Type.Object({ definitionId: IdSchema }, strict);
 const revisionPath = Type.Object({ definitionId: IdSchema, revisionId: IdSchema }, strict);
 type DefinitionPath = { definitionId: string };
 type RevisionPath = DefinitionPath & { revisionId: string };
+type ImportPath = { definitionId?: string };
+type ImportBody = { yaml: string; dryRun: boolean; expectedGeneration?: number };
 
 function availability(value: AdminSetAgentAvailability["availability"]) {
   return value.mode === "selected_tenants"
@@ -81,6 +89,207 @@ export function registerAgentDefinitionRoutes(
       );
       return success(request, result ?? notFound());
     },
+  );
+  app.get<{ Params: RevisionPath }>(
+    `${base}/:definitionId/revisions/:revisionId/export`,
+    { schema: { params: revisionPath } },
+    async (request, reply) => {
+      const result = await agents.readRevisionForExport(
+        await actor(request),
+        request.params.definitionId,
+        request.params.revisionId,
+      );
+      if (!result) return notFound();
+      const yaml = serializeAgentConfiguration({
+        schemaVersion: 1,
+        definition: {
+          id: result.definition.id,
+          availability: result.definition.availability,
+        },
+        revision: {
+          content: result.revision.content,
+          ...(result.revision.versionNotes === undefined
+            ? {}
+            : { versionNotes: result.revision.versionNotes }),
+        },
+      });
+      return reply
+        .type("application/yaml; charset=utf-8")
+        .header("content-disposition", `attachment; filename="${result.definition.id}.yaml"`)
+        .send(yaml);
+    },
+  );
+  const importSchema = { body: AgentConfigurationImportRequestSchema };
+  const importConfiguration = async (
+    request: FastifyRequest<{ Params: ImportPath; Body: ImportBody }>,
+    reply: FastifyReply,
+  ) => {
+    const actorUserId = await actor(request);
+    const imported = (() => {
+      try {
+        return parseAgentConfiguration(request.body.yaml);
+      } catch (error) {
+        if (error instanceof AgentConfigurationError && request.body.dryRun) {
+          return { errors: error.errors } as const;
+        }
+        throw error;
+      }
+    })();
+    if ("errors" in imported) {
+      return success(request, { valid: false, errors: imported.errors });
+    }
+    const definitionId = request.params.definitionId;
+    const existing = definitionId !== undefined;
+    if (existing && request.body.expectedGeneration === undefined) {
+      throw new AgentConfigurationError([
+        {
+          path: "/expectedGeneration",
+          code: "INVALID_VALUE",
+          message: "追加到现有 Agent 时必须提供 expectedGeneration",
+        },
+      ]);
+    }
+    if (
+      !existing &&
+      request.body.expectedGeneration !== undefined &&
+      request.body.expectedGeneration !== 0
+    ) {
+      throw new AgentConfigurationError([
+        {
+          path: "/expectedGeneration",
+          code: "INVALID_VALUE",
+          message: "新建 Agent 的 expectedGeneration 必须为 0",
+        },
+      ]);
+    }
+    let content: ReturnType<typeof validateAgentRevisionContent>;
+    try {
+      content = validateAgentRevisionContent(imported.revision.content);
+    } catch {
+      const validationErrors = [
+        {
+          path: "/revision/content",
+          code: "INVALID_VALUE",
+          message: "Agent Revision 内容不符合领域约束",
+        },
+      ];
+      if (request.body.dryRun) return success(request, { valid: false, errors: validationErrors });
+      throw new AgentConfigurationError(validationErrors);
+    }
+    const importedAvailability = availability(imported.definition.availability);
+    try {
+      await agents.validateImport(actorUserId, {
+        id: imported.definition.id,
+        availability: importedAvailability,
+        content,
+        ...(definitionId === undefined ? {} : { definitionId }),
+        ...(request.body.expectedGeneration === undefined
+          ? {}
+          : { expectedGeneration: request.body.expectedGeneration }),
+      });
+    } catch (error) {
+      if (error instanceof AgentDefinitionValidationError) {
+        const validationErrors = [
+          {
+            path: error.message.includes("Tenant")
+              ? "/definition/availability"
+              : "/revision/content",
+            code: "REFERENCE_INVALID",
+            message: error.message,
+          },
+        ];
+        if (request.body.dryRun) {
+          return success(request, { valid: false, errors: validationErrors });
+        }
+        throw new AgentConfigurationError(validationErrors);
+      }
+      if (request.body.dryRun && error instanceof PersistenceError && error.code === "CONFLICT") {
+        return success(request, {
+          valid: false,
+          errors: [
+            {
+              path: "/definition/id",
+              code: "CONFLICT",
+              message: "导入目标不存在、状态已变化或新建 ID 已被占用",
+            },
+          ],
+        });
+      }
+      if (error instanceof PersistenceError && error.code === "CONSTRAINT_VIOLATION") {
+        const validationErrors = [
+          {
+            path: "/definition/availability",
+            code: "REFERENCE_INVALID",
+            message: "可用范围引用无效或已不存在",
+          },
+        ];
+        if (request.body.dryRun)
+          return success(request, { valid: false, errors: validationErrors });
+        throw new AgentConfigurationError(validationErrors);
+      }
+      throw error;
+    }
+    if (request.body.dryRun) {
+      return success(request, { valid: true, definitionId: imported.definition.id });
+    }
+    const idempotency = idempotencyKey(request);
+    const revisionId = `agent_revision_import_${createHash("sha256")
+      .update(idempotency)
+      .digest("hex")
+      .slice(0, 32)}`;
+    const notes = imported.revision.versionNotes;
+    if (existing) {
+      const result = await agents.createDraftRevision({
+        actorUserId,
+        idempotencyKey: idempotency,
+        definitionId,
+        revisionId,
+        content,
+        expectedGeneration: request.body.expectedGeneration as number,
+        auditAction: "imported",
+        ...(notes === undefined ? {} : { versionNotes: notes }),
+      });
+      return reply.code(201).send(success(request, result));
+    }
+    try {
+      const result = await agents.createDraft({
+        actorUserId,
+        idempotencyKey: idempotency,
+        id: imported.definition.id,
+        availability: importedAvailability,
+        revisionId,
+        content,
+        expectedGeneration: 0,
+        auditAction: "imported",
+        ...(notes === undefined ? {} : { versionNotes: notes }),
+      });
+      return reply.code(201).send(success(request, result));
+    } catch (error) {
+      if (error instanceof PersistenceError && error.code === "CONSTRAINT_VIOLATION") {
+        throw new AgentConfigurationError([
+          {
+            path: "/definition/availability",
+            code: "REFERENCE_INVALID",
+            message: "可用范围引用无效或已不存在",
+          },
+        ]);
+      }
+      throw error;
+    }
+  };
+  app.post<{ Params: ImportPath; Body: ImportBody }>(
+    `${base}/import`,
+    { bodyLimit: 6_500_000, preValidation: json, schema: importSchema },
+    async (request, reply) => importConfiguration(request, reply),
+  );
+  app.post<{ Params: DefinitionPath; Body: ImportBody }>(
+    `${base}/:definitionId/import`,
+    {
+      bodyLimit: 6_500_000,
+      preValidation: json,
+      schema: { ...importSchema, params: definitionPath },
+    },
+    async (request, reply) => importConfiguration(request, reply),
   );
   app.post<{ Body: AdminCreateAgentDefinition }>(
     base,

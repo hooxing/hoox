@@ -4998,7 +4998,9 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           undefined,
           undefined,
           {
-            persist: async (record: unknown) => laterTrajectory.push(record),
+            persist: async (record: unknown) => {
+              laterTrajectory.push(record);
+            },
           },
           undefined,
           undefined,

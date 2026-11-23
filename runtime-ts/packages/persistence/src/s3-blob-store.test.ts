@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  type BlobReferenceCommitPort,
   type BlobCommitSnapshot,
+  type BlobReferenceCommitPort,
   BlobStoreError,
   type PromotionAuthorizationRef,
   type PromotionAuthorizationResolution,
@@ -13,24 +13,24 @@ import {
   type StableBlobLifecycleAllocationPort,
   type StableBlobPromotionAuthorization,
   type StableBlobPromotionAuthorizationPort,
+  type StableBlobRef,
   type StableBlobRetiredTombstone,
   type StableBlobRetiredTombstonePort,
-  type StableBlobRef,
   type StagedBlobRef,
   type TenantBlobScope,
   transitionBlobCommit,
 } from "./index.js";
 import {
+  encodeRfc5987Value,
   S3BlobStore,
-  S3RetiredBlobTombstoneScrubber,
-  S3StableBlobGarbageCollector,
   type S3CopyObjectInput,
   type S3GetObjectResult,
   type S3ObjectClient,
   type S3ObjectMetadata,
   type S3PresignInput,
   type S3PutObjectInput,
-  encodeRfc5987Value,
+  S3RetiredBlobTombstoneScrubber,
+  S3StableBlobGarbageCollector,
 } from "./s3-blob-store.js";
 
 const config = { bucket: "agent-runtime-dev", maxBlobSizeBytes: 1_024 } as const;

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { userId } from "@hoox/domain";
 import type { SkillPublicationRole, SkillPublicationStatus } from "@hoox/skill";
-import { describe, expect, it } from "vitest";
 import type { Pool } from "pg";
+import { describe, expect, it } from "vitest";
 import {
   PgSkillPublicationAuthorization,
   PgSkillPublicationRepository,

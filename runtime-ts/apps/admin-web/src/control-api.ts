@@ -12,6 +12,12 @@ import type {
   AdminHttpToolPreview,
   AdminAgentDefinitionList,
   AdminAgentGeneration,
+  AdminPublishAgentRevision,
+  EvaluationSuite,
+  EvaluationRunRequest,
+  EvaluationRunSummary,
+  EvaluationRunDetail,
+  EvaluationComparison,
   AdminAgentRevisionHistory,
   AdminCreateAgentDefinition,
   AdminRevokeAgentRevision,
@@ -241,12 +247,78 @@ export class AdminControlApi {
   publishAgentRevision(
     id: string,
     revisionId: string,
-    input: AdminAgentGeneration,
+    input: AdminPublishAgentRevision,
   ): Promise<AgentDefinitionDto> {
     return this.request(`${agentRevisionPath(id, revisionId)}/publish`, {
       method: "POST",
       body: JSON.stringify(input),
     });
+  }
+
+  listEvaluationSuites(definitionId: string): Promise<readonly EvaluationSuite[]> {
+    return this.request(`/agent-definitions/${encodeURIComponent(definitionId)}/evaluations`, {
+      cache: "no-store",
+    });
+  }
+
+  saveEvaluationSuite(suite: EvaluationSuite): Promise<null> {
+    return this.request(
+      `/agent-definitions/${encodeURIComponent(suite.definitionId)}/evaluations`,
+      {
+        method: "PUT",
+        body: JSON.stringify(suite),
+      },
+    );
+  }
+
+  deleteEvaluationSuite(definitionId: string, suiteId: string): Promise<null> {
+    return this.request(
+      `/agent-definitions/${encodeURIComponent(definitionId)}/evaluations/${encodeURIComponent(suiteId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  startEvaluationRun(
+    definitionId: string,
+    suiteId: string,
+    input: EvaluationRunRequest,
+  ): Promise<EvaluationRunSummary> {
+    return this.request(
+      `/agent-definitions/${encodeURIComponent(definitionId)}/evaluations/${encodeURIComponent(suiteId)}/runs`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+
+  listEvaluationRuns(definitionId: string): Promise<readonly EvaluationRunSummary[]> {
+    return this.request(`/agent-definitions/${encodeURIComponent(definitionId)}/evaluations/runs`, {
+      cache: "no-store",
+    });
+  }
+
+  readEvaluationRun(definitionId: string, runId: string): Promise<EvaluationRunDetail> {
+    return this.request(
+      `/agent-definitions/${encodeURIComponent(definitionId)}/evaluations/runs/${encodeURIComponent(runId)}`,
+      { cache: "no-store" },
+    );
+  }
+
+  cancelEvaluationRun(definitionId: string, runId: string): Promise<boolean> {
+    return this.request(
+      `/agent-definitions/${encodeURIComponent(definitionId)}/evaluations/runs/${encodeURIComponent(runId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  compareEvaluationRuns(
+    definitionId: string,
+    leftRunId: string,
+    rightRunId: string,
+  ): Promise<EvaluationComparison> {
+    const query = new URLSearchParams({ leftRunId, rightRunId });
+    return this.request(
+      `/agent-definitions/${encodeURIComponent(definitionId)}/evaluations/compare?${query}`,
+      { cache: "no-store" },
+    );
   }
 
   deactivateAgentDefinition(id: string, input: AdminAgentGeneration): Promise<AgentDefinitionDto> {
@@ -494,6 +566,7 @@ export type AgentDefinitionApiContract = Pick<
   | "createAgentDefinition"
   | "saveAgentRevision"
   | "publishAgentRevision"
+  | "listEvaluationSuites"
   | "deactivateAgentDefinition"
   | "revokeAgentRevision"
   | "setAgentAvailability"

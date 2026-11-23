@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   ExecutionScope,
+  SandboxProviderKey,
   ThreadContinuityMetricsPort,
   ThreadSandboxAcquireResult,
   ThreadSandboxLeaseRefV1,
@@ -10,7 +11,6 @@ import type {
   ThreadSandboxTerminalReceiptV1,
 } from "@hoox/run-contracts";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
-import type { SandboxProviderKey } from "@hoox/run-contracts";
 import type { Pool, PoolClient } from "pg";
 import { readSessionSandboxPolicy } from "./pg-sandbox-configuration.js";
 import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";

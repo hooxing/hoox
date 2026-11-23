@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  BlobCommitTransitionError,
   type BlobCommitSnapshot,
   type BlobCommitStatePort,
+  BlobCommitTransitionError,
   type StableBlobLifecycleAllocation,
   type StableBlobPromotionAuthorization,
   type StableBlobRef,

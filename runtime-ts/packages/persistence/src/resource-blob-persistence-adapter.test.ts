@@ -1,10 +1,10 @@
+import { describe, expect, it } from "vitest";
 import type { BlobStore, StableBlobGcPort } from "./blob-store.js";
 import {
   DurableResourceBlobWriter,
   type PersistResourceBlobResult,
   type ResourceBlobCommitRepository,
 } from "./resource-blob-persistence-adapter.js";
-import { describe, expect, it } from "vitest";
 
 const persisted: PersistResourceBlobResult = {
   referenceId: "reference-delivery-cleanup",

@@ -1,7 +1,7 @@
 import type { ExternalToolVersion } from "@hoox/domain";
 import {
-  ExternalToolSnapshotError,
   type ExternalToolRuntimeSnapshot,
+  ExternalToolSnapshotError,
   type ExternalToolSnapshotReader,
 } from "@hoox/run-contracts";
 import type { Pool } from "pg";

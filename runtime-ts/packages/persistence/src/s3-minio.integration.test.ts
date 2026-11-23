@@ -2,12 +2,10 @@ import { randomUUID } from "node:crypto";
 import { DeleteObjectsCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
 import {
-  createS3BlobStore,
-  createS3StableBlobGarbageCollector,
-  sha256Hex,
-  transitionBlobCommit,
   type BlobCommitSnapshot,
   type BlobCommitStatePort,
+  createS3BlobStore,
+  createS3StableBlobGarbageCollector,
   type PromotionAuthorizationRef,
   type PromotionExecutionClaim,
   type StableBlobLifecycleAllocation,
@@ -16,6 +14,8 @@ import {
   type StableBlobPromotionAuthorizationPort,
   type StableBlobRef,
   type StagedBlobRef,
+  sha256Hex,
+  transitionBlobCommit,
 } from "./index.js";
 
 const integration = process.env.RUN_MINIO_INTEGRATION === "true" ? describe : describe.skip;

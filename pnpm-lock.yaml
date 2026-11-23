@@ -544,6 +544,9 @@ importers:
       '@hoox/memory':
         specifier: workspace:*
         version: link:../memory
+      '@hoox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@hoox/resource':
         specifier: workspace:*
         version: link:../resource

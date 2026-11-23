@@ -7,25 +7,24 @@ import {
   type AdminMcpDraftDto,
   type AdminMcpDraftSettings,
   type ControlOperatorRole,
-  type ExternalToolAdminRepositoryPort,
   ExternalToolAdminError,
+  type ExternalToolAdminRepositoryPort,
   type ExternalToolCommandContext,
   externalToolAccess,
 } from "@hoox/admin-control";
-import { validateExternalToolVersion, type ExternalToolVersion } from "@hoox/domain";
+import { type ExternalToolVersion, validateExternalToolVersion } from "@hoox/domain";
 import type { QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {
   ExternalToolCredentialCipher,
   ExternalToolDraftCredentialCipher,
 } from "./external-tool-credential.js";
+import {
+  EXTERNAL_TOOL_REVOCATION_LOCK,
+  insertExternalToolVersion,
+} from "./external-tool-version-write.js";
 import type { Pool, PoolClient } from "./postgres.js";
 import { TransactionCommitUnknownError, withTransaction } from "./postgres.js";
-
-import {
-  insertExternalToolVersion,
-  EXTERNAL_TOOL_REVOCATION_LOCK,
-} from "./external-tool-version-write.js";
 
 interface DraftRow extends QueryResultRow {
   draft_id: string;

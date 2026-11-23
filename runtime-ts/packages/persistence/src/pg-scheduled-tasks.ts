@@ -13,9 +13,9 @@ import {
 } from "@hoox/automation";
 import {
   createRun,
+  tenantId as domainTenantId,
   isoTimestamp,
   runId,
-  tenantId as domainTenantId,
   threadId,
   userId,
 } from "@hoox/domain";

@@ -37,6 +37,22 @@ export const AdminSaveAgentRevisionSchema = Type.Object(
 export type AdminSaveAgentRevision = Static<typeof AdminSaveAgentRevisionSchema>;
 export const AdminAgentGenerationSchema = Type.Object({ expectedGeneration }, strict);
 export type AdminAgentGeneration = Static<typeof AdminAgentGenerationSchema>;
+export const AdminPublishAgentRevisionSchema = Type.Object(
+  {
+    expectedGeneration,
+    evaluationGate: Type.Optional(
+      Type.Object(
+        {
+          suiteId: IdSchema,
+          minimumPassRate: Type.Number({ minimum: 0, maximum: 1 }),
+        },
+        strict,
+      ),
+    ),
+  },
+  strict,
+);
+export type AdminPublishAgentRevision = Static<typeof AdminPublishAgentRevisionSchema>;
 export const AdminRevokeAgentRevisionSchema = Type.Object(
   { expectedGeneration, reason: Type.String({ minLength: 1, maxLength: 500 }) },
   strict,

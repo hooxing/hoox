@@ -7,6 +7,8 @@ import {
   AdminAgentDefinitionListSchema,
   type AdminAgentGeneration,
   AdminAgentGenerationSchema,
+  type AdminPublishAgentRevision,
+  AdminPublishAgentRevisionSchema,
   AdminAgentRevisionHistorySchema,
   type AdminCreateAgentDefinition,
   AdminCreateAgentDefinitionSchema,
@@ -119,13 +121,13 @@ export function registerAgentDefinitionRoutes(
       return reply.code(201).send(success(request, result));
     },
   );
-  app.post<{ Params: RevisionPath; Body: AdminAgentGeneration }>(
+  app.post<{ Params: RevisionPath; Body: AdminPublishAgentRevision }>(
     `${base}/:definitionId/revisions/:revisionId/publish`,
     {
       preValidation: json,
       schema: {
         params: revisionPath,
-        body: AdminAgentGenerationSchema,
+        body: AdminPublishAgentRevisionSchema,
         response: response(AgentDefinitionDtoSchema),
       },
     },

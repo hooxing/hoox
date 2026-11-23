@@ -5537,18 +5537,20 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("down 的 DDL 与 ACL 收敛失败时整体回滚", async () => {
-    await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${runtimeRole}"`,
-    );
+    const target = await createIsolatedMigrationTarget("down_acl_failure");
     try {
+      await migrateUp(target.pool, target.context);
+      await administrativePool.query(
+        `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${runtimeRole}"`,
+      );
       await expect(
-        migrateDown(migratorPool, {
+        migrateDown(target.pool, {
           allowDestructive: true,
           environment: "test",
-          ...migrationSecurity,
+          ...target.context,
         }),
       ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
-      const state = await migratorPool.query<{ threads: string | null; migration_count: string }>(
+      const state = await target.pool.query<{ threads: string | null; migration_count: string }>(
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
@@ -5560,6 +5562,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await administrativePool.query(
         `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
       );
+      await target.close();
     }
   });
 
@@ -5616,46 +5619,96 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("down 只有显式 test 授权可执行并能再次向前", async () => {
-    await expect(
-      migrateDown(migratorPool, {
-        allowDestructive: false as true,
-        environment: "test",
-        ...migrationSecurity,
-      }),
-    ).rejects.toThrow("禁止破坏性");
-    expect(
-      await migrateDown(migratorPool, {
-        allowDestructive: true,
-        environment: "test",
-        ...migrationSecurity,
-      }),
-    ).toEqual([]);
-    const usageAfterDown = await migratorPool.query<{ allowed: boolean }>(
-      "SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS allowed",
-      [runtimeRole],
-    );
-    expect(usageAfterDown.rows[0]?.allowed).toBe(false);
-    const downPrivileges = await migratorPool.query<{ privilege: string; allowed: boolean }>(
-      `SELECT requested.privilege,
-              has_table_privilege($1, 'runtime_schema_migrations', requested.privilege) AS allowed
-         FROM unnest($2::text[]) AS requested(privilege)`,
-      [runtimeRole, ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]],
-    );
-    expect(downPrivileges.rows.every((entry) => !entry.allowed)).toBe(true);
-    const routineState = await migratorPool.query<{
-      routine_count: string;
-      default_acl_count: string;
-    }>(
-      `SELECT (SELECT count(*)::text FROM pg_proc
-                WHERE pronamespace = current_schema()::regnamespace) AS routine_count,
-              (SELECT count(*)::text
-                 FROM pg_default_acl defaults
-                WHERE defaults.defaclrole = $1::regrole
-                  AND defaults.defaclobjtype = 'f') AS default_acl_count`,
-      [migratorRole],
-    );
-    expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(migrationContract.count);
+    const target = await createIsolatedMigrationTarget("authorized_down");
+    try {
+      await migrateUp(target.pool, target.context);
+      await expect(
+        migrateDown(target.pool, {
+          allowDestructive: false as true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).rejects.toThrow("禁止破坏性");
+      expect(
+        await migrateDown(target.pool, {
+          allowDestructive: true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).toEqual([]);
+      const usageAfterDown = await target.pool.query<{ allowed: boolean }>(
+        "SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS allowed",
+        [runtimeRole],
+      );
+      expect(usageAfterDown.rows[0]?.allowed).toBe(false);
+      const downPrivileges = await target.pool.query<{ privilege: string; allowed: boolean }>(
+        `SELECT requested.privilege,
+                has_table_privilege($1, 'runtime_schema_migrations', requested.privilege) AS allowed
+           FROM unnest($2::text[]) AS requested(privilege)`,
+        [
+          runtimeRole,
+          ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
+        ],
+      );
+      expect(downPrivileges.rows.every((entry) => !entry.allowed)).toBe(true);
+      const routineState = await target.pool.query<{
+        routine_count: string;
+        default_acl_count: string;
+      }>(
+        `SELECT (SELECT count(*)::text FROM pg_proc
+                  WHERE pronamespace = current_schema()::regnamespace) AS routine_count,
+                (SELECT count(*)::text
+                   FROM pg_default_acl defaults
+                  WHERE defaults.defaclrole = $1::regrole
+                    AND defaults.defaclobjtype = 'f') AS default_acl_count`,
+        [target.context.migratorRole],
+      );
+      expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
+      expect(await migrateUp(target.pool, target.context)).toHaveLength(migrationContract.count);
+    } finally {
+      await target.close();
+    }
+  });
+
+  it("导入导出审计在迁移角色受 RLS 限制时仍以 P0001 阻止回退", async () => {
+    const target = await createIsolatedMigrationTarget("transfer_down_guard");
+    try {
+      await migrateUp(target.pool, target.context);
+      await administrativePool.query(
+        `BEGIN;
+         SET LOCAL search_path TO "${target.context.schema}";
+         SET LOCAL session_replication_role = replica;
+         INSERT INTO agent_definition_audits(definition_id,action,generation,actor_user_id,reason)
+           VALUES('definition_hidden','imported',0,'actor_hidden','test rollback guard');
+         COMMIT;`,
+      );
+      await expect(
+        migrateDown(target.pool, {
+          targetVersion: migrationContract.latestVersion - 1,
+          allowDestructive: true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).rejects.toMatchObject({ code: "UNEXPECTED", cause: { code: "P0001" } });
+      const state = await target.pool.query<{
+        readonly version: number;
+        readonly row_security: boolean;
+        readonly force_row_security: boolean;
+      }>(
+        `SELECT (SELECT max(version)::int FROM runtime_schema_migrations) AS version,
+                relation.relrowsecurity AS row_security,
+                relation.relforcerowsecurity AS force_row_security
+           FROM pg_class relation
+          WHERE relation.oid='agent_definition_audits'::regclass`,
+      );
+      expect(state.rows[0]).toEqual({
+        version: migrationContract.latestVersion,
+        row_security: true,
+        force_row_security: true,
+      });
+    } finally {
+      await target.close();
+    }
   });
 
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {

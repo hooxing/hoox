@@ -1,3 +1,26 @@
+-- 清理旧版本已生成的派生入口与通知；新写入路径同时使用来源正向白名单。
+ALTER TABLE thread_history_file_entries DISABLE ROW LEVEL SECURITY;
+ALTER TABLE thread_history_directories DISABLE ROW LEVEL SECURITY;
+DELETE FROM thread_history_file_entries entry
+ USING runs source_run
+ WHERE source_run.tenant_id=entry.tenant_id AND source_run.thread_id=entry.thread_id
+   AND source_run.origin='evaluation';
+DELETE FROM thread_history_directories directory
+ USING runs source_run
+ WHERE source_run.tenant_id=directory.tenant_id AND source_run.thread_id=directory.thread_id
+   AND source_run.origin='evaluation';
+ALTER TABLE thread_history_file_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE thread_history_file_entries FORCE ROW LEVEL SECURITY;
+ALTER TABLE thread_history_directories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE thread_history_directories FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE webhook_outbox DISABLE ROW LEVEL SECURITY;
+UPDATE webhook_outbox
+   SET state='disabled',last_error_code='source_not_allowed',claim_token=NULL,claim_expires_at=NULL
+ WHERE source_run_origin='evaluation' AND state IN ('pending','claimed');
+ALTER TABLE webhook_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_outbox FORCE ROW LEVEL SECURITY;
+
 ALTER TABLE threads
   ADD COLUMN is_evaluation boolean NOT NULL DEFAULT false;
 

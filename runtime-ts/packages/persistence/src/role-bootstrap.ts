@@ -2683,17 +2683,13 @@ async function assertAdminControlBoundary(
     allowed.set("agent_definition_audits", new Set(["SELECT", "INSERT"]));
   }
   if (enabled) {
-    for (const table of [
-      "agent_evaluation_suites",
-      "agent_evaluation_cases",
-      "agent_evaluation_runs",
-      "agent_evaluation_results",
-    ]) {
-      allowed.set(table, new Set(["SELECT", "INSERT", "UPDATE", "DELETE"]));
-    }
+    allowed.set("agent_evaluation_suites", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"]));
+    allowed.set("agent_evaluation_cases", new Set(["INSERT", "UPDATE", "DELETE"]));
+    allowed.set("agent_evaluation_runs", new Set(["SELECT", "INSERT", "UPDATE"]));
+    allowed.set("agent_evaluation_results", new Set(["SELECT", "INSERT"]));
   }
   if (enabled && (await hasAgentEvaluationExecutionState(client, context.schema))) {
-    allowed.set("agent_evaluation_case_jobs", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"]));
+    allowed.set("agent_evaluation_case_jobs", new Set(["INSERT"]));
   }
   if (sandboxEnabled) {
     for (const table of managedSandboxControlTables)
@@ -2771,6 +2767,20 @@ async function assertAdminControlBoundary(
     );
   if (agentDefinitionsEnabled) updatePolicy.set("agent_definition_tenants", new Set(["available"]));
   if (agentDefinitionsEnabled) updatePolicy.set("agent_revisions", new Set(["status"]));
+  if (enabled && (await hasAgentEvaluationExecutionState(client, context.schema))) {
+    updatePolicy.set(
+      "agent_evaluation_case_jobs",
+      new Set([
+        "status",
+        "run_id",
+        "claim_token",
+        "generation",
+        "lease_until",
+        "next_poll_at",
+        "updated_at",
+      ]),
+    );
+  }
   if (externalToolAdminEnabled)
     updatePolicy.set("external_tool_registration_drafts", new Set(externalToolDraftUpdateColumns));
   if (externalToolAdminEnabled)
@@ -2822,6 +2832,34 @@ async function assertAdminControlBoundary(
     );
     selectPolicy.set("user_sessions", new Set(["user_id"]));
   }
+  if (enabled && (await hasAgentEvaluationState(client, context.schema))) {
+    selectPolicy.set(
+      "agent_evaluation_cases",
+      new Set(["id", "suite_id", "name", "assertions", "created_at", "updated_at"]),
+    );
+  }
+  if (enabled && (await hasAgentEvaluationExecutionState(client, context.schema))) {
+    selectPolicy.set(
+      "agent_evaluation_case_jobs",
+      new Set([
+        "evaluation_run_id",
+        "suite_id",
+        "case_id",
+        "status",
+        "tenant_id",
+        "run_id",
+        "run_origin",
+        "planned_run_id",
+        "case_name",
+        "assertions_snapshot",
+        "claim_token",
+        "generation",
+        "lease_until",
+        "next_poll_at",
+        "updated_at",
+      ]),
+    );
+  }
   if (selectPolicy.size > 0) {
     const selects = await client.query<{
       readonly table_name: string;
@@ -2867,6 +2905,10 @@ async function assertAdminControlBoundary(
         "admin_user_directory",
         "external_tool_selectable_versions",
         ...adminRunExplorerViews,
+        "admin_evaluation_case_projection",
+        "admin_evaluation_executor_scope",
+        "admin_evaluation_artifact_evidence",
+        "admin_evaluation_queue",
         "admin_integration_tenant_directory",
       ],
     ],
@@ -2885,7 +2927,15 @@ async function assertAdminControlBoundary(
                 ? runTrajectoryEnabled
                 : row.view_name === "admin_agent_metrics_hourly"
                   ? agentMetricsEnabled
-                  : runExplorerEnabled;
+                  : row.view_name === "admin_evaluation_case_projection"
+                    ? enabled && (await hasAgentEvaluationState(client, context.schema))
+                    : [
+                          "admin_evaluation_executor_scope",
+                          "admin_evaluation_artifact_evidence",
+                          "admin_evaluation_queue",
+                        ].includes(row.view_name)
+                      ? enabled && (await hasAgentEvaluationExecutionState(client, context.schema))
+                      : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3870,14 +3920,23 @@ async function grantAdminControlAccess(
     );
     if (await hasAgentEvaluationState(client, context.schema)) {
       await client.query(
-        `GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE
-           ${schema}.agent_evaluation_suites,${schema}.agent_evaluation_cases,
-           ${schema}.agent_evaluation_runs,${schema}.agent_evaluation_results TO ${control}`,
+        `GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE ${schema}.agent_evaluation_suites TO ${control};
+         GRANT INSERT,UPDATE,DELETE ON TABLE ${schema}.agent_evaluation_cases TO ${control};
+         GRANT SELECT(id,suite_id,name,assertions,created_at,updated_at)
+           ON TABLE ${schema}.agent_evaluation_cases TO ${control};
+         GRANT SELECT,INSERT,UPDATE ON TABLE ${schema}.agent_evaluation_runs TO ${control};
+         GRANT SELECT,INSERT ON TABLE ${schema}.agent_evaluation_results TO ${control};
+         GRANT SELECT ON TABLE ${schema}.admin_evaluation_case_projection TO ${control}`,
       );
     }
     if (await hasAgentEvaluationExecutionState(client, context.schema)) {
       await client.query(
-        `GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE ${schema}.agent_evaluation_case_jobs TO ${control}`,
+        `GRANT INSERT ON TABLE ${schema}.agent_evaluation_case_jobs TO ${control};
+         GRANT SELECT(evaluation_run_id,suite_id,case_id,status,tenant_id,run_id,run_origin,
+           planned_run_id,case_name,assertions_snapshot,claim_token,generation,lease_until,next_poll_at,updated_at)
+           ON TABLE ${schema}.agent_evaluation_case_jobs TO ${control};
+         GRANT UPDATE(status,run_id,claim_token,generation,lease_until,next_poll_at,updated_at)
+           ON TABLE ${schema}.agent_evaluation_case_jobs TO ${control}`,
       );
       await client.query(
         `GRANT SELECT ON TABLE ${schema}.admin_evaluation_executor_scope,${schema}.admin_evaluation_artifact_evidence,${schema}.admin_evaluation_queue TO ${control}`,

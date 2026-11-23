@@ -12,7 +12,8 @@ import { withTransaction } from "./postgres.js";
 async function authorized(client: PoolClient, actorUserId: string): Promise<boolean> {
   await client.query("SELECT set_config('app.user_id',$1,true)", [actorUserId]);
   const result = await client.query<{ role: string }>(
-    "SELECT role FROM platform_control_operators WHERE user_id=$1 AND status='active' AND role IN ('admin','operator')",
+    `SELECT actor.role FROM platform_control_operators actor
+      WHERE actor.user_id=$1 AND actor.status='active' AND actor.role IN ('admin','operator')`,
     [actorUserId],
   );
   if (!result.rowCount) throw new PersistenceError("CONSTRAINT_VIOLATION", "评测管理权限不足");
@@ -34,7 +35,7 @@ export class PgEvaluationRepository {
            'cases',COALESCE((SELECT jsonb_agg(jsonb_build_object(
              'id',test_case.id,'name',test_case.name,'inputText',CASE WHEN $2 THEN test_case.input_text ELSE '' END,
              'attachments',CASE WHEN $2 THEN test_case.attachments ELSE '[]'::jsonb END,'assertions',test_case.assertions
-           ) ORDER BY test_case.created_at,test_case.id) FROM agent_evaluation_cases test_case
+           ) ORDER BY test_case.created_at,test_case.id) FROM admin_evaluation_case_projection test_case
              WHERE test_case.suite_id=suite.id),'[]'::jsonb)
          )) AS suite FROM agent_evaluation_suites suite
           WHERE suite.definition_id=$1 ORDER BY suite.created_at,suite.id`,
@@ -51,7 +52,7 @@ export class PgEvaluationRepository {
         `INSERT INTO agent_evaluation_suites(id,definition_id,name,description,reviewer_model,reviewer_rubric,created_by)
          VALUES($1,$2,$3,$4,$5::jsonb,$6,$7)
          ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,
-           reviewer_model=EXCLUDED.reviewer_model,reviewer_rubric=EXCLUDED.reviewer_rubric,updated_at=clock_timestamp()
+           reviewer_model=EXCLUDED.reviewer_model,reviewer_rubric=EXCLUDED.reviewer_rubric,content_version=agent_evaluation_suites.content_version+1,updated_at=clock_timestamp()
          WHERE agent_evaluation_suites.definition_id=EXCLUDED.definition_id`,
         [
           suite.id,
@@ -76,35 +77,40 @@ export class PgEvaluationRepository {
       );
       for (const item of suite.cases) {
         await client.query(
-          `INSERT INTO agent_evaluation_cases(id,suite_id,name,input_text,attachments,assertions)
-           VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)
-           ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,
-             input_text=CASE WHEN $7 THEN EXCLUDED.input_text ELSE agent_evaluation_cases.input_text END,
-             attachments=CASE WHEN $7 THEN EXCLUDED.attachments ELSE agent_evaluation_cases.attachments END,
-             assertions=EXCLUDED.assertions,updated_at=clock_timestamp()
-           WHERE agent_evaluation_cases.suite_id=EXCLUDED.suite_id`,
-          [
-            item.id,
-            suite.id,
-            item.name,
-            item.inputText,
-            JSON.stringify(item.attachments),
-            JSON.stringify(item.assertions),
-            contentAccess,
-          ],
+          contentAccess
+            ? `INSERT INTO agent_evaluation_cases(id,suite_id,name,input_text,attachments,assertions)
+                 VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)
+                 ON CONFLICT(id) DO UPDATE SET name=$3,input_text=$4,
+                   attachments=$5::jsonb,assertions=$6::jsonb,updated_at=clock_timestamp()
+                 WHERE agent_evaluation_cases.suite_id=$2`
+            : `INSERT INTO agent_evaluation_cases(id,suite_id,name,input_text,attachments,assertions)
+                 VALUES($1,$2,$3,'','[]'::jsonb,$4::jsonb)
+                 ON CONFLICT(id) DO UPDATE SET name=$3,assertions=$4::jsonb,
+                   updated_at=clock_timestamp()
+                 WHERE agent_evaluation_cases.suite_id=$2`,
+          contentAccess
+            ? [
+                item.id,
+                suite.id,
+                item.name,
+                item.inputText,
+                JSON.stringify(item.attachments),
+                JSON.stringify(item.assertions),
+              ]
+            : [item.id, suite.id, item.name, JSON.stringify(item.assertions)],
         );
       }
     });
   }
 
-  async deleteSuite(actorUserId: string, suiteId: string): Promise<void> {
-    await withTransaction(this.pool, async (client) => {
+  async deleteSuite(actorUserId: string, definitionId: string, suiteId: string): Promise<boolean> {
+    return withTransaction(this.pool, async (client) => {
       await authorized(client, actorUserId);
-      const result = await client.query("DELETE FROM agent_evaluation_suites WHERE id=$1", [
-        suiteId,
-      ]);
-      if (!result.rowCount)
-        throw new PersistenceError("CONSTRAINT_VIOLATION", "评测集不存在或已有关联评测运行");
+      const result = await client.query(
+        "DELETE FROM agent_evaluation_suites WHERE id=$1 AND definition_id=$2",
+        [suiteId, definitionId],
+      );
+      return Boolean(result.rowCount);
     });
   }
 
@@ -112,11 +118,12 @@ export class PgEvaluationRepository {
     actorUserId: string,
     input: {
       readonly id: string;
+      readonly definitionId: string;
       readonly suiteId: string;
       readonly revisionId: string;
       readonly maxConcurrency: number;
     },
-  ): Promise<EvaluationRunSummary> {
+  ): Promise<EvaluationRunSummary | undefined> {
     return withTransaction(this.pool, async (client) => {
       if (!(await authorized(client, actorUserId)))
         throw new PersistenceError("CONSTRAINT_VIOLATION", "执行评测需要正文权限");
@@ -126,28 +133,36 @@ export class PgEvaluationRepository {
       );
       const tenantId = executor.rows[0]?.tenant_id;
       if (!tenantId) throw new PersistenceError("CONSTRAINT_VIOLATION", "评测执行空间不可用");
-      await client.query("SELECT id FROM agent_evaluation_suites WHERE id=$1 FOR SHARE", [
-        input.suiteId,
-      ]);
-      const target = await client.query<{ definition_id: string; total_cases: number }>(
-        `SELECT suite.definition_id,count(test_case.id)::int AS total_cases
+      const lockedSuite = await client.query(
+        "SELECT id FROM agent_evaluation_suites WHERE id=$1 AND definition_id=$2 FOR SHARE",
+        [input.suiteId, input.definitionId],
+      );
+      if (!lockedSuite.rowCount) return undefined;
+      const target = await client.query<{
+        definition_id: string;
+        content_version: string;
+        total_cases: number;
+      }>(
+        `SELECT suite.definition_id,suite.content_version,count(test_case.id)::int AS total_cases
            FROM agent_evaluation_suites suite
            JOIN agent_revisions revision ON revision.definition_id=suite.definition_id
-             AND revision.id=$2 AND revision.status IN ('draft','published')
-           LEFT JOIN agent_evaluation_cases test_case ON test_case.suite_id=suite.id
-          WHERE suite.id=$1 GROUP BY suite.definition_id`,
-        [input.suiteId, input.revisionId],
+             AND revision.id=$3 AND revision.status IN ('draft','published')
+           LEFT JOIN admin_evaluation_case_projection test_case ON test_case.suite_id=suite.id
+          WHERE suite.id=$1 AND suite.definition_id=$2
+          GROUP BY suite.definition_id,suite.content_version`,
+        [input.suiteId, input.definitionId, input.revisionId],
       );
       const row = target.rows[0];
       if (!row) throw new PersistenceError("CONSTRAINT_VIOLATION", "评测集或目标 Revision 不存在");
       const inserted = await client.query(
         `INSERT INTO agent_evaluation_runs(
-           id,definition_id,suite_id,revision_id,tenant_id,status,max_concurrency,total_cases,created_by,finished_at
-         ) VALUES($1,$2,$3,$4,$5,CASE WHEN $7::integer=0 THEN 'completed' ELSE 'queued' END,$6,$7,$8,CASE WHEN $7=0 THEN clock_timestamp() END)`,
+           id,definition_id,suite_id,suite_version,revision_id,tenant_id,status,max_concurrency,total_cases,created_by,finished_at
+         ) VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $8::integer=0 THEN 'completed' ELSE 'queued' END,$7,$8,$9,CASE WHEN $8=0 THEN clock_timestamp() END)`,
         [
           input.id,
           row.definition_id,
           input.suiteId,
+          row.content_version,
           input.revisionId,
           tenantId,
           input.maxConcurrency,
@@ -157,8 +172,12 @@ export class PgEvaluationRepository {
       );
       if (!inserted.rowCount) throw new TypeError("评测运行未写入");
       await client.query(
-        `INSERT INTO agent_evaluation_case_jobs(evaluation_run_id,suite_id,case_id,status,tenant_id,case_snapshot)
-         SELECT $1,$2,id,'queued',$3,jsonb_build_object('id',id,'name',name,'inputText',input_text,'attachments',attachments,'assertions',assertions) FROM agent_evaluation_cases WHERE suite_id=$2`,
+        `INSERT INTO agent_evaluation_case_jobs(
+           evaluation_run_id,suite_id,case_id,status,tenant_id,case_snapshot,case_name,assertions_snapshot
+         ) SELECT $1,$2,id,'queued',$3,
+                  jsonb_build_object('id',id,'name',name,'inputText',input_text,'attachments',attachments,'assertions',assertions),
+                  name,assertions
+             FROM admin_evaluation_case_projection WHERE suite_id=$2`,
         [input.id, input.suiteId, tenantId],
       );
       const result = await client.query(
@@ -208,7 +227,7 @@ export class PgEvaluationRepository {
       const rawRun = runQuery.rows[0];
       if (!rawRun) return undefined;
       const results = await client.query(
-        `SELECT job.case_id,job.case_snapshot->>'name' AS case_name,
+        `SELECT job.case_id,job.case_name,
                 COALESCE(result.outcome,job.status) AS outcome,
                 job.run_id,job.tenant_id,result.assertion_results,
                 result.score,result.reason

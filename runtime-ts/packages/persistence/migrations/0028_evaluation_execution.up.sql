@@ -28,6 +28,8 @@ CREATE TABLE agent_evaluation_case_jobs (
   run_origin text NOT NULL DEFAULT 'evaluation' CHECK (run_origin='evaluation'),
   planned_run_id text NOT NULL DEFAULT gen_random_uuid()::text UNIQUE,
   case_snapshot jsonb NOT NULL,
+  case_name text NOT NULL,
+  assertions_snapshot jsonb NOT NULL CHECK (jsonb_typeof(assertions_snapshot)='array'),
   claim_token uuid,
   generation bigint NOT NULL DEFAULT 0,
   lease_until timestamptz,
@@ -57,13 +59,16 @@ SELECT actor.user_id,account.personal_tenant_id AS tenant_id
   FROM platform_control_operators actor
   JOIN user_accounts account ON account.user_id=actor.user_id
  WHERE actor.user_id=NULLIF(current_setting('app.user_id',true),'')
-   AND actor.status='active' AND actor.role IN ('admin','operator');
+   AND actor.status='active' AND actor.role IN ('admin','operator') AND account.status='active';
 
 DO $$
 DECLARE control_role text := current_setting('app.admin_control_role');
 BEGIN
-  EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON agent_evaluation_case_jobs TO %I', control_role);
+  EXECUTE format('GRANT INSERT ON agent_evaluation_case_jobs TO %I', control_role);
+  EXECUTE format('GRANT SELECT(evaluation_run_id,suite_id,case_id,status,tenant_id,run_id,run_origin,planned_run_id,case_name,assertions_snapshot,claim_token,generation,lease_until,next_poll_at,updated_at) ON agent_evaluation_case_jobs TO %I', control_role);
+  EXECUTE format('GRANT UPDATE(status,run_id,claim_token,generation,lease_until,next_poll_at,updated_at) ON agent_evaluation_case_jobs TO %I', control_role);
   EXECUTE format('GRANT SELECT ON admin_evaluation_executor_scope TO %I', control_role);
+  EXECUTE format('GRANT SELECT ON admin_evaluation_case_projection TO %I', control_role);
   EXECUTE format('CREATE POLICY evaluation_case_job_admin ON agent_evaluation_case_jobs TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator''))) WITH CHECK (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator'')))', control_role);
 END $$;
 
@@ -75,16 +80,19 @@ SELECT b.id AS batch_id,b.created_by,b.max_concurrency,b.cancel_requested_at,j.c
  WHERE b.status IN ('queued','running') AND j.status IN ('queued','starting','running');
 
 CREATE VIEW evaluation_run_command WITH (security_barrier=true) AS
-SELECT j.planned_run_id,CASE WHEN m.status='active' AND actor.role='admin' AND actor.status='active' AND b.cancel_requested_at IS NULL THEN j.case_snapshot END AS case_snapshot,
-       b.definition_id,b.revision_id,b.cancel_requested_at,COALESCE(m.status='active',false) AS member_active
+SELECT j.planned_run_id,j.evaluation_run_id,CASE WHEN m.status='active' AND account.status='active' AND actor.role='admin' AND actor.status='active' AND b.cancel_requested_at IS NULL THEN j.case_snapshot END AS case_snapshot,
+       b.definition_id,b.revision_id,b.cancel_requested_at,COALESCE(m.status='active',false) AS member_active,
+       COALESCE(account.status='active',false) AS account_active,
+       COALESCE(actor.role='admin' AND actor.status='active',false) AS actor_active
   FROM agent_evaluation_case_jobs j JOIN agent_evaluation_runs b ON b.id=j.evaluation_run_id
-  JOIN user_accounts account ON account.user_id=b.created_by AND account.personal_tenant_id=b.tenant_id
+  LEFT JOIN user_accounts account ON account.user_id=b.created_by AND account.personal_tenant_id=b.tenant_id
   LEFT JOIN memberships m ON m.user_id=b.created_by AND m.tenant_id=b.tenant_id
   LEFT JOIN platform_control_operators actor ON actor.user_id=b.created_by
  WHERE b.created_by=current_setting('app.user_id',true) AND j.tenant_id=b.tenant_id
    AND j.tenant_id=current_setting('app.tenant_id',true)
    AND j.claim_token::text=current_setting('app.evaluation_token',true)
    AND j.generation::text=current_setting('app.evaluation_generation',true)
+   AND b.id=current_setting('app.evaluation_batch',true)
    AND j.status IN ('starting','running') AND j.lease_until>statement_timestamp();
 DO $$ BEGIN
   EXECUTE format('CREATE POLICY evaluation_queue_projection ON agent_evaluation_runs FOR SELECT TO %I USING(true)',current_user);

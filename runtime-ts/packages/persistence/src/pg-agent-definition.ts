@@ -672,23 +672,37 @@ export class PgAgentDefinitionRepository
           throw new PersistenceError("CONSTRAINT_VIOLATION", "Agent 草稿 Revision 不存在");
         await validateDraft(client, revision.content);
         if (input.evaluationGate !== undefined) {
-          const gate = await client.query<{
-            total_cases: string;
-            passed_cases: string;
-            result_count: string;
-          }>(
-            `SELECT run.total_cases::text,
+          const suite = await client.query<{ content_version: string }>(
+            "SELECT content_version::text FROM agent_evaluation_suites WHERE id=$1 AND definition_id=$2 FOR UPDATE",
+            [input.evaluationGate.suiteId, input.definitionId],
+          );
+          const suiteVersion = suite.rows[0]?.content_version;
+          const gate =
+            suiteVersion === undefined
+              ? undefined
+              : await client.query<{
+                  total_cases: string;
+                  passed_cases: string;
+                  result_count: string;
+                }>(
+                  `SELECT run.total_cases::text,
                     count(result.case_id) FILTER (WHERE result.outcome='passed')::text AS passed_cases,
                     count(result.case_id)::text AS result_count
                FROM agent_evaluation_suites suite
                JOIN agent_evaluation_runs run ON run.suite_id=suite.id
                LEFT JOIN agent_evaluation_results result ON result.evaluation_run_id=run.id
               WHERE suite.id=$1 AND suite.definition_id=$2 AND run.revision_id=$3
+                AND run.suite_version=$4 AND suite.content_version=$4
                 AND run.status='completed' AND run.total_cases>0
               GROUP BY run.id ORDER BY run.finished_at DESC LIMIT 1`,
-            [input.evaluationGate.suiteId, input.definitionId, input.revisionId],
-          );
-          const result = gate.rows[0];
+                  [
+                    input.evaluationGate.suiteId,
+                    input.definitionId,
+                    input.revisionId,
+                    suiteVersion,
+                  ],
+                );
+          const result = gate?.rows[0];
           if (
             result === undefined ||
             Number(result.result_count) !== Number(result.total_cases) ||

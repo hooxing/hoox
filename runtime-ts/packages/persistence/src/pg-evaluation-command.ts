@@ -1,25 +1,20 @@
-import {
-  isoTimestamp,
-  resourceId,
-  resourceVersionId,
-  runId,
-  tenantId,
-  threadId,
-  userId,
-} from "@hoox/domain";
+import { resourceId, resourceVersionId, runId, tenantId, threadId, userId } from "@hoox/domain";
 import type { EvaluationCase } from "@hoox/protocol";
 import { appendAttachmentsToLatestUserPrompt } from "@hoox/resource";
-import { cancelScopedRun } from "./cancel-run.js";
-import { transactionRunRepository } from "./pg-core-repositories.js";
+import {
+  cancelThreadQueuedRun,
+  enqueueThreadFollowUp,
+  lockThreadExecutionHead,
+} from "./pg-thread-run-queue.js";
 import { createRevisionRun } from "./pg-playground.js";
 import { findFile } from "./pg-resource-filesystem.js";
 import { PersistenceError } from "./errors.js";
 import { inputDigest } from "./pg-run-dispatch.js";
 import { SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
-import { enqueueThreadFollowUp } from "./pg-thread-run-queue.js";
 import { type Pool, withTenantTransaction } from "./postgres.js";
 
 export interface EvaluationCommand {
+  readonly batchId: string;
   readonly tenantId: string;
   readonly userId: string;
   readonly token: string;
@@ -46,8 +41,8 @@ export class PgEvaluationCommand {
           `evaluation:${command.plannedRunId}`,
         ]);
         await client.query(
-          "SELECT set_config('app.evaluation_token',$1,true),set_config('app.evaluation_generation',$2,true)",
-          [command.token, command.generation],
+          "SELECT set_config('app.evaluation_token',$1,true),set_config('app.evaluation_generation',$2,true),set_config('app.evaluation_batch',$3,true)",
+          [command.token, command.generation, command.batchId],
         );
         const {
           rows: [job],
@@ -57,8 +52,15 @@ export class PgEvaluationCommand {
           revision_id: string;
           case_snapshot: EvaluationCase | null;
           cancel_requested_at: Date | null;
+          evaluation_run_id: string;
           member_active: boolean;
-        }>(`SELECT * FROM evaluation_run_command WHERE planned_run_id=$1`, [command.plannedRunId]);
+          account_active: boolean;
+          actor_active: boolean;
+        }>(
+          `SELECT * FROM evaluation_run_command
+            WHERE planned_run_id=$1 AND evaluation_run_id=$2`,
+          [command.plannedRunId, command.batchId],
+        );
         if (!job) return "stale";
         const id = job.planned_run_id;
         const {
@@ -73,21 +75,49 @@ export class PgEvaluationCommand {
           existing?.status === "cancelled"
         )
           return existing.status;
-        if (job.cancel_requested_at !== null) {
-          if (!existing) return "not_started";
-          if (!job.member_active) return "active";
-          const cancelled = await cancelScopedRun(
-            transactionRunRepository(client),
-            scope,
-            threadId(id),
-            runId(id),
-            () => isoTimestamp(new Date().toISOString()),
+        const executorActive = job.member_active && job.account_active && job.actor_active;
+        if (job.cancel_requested_at !== null || !executorActive) {
+          if (!existing) return job.cancel_requested_at === null ? "unavailable" : "not_started";
+          const thread = await client.query(
+            "SELECT 1 FROM threads WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+            [scope.tenantId, id],
           );
-          if (typeof cancelled === "string") throw new Error("评测取消需要重试");
+          if (!thread.rowCount) throw new Error("评测取消需要重试");
+          await lockThreadExecutionHead(client, scope.tenantId, id);
+          const cancelled = await client.query(
+            `UPDATE runs target
+                SET status='cancelled',updated_at=clock_timestamp(),version=version+1
+              WHERE target.tenant_id=$1 AND target.id=$2 AND target.thread_id=$2
+                AND target.origin='evaluation'
+                AND target.status NOT IN ('succeeded','failed','cancelled')
+                AND EXISTS (
+                  SELECT 1 FROM evaluation_run_command current_command
+                   WHERE current_command.planned_run_id=target.id
+                     AND current_command.evaluation_run_id=$3
+                     AND (current_command.cancel_requested_at IS NOT NULL
+                       OR NOT current_command.member_active
+                       OR NOT current_command.account_active
+                       OR NOT current_command.actor_active)
+                ) RETURNING target.id`,
+            [scope.tenantId, id, command.batchId],
+          );
+          if (!cancelled.rowCount) {
+            const latest = await client.query<{ status: string }>(
+              "SELECT status FROM runs WHERE tenant_id=$1 AND id=$2 AND thread_id=$2 AND origin='evaluation'",
+              [scope.tenantId, id],
+            );
+            if (latest.rows[0]?.status !== "cancelled") throw new Error("评测取消需要重试");
+          } else {
+            await cancelThreadQueuedRun(client, {
+              tenantId: scope.tenantId,
+              threadId: threadId(id),
+              runId: runId(id),
+            });
+          }
           return "cancelled";
         }
         if (existing) return "active";
-        if (!job.case_snapshot) return "unavailable";
+        if (!executorActive || !job.case_snapshot) return "unavailable";
         const files = [];
         for (const ref of job.case_snapshot.attachments) {
           const ids =

@@ -79,7 +79,7 @@ export class PgEvaluationDriver {
                     claim_token=$3,generation=generation+1,updated_at=clock_timestamp(),
                     lease_until=clock_timestamp()+$4*interval '1 millisecond'
                FROM picked WHERE evaluation_run_id=$1 AND j.case_id=picked.case_id
-          RETURNING j.planned_run_id,j.generation::text,j.case_snapshot->'assertions' AS assertions,j.tenant_id`,
+          RETURNING j.planned_run_id,j.generation::text,j.assertions_snapshot AS assertions,j.tenant_id`,
             [batchId, caseId, token, this.options.leaseMs],
           )
         ).rows[0];
@@ -103,16 +103,25 @@ export class PgEvaluationDriver {
   }
   async process(lease: Lease): Promise<void> {
     const { token, userId, tenantId, generation, plannedRunId } = lease;
-    const status = await this.command({ token, userId, tenantId, generation, plannedRunId });
+    const status = await this.command({
+      batchId: lease.batchId,
+      token,
+      userId,
+      tenantId,
+      generation,
+      plannedRunId,
+    });
     if (status === "stale") return;
     const hasRun = status !== "not_started" && status !== "unavailable";
     let result: Settlement | undefined;
     if (status === "succeeded") {
       try {
         const evidence = await this.readEvidence(userId, tenantId, plannedRunId);
-        const assertionResults = lease.assertions
-          .filter((a) => a.kind !== "model_score")
-          .map((assertion) => evaluateAssertion(assertion, evidence));
+        const assertionResults = [];
+        for (const assertion of lease.assertions) {
+          if (assertion.kind !== "model_score")
+            assertionResults.push(await evaluateAssertion(assertion, evidence));
+        }
         result =
           assertionResults.length !== lease.assertions.length
             ? { outcome: "unknown", assertionResults, reason: "模型评审未启用" }

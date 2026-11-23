@@ -5,6 +5,7 @@ CREATE TABLE agent_evaluation_suites (
   description text NOT NULL DEFAULT '' CHECK (octet_length(description) <= 4000),
   reviewer_model jsonb,
   reviewer_rubric text,
+  content_version bigint NOT NULL DEFAULT 1 CHECK (content_version > 0),
   created_by text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -26,6 +27,7 @@ CREATE TABLE agent_evaluation_runs (
   id text PRIMARY KEY CHECK (id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
   definition_id text NOT NULL REFERENCES agent_definitions(id) ON DELETE RESTRICT,
   suite_id text NOT NULL,
+  suite_version bigint NOT NULL CHECK (suite_version > 0),
   revision_id text NOT NULL,
   status text NOT NULL CHECK (status IN ('queued','running','cancelled','completed','failed')),
   max_concurrency integer NOT NULL CHECK (max_concurrency BETWEEN 1 AND 32),
@@ -71,10 +73,40 @@ ALTER TABLE agent_evaluation_results FORCE ROW LEVEL SECURITY;
 DO $$
 DECLARE control_role text := current_setting('app.admin_control_role');
 BEGIN
-  EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON agent_evaluation_suites,agent_evaluation_cases TO %I', control_role);
-  EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON agent_evaluation_runs,agent_evaluation_results TO %I', control_role);
+  EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON agent_evaluation_suites TO %I', control_role);
+  EXECUTE format('GRANT SELECT(id,suite_id,name,assertions,created_at,updated_at) ON agent_evaluation_cases TO %I', control_role);
+  EXECUTE format('GRANT INSERT,UPDATE,DELETE ON agent_evaluation_cases TO %I', control_role);
+  EXECUTE format('GRANT SELECT,INSERT,UPDATE ON agent_evaluation_runs TO %I', control_role);
+  EXECUTE format('GRANT SELECT,INSERT ON agent_evaluation_results TO %I', control_role);
   EXECUTE format('CREATE POLICY evaluation_suite_admin ON agent_evaluation_suites TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator''))) WITH CHECK (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator'')))', control_role);
   EXECUTE format('CREATE POLICY evaluation_case_admin ON agent_evaluation_cases TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator''))) WITH CHECK (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator'')))', control_role);
   EXECUTE format('CREATE POLICY evaluation_run_admin ON agent_evaluation_runs TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator''))) WITH CHECK (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator'')))', control_role);
   EXECUTE format('CREATE POLICY evaluation_result_admin ON agent_evaluation_results TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator''))) WITH CHECK (EXISTS (SELECT 1 FROM platform_control_operators WHERE user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND status=''active'' AND role IN (''admin'',''operator'')))', control_role);
+END $$;
+
+CREATE VIEW admin_evaluation_case_projection WITH (security_barrier=true) AS
+SELECT test_case.id,test_case.suite_id,test_case.name,
+       CASE WHEN EXISTS (
+         SELECT 1 FROM platform_control_operators actor
+         JOIN user_accounts account ON account.user_id=actor.user_id AND account.status='active'
+          WHERE actor.user_id=NULLIF(current_setting('app.user_id',true),'')
+            AND actor.status='active' AND actor.role='admin'
+       ) THEN test_case.input_text ELSE '' END AS input_text,
+       CASE WHEN EXISTS (
+         SELECT 1 FROM platform_control_operators actor
+         JOIN user_accounts account ON account.user_id=actor.user_id AND account.status='active'
+          WHERE actor.user_id=NULLIF(current_setting('app.user_id',true),'')
+            AND actor.status='active' AND actor.role='admin'
+       ) THEN test_case.attachments ELSE '[]'::jsonb END AS attachments,
+       test_case.assertions,test_case.created_at,test_case.updated_at
+  FROM agent_evaluation_cases test_case
+ WHERE EXISTS (
+   SELECT 1 FROM platform_control_operators actor
+    WHERE actor.user_id=NULLIF(current_setting('app.user_id',true),'')
+      AND actor.status='active' AND actor.role IN ('admin','operator')
+ );
+
+DO $$ BEGIN
+  EXECUTE format('CREATE POLICY evaluation_case_projection_owner ON agent_evaluation_cases TO %I USING(true)',current_user);
+  EXECUTE format('GRANT SELECT ON admin_evaluation_case_projection TO %I',current_setting('app.admin_control_role'));
 END $$;

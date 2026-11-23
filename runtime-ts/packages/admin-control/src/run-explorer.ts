@@ -1,4 +1,5 @@
 import type { RuntimeEventV1 } from "@hoox/run-contracts";
+import type { RunFeedbackDto } from "@hoox/protocol";
 import {
   type ObservedRuntimeEvent,
   outlineTrajectory,
@@ -105,6 +106,7 @@ export interface RunExplorerSummary {
 
 export interface RunExplorerRunRecord extends RunExplorerSummary {
   readonly attempts: readonly RunExplorerAttempt[];
+  readonly feedback?: readonly RunFeedbackDto[];
 }
 
 export interface RunExplorerEventRow {
@@ -284,7 +286,12 @@ function selectAttempt(run: RunExplorerRunRecord, attemptId: string | undefined)
 }
 
 function redactRunInput<T extends RunExplorerSummary>(run: T): T {
-  const { threadTitle: _threadTitle, userInput: _userInput, ...safe } = run;
+  const {
+    threadTitle: _threadTitle,
+    userInput: _userInput,
+    feedback: _feedback,
+    ...safe
+  } = run as T & { readonly feedback?: unknown };
   return {
     ...safe,
     threadTitle: "",

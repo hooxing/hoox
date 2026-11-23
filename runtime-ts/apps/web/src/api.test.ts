@@ -2,6 +2,26 @@ import { describe, expect, it, vi } from "vitest";
 import { canPreviewArtifact, normalizeRunEvent, RuntimeApi } from "./api.js";
 
 describe("RuntimeApi", () => {
+  it("按当前用户读取、提交及撤销 Run 反馈", async () => {
+    const fetcher = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ version: "v1", requestId: "req", data: { feedback: null } })),
+    );
+    const api = new RuntimeApi(fetcher, "/api");
+    await api.getRunFeedback("thread_1", "run_1");
+    await api.putRunFeedback("thread_1", "run_1", "up", "很有帮助");
+    await api.deleteRunFeedback("thread_1", "run_1");
+    expect(fetcher.mock.calls.map(([url, init]) => [String(url), init?.method ?? "GET"])).toEqual([
+      ["/api/v1/threads/thread_1/runs/run_1/feedback", "GET"],
+      ["/api/v1/threads/thread_1/runs/run_1/feedback", "PUT"],
+      ["/api/v1/threads/thread_1/runs/run_1/feedback", "DELETE"],
+    ]);
+    expect(
+      JSON.parse(
+        String((fetcher.mock.calls[1] as unknown as [RequestInfo | URL, RequestInit])[1].body),
+      ),
+    ).toEqual({ rating: "up", comment: "很有帮助" });
+  });
   it("实时流携带现有身份与 Tenant 头，验证正文和结束帧", async () => {
     const payload = {
       run: { id: "run", threadId: "thread", status: "running" },

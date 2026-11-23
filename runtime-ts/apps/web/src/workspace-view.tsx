@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  Fragment,
   type FormEventHandler,
   type ReactNode,
   type RefObject,
@@ -33,6 +34,7 @@ import {
   type HistoryFile,
   type Run,
   type RunEvent,
+  type RunFeedback,
   type RunStatus,
   type RuntimeApi,
   type Thread,
@@ -79,10 +81,15 @@ function CurrentAgentTurn({
   run,
   events,
   messages = [],
+  feedbackApi,
 }: {
   readonly run: Run;
   readonly events: readonly RunEvent[];
   readonly messages?: readonly ThreadContextMessage[];
+  readonly feedbackApi?: Pick<
+    RuntimeApi,
+    "getRunFeedback" | "putRunFeedback" | "deleteRunFeedback"
+  >;
 }) {
   const projected = useConversationBlocks(events);
   const fallback = terminalFallbackAnswer(run, events, projected);
@@ -105,6 +112,11 @@ function CurrentAgentTurn({
   return (
     <>
       {blocks.length > 0 && <AgentTurn run={run} blocks={blocks} />}
+      {feedbackApi !== undefined &&
+        !run.executionStatus &&
+        ["succeeded", "failed", "cancelled"].includes(run.status) && (
+          <RunFeedbackControl api={feedbackApi} threadId={run.threadId} runId={run.id} />
+        )}
       {question !== undefined && <AssistantMessage label="需要你的输入" text={question} />}
     </>
   );
@@ -1017,6 +1029,8 @@ export function ThreadTranscript({
   currentRunEvents = [],
   loadRunEvents,
   loadAttachmentUrl,
+  feedbackApi,
+  threadId,
 }: {
   readonly messages: readonly ThreadContextMessage[];
   readonly pendingInputs?: readonly PendingThreadInputView[];
@@ -1024,6 +1038,11 @@ export function ThreadTranscript({
   readonly currentRunEvents?: readonly RunEvent[];
   readonly loadRunEvents?: (runId: string) => Promise<readonly RunEvent[]>;
   readonly loadAttachmentUrl?: (attachment: ThreadContextAttachment) => Promise<string>;
+  readonly feedbackApi?: Pick<
+    RuntimeApi,
+    "getRunFeedback" | "putRunFeedback" | "deleteRunFeedback"
+  >;
+  readonly threadId?: string;
 }) {
   if (messages.length === 0 && pendingInputs.length === 0 && currentRun === undefined) return null;
   const transcriptItems = buildThreadTranscriptItems(messages);
@@ -1072,6 +1091,7 @@ export function ThreadTranscript({
               run={currentRun}
               events={segmentEvents}
               messages={item.messages}
+              {...(feedbackApi === undefined ? {} : { feedbackApi })}
             />
           );
         }
@@ -1083,12 +1103,17 @@ export function ThreadTranscript({
                   eventsInTranscriptInterval(await loadRunEvents(runId), item.after, item.before)
               : loadRunEvents;
         return (
-          <HistoricalAgentTurn
-            key={firstMessage.sequence}
-            runId={item.runId}
-            messages={item.messages}
-            {...(loadSegmentEvents === undefined ? {} : { loadRunEvents: loadSegmentEvents })}
-          />
+          <Fragment key={`historical-feedback-${item.runId}-${firstMessage.sequence}`}>
+            <HistoricalAgentTurn
+              key={firstMessage.sequence}
+              runId={item.runId}
+              messages={item.messages}
+              {...(loadSegmentEvents === undefined ? {} : { loadRunEvents: loadSegmentEvents })}
+            />
+            {feedbackApi !== undefined && threadId !== undefined && (
+              <RunFeedbackControl api={feedbackApi} threadId={threadId} runId={item.runId} />
+            )}
+          </Fragment>
         );
       })()
     ) : item.kind === "message" && item.message.role === "assistant" ? (
@@ -1116,6 +1141,7 @@ export function ThreadTranscript({
         key={`current-run-tail-${currentRun.id}-${currentRunTail?.sequence ?? "unknown"}`}
         run={currentRun}
         events={tailEvents}
+        {...(feedbackApi === undefined ? {} : { feedbackApi })}
       />,
     );
   } else if (
@@ -1127,6 +1153,7 @@ export function ThreadTranscript({
         key={`current-${currentRun.id}`}
         run={currentRun}
         events={currentRunEvents}
+        {...(feedbackApi === undefined ? {} : { feedbackApi })}
       />,
     );
   }
@@ -1134,6 +1161,118 @@ export function ThreadTranscript({
     <section className="assistant-transcript" aria-label="Thread 连续对话">
       {content}
     </section>
+  );
+}
+
+function RunFeedbackControl({
+  api,
+  threadId,
+  runId,
+}: {
+  readonly api: Pick<RuntimeApi, "getRunFeedback" | "putRunFeedback" | "deleteRunFeedback">;
+  readonly threadId: string;
+  readonly runId: string;
+}) {
+  const [feedback, setFeedback] = useState<RunFeedback | null>();
+  const [comment, setComment] = useState("");
+  const [open, setOpen] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(false);
+  const [rating, setRating] = useState<"up" | "down">();
+  useEffect(() => {
+    let active = true;
+    void api
+      .getRunFeedback(threadId, runId)
+      .then((value) => {
+        if (active) {
+          setFeedback(value.feedback);
+          setComment(value.feedback?.comment ?? "");
+          setRating(value.feedback?.rating);
+        }
+      })
+      .catch(() => {
+        if (active) setError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, threadId, runId]);
+  const save = async () => {
+    if (rating === undefined) return;
+    setPending(true);
+    try {
+      const value = await api.putRunFeedback(threadId, runId, rating, comment || undefined);
+      setFeedback(value.feedback);
+    } catch {
+      setError(true);
+    } finally {
+      setPending(false);
+    }
+  };
+  const revoke = async () => {
+    setPending(true);
+    try {
+      await api.deleteRunFeedback(threadId, runId);
+      setFeedback(null);
+      setComment("");
+      setRating(undefined);
+    } catch {
+      setError(true);
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <fieldset className="run-feedback" aria-label="回答反馈">
+      <button
+        type="button"
+        disabled={pending}
+        aria-pressed={feedback?.rating === "up" || rating === "up"}
+        onClick={() => {
+          setRating("up");
+          setOpen(true);
+        }}
+      >
+        👍
+      </button>
+      <button
+        type="button"
+        disabled={pending}
+        aria-pressed={feedback?.rating === "down" || rating === "down"}
+        onClick={() => {
+          setRating("down");
+          setOpen(true);
+        }}
+      >
+        👎
+      </button>
+      <button type="button" disabled={pending} onClick={() => setOpen(!open)}>
+        附言
+      </button>
+      {feedback !== null && feedback !== undefined && (
+        <button type="button" disabled={pending} onClick={() => void revoke()}>
+          撤销反馈
+        </button>
+      )}
+      {open && (
+        <label>
+          反馈附言
+          <textarea
+            maxLength={2000}
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+          />
+          <button
+            type="button"
+            disabled={pending || rating === undefined}
+            onClick={() => void save()}
+          >
+            提交反馈
+          </button>
+        </label>
+      )}
+      {error && <span role="status">反馈暂时无法保存</span>}
+    </fieldset>
   );
 }
 

@@ -5,7 +5,7 @@ import {
   type RunExplorerService,
   type RunExplorerStatus,
 } from "@hoox/admin-control";
-import { ErrorEnvelopeSchema } from "@hoox/protocol";
+import { ErrorEnvelopeSchema, RunFeedbackDtoSchema } from "@hoox/protocol";
 import { type TSchema, Type } from "@sinclair/typebox";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
@@ -87,7 +87,11 @@ const AttemptSchema = Type.Object(
   strict,
 );
 const RunRecordSchema = Type.Object(
-  { ...summaryProperties, attempts: Type.Array(AttemptSchema) },
+  {
+    ...summaryProperties,
+    attempts: Type.Array(AttemptSchema),
+    feedback: Type.Optional(Type.Array(RunFeedbackDtoSchema)),
+  },
   strict,
 );
 const TimelineRecordSchema = Type.Object(

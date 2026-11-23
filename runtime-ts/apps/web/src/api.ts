@@ -126,6 +126,16 @@ export type Run = {
   readonly updatedAt: string;
 };
 
+export type RunFeedback = {
+  readonly runId: string;
+  readonly revisionId: string;
+  readonly userId: string;
+  readonly rating: "up" | "down";
+  readonly comment?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
 export type ThreadInputReceipt = {
   readonly receiptId: string;
   readonly inputSequence: number;
@@ -1016,6 +1026,31 @@ export class RuntimeApi {
       {
         method: "DELETE",
       },
+    );
+  }
+  getRunFeedback(threadId: string, runId: string): Promise<{ feedback: RunFeedback | null }> {
+    return this.request(
+      `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
+    );
+  }
+  putRunFeedback(
+    threadId: string,
+    runId: string,
+    rating: "up" | "down",
+    comment?: string,
+  ): Promise<{ feedback: RunFeedback }> {
+    return this.request(
+      `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ rating, ...(comment === undefined ? {} : { comment }) }),
+      },
+    );
+  }
+  deleteRunFeedback(threadId: string, runId: string): Promise<{ feedback: null }> {
+    return this.request(
+      `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
+      { method: "DELETE" },
     );
   }
   async listEvents(

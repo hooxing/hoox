@@ -687,6 +687,25 @@ export function RunExplorerDetail({
           </span>
         </div>
       )}
+      {detail?.contentAccess && run?.feedback !== undefined && (
+        <section aria-label="终端用户反馈">
+          <h2>终端用户反馈</h2>
+          {run.feedback.length === 0 ? (
+            <p>暂无反馈</p>
+          ) : (
+            run.feedback.map((feedback) => (
+              <article key={feedback.userId}>
+                <strong>{feedback.rating === "up" ? "点赞" : "点踩"}</strong>
+                <small>
+                  {" "}
+                  · {feedback.userId} · {formatDate(feedback.updatedAt)}
+                </small>
+                {feedback.comment !== undefined && <p>{feedback.comment}</p>}
+              </article>
+            ))
+          )}
+        </section>
+      )}
       {run !== undefined && run.attempts.length > 0 && (
         <label className="run-attempt-select">
           Attempt

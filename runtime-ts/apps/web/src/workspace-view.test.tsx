@@ -50,6 +50,63 @@ describe("工作台展示组件", () => {
     createdAt: "2026-07-29T00:00:00.000Z",
     updatedAt: "2026-07-29T00:00:00.000Z",
   };
+  it("对已结束助手回答回显并保存当前用户反馈与附言", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const feedbackApi = {
+      getRunFeedback: vi.fn(async () => ({ feedback: null })),
+      putRunFeedback: vi.fn(
+        async (_threadId: string, _runId: string, rating: "up" | "down", comment?: string) => ({
+          feedback: {
+            runId: "run-1",
+            revisionId: "revision-1",
+            userId: "user-1",
+            rating,
+            ...(comment ? { comment } : {}),
+            createdAt: "2026-11-20T00:00:00.000Z",
+            updatedAt: "2026-11-20T00:00:00.000Z",
+          },
+        }),
+      ),
+      deleteRunFeedback: vi.fn(async () => ({ feedback: null })),
+    };
+    try {
+      await act(async () =>
+        root.render(
+          <ThreadTranscript
+            messages={[]}
+            currentRun={{ ...running, status: "succeeded" }}
+            threadId="thread-1"
+            feedbackApi={feedbackApi}
+          />,
+        ),
+      );
+      expect(feedbackApi.getRunFeedback).toHaveBeenCalledWith("thread-1", "run-1");
+      const buttons = container.querySelectorAll<HTMLButtonElement>(".run-feedback button");
+      await act(async () => buttons[0]?.click());
+      const textarea = container.querySelector<HTMLTextAreaElement>(".run-feedback textarea");
+      if (textarea === null) throw new Error("反馈附言输入框缺失");
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+          textarea,
+          "很有帮助",
+        );
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      const submit = Array.from(
+        container.querySelectorAll<HTMLButtonElement>(".run-feedback button"),
+      ).find((button) => button.textContent === "提交反馈");
+      await act(async () => submit?.click());
+      expect(feedbackApi.putRunFeedback).toHaveBeenCalledWith(
+        "thread-1",
+        "run-1",
+        "up",
+        "很有帮助",
+      );
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
   it.each(["native", "PTC"])("%s 真实组件共用安全工具展示，失败不混入模型正文", (mode) => {
     const container = document.createElement("div");
     const root = createRoot(container);

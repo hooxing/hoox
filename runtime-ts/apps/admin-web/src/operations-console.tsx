@@ -469,6 +469,7 @@ export function AgentMetricsDashboard({ api }: { readonly api: AdminControlApiCo
                 <th>Run</th>
                 <th>成功 / 失败 / 未知</th>
                 <th>工具失败率</th>
+                <th>点赞率 / 点踩率</th>
                 <th>P50 / P90 / P99</th>
                 <th>平均轮次</th>
                 <th>Token（输入/输出/缓存）</th>
@@ -498,6 +499,11 @@ export function AgentMetricsDashboard({ api }: { readonly api: AdminControlApiCo
                     {formatRate(item.resultUnknownRate)}
                   </td>
                   <td>{formatRate(item.toolFailureRate)}</td>
+                  <td>
+                    {formatRate(item.feedbackUpRate)} / {formatRate(item.feedbackDownRate)}
+                    <br />
+                    {item.feedbackUpCount} 赞 / {item.feedbackDownCount} 踩
+                  </td>
                   <td>
                     {[item.latencyP50Ms, item.latencyP90Ms, item.latencyP99Ms]
                       .map((value) => (value === null ? "—" : `${Math.round(value)}ms`))

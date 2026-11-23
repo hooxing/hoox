@@ -11,12 +11,12 @@ import type {
 import { agentRevisionChangedFields } from "@hoox/protocol";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Empty, Input, Modal, Space, Spin, Tag, Typography } from "antd";
-import { type FormEvent, useId, useState } from "react";
+import { type FormEvent, useId, useRef, useState } from "react";
 import {
+  AgentDefinitionEditor,
+  AvailabilityFields,
   allTenants,
   availabilityText,
-  AvailabilityFields,
-  AgentDefinitionEditor,
   parseAvailability,
 } from "./agent-definition-editor.js";
 import type { AgentDefinitionApiContract } from "./control-api.js";
@@ -204,8 +204,11 @@ function AgentConfigurationImport({
   }>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  // 输入变化后递增；只接收仍对应当前输入的校验结果，避免迟到的结果为未校验内容启用导入。
+  const inputVersion = useRef(0);
   const selected = items.find((item) => item.definition.id === definitionId)?.definition;
   const changeYaml = (value: string) => {
+    inputVersion.current += 1;
     setYaml(value);
     setValidation(undefined);
     setError(undefined);
@@ -213,10 +216,14 @@ function AgentConfigurationImport({
   async function validate() {
     setBusy(true);
     setError(undefined);
+    const version = inputVersion.current;
     try {
-      setValidation(
-        await api.validateAgentConfiguration(yaml, definitionId || undefined, selected?.generation),
+      const result = await api.validateAgentConfiguration(
+        yaml,
+        definitionId || undefined,
+        selected?.generation,
       );
+      if (version === inputVersion.current) setValidation(result);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "配置校验失败");
     } finally {
@@ -276,6 +283,7 @@ function AgentConfigurationImport({
             aria-label="导入目标"
             value={definitionId}
             onChange={(event) => {
+              inputVersion.current += 1;
               setDefinitionId(event.target.value);
               setValidation(undefined);
             }}

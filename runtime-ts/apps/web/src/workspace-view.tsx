@@ -27,6 +27,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { AssistantMessage } from "@hoox/chat-ui/assistant-message";
 import {
   type Artifact,
   type AvailableAgent,
@@ -1311,29 +1312,6 @@ function threadInputDispositionLabel(input: PendingThreadInputView): string {
     case "rejected":
       return `未应用${input.rejectionCode === undefined ? "" : ` · ${input.rejectionCode}`}`;
   }
-}
-
-export function AssistantMessage({
-  text,
-  label = "Hoox",
-  contentBefore,
-}: {
-  readonly text: string;
-  readonly label?: string;
-  readonly contentBefore?: ReactNode;
-}) {
-  return (
-    <article className="message assistant-message" aria-label={label}>
-      <span className="message-avatar" aria-hidden="true">
-        H
-      </span>
-      <div className="message-card">
-        <span className="message-label">{label}</span>
-        {contentBefore}
-        {text.length > 0 && <AssistantMarkdown text={text} />}
-      </div>
-    </article>
-  );
 }
 
 /**

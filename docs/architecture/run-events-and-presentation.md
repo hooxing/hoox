@@ -25,6 +25,7 @@ Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交�
 - 一个 Agent 回合按有序块展示：思考、工具调用、正文和最终回复保持组件身份，滚动只在用户跟随底部且高度改变时更新。
 - 思考内容实时展示并在完成后折叠；模型可通过受控标记把长过程折叠，只突出最终答复。工具调用只显示受控摘要（操作、相对路径、用途、技能名），不显示完整参数、源码、命令或业务输出。
 - Markdown 使用固定版本的增量解析器（`runtime-ts/vendor/deepseek-markdown`），Hoox 保留 GFM、链接净化、禁用原始 HTML 和阻止第三方图片请求等安全策略。
+- 工作台与 `@hoox/chat-ui` 共用 Markdown 展示与净化实现。嵌入组件只持有无 API Key 的 SDK 客户端；业务代理从自己的登录态映射 `Hoox-End-User` 并注入服务凭据，必须保留 SSE 游标续连且执行同源与 CSRF 防护。
 - `executionStatus=recovery_required` 的 Run 显示“执行已中断”，停止计时、动画和短轮询，见 [Run 执行与恢复](run-execution-and-recovery.md#状态分层)。
 - 失败时页面优先展示同一 Agent 根据持久工具失败事实给出的解释；Runtime 兜底提示不包含原始异常与私有诊断。旧数据或事件缺口由页面提供最后一层通用展示。
 

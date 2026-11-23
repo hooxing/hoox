@@ -1,0 +1,103 @@
+.hoox-chat {
+  --hoox-chat-accent: var(--action-primary);
+  --hoox-chat-background: var(--surface-raised);
+  --hoox-chat-text: var(--text-primary);
+  --hoox-chat-font: var(--font-ui);
+  --hoox-chat-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 24rem;
+  color: var(--hoox-chat-text);
+  background: var(--hoox-chat-background);
+  font-family: var(--hoox-chat-font);
+}
+.hoox-chat-messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow: auto;
+  padding: var(--space-4);
+}
+.hoox-chat-message {
+  max-width: 85%;
+  border-radius: var(--hoox-chat-radius);
+  padding: var(--space-3) var(--space-4);
+  overflow-wrap: anywhere;
+}
+.hoox-chat-message.is-user {
+  align-self: flex-end;
+  background: var(--surface-sunken);
+}
+.hoox-chat-message.is-assistant {
+  align-self: flex-start;
+}
+.hoox-chat-message p {
+  margin: 0;
+}
+.hoox-chat .assistant-markdown > :first-child {
+  margin-top: 0;
+}
+.hoox-chat .assistant-markdown > :last-child {
+  margin-bottom: 0;
+}
+.hoox-chat-composer {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--hoox-chat-radius);
+}
+.hoox-chat-composer textarea {
+  flex: 1;
+  min-height: 3rem;
+  resize: vertical;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+}
+.hoox-chat button {
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  color: var(--action-primary-text);
+  background: var(--hoox-chat-accent);
+  font: inherit;
+  cursor: pointer;
+}
+.hoox-chat button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.hoox-chat-status {
+  color: var(--text-secondary);
+}
+.hoox-chat-error {
+  color: var(--status-error-text);
+}
+.hoox-chat-artifacts ul {
+  display: grid;
+  gap: var(--space-2);
+  padding: 0;
+  list-style: none;
+}
+.hoox-chat-artifacts li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.hoox-chat-artifacts li span {
+  flex: 1;
+}
+.hoox-chat-preview {
+  position: relative;
+  max-height: 18rem;
+  overflow: auto;
+  padding: var(--space-3);
+  background: var(--surface-sunken);
+}
+.hoox-chat-preview pre {
+  white-space: pre-wrap;
+}

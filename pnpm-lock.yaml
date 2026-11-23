@@ -345,6 +345,9 @@ importers:
       '@aiden0z/pptx-renderer':
         specifier: 1.2.4
         version: 1.2.4(pdfjs-dist@6.3.289)
+      '@hoox/chat-ui':
+        specifier: workspace:*
+        version: link:../../packages/chat-ui
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -442,6 +445,49 @@ importers:
         version: 8.20.0
 
   runtime-ts/packages/automation: {}
+
+  runtime-ts/packages/chat-ui:
+    dependencies:
+      '@hoox/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      '@hoox/ui-theme':
+        specifier: workspace:*
+        version: link:../ui-theme
+      '@hoox/vendor-deepseek-markdown':
+        specifier: workspace:*
+        version: link:../../vendor/deepseek-markdown
+      react-markdown:
+        specifier: 10.1.0
+        version: 10.1.0(@types/react@19.1.13)(react@19.1.1)
+      remark-gfm:
+        specifier: 4.0.1
+        version: 4.0.1
+      remark-parse:
+        specifier: 11.0.0
+        version: 11.0.0
+      unified:
+        specifier: 11.0.5
+        version: 11.0.5
+    devDependencies:
+      '@types/mdast':
+        specifier: 4.0.4
+        version: 4.0.4
+      '@types/react':
+        specifier: 19.1.13
+        version: 19.1.13
+      '@types/react-dom':
+        specifier: 19.1.9
+        version: 19.1.9(@types/react@19.1.13)
+      jsdom:
+        specifier: 26.1.0
+        version: 26.1.0
+      react:
+        specifier: 19.1.1
+        version: 19.1.1
+      react-dom:
+        specifier: 19.1.1
+        version: 19.1.1(react@19.1.1)
 
   runtime-ts/packages/context-policy:
     dependencies:

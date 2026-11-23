@@ -12,6 +12,8 @@ import type {
   SubmitToolResult,
 } from "./types.js";
 
+const MAX_ARTIFACT_CONTENT_BYTES = 24 * 1024 * 1024;
+
 export type HooxClientOptions = {
   baseUrl: string;
   apiKey?: string;
@@ -143,6 +145,97 @@ export class HooxClient {
     options?: RequestOptions,
   ): Promise<Data<"submitToolResult">> {
     return this.request("submitToolResult", { threadId, runId }, body, undefined, options);
+  }
+
+  listArtifacts(
+    threadId: string,
+    runId: string,
+    options?: RequestOptions,
+  ): Promise<Data<"listArtifacts">> {
+    return this.request("listArtifacts", { threadId, runId }, undefined, undefined, options);
+  }
+
+  previewArtifact(
+    threadId: string,
+    runId: string,
+    artifactId: string,
+    options?: RequestOptions,
+  ): Promise<Data<"previewArtifact">> {
+    return this.request(
+      "previewArtifact",
+      { threadId, runId, artifactId },
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  downloadArtifact(
+    threadId: string,
+    runId: string,
+    artifactId: string,
+    options?: RequestOptions,
+  ): Promise<Data<"downloadArtifact">> {
+    return this.request(
+      "downloadArtifact",
+      { threadId, runId, artifactId },
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  async readArtifactContent(
+    threadId: string,
+    runId: string,
+    artifactId: string,
+    options: RequestOptions = {},
+  ): Promise<Uint8Array> {
+    const connection = this.connection(options);
+    try {
+      const response = await this.send(
+        "readArtifactContent",
+        { threadId, runId, artifactId },
+        undefined,
+        undefined,
+        options,
+        connection.signal,
+      );
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_ARTIFACT_CONTENT_BYTES) {
+        await response.body?.cancel();
+        throw new HooxError("Artifact 内容超过读取上限", "RESPONSE_TOO_LARGE", response.status);
+      }
+      if (!response.body) return new Uint8Array();
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_ARTIFACT_CONTENT_BYTES) {
+            await reader.cancel();
+            throw new HooxError("Artifact 内容超过读取上限", "RESPONSE_TOO_LARGE", response.status);
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const content = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        content.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return content;
+    } catch (error) {
+      throw connection.error(error);
+    } finally {
+      connection.close();
+    }
   }
 
   async *streamRunEvents(
@@ -321,7 +414,12 @@ export class HooxClient {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
     const headers = new Headers({
-      accept: operation === "streamRunEvents" ? "text/event-stream" : "application/json",
+      accept:
+        operation === "streamRunEvents"
+          ? "text/event-stream"
+          : operation === "readArtifactContent"
+            ? "application/octet-stream"
+            : "application/json",
     });
     if (this.#apiKey) headers.set("Authorization", `Bearer ${this.#apiKey}`);
     if (this.#endUser !== undefined) headers.set("Hoox-End-User", this.#endUser);

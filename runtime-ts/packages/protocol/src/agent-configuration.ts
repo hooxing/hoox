@@ -9,6 +9,15 @@ import {
 import { IdSchema } from "./schemas.js";
 
 const strict = { additionalProperties: false } as const;
+const allowedCoreTags = new Set([
+  "tag:yaml.org,2002:bool",
+  "tag:yaml.org,2002:float",
+  "tag:yaml.org,2002:int",
+  "tag:yaml.org,2002:map",
+  "tag:yaml.org,2002:null",
+  "tag:yaml.org,2002:seq",
+  "tag:yaml.org,2002:str",
+]);
 const AgentConfigurationSchema = Type.Object(
   {
     schemaVersion: Type.Literal(1),
@@ -130,6 +139,9 @@ export function parseAgentConfiguration(source: string): AgentConfiguration {
     uniqueKeys: true,
     customTags: [],
   });
+  if (document.warnings.length > 0) {
+    fail("/", "YAML_TAG_NOT_ALLOWED", "配置文件包含未解析或不允许的 YAML 标签");
+  }
   if (document.errors.length) {
     fail("/", "INVALID_YAML", "YAML 无效，或包含不允许的标签、别名或重复键");
   }
@@ -139,7 +151,7 @@ export function parseAgentConfiguration(source: string): AgentConfiguration {
     if (node === null || typeof node !== "object") return;
     if (isAlias(node)) fail("/", "YAML_ALIAS_NOT_ALLOWED", "配置文件不允许 YAML 别名");
     const tagged = node as { tag?: string };
-    if (tagged.tag && !tagged.tag.startsWith("tag:yaml.org,2002:")) {
+    if (tagged.tag && !allowedCoreTags.has(tagged.tag)) {
       fail("/", "YAML_TAG_NOT_ALLOWED", "配置文件不允许自定义 YAML 标签");
     }
     nodeCount += 1;

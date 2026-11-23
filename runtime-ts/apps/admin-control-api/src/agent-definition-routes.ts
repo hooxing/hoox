@@ -1,6 +1,7 @@
 import { tenantId, validateAgentRevisionContent } from "@hoox/domain";
 import { createHash } from "node:crypto";
 import {
+  AgentDefinitionAccessError,
   type AgentDefinitionAdminRepositoryPort,
   AgentDefinitionValidationError,
 } from "@hoox/persistence/admin";
@@ -177,59 +178,60 @@ export function registerAgentDefinitionRoutes(
       throw new AgentConfigurationError(validationErrors);
     }
     const importedAvailability = availability(imported.definition.availability);
-    try {
-      await agents.validateImport(actorUserId, {
-        id: imported.definition.id,
-        availability: importedAvailability,
-        content,
-        ...(definitionId === undefined ? {} : { definitionId }),
-        ...(request.body.expectedGeneration === undefined
-          ? {}
-          : { expectedGeneration: request.body.expectedGeneration }),
-      });
-    } catch (error) {
-      if (error instanceof AgentDefinitionValidationError) {
-        const validationErrors = [
-          {
-            path: error.message.includes("Tenant")
-              ? "/definition/availability"
-              : "/revision/content",
-            code: "REFERENCE_INVALID",
-            message: error.message,
-          },
-        ];
-        if (request.body.dryRun) {
-          return success(request, { valid: false, errors: validationErrors });
-        }
-        throw new AgentConfigurationError(validationErrors);
-      }
-      if (request.body.dryRun && error instanceof PersistenceError && error.code === "CONFLICT") {
-        return success(request, {
-          valid: false,
-          errors: [
-            {
-              path: "/definition/id",
-              code: "CONFLICT",
-              message: "导入目标不存在、状态已变化或新建 ID 已被占用",
-            },
-          ],
-        });
-      }
-      if (error instanceof PersistenceError && error.code === "CONSTRAINT_VIOLATION") {
-        const validationErrors = [
-          {
-            path: "/definition/availability",
-            code: "REFERENCE_INVALID",
-            message: "可用范围引用无效或已不存在",
-          },
-        ];
-        if (request.body.dryRun)
-          return success(request, { valid: false, errors: validationErrors });
-        throw new AgentConfigurationError(validationErrors);
-      }
-      throw error;
-    }
     if (request.body.dryRun) {
+      try {
+        await agents.validateImport(actorUserId, {
+          id: imported.definition.id,
+          availability: importedAvailability,
+          content,
+          ...(definitionId === undefined ? {} : { definitionId }),
+          ...(request.body.expectedGeneration === undefined
+            ? {}
+            : { expectedGeneration: request.body.expectedGeneration }),
+        });
+      } catch (error) {
+        if (error instanceof AgentDefinitionAccessError) throw error;
+        if (error instanceof AgentDefinitionValidationError) {
+          return success(request, {
+            valid: false,
+            errors: [
+              {
+                path:
+                  error.message.includes("Tenant") || error.message.includes("可用范围")
+                    ? "/definition/availability"
+                    : "/revision/content",
+                code: "REFERENCE_INVALID",
+                message: error.message,
+              },
+            ],
+          });
+        }
+        if (error instanceof PersistenceError && error.code === "CONFLICT") {
+          return success(request, {
+            valid: false,
+            errors: [
+              {
+                path: "/definition/id",
+                code: "CONFLICT",
+                message: "导入目标不存在、状态已变化或新建 ID 已被占用",
+              },
+            ],
+          });
+        }
+        if (error instanceof PersistenceError && error.code === "CONSTRAINT_VIOLATION") {
+          return success(request, {
+            valid: false,
+            errors: [
+              {
+                path: "/definition/availability",
+                code: "REFERENCE_INVALID",
+                message: "可用范围引用无效或已不存在",
+              },
+            ],
+          });
+        }
+        throw error;
+      }
       return success(request, { valid: true, definitionId: imported.definition.id });
     }
     const idempotency = idempotencyKey(request);
@@ -238,20 +240,21 @@ export function registerAgentDefinitionRoutes(
       .digest("hex")
       .slice(0, 32)}`;
     const notes = imported.revision.versionNotes;
-    if (existing) {
-      const result = await agents.createDraftRevision({
-        actorUserId,
-        idempotencyKey: idempotency,
-        definitionId,
-        revisionId,
-        content,
-        expectedGeneration: request.body.expectedGeneration as number,
-        auditAction: "imported",
-        ...(notes === undefined ? {} : { versionNotes: notes }),
-      });
-      return reply.code(201).send(success(request, result));
-    }
     try {
+      if (existing) {
+        const result = await agents.createDraftRevision({
+          actorUserId,
+          idempotencyKey: idempotency,
+          definitionId,
+          revisionId,
+          content,
+          expectedGeneration: request.body.expectedGeneration as number,
+          auditAction: "imported",
+          importDefinition: { id: imported.definition.id, availability: importedAvailability },
+          ...(notes === undefined ? {} : { versionNotes: notes }),
+        });
+        return reply.code(201).send(success(request, result));
+      }
       const result = await agents.createDraft({
         actorUserId,
         idempotencyKey: idempotency,
@@ -265,6 +268,19 @@ export function registerAgentDefinitionRoutes(
       });
       return reply.code(201).send(success(request, result));
     } catch (error) {
+      if (error instanceof AgentDefinitionAccessError) throw error;
+      if (error instanceof AgentDefinitionValidationError) {
+        throw new AgentConfigurationError([
+          {
+            path:
+              error.message.includes("Tenant") || error.message.includes("可用范围")
+                ? "/definition/availability"
+                : "/revision/content",
+            code: "REFERENCE_INVALID",
+            message: error.message,
+          },
+        ]);
+      }
       if (error instanceof PersistenceError && error.code === "CONSTRAINT_VIOLATION") {
         throw new AgentConfigurationError([
           {

@@ -2438,6 +2438,30 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expectedGeneration: 0,
     });
     expect(draft.definition.status).toBe("draft");
+    const orderedScopeDraft = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_scope_order_test",
+      availability: {
+        mode: "selected_tenants",
+        tenantIds: [other.tenant.id, manager.tenant.id],
+      },
+      content,
+      revisionId: "agent_scope_order_revision",
+      idempotencyKey: "agent-scope-order-create",
+      expectedGeneration: 0,
+    });
+    await expect(
+      repository.validateImport(manager.user.id, {
+        id: orderedScopeDraft.definition.id,
+        availability: {
+          mode: "selected_tenants",
+          tenantIds: [manager.tenant.id, other.tenant.id],
+        },
+        definitionId: orderedScopeDraft.definition.id,
+        expectedGeneration: orderedScopeDraft.definition.generation,
+        content,
+      }),
+    ).resolves.toBeUndefined();
     await expect(
       repository.validateImport(manager.user.id, {
         id: draft.definition.id,
@@ -2475,7 +2499,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expectedGeneration: published.generation,
       content: importedConfiguration.revision.content,
     });
-    const importedRevision = await repository.createDraftRevision({
+    const importedRevisionInput = {
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
       revisionId: "agent_scope_imported_revision",
@@ -2483,7 +2507,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       idempotencyKey: "agent-import-scope-revision",
       expectedGeneration: published.generation,
       auditAction: "imported",
-    });
+      importDefinition: {
+        id: importedConfiguration.definition.id,
+        availability: draft.definition.availability,
+      },
+    } as const;
+    const importedRevision = await repository.createDraftRevision(importedRevisionInput);
+    await expect(repository.createDraftRevision(importedRevisionInput)).resolves.toEqual(
+      importedRevision,
+    );
     expect(importedRevision.status).toBe("draft");
     expect(
       await repository.readCurrentPublished(manager.tenant.id, draft.definition.id),
@@ -3046,8 +3078,20 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         [skillId],
       );
       await client.query(
+        `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
+             entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
+         VALUES ($1,'1.0.0','Agent 固定版本','runtime >= 1',repeat('c',64),
+                 'SKILL.md',repeat('d',64),'test/agent-skill-package','verified','available')`,
+        [skillId],
+      );
+      await client.query(
         `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
          VALUES ($1,'2.0.0','SKILL.md','text/markdown',20,repeat('b',64),'test/tenant-fallback-entrypoint')`,
+        [skillId],
+      );
+      await client.query(
+        `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
+         VALUES ($1,'1.0.0','SKILL.md','text/markdown',20,repeat('d',64),'test/agent-skill-entrypoint')`,
         [skillId],
       );
     });
@@ -3059,15 +3103,100 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ),
     );
     const agents = new PgAgentDefinitionRepository(adminControlPool);
+    const skillContent = {
+      ...defaults.content,
+      skillVersions: [{ skillId, version: "1.0.0" }],
+    };
+    await expect(
+      agents.validateImport(owner.user.id, {
+        id: "agent_skill_missing_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: { ...defaults.content, skillVersions: [{ skillId, version: "3.0.0" }] },
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_missing_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: { ...defaults.content, skillVersions: [{ skillId, version: "3.0.0" }] },
+        revisionId: "agent_skill_missing_revision",
+        idempotencyKey: "agent-skill-missing-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_duplicate_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: {
+          ...defaults.content,
+          skillVersions: [...skillContent.skillVersions, ...skillContent.skillVersions],
+        },
+        revisionId: "agent_skill_duplicate_revision",
+        idempotencyKey: "agent-skill-duplicate-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query("UPDATE skills SET status='revoked' WHERE id=$1", [skillId]);
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_revoked_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: skillContent,
+        revisionId: "agent_skill_revoked_revision",
+        idempotencyKey: "agent-skill-revoked-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query("UPDATE skills SET status='active' WHERE id=$1", [skillId]);
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='revoked' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_revoked_version",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: skillContent,
+        revisionId: "agent_skill_revoked_version_revision",
+        idempotencyKey: "agent-skill-revoked-version",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='available' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
     const draft = await agents.createDraft({
       actorUserId: owner.user.id,
       id: "agent_skill_unavailable",
       availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
-      content: { ...defaults.content, skillVersions: [{ skillId, version: "1.0.0" }] },
+      content: skillContent,
       revisionId: "agent_skill_unavailable_v1",
       idempotencyKey: "agent-skill-unavailable-draft",
       expectedGeneration: 0,
     });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='revoked' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
+    await expect(
+      agents.publish({
+        actorUserId: owner.user.id,
+        definitionId: draft.definition.id,
+        revisionId: draft.revision.id,
+        idempotencyKey: "agent-skill-unavailable-publish",
+        expectedGeneration: draft.definition.generation,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='available' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
     await agents.publish({
       actorUserId: owner.user.id,
       definitionId: draft.definition.id,
@@ -3154,17 +3283,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await app.close();
     }
     await migratorPool.query(
-      `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
-           entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
-       SELECT skill_id,'1.0.0','Agent 固定版本',compatibility,package_digest,
-              entrypoint_path,entrypoint_digest,$2,security_status,'revoked'
-         FROM skill_versions WHERE skill_id=$1 AND version='2.0.0'`,
+      "UPDATE skill_versions SET status='revoked',package_blob_ref=$2 WHERE skill_id=$1 AND version='1.0.0'",
       [skillId, skillSnapshotBlobRef("a".repeat(64), 250, "application/json")],
-    );
-    await migratorPool.query(
-      `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
-       VALUES ($1,'1.0.0','SKILL.md','text/markdown',20,repeat('b',64),$2)`,
-      [skillId, skillSnapshotBlobRef("b".repeat(64), 20, "text/markdown")],
     );
     await expectRejected("revoked");
     await migratorPool.query(

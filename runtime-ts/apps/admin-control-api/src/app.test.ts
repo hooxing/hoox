@@ -1,7 +1,10 @@
 import type { AuthContextResolver } from "@hoox/identity/auth";
 import { userId } from "@hoox/domain";
 import { PersistenceError } from "@hoox/persistence/postgres";
-import { AgentDefinitionValidationError } from "@hoox/persistence/admin";
+import {
+  AgentDefinitionAccessError,
+  AgentDefinitionValidationError,
+} from "@hoox/persistence/admin";
 import { describe, expect, it, vi } from "vitest";
 import { type AdminControlApiDependencies, createAdminControlApiApp } from "./app.js";
 
@@ -289,7 +292,7 @@ describe("后台控制 API", () => {
       payload: { yaml, dryRun: false },
     });
     expect(imported.statusCode).toBe(201);
-    expect(agents.validateImport).toHaveBeenCalledOnce();
+    expect(agents.validateImport).not.toHaveBeenCalled();
     expect(agents.createDraft).toHaveBeenCalledWith(
       expect.objectContaining({ id: "agent_transfer", auditAction: "imported" }),
     );
@@ -306,6 +309,26 @@ describe("后台控制 API", () => {
     expect(missingCredential.json()).toMatchObject({
       data: { valid: false, errors: [{ code: "REFERENCE_INVALID", path: "/revision/content" }] },
     });
+    vi.mocked(agents.validateImport).mockRejectedValueOnce(new AgentDefinitionAccessError());
+    const deniedDryRun = await app.inject({
+      method: "POST",
+      url: `${url}/import`,
+      headers: { authorization: "Bearer admin", "content-type": "application/json" },
+      payload: { yaml, dryRun: true },
+    });
+    expect(deniedDryRun.statusCode).toBe(401);
+    vi.mocked(agents.createDraft).mockRejectedValueOnce(new AgentDefinitionAccessError());
+    const deniedImport = await app.inject({
+      method: "POST",
+      url: `${url}/import`,
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "agent-config-import-denied",
+      },
+      payload: { yaml, dryRun: false },
+    });
+    expect(deniedImport.statusCode).toBe(401);
     await app.close();
   });
 

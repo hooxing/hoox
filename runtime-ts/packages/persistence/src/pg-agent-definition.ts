@@ -243,6 +243,40 @@ async function validateDraft(client: PoolClient, value: AgentRevisionContent) {
     )
       throw new AgentDefinitionValidationError("请选择已保存、已启用且绑定托管凭据的模型");
   }
+  if (content.skillVersions.length > 0) {
+    const skills = await client.query<{
+      skill_id: string;
+      skill_version: string;
+      invocation_name: string | null;
+      skill_status: string | null;
+      version_status: string | null;
+    }>(
+      `SELECT requested.skill_id,requested.skill_version,skill.canonical_key AS invocation_name,
+              skill.status AS skill_status,version.status AS version_status
+         FROM unnest($1::text[],$2::text[]) WITH ORDINALITY
+              AS requested(skill_id,skill_version,ordinality)
+         LEFT JOIN skills skill ON skill.id=requested.skill_id
+         LEFT JOIN skill_versions version
+           ON version.skill_id=requested.skill_id AND version.version=requested.skill_version
+        ORDER BY requested.ordinality`,
+      [
+        content.skillVersions.map((reference) => reference.skillId),
+        content.skillVersions.map((reference) => reference.version),
+      ],
+    );
+    const invocationNames = skills.rows.map((skill) => skill.invocation_name);
+    if (
+      skills.rows.length !== content.skillVersions.length ||
+      skills.rows.some(
+        (skill) => skill.skill_status !== "active" || skill.version_status !== "available",
+      )
+    ) {
+      throw new AgentDefinitionValidationError("只能引用可用状态的 Skill 精确版本");
+    }
+    if (new Set(invocationNames).size !== invocationNames.length) {
+      throw new AgentDefinitionValidationError("Agent 中的 Skill 调用名不得重复");
+    }
+  }
   const selectedTools = content.tools;
   if (selectedTools.mode === "configured") {
     const reserved = new Set([
@@ -315,6 +349,11 @@ function availabilityIds(availability: AgentAvailability) {
     throw new AgentDefinitionValidationError("请提供 1 至 1000 个不重复的 Tenant ID");
   }
   return [...ids].sort();
+}
+function normalizedAvailability(availability: AgentAvailability): AgentAvailability {
+  return availability.mode === "selected_tenants"
+    ? { mode: availability.mode, tenantIds: availabilityIds(availability) }
+    : availability;
 }
 
 async function insertScopes(
@@ -450,7 +489,10 @@ export class PgAgentDefinitionRepository
             definition,
             await scopeIds(client, definition.id, true),
           ).availability;
-          if (canonical(currentAvailability) !== canonical(configuration.availability)) {
+          if (
+            canonical(normalizedAvailability(currentAvailability)) !==
+            canonical(normalizedAvailability(configuration.availability))
+          ) {
             throw new AgentDefinitionValidationError("文件的可用范围与目标 Agent 不一致");
           }
         } else if (await readDefinition(client, configuration.id)) {
@@ -664,6 +706,7 @@ export class PgAgentDefinitionRepository
     idempotencyKey: string;
     expectedGeneration: number;
     auditAction?: "created" | "imported";
+    importDefinition?: { readonly id: string; readonly availability: AgentAvailability };
   }): Promise<StoredAgentRevision> {
     try {
       return await admin(this.pool, input.actorUserId, async (client) => {
@@ -677,6 +720,21 @@ export class PgAgentDefinitionRepository
           definition.status === "revoked"
         ) {
           throw new PersistenceError("CONFLICT", "Agent generation 或状态已变化");
+        }
+        if (input.importDefinition !== undefined) {
+          if (input.importDefinition.id !== definition.id) {
+            throw new AgentDefinitionValidationError("文件中的 Agent ID 与导入目标不一致");
+          }
+          const currentAvailability = mapDefinition(
+            definition,
+            await scopeIds(client, definition.id, true),
+          ).availability;
+          if (
+            canonical(normalizedAvailability(currentAvailability)) !==
+            canonical(normalizedAvailability(input.importDefinition.availability))
+          ) {
+            throw new AgentDefinitionValidationError("文件的可用范围与目标 Agent 不一致");
+          }
         }
         const content = await validateDraft(client, input.content);
         const latest = await client.query<{ next_revision: string }>(

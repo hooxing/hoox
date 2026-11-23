@@ -66,6 +66,27 @@ describe("Agent YAML 配置文件", () => {
   it("拒绝别名、自定义标签和多个 YAML 文档", () => {
     expect(errors("a: &a [x]\nb: *a\n")[0]?.code).toBe("YAML_ALIAS_NOT_ALLOWED");
     expect(errors("x: !custom secret\n")[0]?.code).toBe("YAML_TAG_NOT_ALLOWED");
+    expect(errors("x: !<tag:yaml.org,2002:custom> secret\n")[0]?.code).toBe("YAML_TAG_NOT_ALLOWED");
     expect(errors("a: 1\n---\nb: 2\n")[0]?.code).toBe("INVALID_YAML");
+  });
+
+  it("拒绝原型键且不修改 JavaScript 原型", () => {
+    const yaml = serializeAgentConfiguration(configuration);
+    for (const key of ["__proto__", "constructor", "prototype"]) {
+      const malicious = yaml.replace(
+        "    description: 配置示例",
+        `    description: 配置示例\n    ${key}: polluted`,
+      );
+      expect(errors(malicious)).toContainEqual(expect.objectContaining({ code: "UNKNOWN_FIELD" }));
+    }
+    expect(Object.prototype).not.toHaveProperty("polluted");
+  });
+
+  it("拒绝超过深度与节点数上限的 YAML", () => {
+    const deeplyNested = `${'{"a":'.repeat(66)}0${"}".repeat(66)}`;
+    expect(errors(deeplyNested)[0]?.code).toBe("YAML_COMPLEXITY_LIMIT");
+
+    const manyNodes = `[${Array.from({ length: 100_001 }, () => "0").join(",")}]`;
+    expect(errors(manyNodes)[0]?.code).toBe("YAML_COMPLEXITY_LIMIT");
   });
 });

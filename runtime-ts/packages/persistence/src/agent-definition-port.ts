@@ -40,6 +40,7 @@ export interface CreateAgentRevisionDraftInput {
   readonly idempotencyKey: string;
   readonly expectedGeneration: number;
   readonly auditAction?: "created" | "imported";
+  readonly importDefinition?: { readonly id: string; readonly availability: AgentAvailability };
 }
 export interface AgentDefinitionCommandInput {
   readonly actorUserId: string;

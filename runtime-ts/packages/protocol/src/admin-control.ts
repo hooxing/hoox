@@ -75,8 +75,8 @@ export type ModelProviderConfigurationDto = Static<typeof ModelProviderConfigura
 
 export const AgentMetricsQueryDtoSchema = Type.Object(
   {
-    from: Type.String({ minLength: 20, maxLength: 64 }),
-    to: Type.String({ minLength: 20, maxLength: 64 }),
+    from: IsoTimestampSchema,
+    to: IsoTimestampSchema,
     agentDefinitionId: Type.Optional(IdSchema),
     agentRevisionId: Type.Optional(IdSchema),
     tenantId: Type.Optional(IdSchema),

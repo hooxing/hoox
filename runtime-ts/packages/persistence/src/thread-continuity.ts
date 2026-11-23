@@ -55,6 +55,7 @@ export class PgThreadContinuityMetrics
       throw new TypeError("模型用量观测无效");
     }
     await withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
+      await client.query("SELECT set_config('app.pinned_model_run_id',$1,true)", [input.runId]);
       await client.query(
         `INSERT INTO run_model_pricing_snapshots(
            tenant_id,run_id,model_id,currency,input_per_million,output_per_million,cache_read_per_million
@@ -63,24 +64,36 @@ export class PgThreadContinuityMetrics
                 CASE WHEN model_price.pricing->>'inputPerMillion' ~ '^[0-9]+([.][0-9]+)?$' THEN (model_price.pricing->>'inputPerMillion')::numeric END,
                 CASE WHEN model_price.pricing->>'outputPerMillion' ~ '^[0-9]+([.][0-9]+)?$' THEN (model_price.pricing->>'outputPerMillion')::numeric END,
                 CASE WHEN model_price.pricing->>'cacheReadPerMillion' ~ '^[0-9]+([.][0-9]+)?$' THEN (model_price.pricing->>'cacheReadPerMillion')::numeric END
-           FROM run_runtime_config_snapshots snapshot
+           FROM (
+             SELECT agent.content #>> '{model,providerKey}' AS provider_key,
+                    (agent.content #>> '{model,providerRevision}')::bigint AS provider_revision,
+                    agent.content #>> '{model,modelId}' AS model_id
+               FROM run_agent_snapshots agent
+              WHERE agent.tenant_id=$1 AND agent.run_id=$2
+                AND agent.content #>> '{model,mode}'='pinned'
+             UNION ALL
+             SELECT snapshot.model_object_key,snapshot.model_revision,
+                    revision.configuration->>'defaultModelId'
+               FROM run_runtime_config_snapshots snapshot
+               JOIN admin_control_config_revisions revision
+                 ON revision.object_kind='model_provider'
+                AND revision.object_key=snapshot.model_object_key
+                AND revision.revision=snapshot.model_revision
+              WHERE snapshot.tenant_id=$1 AND snapshot.run_id=$2
+                AND NOT EXISTS (
+                  SELECT 1 FROM run_agent_snapshots agent
+                   WHERE agent.tenant_id=$1 AND agent.run_id=$2
+                     AND agent.content #>> '{model,mode}'='pinned'
+                )
+           ) selected
            JOIN admin_control_config_revisions revision
              ON revision.object_kind='model_provider'
-            AND revision.object_key=snapshot.model_object_key AND revision.revision=snapshot.model_revision
-           JOIN LATERAL (
-             SELECT COALESCE(agent.content #>> '{model,modelId}',revision.configuration->>'defaultModelId') AS model_id
-               FROM run_agent_snapshots agent
-              WHERE agent.tenant_id=snapshot.tenant_id AND agent.run_id=snapshot.run_id
-              UNION ALL
-             SELECT revision.configuration->>'defaultModelId'
-              WHERE NOT EXISTS (SELECT 1 FROM run_agent_snapshots agent WHERE agent.tenant_id=snapshot.tenant_id AND agent.run_id=snapshot.run_id)
-             LIMIT 1
-           ) selected ON true
+            AND revision.object_key=selected.provider_key
+            AND revision.revision=selected.provider_revision
            LEFT JOIN LATERAL (
              SELECT model->'pricing' AS pricing FROM jsonb_array_elements(revision.configuration->'models') model
               WHERE model->>'id'=selected.model_id LIMIT 1
            ) model_price ON true
-          WHERE snapshot.tenant_id=$1 AND snapshot.run_id=$2
          ON CONFLICT(tenant_id,run_id) DO NOTHING`,
         [input.tenantId, input.runId],
       );

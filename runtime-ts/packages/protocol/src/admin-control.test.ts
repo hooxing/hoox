@@ -2,6 +2,7 @@ import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
   CreateModelProviderDraftRequestSchema,
+  AgentMetricsQueryDtoSchema,
   ModelProviderControlRevisionRequestSchema,
   PlatformUserPageDtoSchema,
   RuntimeSettingsConfigurationDtoSchema,
@@ -11,6 +12,22 @@ import {
 } from "./admin-control.js";
 
 describe("后台运营协议", () => {
+  it("指标时间窗口要求真实日历日期和 UTC 时区", () => {
+    for (const from of ["2026-02-30T00:00:00.000Z", "2026-11-22T00:00:00", "2026-11-22"]) {
+      expect(
+        Value.Check(AgentMetricsQueryDtoSchema, {
+          from,
+          to: "2026-11-23T00:00:00.000Z",
+        }),
+      ).toBe(false);
+    }
+    expect(
+      Value.Check(AgentMetricsQueryDtoSchema, {
+        from: "2026-11-22T00:00:00.000Z",
+        to: "2026-11-23T00:00:00.000Z",
+      }),
+    ).toBe(true);
+  });
   it.each(["native", "ptc", undefined, null, "", "PTC", "auto", 1, false])(
     "运行设置协议校验工具调用模式 %s",
     (toolCallingMode) => {

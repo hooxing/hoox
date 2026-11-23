@@ -1233,6 +1233,10 @@ describe("统一平台管理导航", () => {
       const tenantInput = metricInputs[4];
       if (tenantInput === undefined) throw new Error("Tenant 筛选输入框缺失");
       tenantInput.dispatchEvent(new Event("input", { bubbles: true }));
+      const fromInput = metricInputs[0];
+      if (fromInput === undefined) throw new Error("开始时间输入框缺失");
+      setValue?.call(fromInput, "2026-11-19T00:00");
+      fromInput.dispatchEvent(new Event("change", { bubbles: true }));
       const source = metricForm.querySelector("select");
       if (source === null) throw new Error("来源筛选缺失");
       source.value = "evaluation";
@@ -1242,11 +1246,23 @@ describe("统一平台管理导航", () => {
     await settle();
     expect(api.agentMetrics).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        from: new Date("2026-11-19T00:00").toISOString(),
         agentDefinitionId: "agent_alpha",
         tenantId: "tenant_alpha",
         origin: "evaluation",
       }),
     );
+    const appliedCallCount = vi.mocked(api.agentMetrics).mock.calls.length;
+    act(() => {
+      const fromInput = metricInputs[0];
+      if (fromInput === undefined) throw new Error("开始时间输入框缺失");
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setValue?.call(fromInput, "");
+      fromInput.dispatchEvent(new Event("change", { bubbles: true }));
+      metricForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(container.textContent).toContain("请输入有效的开始和结束时间");
+    expect(api.agentMetrics).toHaveBeenCalledTimes(appliedCallCount);
     expect(container.querySelector(".trajectory-viewer-link")).toBeNull();
     expect(container.querySelector("iframe")).toBeNull();
 

@@ -9,6 +9,7 @@ import {
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
 import { PgAdminControlRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
+import { PgThreadContinuityMetrics } from "../../runtime-ts/packages/persistence/src/thread-continuity.js";
 import {
   listRunTrajectoryCleanupTenants,
   PgRunTrajectoryStore,
@@ -266,6 +267,22 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
        COMMIT;`,
     );
     await administrator.query(
+      `INSERT INTO "${schema}".runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
+       VALUES('tenant_a','run_waiting_metrics','thread_1','waiting',
+         '2026-11-19T05:00:00Z','2026-11-19T05:01:00Z','normal')`,
+    );
+    await administrator.query(
+      `BEGIN;
+       SET LOCAL session_replication_role=replica;
+       INSERT INTO "${schema}".execution_attempts(
+         tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage,
+         created_at,updated_at,finished_at
+       ) VALUES('tenant_a','run_waiting_attempt','run_waiting_metrics','thread_1',
+         'workspace_1','run_waiting_metrics','waiting','finished',
+         '2026-11-19T05:00:01Z','2026-11-19T05:01:00Z','2026-11-19T05:01:00Z');
+       COMMIT;`,
+    );
+    await administrator.query(
       `INSERT INTO "${schema}".run_model_pricing_snapshots(
          tenant_id,run_id,model_id,currency,input_per_million,output_per_million,cache_read_per_million
        ) VALUES('tenant_a','run_a2','model-a','USD',1,2,0.5)`,
@@ -321,13 +338,169 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
     expect(evaluationRows.length).toBeGreaterThan(0);
     expect(evaluationRows.every((row) => row.origin === "evaluation")).toBe(true);
     expect(evaluationRows[0]).toMatchObject({ resultUnknownCount: 1, resultUnknownRate: 1 });
+    const waitingRows = await new PgAdminControlRepository(
+      control,
+      {} as never,
+      "unused",
+    ).readAgentMetrics({
+      actorUserId: "user_admin",
+      from: "2026-11-19T05:00:00.000Z",
+      to: "2026-11-19T06:00:00.000Z",
+    });
+    expect(waitingRows).toMatchObject([
+      { runCount: 1, latencyP50Ms: null, latencyP90Ms: null, latencyP99Ms: null },
+    ]);
     expect(JSON.stringify(rows)).not.toContain("SECRET");
     await expect(control.query("SELECT * FROM runs")).rejects.toMatchObject({ code: "42501" });
+    await administrator.query(
+      `DELETE FROM "${schema}".execution_attempts WHERE tenant_id='tenant_a' AND attempt_id='run_waiting_attempt'`,
+    );
+    await administrator.query(
+      `DELETE FROM "${schema}".runs WHERE tenant_id='tenant_a' AND id='run_waiting_metrics'`,
+    );
     await administrator.query(
       `DELETE FROM "${schema}".execution_attempts WHERE tenant_id='tenant_a' AND attempt_id='run_evaluation_attempt'`,
     );
     await administrator.query(
       `DELETE FROM "${schema}".runs WHERE tenant_id='tenant_a' AND id='run_evaluation_metrics'`,
+    );
+  });
+
+  it("指标视图 EXPLAIN 将原始时间窗口下推到 Run 创建时间索引", async () => {
+    const client = await administrator.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SET LOCAL enable_seqscan=off");
+      await client.query("SET LOCAL enable_bitmapscan=off");
+      await client.query("SELECT set_config('app.user_id','user_admin',true)");
+      await client.query(
+        `SELECT set_config('app.agent_metrics_from','2026-11-19T00:00:00Z',true),
+                set_config('app.agent_metrics_to','2026-11-20T00:00:00Z',true),
+                set_config('app.agent_metrics_origin','',true)`,
+      );
+      const plan = await client.query<{ readonly "QUERY PLAN": unknown }>(
+        `EXPLAIN (FORMAT JSON) SELECT window_start FROM "${schema}".admin_agent_metrics_hourly`,
+      );
+      const rendered = JSON.stringify(plan.rows[0]?.["QUERY PLAN"]);
+      expect(rendered).toContain("runs_metrics_created_idx");
+      expect(rendered).toContain("created_at");
+      await client.query("ROLLBACK");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  it("指标查询并发达到上限时快速拒绝，而不排队占用连接", async () => {
+    const client = await administrator.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(6711329,2403)");
+      const repository = new PgAdminControlRepository(control, {} as never, "unused");
+      await expect(
+        repository.readAgentMetrics({
+          actorUserId: "user_admin",
+          from: "2026-11-19T00:00:00.000Z",
+          to: "2026-11-20T00:00:00.000Z",
+        }),
+      ).rejects.toMatchObject({ code: "UNAVAILABLE" });
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
+    }
+  });
+
+  it("Run 用量计价读取 Agent 固定 Provider Revision，而非平台活动 Revision", async () => {
+    const providerConfig = (inputPrice: number) => ({
+      providerKey: "pinned_provider",
+      displayName: "Pinned Provider",
+      protocol: "openai-compatible",
+      baseUrl: "https://model.example.invalid/v1",
+      secretRef: "deployment:model",
+      defaultModelId: "pinned-model",
+      models: [
+        {
+          id: "pinned-model",
+          name: "Pinned Model",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+          pricing: {
+            currency: inputPrice === 7 ? "USD" : "EUR",
+            inputPerMillion: inputPrice,
+            outputPerMillion: 3,
+            cacheReadPerMillion: 1,
+          },
+        },
+      ],
+    });
+    await administrator.query(
+      `BEGIN; SET LOCAL search_path TO "${schema}"; SET LOCAL session_replication_role=replica`,
+    );
+    for (const [revision, price] of [
+      [1, 7],
+      [2, 90],
+    ] as const) {
+      await administrator.query(
+        `INSERT INTO admin_control_config_revisions(
+           object_kind,object_key,revision,configuration,configuration_digest,created_by
+         ) VALUES('model_provider','pinned_provider',$1,$2::jsonb,$3,'user_admin')`,
+        [revision, JSON.stringify(providerConfig(price)), String(revision).repeat(64)],
+      );
+    }
+    await administrator.query(
+      `INSERT INTO admin_control_active_configs(
+         object_kind,object_key,revision,generation,activated_by,reason
+       ) VALUES('model_provider','pinned_provider',2,1,'user_admin','测试切换活动版本')`,
+    );
+    await administrator.query(
+      `INSERT INTO run_agent_snapshots(
+         tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content
+       ) VALUES('tenant_b','run_b1','thread_1','agent_pinned','revision_pinned',repeat('a',64),
+         '{"model":{"mode":"pinned","providerKey":"pinned_provider","providerRevision":1,"modelId":"pinned-model"}}'::jsonb)`,
+    );
+    await administrator.query("COMMIT");
+    const metrics = new PgThreadContinuityMetrics(runtime);
+    await metrics.recordModelUsage({
+      tenantId: "tenant_b" as never,
+      threadId: "thread_1" as never,
+      runId: "run_b1" as never,
+      observationId: "integration:model-usage:pinned-revision",
+      inputTokens: 100_000,
+      outputTokens: 20_000,
+      cacheReadTokens: 50_000,
+      generationDurationMs: 500,
+    });
+    const result = await administrator.query(
+      `SELECT model_id,currency,input_per_million,output_per_million,cache_read_per_million
+         FROM "${schema}".run_model_pricing_snapshots WHERE tenant_id='tenant_b' AND run_id='run_b1'`,
+    );
+    expect(result.rows[0]).toMatchObject({
+      model_id: "pinned-model",
+      currency: "USD",
+      input_per_million: "7.000000",
+      output_per_million: "3.000000",
+      cache_read_per_million: "1.000000",
+    });
+    await administrator.query(
+      `DELETE FROM "${schema}".thread_continuity_metric_observations
+        WHERE tenant_id='tenant_b' AND observation_id LIKE 'integration:model-usage:pinned-revision:%'`,
+    );
+    await administrator.query(
+      `DELETE FROM "${schema}".run_model_pricing_snapshots WHERE tenant_id='tenant_b' AND run_id='run_b1'`,
+    );
+    await administrator.query(
+      `DELETE FROM "${schema}".run_agent_snapshots WHERE tenant_id='tenant_b' AND run_id='run_b1'`,
+    );
+    await administrator.query(
+      `DELETE FROM "${schema}".admin_control_active_configs WHERE object_kind='model_provider' AND object_key='pinned_provider'`,
+    );
+    await administrator.query(
+      `DELETE FROM "${schema}".admin_control_config_revisions WHERE object_kind='model_provider' AND object_key='pinned_provider'`,
     );
   });
 
@@ -927,6 +1100,11 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
   });
 
   it("Agent 指标迁移可安全回退并重新应用", async () => {
+    await administrator.query(
+      `INSERT INTO "${schema}".thread_continuity_metric_observations(
+         tenant_id,observation_id,thread_id,run_id,metric_name,value,unit
+       ) VALUES('tenant_a','legacy-model-call:output','thread_1','run_a1','model_output_tokens',0,'tokens')`,
+    );
     const migrationContract = await loadPostgreSqlMigrationContract();
     const previousVersion = migrationContract.latestVersion - 1;
     await expect(
@@ -946,5 +1124,10 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
       ).rows[0]?.view,
     ).toBeNull();
     await expect(migrateUp(migrator, security)).resolves.toHaveLength(migrationContract.count);
+    const backfilled = await administrator.query(
+      `SELECT value,unit FROM "${schema}".thread_continuity_metric_observations
+        WHERE tenant_id='tenant_a' AND observation_id='legacy-model-call:count'`,
+    );
+    expect(backfilled.rows).toEqual([{ value: 1, unit: "count" }]);
   });
 });

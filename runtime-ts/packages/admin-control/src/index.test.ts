@@ -146,7 +146,17 @@ describe("后台控制面领域规则", () => {
     ).toThrow("最大输出 Token 不能超过上下文窗口");
   });
 
-  it("保留有效单价并拒绝负值、非有限值和非法币种", () => {
+  it("接受可精确表示的六位单价并拒绝超精度、负值和非法币种", () => {
+    for (const price of [1.000001, 0.000123, 0.000249]) {
+      expect(() =>
+        normalizeModelProviderConfiguration({
+          ...modelConfiguration(),
+          models: [
+            { ...firstModelConfiguration(), pricing: { currency: "USD", inputPerMillion: price } },
+          ],
+        }),
+      ).not.toThrow();
+    }
     const priced = normalizeModelProviderConfiguration({
       ...modelConfiguration(),
       models: [
@@ -166,6 +176,7 @@ describe("后台控制面领域规则", () => {
       { currency: "USD", inputPerMillion: -1 },
       { currency: "USD", outputPerMillion: Number.POSITIVE_INFINITY },
       { currency: "USD", cacheReadPerMillion: 0.0000001 },
+      { currency: "USD", inputPerMillion: 1.0000001 },
     ]) {
       expect(() =>
         normalizeModelProviderConfiguration({
@@ -174,6 +185,22 @@ describe("后台控制面领域规则", () => {
         }),
       ).toThrow();
     }
+  });
+
+  it("Agent 指标拒绝无时区和不存在的 UTC 日期", async () => {
+    const readAgentMetrics = vi.fn(async () => []);
+    const service = new AdminControlService(
+      { resolveRole: async () => "viewer", readAgentMetrics } as unknown as AdminControlRepository,
+      {} as never,
+      {} as never,
+      [],
+    );
+    for (const from of ["2026-02-30T00:00:00.000Z", "2026-11-22T00:00:00"]) {
+      await expect(
+        service.agentMetrics("viewer", { from, to: "2026-11-23T00:00:00.000Z" }),
+      ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    }
+    expect(readAgentMetrics).not.toHaveBeenCalled();
   });
 
   it("拒绝未知记忆秘密引用", () => {

@@ -5,8 +5,9 @@ import type {
   PlatformUserPageDto,
   PlatformUserSummaryDto,
 } from "@hoox/protocol";
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AdminControlApiContract } from "./control-api.js";
+import { isoToLocalInput, localInputToIso } from "./run-explorer.js";
 
 function formatDate(value: string | undefined): string {
   if (value === undefined) return "尚无活动";
@@ -264,34 +265,43 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
 export function AgentMetricsDashboard({ api }: { readonly api: AdminControlApiContract }) {
   const initialTo = new Date();
   const initialFrom = new Date(initialTo.valueOf() - 30 * 86_400_000);
-  const [filters, setFilters] = useState({
+  const initialQuery = {
     from: initialFrom.toISOString(),
     to: initialTo.toISOString(),
+  } satisfies AgentMetricsQueryDto;
+  const [filters, setFilters] = useState({
+    from: isoToLocalInput(initialFrom.toISOString()),
+    to: isoToLocalInput(initialTo.toISOString()),
     agentDefinitionId: "",
     agentRevisionId: "",
     tenantId: "",
     origin: "" as AgentMetricsQueryDto["origin"] | "",
   });
+  const [appliedQuery, setAppliedQuery] = useState<AgentMetricsQueryDto>(initialQuery);
   const [items, setItems] = useState<readonly AgentMetricsRowDto[]>([]);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const requestSequence = useRef(0);
   const load = useCallback(
     async (query: AgentMetricsQueryDto) => {
+      const sequence = ++requestSequence.current;
       setBusy(true);
       setError(undefined);
       try {
-        setItems(await api.agentMetrics(query));
+        const result = await api.agentMetrics(query);
+        if (requestSequence.current === sequence) setItems(result);
       } catch {
-        setError("指标读取失败，请缩短时间范围或增加筛选条件后重试。");
+        if (requestSequence.current === sequence)
+          setError("指标读取失败，请缩短时间范围或增加筛选条件后重试。");
       } finally {
-        setBusy(false);
+        if (requestSequence.current === sequence) setBusy(false);
       }
     },
     [api],
   );
   useEffect(() => {
-    void load({ from: filters.from, to: filters.to });
-  }, [filters.from, filters.to, load]);
+    void load(appliedQuery);
+  }, [appliedQuery, load]);
   const trend = useMemo(() => {
     const counts = new Map<string, number>();
     for (const item of items)
@@ -304,11 +314,28 @@ export function AgentMetricsDashboard({ api }: { readonly api: AdminControlApiCo
       height: Math.max(4, (count / maximum) * 100),
     }));
   }, [items]);
+  const hasUnappliedFilters =
+    filters.from !== isoToLocalInput(appliedQuery.from) ||
+    filters.to !== isoToLocalInput(appliedQuery.to) ||
+    filters.agentDefinitionId !== (appliedQuery.agentDefinitionId ?? "") ||
+    filters.agentRevisionId !== (appliedQuery.agentRevisionId ?? "") ||
+    filters.tenantId !== (appliedQuery.tenantId ?? "") ||
+    filters.origin !== (appliedQuery.origin ?? "");
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    void load({
-      from: filters.from,
-      to: filters.to,
+    const from = localInputToIso(filters.from);
+    const to = localInputToIso(filters.to);
+    if (from === undefined || to === undefined || Date.parse(to) <= Date.parse(from)) {
+      setError("请输入有效的开始和结束时间，并确保结束时间晚于开始时间。");
+      return;
+    }
+    if (Date.parse(to) - Date.parse(from) > 90 * 86_400_000) {
+      setError("指标时间范围不能超过 90 天。");
+      return;
+    }
+    setAppliedQuery({
+      from,
+      to,
       ...(filters.agentDefinitionId ? { agentDefinitionId: filters.agentDefinitionId } : {}),
       ...(filters.agentRevisionId ? { agentRevisionId: filters.agentRevisionId } : {}),
       ...(filters.tenantId ? { tenantId: filters.tenantId } : {}),
@@ -341,20 +368,16 @@ export function AgentMetricsDashboard({ api }: { readonly api: AdminControlApiCo
           开始时间
           <input
             type="datetime-local"
-            value={filters.from.slice(0, 16)}
-            onChange={(event) =>
-              setFilters({ ...filters, from: new Date(event.target.value).toISOString() })
-            }
+            value={filters.from}
+            onChange={(event) => setFilters({ ...filters, from: event.target.value })}
           />
         </label>
         <label>
           结束时间
           <input
             type="datetime-local"
-            value={filters.to.slice(0, 16)}
-            onChange={(event) =>
-              setFilters({ ...filters, to: new Date(event.target.value).toISOString() })
-            }
+            value={filters.to}
+            onChange={(event) => setFilters({ ...filters, to: event.target.value })}
           />
         </label>
         <label>
@@ -397,6 +420,11 @@ export function AgentMetricsDashboard({ api }: { readonly api: AdminControlApiCo
           {busy ? "读取中…" : "应用筛选"}
         </button>
       </form>
+      {hasUnappliedFilters && (
+        <p role="status" className="muted-note">
+          筛选条件已修改；点击“应用筛选”后更新结果。
+        </p>
+      )}
       {error && (
         <p role="alert" className="empty-state">
           {error}

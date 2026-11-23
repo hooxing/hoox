@@ -1,5 +1,6 @@
 import {
   type AgentPinnedModelReferenceDto,
+  isIsoUtcTimestamp,
   normalizeRuntimeToolSelection,
   type RuntimeToolName,
 } from "@hoox/protocol";
@@ -534,7 +535,7 @@ function normalizedModelProviderConfiguration(
           (!Number.isFinite(price) ||
             price < 0 ||
             price > 1_000_000 ||
-            !Number.isInteger(price * 1_000_000))
+            Number(price.toFixed(6)) !== price)
         ) {
           throw new TypeError(`${label}单价无效`);
         }
@@ -789,8 +790,8 @@ export class AdminControlService {
     query: Omit<AgentMetricsQuery, "actorUserId">,
   ): Promise<readonly AgentMetricsBucket[]> {
     requireRole(await this.repository.resolveRole(actorUserId), ["viewer", "operator", "admin"]);
-    const from = Date.parse(query.from);
-    const to = Date.parse(query.to);
+    const from = isIsoUtcTimestamp(query.from) ? Date.parse(query.from) : Number.NaN;
+    const to = isIsoUtcTimestamp(query.to) ? Date.parse(query.to) : Number.NaN;
     if (
       !Number.isFinite(from) ||
       !Number.isFinite(to) ||

@@ -20,8 +20,7 @@ CREATE POLICY run_model_pricing_snapshots_tenant_policy ON run_model_pricing_sna
   USING (tenant_id=NULLIF(current_setting('app.tenant_id',true),''))
   WITH CHECK (tenant_id=NULLIF(current_setting('app.tenant_id',true),''));
 
-CREATE INDEX runs_metrics_created_idx ON runs(created_at,tenant_id)
-  WHERE origin NOT IN ('playground','evaluation');
+CREATE INDEX runs_metrics_created_idx ON runs(created_at,tenant_id);
 CREATE INDEX run_metrics_observation_run_idx ON thread_continuity_metric_observations(tenant_id,run_id,metric_name)
   WHERE run_id IS NOT NULL AND metric_name IN (
     'model_input_tokens','model_output_tokens','model_cache_read_tokens','model_generation_duration_ms',
@@ -45,6 +44,18 @@ ALTER TABLE thread_continuity_metric_observations
     'model_generation_duration_ms','model_generation_count'
   ));
 
+ALTER TABLE thread_continuity_metric_observations NO FORCE ROW LEVEL SECURITY;
+INSERT INTO thread_continuity_metric_observations(
+  tenant_id,observation_id,thread_id,run_id,metric_name,value,unit
+)
+SELECT tenant_id,regexp_replace(observation_id, ':output$', ':count'),thread_id,run_id,
+       'model_generation_count',1,'count'
+  FROM thread_continuity_metric_observations
+ WHERE metric_name='model_output_tokens' AND run_id IS NOT NULL
+   AND observation_id ~ ':output$'
+ON CONFLICT (tenant_id,observation_id) DO NOTHING;
+ALTER TABLE thread_continuity_metric_observations FORCE ROW LEVEL SECURITY;
+
 DO $$
 DECLARE migrator_role text := current_user;
 BEGIN
@@ -62,7 +73,9 @@ WITH run_facts AS (
          CASE WHEN latest.status IN ('recovery_required','abandoned') THEN 1 ELSE 0 END AS result_unknown,
          CASE WHEN r.status='succeeded' THEN 1 ELSE 0 END AS succeeded,
          CASE WHEN r.status='failed' THEN 1 ELSE 0 END AS failed,
-         CASE WHEN latest.finished_at IS NULL THEN NULL ELSE latest.finished_at-r.created_at END AS duration,
+         CASE WHEN (r.status IN ('succeeded','failed','cancelled') OR latest.status IN ('recovery_required','abandoned'))
+                    AND latest.finished_at IS NOT NULL
+              THEN latest.finished_at-r.created_at END AS duration,
          COALESCE(usage.input_tokens,0) AS input_tokens,
          COALESCE(usage.output_tokens,0) AS output_tokens,
          COALESCE(usage.cache_read_tokens,0) AS cache_read_tokens,
@@ -96,6 +109,17 @@ WITH run_facts AS (
        WHERE e.tenant_id=r.tenant_id AND e.attempt_id=latest.attempt_id
     ) events ON true
     LEFT JOIN run_model_pricing_snapshots pricing ON pricing.tenant_id=r.tenant_id AND pricing.run_id=r.id
+   WHERE r.created_at >= NULLIF(current_setting('app.agent_metrics_from',true),'')::timestamptz
+     AND r.created_at < NULLIF(current_setting('app.agent_metrics_to',true),'')::timestamptz
+     AND (NULLIF(current_setting('app.agent_metrics_agent_id',true),'') IS NULL
+          OR t.agent_definition_id=NULLIF(current_setting('app.agent_metrics_agent_id',true),''))
+     AND (NULLIF(current_setting('app.agent_metrics_revision_id',true),'') IS NULL
+          OR s.revision_id=NULLIF(current_setting('app.agent_metrics_revision_id',true),''))
+     AND (NULLIF(current_setting('app.agent_metrics_tenant_id',true),'') IS NULL
+          OR r.tenant_id=NULLIF(current_setting('app.agent_metrics_tenant_id',true),''))
+     AND CASE WHEN NULLIF(current_setting('app.agent_metrics_origin',true),'') IS NULL
+              THEN r.origin NOT IN ('playground','evaluation')
+              ELSE r.origin=NULLIF(current_setting('app.agent_metrics_origin',true),'') END
 ), grouped AS (
   SELECT date_trunc('hour',created_at) AS window_start,agent_definition_id,agent_revision_id,tenant_id,origin,currency,
          count(*)::bigint AS run_count,

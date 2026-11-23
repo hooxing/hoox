@@ -218,13 +218,15 @@ function statusLabel(value: string): string {
 }
 
 /** datetime-local 输入按浏览器本地时区解释，提交前转为 UTC ISO 时间。 */
-function localInputToIso(value: string): string | undefined {
+export function localInputToIso(value: string): string | undefined {
   if (value.length === 0) return undefined;
   const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf()) ? undefined : parsed.toISOString();
+  if (Number.isNaN(parsed.valueOf())) return undefined;
+  const normalized = parsed.toISOString();
+  return isoToLocalInput(normalized) === value ? normalized : undefined;
 }
 
-function isoToLocalInput(value: string | null): string {
+export function isoToLocalInput(value: string | null): string {
   if (value === null) return "";
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp)

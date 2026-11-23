@@ -30,7 +30,7 @@ import {
   type RuntimeStatistics,
 } from "@hoox/admin-control";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
-import { mapPersistenceError } from "./errors.js";
+import { mapPersistenceError, PersistenceError } from "./errors.js";
 import {
   type EncryptedModelProviderCredential,
   isEncryptedModelProviderCredential,
@@ -1032,7 +1032,29 @@ export class PgAdminControlRepository
   async readAgentMetrics(input: AgentMetricsQuery): Promise<readonly AgentMetricsBucket[]> {
     try {
       return await withTransaction(this.pool, async (client) => {
+        const lock = await client.query<{ readonly acquired: boolean }>(
+          "SELECT pg_try_advisory_xact_lock(6711329, 2403) AS acquired",
+        );
+        if (!lock.rows[0]?.acquired) {
+          throw new PersistenceError("UNAVAILABLE", "指标查询繁忙，请稍后重试");
+        }
         await client.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
+        await client.query(
+          `SELECT set_config('app.agent_metrics_from',$1,true),
+                  set_config('app.agent_metrics_to',$2,true),
+                  set_config('app.agent_metrics_agent_id',$3,true),
+                  set_config('app.agent_metrics_revision_id',$4,true),
+                  set_config('app.agent_metrics_tenant_id',$5,true),
+                  set_config('app.agent_metrics_origin',$6,true)`,
+          [
+            input.from,
+            input.to,
+            input.agentDefinitionId ?? "",
+            input.agentRevisionId ?? "",
+            input.tenantId ?? "",
+            input.origin ?? "",
+          ],
+        );
         const result = await client.query<QueryResultRow & Record<string, unknown>>(
           `SELECT window_start,agent_definition_id,agent_revision_id,tenant_id,origin,currency,
                   run_count,succeeded_count,failed_count,result_unknown_count,
@@ -1040,22 +1062,8 @@ export class PgAdminControlRepository
                   latency_p50_ms,latency_p90_ms,latency_p99_ms,average_model_rounds,
                   tool_calls,failed_tool_calls,input_tokens,output_tokens,cache_read_tokens,cost
              FROM admin_agent_metrics_hourly
-            WHERE window_start >= date_trunc('hour',$1::timestamptz)
-              AND window_start < $2::timestamptz
-              AND ($3::text IS NULL OR agent_definition_id=$3)
-              AND ($4::text IS NULL OR agent_revision_id=$4)
-              AND ($5::text IS NULL OR tenant_id=$5)
-              AND (CASE WHEN $6::text IS NULL THEN origin NOT IN ('playground','evaluation') ELSE origin=$6 END)
             ORDER BY window_start,agent_definition_id,agent_revision_id,tenant_id,currency
             LIMIT 10001`,
-          [
-            input.from,
-            input.to,
-            input.agentDefinitionId ?? null,
-            input.agentRevisionId ?? null,
-            input.tenantId ?? null,
-            input.origin ?? null,
-          ],
         );
         if (result.rows.length > 10_000)
           throw new Error("指标筛选结果过多，请缩短时间范围或增加筛选条件");

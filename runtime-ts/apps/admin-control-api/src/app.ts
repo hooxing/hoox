@@ -783,6 +783,7 @@ function failureKind(error: unknown, request: FastifyRequest): FailureKind {
   if (
     error instanceof PersistenceError &&
     (request.url.startsWith("/v1/admin/control/agent-definitions") ||
+      request.routeOptions.url?.startsWith("/v1/admin/control/agent-metrics") ||
       request.routeOptions.url?.startsWith(EXTERNAL_TOOL_ROUTE_PREFIX) ||
       request.routeOptions.url?.startsWith("/v1/admin/control/integrations/"))
   ) {

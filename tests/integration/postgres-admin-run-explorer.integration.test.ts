@@ -379,11 +379,35 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
                 set_config('app.agent_metrics_origin','',true)`,
       );
       const plan = await client.query<{ readonly "QUERY PLAN": unknown }>(
-        `EXPLAIN (FORMAT JSON) SELECT window_start FROM "${schema}".admin_agent_metrics_hourly`,
+        `EXPLAIN (FORMAT JSON)
+         SELECT window_start,agent_definition_id,agent_revision_id,tenant_id,origin,currency,
+                run_count,succeeded_count,failed_count,result_unknown_count,
+                success_rate,failure_rate,result_unknown_rate,tool_failure_rate,
+                latency_p50_ms,latency_p90_ms,latency_p99_ms,average_model_rounds,
+                tool_calls,failed_tool_calls,input_tokens,output_tokens,cache_read_tokens,cost
+           FROM "${schema}".admin_agent_metrics_hourly
+          ORDER BY window_start,agent_definition_id,agent_revision_id,tenant_id,currency
+          LIMIT 10001`,
       );
-      const rendered = JSON.stringify(plan.rows[0]?.["QUERY PLAN"]);
-      expect(rendered).toContain("runs_metrics_created_idx");
-      expect(rendered).toContain("created_at");
+      const planRoot = plan.rows[0]?.["QUERY PLAN"] as
+        | readonly { readonly Plan?: Record<string, unknown> }[]
+        | undefined;
+      const scanNodes: Record<string, unknown>[] = [];
+      const visit = (node: unknown) => {
+        if (typeof node !== "object" || node === null) return;
+        const record = node as Record<string, unknown>;
+        if (record["Relation Name"] === "runs") scanNodes.push(record);
+        for (const value of Object.values(record)) {
+          if (Array.isArray(value)) value.forEach(visit);
+          else if (typeof value === "object" && value !== null) visit(value);
+        }
+      };
+      visit(planRoot?.[0]?.Plan);
+      const runScan = scanNodes.find((node) => node["Index Name"] === "runs_metrics_created_idx");
+      expect(runScan).toBeDefined();
+      const indexCondition = String(runScan?.["Index Cond"]);
+      expect(indexCondition).toContain("created_at >=");
+      expect(indexCondition).toContain("created_at <");
       await client.query("ROLLBACK");
     } catch (error) {
       await client.query("ROLLBACK");

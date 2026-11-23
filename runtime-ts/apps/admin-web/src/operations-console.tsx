@@ -344,9 +344,10 @@ export function AgentMetricsDashboard({ api }: { readonly api: AdminControlApiCo
   };
   const runLink = (item: AgentMetricsRowDto) => {
     const hour = Date.parse(item.windowStart);
+    const bucketEnd = hour + 3_599_999;
     const params = new URLSearchParams({
-      createdFrom: item.windowStart,
-      createdTo: new Date(hour + 3_599_999).toISOString(),
+      createdFrom: new Date(Math.max(hour, Date.parse(appliedQuery.from))).toISOString(),
+      createdTo: new Date(Math.min(bucketEnd, Date.parse(appliedQuery.to))).toISOString(),
     });
     if (item.agentDefinitionId) params.set("agentDefinitionId", item.agentDefinitionId);
     if (item.agentRevisionId) params.set("agentRevisionId", item.agentRevisionId);

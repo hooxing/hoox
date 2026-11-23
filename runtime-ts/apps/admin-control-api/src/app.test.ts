@@ -1,5 +1,6 @@
 import type { AuthContextResolver } from "@hoox/identity/auth";
 import { userId } from "@hoox/domain";
+import { PersistenceError } from "@hoox/persistence/postgres";
 import { describe, expect, it, vi } from "vitest";
 import { type AdminControlApiDependencies, createAdminControlApiApp } from "./app.js";
 
@@ -201,6 +202,21 @@ describe("后台控制 API", () => {
       to: "2026-08-02T00:00:00.000Z",
       origin: "evaluation",
     });
+    await app.close();
+  });
+
+  it("指标查询繁忙时返回 503", async () => {
+    const { app, control } = fixture();
+    vi.mocked(control.agentMetrics).mockRejectedValueOnce(
+      new PersistenceError("UNAVAILABLE", "指标查询繁忙，请稍后重试"),
+    );
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/admin/control/agent-metrics?from=2026-08-01T00%3A00%3A00.000Z&to=2026-08-02T00%3A00%3A00.000Z",
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ error: { code: "DEPENDENCY_UNAVAILABLE" } });
     await app.close();
   });
 

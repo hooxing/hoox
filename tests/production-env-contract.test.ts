@@ -9,6 +9,75 @@ import {
 const example = readFileSync(new URL("../deploy/production.env.example", import.meta.url), "utf8");
 
 describe("production 部署配置契约", () => {
+  it("按运行时 dotenv 解析带引号值、行尾注释和 CRLF", () => {
+    const source = example
+      .replace(
+        "S3_ENDPOINT=https://s3.internal.example.invalid",
+        'S3_ENDPOINT="https://s3.internal.example.invalid" # endpoint',
+      )
+      .replace("S3_BUCKET=agent-runtime-production", "S3_BUCKET=agent-runtime-production # bucket")
+      .replace("S3_REGION=us-east-1", 'S3_REGION="us-east-1" # region')
+      .replace(
+        "S3_ACCESS_KEY_ID=replace-with-production-s3-access-key",
+        'S3_ACCESS_KEY_ID="replace-with-access-key" # key',
+      )
+      .replace(
+        "S3_SECRET_ACCESS_KEY=replace-with-production-s3-secret-key",
+        'S3_SECRET_ACCESS_KEY="replace-with-secret-key" # secret',
+      )
+      .replace("S3_FORCE_PATH_STYLE=false", 'S3_FORCE_PATH_STYLE="false" # boolean')
+      .replaceAll("\n", "\r\n");
+    expect(validateProductionEnvironmentExample(source)).toEqual([]);
+  });
+
+  it.each([
+    "S3_ENDPOINT",
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_FORCE_PATH_STYLE",
+  ])("解析后的空串或纯空白 %s 会失败", (key) => {
+    const line = new RegExp(`^${key}=.*$`, "mu");
+    for (const value of ['""', '"   "', "   # comment"]) {
+      expect(
+        validateProductionEnvironmentExample(example.replace(line, `${key}=${value}`)),
+      ).toContain(`环境变量不能为空：${key}`);
+    }
+  });
+
+  it("S3 字符串拒绝非空的首尾空白", () => {
+    const issues = validateProductionEnvironmentExample(
+      example.replace("S3_BUCKET=agent-runtime-production", 'S3_BUCKET=" runtime-production "'),
+    );
+    expect(issues).toContain("环境变量不能包含首尾空白：S3_BUCKET");
+  });
+
+  it.each([
+    "S3_ENDPOINT",
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_FORCE_PATH_STYLE",
+  ])("Scheduler 与 Admin Control 也需要的 %s 必须声明且不能为空", (key) => {
+    const pattern = new RegExp(`^${key}=.*$`, "mu");
+    expect(validateProductionEnvironmentExample(example.replace(pattern, ""))).toContain(
+      `缺少环境变量：${key}`,
+    );
+    expect(validateProductionEnvironmentExample(example.replace(pattern, `${key}=`))).toContain(
+      `环境变量不能为空：${key}`,
+    );
+  });
+
+  it("对象存储路径开关必须是布尔值且不回显非法配置", () => {
+    const issues = validateProductionEnvironmentExample(
+      example.replace("S3_FORCE_PATH_STYLE=false", "S3_FORCE_PATH_STYLE=invalid-placeholder"),
+    );
+    expect(issues).toContain("S3_FORCE_PATH_STYLE 必须为 true 或 false");
+    expect(issues.join(" ")).not.toContain("invalid-placeholder");
+  });
+
   it("OTLP 样例拒绝带凭据的端点和请求头且不回显配置值", () => {
     const issues = validateProductionEnvironmentExample(
       example

@@ -1,3 +1,4 @@
+import { EnvironmentConfigurationError } from "@hoox/process-runtime";
 import { selectSchedulerProcessEnvironment, startSchedulerProcess } from "./process-entry.js";
 
 try {
@@ -20,7 +21,11 @@ try {
   }
   if (readiness.status !== "ready") console.info("Scheduler 等待沙箱配置；保存配置后自动就绪");
   console.info("Scheduler 生产进程已启动");
-} catch {
-  console.error("Scheduler 生产进程启动失败");
+} catch (error) {
+  console.error(
+    error instanceof EnvironmentConfigurationError
+      ? `Scheduler 生产进程启动失败：${error.message}`
+      : "Scheduler 生产进程启动失败",
+  );
   process.exitCode = 1;
 }

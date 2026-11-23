@@ -6,6 +6,34 @@ function source(path: string): string {
 }
 
 describe("Demo 持续部署契约", () => {
+  it.each(["scheduler", "admin-control"])(
+    "%s 轨迹对象存储必填项完整，且不混用 Skill 发布凭据",
+    (service) => {
+      const example = source(`deploy/demo/${service}.env.example`);
+      for (const key of [
+        "S3_ENDPOINT",
+        "S3_BUCKET",
+        "S3_REGION",
+        "S3_ACCESS_KEY_ID",
+        "S3_SECRET_ACCESS_KEY",
+        "S3_FORCE_PATH_STYLE",
+      ]) {
+        expect(example, key).toMatch(new RegExp(`^${key}=\\S+$`, "mu"));
+      }
+      expect(example).toContain("S3_ENDPOINT=http://127.0.0.1:19000");
+      expect(example).toContain("S3_BUCKET=agent-runtime-demo");
+      expect(example).toContain("S3_FORCE_PATH_STYLE=true");
+      for (const key of ["S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"]) {
+        expect(example).toMatch(new RegExp(`^${key}=replace-`, "mu"));
+      }
+      if (service === "admin-control") {
+        const runtimeKey = example.match(/^S3_ACCESS_KEY_ID=(.*)$/mu)?.[1];
+        const publisherKey = example.match(/^SKILL_PUBLISHER_S3_ACCESS_KEY_ID=(.*)$/mu)?.[1];
+        expect(runtimeKey).not.toBe(publisherKey);
+      }
+    },
+  );
+
   it("只在 main 的绿色 CI 后自动发布，并始终使用固定 commit 的 Action 与镜像 digest", () => {
     const workflow = source(".github/workflows/cd-demo.yml");
     expect(workflow).toContain('workflows: ["持续集成"]');

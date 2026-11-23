@@ -5,25 +5,72 @@ set -euo pipefail
 export HOOX_DEMO_ROOT="$(cd "$FIXTURE_ROOT" && pwd)"
 export TMPDIR="$HOOX_DEMO_ROOT/tmp"
 
+compose_services() {
+  awk '
+    /^services:[[:space:]]*$/ { in_services = 1; next }
+    in_services && /^[^[:space:]]/ { exit }
+    in_services && /^  [[:alnum:]_-]+:/ {
+      service = $1
+      sub(/:$/, "", service)
+      print service
+    }
+  ' "$1"
+}
+
 docker() {
   printf 'docker %s\n' "$*" >>"$MOCK_LOG"
+  local compose_file="" previous_argument="" argument service declared_services
+  if [[ "$1" == compose ]]; then
+    local env_file=""
+    for argument in "$@"; do
+      if [[ "$previous_argument" == --env-file ]]; then env_file="$argument"; fi
+      if [[ "$previous_argument" == -f ]]; then compose_file="$argument"; fi
+      previous_argument="$argument"
+    done
+    if [[ -f "$compose_file" ]]; then
+      declared_services="$(compose_services "$compose_file")"
+    fi
+    local resolved_image="${HOOX_DEMO_IMAGE-}" resolved_directory="${HOOX_DEMO_RELEASE_DIR-}"
+    local resolved_release="${HOOX_DEMO_RELEASE_ID-}" resolved_tenant="${DEMO_TENANT_ID-}" resolved_admin="${DEMO_ADMIN_USER_ID-}"
+    if [[ ! ${HOOX_DEMO_IMAGE+x} ]]; then resolved_image="$(sed -n 's/^HOOX_DEMO_IMAGE=//p' "$env_file" | tail -n 1)"; fi
+    if [[ ! ${HOOX_DEMO_RELEASE_DIR+x} ]]; then resolved_directory="$(sed -n 's/^HOOX_DEMO_RELEASE_DIR=//p' "$env_file" | tail -n 1)"; fi
+    if [[ ! ${HOOX_DEMO_RELEASE_ID+x} ]]; then resolved_release="$(sed -n 's/^HOOX_DEMO_RELEASE_ID=//p' "$env_file" | tail -n 1)"; fi
+    if [[ ! ${DEMO_TENANT_ID+x} ]]; then resolved_tenant="$(sed -n 's/^DEMO_TENANT_ID=//p' "$env_file" | tail -n 1)"; fi
+    if [[ ! ${DEMO_ADMIN_USER_ID+x} ]]; then resolved_admin="$(sed -n 's/^DEMO_ADMIN_USER_ID=//p' "$env_file" | tail -n 1)"; fi
+    if [[ "$*" == *' config --services'* ]]; then
+      printf '%s\n' "$declared_services"
+      return 0
+    fi
+    if [[ "$*" == *' up '* ]]; then
+      printf 'up image=%s\n' "$resolved_image" >>"$MOCK_LOG"
+      for service in "$@"; do
+        case "$service" in
+          api|web|admin-control|admin-web|scheduler|worker|trajectory)
+            if ! printf '%s\n' "$declared_services" | grep -Fxq "$service"; then
+              printf 'rejected missing service=%s compose=%s\n' "$service" "$compose_file" >>"$MOCK_LOG"
+              return 1
+            fi
+            printf '%s' "$resolved_image|$resolved_directory|$resolved_release|$resolved_tenant|$resolved_admin" >"$FIXTURE_ROOT/$service.image"
+            ;;
+        esac
+      done
+    fi
+  fi
   if [[ "$*" == *' pull '* && "$MOCK_MODE" == command-failure ]]; then
     return 37
   fi
   if [[ "$*" == *'--entrypoint node scheduler --input-type=module -e'* ]]; then
     local probe="${!#}" scheduler_url
-    scheduler_url="$(sed -n 's/^WEBHOOK_DISPATCHER_DATABASE_URL=//p' "$HOOX_DEMO_ROOT/shared/scheduler.env" | tail -n 1)"
+    scheduler_url="$(sed -n 's/^WEBHOOK_DISPATCHER_DATABASE_URL=//p' "$FIXTURE_ROOT/shared/scheduler.env" | tail -n 1)"
     local directory_url
-    directory_url="$(sed -n 's/^DATABASE_TRAJECTORY_DIRECTORY_URL=//p' "$HOOX_DEMO_ROOT/shared/scheduler.env" | tail -n 1)"
+    directory_url="$(sed -n 's/^DATABASE_TRAJECTORY_DIRECTORY_URL=//p' "$FIXTURE_ROOT/shared/scheduler.env" | tail -n 1)"
     (
-      cd "$HOOX_DEMO_ROOT"
+      cd "$FIXTURE_ROOT"
       DATABASE_TRAJECTORY_DIRECTORY_URL="$directory_url" WEBHOOK_DISPATCHER_DATABASE_URL="$scheduler_url" node --input-type=module -e "$probe"
     )
     return
   fi
-  if [[ "$*" == *'config --services'* ]]; then
-    printf 'postgres\nminio\napi\nweb\nadmin-control\nadmin-web\nscheduler\nworker\n'
-  elif [[ "$*" == *'exec -T postgres pg_dump'* ]]; then
+  if [[ "$*" == *'exec -T postgres pg_dump'* ]]; then
     if [[ "$MOCK_MODE" == config-export-dump-failure ]]; then
       return 23
     fi
@@ -61,7 +108,7 @@ docker() {
       printf 'user_demo|tenant_demo\n'
     fi
   elif [[ "$*" == *' ps -q '* ]]; then
-    printf 'test-container\n'
+    printf 'test-%s-container\n' "${!#}"
   elif [[ "$1" == inspect ]]; then
     if [[ "$*" == *'RestartCount'* ]]; then
       if [[ "$MOCK_MODE" == worker-restarting ]]; then
@@ -69,6 +116,8 @@ docker() {
       else
         printf 'true|0\n'
       fi
+    elif [[ "$*" == *test-scheduler-container* && "$MOCK_MODE" == *startup-failure ]]; then
+      printf 'false\n'
     else
       printf 'true\n'
     fi
@@ -108,7 +157,7 @@ python3() {
 sudo() { return 0; }
 sleep() { return 0; }
 find() { return 0; }
-ln() { printf 'ln %s\n' "$*" >>"$MOCK_LOG"; }
+ln() { printf 'ln %s\n' "$*" >>"$MOCK_LOG"; command ln "$@"; }
 rm() {
   printf 'rm\n' >>"$MOCK_LOG"
   if [[ "$MOCK_MODE" == cleanup-failure ]]; then

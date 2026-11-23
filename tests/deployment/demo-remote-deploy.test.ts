@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -25,20 +26,37 @@ afterEach(() => {
 });
 
 const webhookKey = "webhook-root-placeholder-at-least-32-bytes";
+const s3Configuration = [
+  "S3_ENDPOINT=http://127.0.0.1:19000",
+  "S3_BUCKET=agent-runtime-demo",
+  "S3_REGION=us-east-1",
+  "S3_ACCESS_KEY_ID=s3-access-placeholder",
+  "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
+  "S3_FORCE_PATH_STYLE=true",
+  "",
+].join("\n");
+const applicationServices = ["api", "web", "admin-control", "admin-web", "scheduler", "worker"];
+const baseServices = ["postgres", "minio", ...applicationServices];
+
+function composeFixture(services: readonly string[]): string {
+  return [`services:`, ...services.map((service) => `  ${service}: {}`), ""].join("\n");
+}
 const webhookFiles = {
   infra:
     "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\nDATABASE_WEBHOOK_DISPATCHER_PASSWORD=placeholder-password\nDATABASE_TRAJECTORY_DIRECTORY_ROLE=trajectory_directory\nDATABASE_TRAJECTORY_DIRECTORY_PASSWORD=directory-placeholder\n",
   migration:
     "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\nDATABASE_TRAJECTORY_DIRECTORY_ROLE=trajectory_directory\n",
   api: `WEBHOOK_SECRET_ENCRYPTION_KEY=${webhookKey}\n`,
-  scheduler: [
-    `WEBHOOK_SECRET_ENCRYPTION_KEY=${webhookKey}`,
-    "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher",
-    "WEBHOOK_DISPATCHER_DATABASE_URL=postgresql://hoox_demo_webhook_dispatcher:placeholder-password@127.0.0.1:15432/test_db",
-    "DATABASE_TRAJECTORY_DIRECTORY_ROLE=trajectory_directory",
-    "DATABASE_TRAJECTORY_DIRECTORY_URL=postgresql://trajectory_directory:directory-placeholder@127.0.0.1:15432/test_db",
-    "",
-  ].join("\n"),
+  scheduler:
+    s3Configuration +
+    [
+      `WEBHOOK_SECRET_ENCRYPTION_KEY=${webhookKey}`,
+      "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher",
+      "WEBHOOK_DISPATCHER_DATABASE_URL=postgresql://hoox_demo_webhook_dispatcher:placeholder-password@127.0.0.1:15432/test_db",
+      "DATABASE_TRAJECTORY_DIRECTORY_ROLE=trajectory_directory",
+      "DATABASE_TRAJECTORY_DIRECTORY_URL=postgresql://trajectory_directory:directory-placeholder@127.0.0.1:15432/test_db",
+      "",
+    ].join("\n"),
 };
 
 function deploy(
@@ -83,7 +101,14 @@ exports.Client = class {
   }
 };\n`,
   );
-  for (const file of ["docker-compose.yml", "postgres-init.sh", "nginx.conf.template"]) {
+  writeFileSync(join(root, "releases/candidate/docker-compose.yml"), composeFixture(baseServices));
+  const previousServices =
+    mode === "legacy-startup-failure" ? [...baseServices, "trajectory"] : baseServices;
+  writeFileSync(
+    join(root, "releases/previous/docker-compose.yml"),
+    composeFixture(previousServices),
+  );
+  for (const file of ["postgres-init.sh", "nginx.conf.template"]) {
     writeFileSync(join(root, "releases/candidate", file), "");
     writeFileSync(join(root, "releases/previous", file), "");
   }
@@ -96,8 +121,7 @@ exports.Client = class {
     "infra.env": `POSTGRES_USER=test_user\nPOSTGRES_DB=test_db\nDATABASE_SCHEMA=test_schema\n${webhookFiles.infra}`,
     "migration.env": webhookFiles.migration,
     "api.env": webhookFiles.api,
-    "admin-control.env":
-      "DEV_ADMIN_CONTROL_TOKEN=test-placeholder-token-with-at-least-32-characters\n",
+    "admin-control.env": `${s3Configuration}DEV_ADMIN_CONTROL_TOKEN=test-placeholder-token-with-at-least-32-characters\n`,
     "scheduler.env": webhookFiles.scheduler,
     "worker.env": "",
     "demo-account.env": "DEMO_ACCOUNT_EMAIL=demo@example.invalid\n",
@@ -118,6 +142,10 @@ exports.Client = class {
       DEPLOY_SCRIPT: deployScript,
       RELEASE_ID: "candidate",
       HOOX_DEMO_IMAGE: "test/candidate@sha256:candidate",
+      HOOX_DEMO_RELEASE_DIR: join(root, "releases/candidate"),
+      HOOX_DEMO_RELEASE_ID: "candidate",
+      DEMO_TENANT_ID: "tenant_from_caller",
+      DEMO_ADMIN_USER_ID: "user_from_caller",
       MOCK_MODE: mode,
       MOCK_LOG: log,
     },
@@ -135,6 +163,190 @@ exports.Client = class {
 
 // Git Bash 的 60 轮启动探测在并发负载下较慢；不启动场景受 60 秒硬超时约束，其余场景为 15 秒。
 describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
+  it.each(
+    ["scheduler.env", "admin-control.env"].flatMap((file) =>
+      s3Configuration
+        .trim()
+        .split("\n")
+        .flatMap((line) => {
+          const key = line.split("=")[0] as string;
+          return ["missing", "empty", "blank"].map((state) => ({ file, key, state }));
+        }),
+    ),
+  )("$file 的 $key $state 时在任何发布动作前失败且不泄露配置", ({ file, key, state }) => {
+    const result = deploy("success", (root) => {
+      const path = join(root, "shared", file);
+      const configuration = readFileSync(path, "utf8").replace(
+        new RegExp(`^${key}=.*$`, "mu"),
+        state === "missing" ? "" : `${key}=${state === "blank" ? "   " : ""}`,
+      );
+      writeFileSync(path, configuration);
+    });
+    expect(result.status, result.stderr).toBe(2);
+    expect(result.stderr).toContain(file);
+    expect(result.stderr).toContain(key);
+    expect(result.stdout + result.stderr).not.toContain("s3-secret-placeholder");
+    expect(result.log).toBe("");
+    expect(result.composeEnv).toBe("HOOX_DEMO_IMAGE=test/previous@sha256:previous\n");
+    expect(realpathSync(join(result.root, "current"))).toBe(
+      realpathSync(join(result.root, "releases/previous")),
+    );
+  });
+
+  it.each(["scheduler.env", "admin-control.env"])("%s 拒绝非法 S3 布尔值且不回显", (file) => {
+    const result = deploy("success", (root) => {
+      const path = join(root, "shared", file);
+      writeFileSync(
+        path,
+        readFileSync(path, "utf8").replace(
+          "S3_FORCE_PATH_STYLE=true",
+          "S3_FORCE_PATH_STYLE=invalid-placeholder",
+        ),
+      );
+    });
+    expect(result.status, result.stderr).toBe(2);
+    expect(result.stderr).toContain("S3_FORCE_PATH_STYLE");
+    expect(result.stderr).not.toContain("invalid-placeholder");
+    expect(result.log).toBe("");
+  });
+
+  it.each(["scheduler.env", "admin-control.env"])(
+    "%s 只接受不加引号的单行 S3 值，其他写法在发布前拒绝",
+    (file) => {
+      for (const replacement of [
+        'S3_BUCKET="agent-runtime-demo"',
+        "S3_BUCKET='agent-runtime-demo'",
+        "S3_BUCKET=agent-runtime-demo # bucket",
+        "S3_BUCKET=agent-runtime-demo\r",
+        "S3_BUCKET=agent-runtime-demo\nS3_BUCKET=agent-runtime-demo",
+        " S3_BUCKET=agent-runtime-demo",
+      ]) {
+        const result = deploy("success", (root) => {
+          const path = join(root, "shared", file);
+          writeFileSync(
+            path,
+            readFileSync(path, "utf8").replace("S3_BUCKET=agent-runtime-demo", replacement),
+          );
+        });
+        expect(result.status, replacement).toBe(2);
+        expect(result.stderr).toContain("S3_BUCKET");
+        expect(result.stderr).not.toContain("agent-runtime-demo");
+        expect(result.log).toBe("");
+      }
+    },
+  );
+
+  it.each(["scheduler.env", "admin-control.env"])(
+    "%s 将引号内空白解析为空配置并在发布前拒绝",
+    (file) => {
+      const result = deploy("success", (root) => {
+        const path = join(root, "shared", file);
+        writeFileSync(
+          path,
+          readFileSync(path, "utf8").replace(
+            "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
+            'S3_SECRET_ACCESS_KEY="   " # blank secret',
+          ),
+        );
+      });
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain("S3_SECRET_ACCESS_KEY");
+      expect(result.log).toBe("");
+    },
+  );
+
+  it.each(["scheduler.env", "admin-control.env"])(
+    "%s 拒绝 S3 字符串首尾空白与未闭合/尾随垃圾引号",
+    (file) => {
+      for (const [replacement, key] of [
+        ['S3_BUCKET=" agent-runtime-demo "', "S3_BUCKET"],
+        ['S3_BUCKET="agent-runtime-demo"suffix', "S3_BUCKET"],
+      ] as const) {
+        const result = deploy("success", (root) => {
+          const path = join(root, "shared", file);
+          writeFileSync(
+            path,
+            readFileSync(path, "utf8").replace("S3_BUCKET=agent-runtime-demo", replacement),
+          );
+        });
+        expect(result.status, result.stderr).toBe(2);
+        expect(result.stderr).toContain(key);
+        expect(result.log).toBe("");
+      }
+    },
+  );
+
+  it.each(["scheduler.env", "admin-control.env"])(
+    "%s 拒绝 Compose 插值语法与引号包裹的字面值",
+    (file) => {
+      const invalid = deploy("success", (root) => {
+        const path = join(root, "shared", file);
+        writeFileSync(
+          path,
+          readFileSync(path, "utf8").replace(
+            "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
+            "S3_SECRET_ACCESS_KEY=$UNDEFINED_SECRET",
+          ),
+        );
+      });
+      expect(invalid.status, invalid.stderr).toBe(2);
+      expect(invalid.stderr).toContain("S3_SECRET_ACCESS_KEY");
+      expect(invalid.log).toBe("");
+
+      const literal = deploy("success", (root) => {
+        const path = join(root, "shared", file);
+        writeFileSync(
+          path,
+          readFileSync(path, "utf8").replace(
+            "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
+            "S3_SECRET_ACCESS_KEY='$literal-secret'",
+          ),
+        );
+      });
+      expect(literal.status, literal.stderr).toBe(2);
+      expect(literal.log).toBe("");
+    },
+  );
+
+  it.each(["scheduler-startup-failure", "legacy-startup-failure"])(
+    "%s 后所有应用容器使用上一版镜像与发布目录，不受调用方环境覆盖",
+    (mode) => {
+      const result = deploy(mode, (root) => {
+        writeFileSync(
+          join(root, "shared/compose.env"),
+          [
+            "HOOX_DEMO_IMAGE=test/previous@sha256:previous",
+            "DEMO_TENANT_ID=tenant_previous",
+            "DEMO_ADMIN_USER_ID=user_previous",
+            "",
+          ].join("\n"),
+        );
+      });
+      expect(result.status, result.stderr).toBe(1);
+      const services =
+        mode === "legacy-startup-failure"
+          ? [...applicationServices, "trajectory"]
+          : applicationServices;
+      for (const service of services) {
+        expect(
+          readFileSync(join(result.root, `${service}.image`), "utf8"),
+          `${service}: ${result.log}`,
+        ).toBe(
+          `test/previous@sha256:previous|${realpathSync(join(result.root, "releases/previous"))}|previous|tenant_previous|user_previous`,
+        );
+      }
+      expect(result.log).toContain("up image=test/candidate@sha256:candidate");
+      expect(result.log).toContain("up image=test/previous@sha256:previous");
+      expect(result.log).toContain(
+        `-f ${realpathSync(join(result.root, "releases/previous/docker-compose.yml"))} up`,
+      );
+      expect(result.stdout).not.toContain("Hoox Demo 发布完成");
+      expect(realpathSync(join(result.root, "current"))).toBe(
+        realpathSync(join(result.root, "releases/previous")),
+      );
+    },
+  );
+
   it("共享配置缺失时不启动或回滚应用，也不改发布配置", () => {
     const result = deploy("missing-config");
     expect(result.status, result.stderr).toBe(2);

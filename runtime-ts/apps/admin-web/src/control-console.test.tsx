@@ -65,6 +65,7 @@ const overview = {
 function fixture(): AdminControlApiContract {
   return {
     overview: vi.fn(async () => overview),
+    agentMetrics: vi.fn(async () => []),
     getIdentityConfiguration: vi.fn(async () => ({
       versionToken: 0,
       emailPasswordEnabled: true,
@@ -1215,6 +1216,88 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("80%");
     expect(container.textContent).toContain("12,500");
     expect(container.textContent).toContain("2,500");
+    expect(container.textContent).toContain("Agent 运营指标");
+    expect(container.textContent).toContain("平均轮次");
+    expect(container.textContent).toContain("结果未知率");
+    expect(api.agentMetrics).toHaveBeenCalled();
+    const metricForm = container.querySelector<HTMLFormElement>(".agent-metrics-filters");
+    if (metricForm === null) throw new Error("Agent 指标筛选表单缺失");
+    const metricInputs = metricForm.querySelectorAll<HTMLInputElement>("input");
+    vi.mocked(api.agentMetrics).mockResolvedValue([
+      {
+        windowStart: "2026-11-19T00:00:00.000Z",
+        agentDefinitionId: "agent_alpha",
+        agentRevisionId: "revision_alpha",
+        tenantId: "tenant_alpha",
+        origin: "api",
+        currency: "USD",
+        runCount: 2,
+        succeededCount: 1,
+        failedCount: 1,
+        resultUnknownCount: 0,
+        successRate: 0.5,
+        failureRate: 0.5,
+        resultUnknownRate: 0,
+        toolFailureRate: null,
+        latencyP50Ms: 100,
+        latencyP90Ms: 100,
+        latencyP99Ms: 100,
+        averageModelRounds: 1,
+        toolCalls: 0,
+        failedToolCalls: 0,
+        inputTokens: 10,
+        outputTokens: 10,
+        cacheReadTokens: 0,
+        cost: 0,
+      },
+    ]);
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setValue?.call(metricInputs[2], "agent_alpha");
+      const agentInput = metricInputs[2];
+      if (agentInput === undefined) throw new Error("Agent 筛选输入框缺失");
+      agentInput.dispatchEvent(new Event("input", { bubbles: true }));
+      setValue?.call(metricInputs[4], "tenant_alpha");
+      const tenantInput = metricInputs[4];
+      if (tenantInput === undefined) throw new Error("Tenant 筛选输入框缺失");
+      tenantInput.dispatchEvent(new Event("input", { bubbles: true }));
+      const fromInput = metricInputs[0];
+      if (fromInput === undefined) throw new Error("开始时间输入框缺失");
+      setValue?.call(fromInput, "2026-11-19T00:30");
+      fromInput.dispatchEvent(new Event("change", { bubbles: true }));
+      const source = metricForm.querySelector("select");
+      if (source === null) throw new Error("来源筛选缺失");
+      source.value = "evaluation";
+      source.dispatchEvent(new Event("change", { bubbles: true }));
+      metricForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(api.agentMetrics).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        from: new Date("2026-11-19T00:30").toISOString(),
+        agentDefinitionId: "agent_alpha",
+        tenantId: "tenant_alpha",
+        origin: "evaluation",
+      }),
+    );
+    const runBrowserLink = container.querySelector<HTMLAnchorElement>(
+      '.agent-metrics-dashboard a[href^="/runs?"]',
+    );
+    if (runBrowserLink === null) throw new Error("指标下钻链接缺失");
+    const runBrowserQuery = new URLSearchParams(runBrowserLink.search);
+    expect(runBrowserQuery.get("createdFrom")).toBe(new Date("2026-11-19T00:30").toISOString());
+    expect(runBrowserQuery.get("createdTo")).toBe("2026-11-19T00:59:59.999Z");
+    const appliedCallCount = vi.mocked(api.agentMetrics).mock.calls.length;
+    act(() => {
+      const fromInput = metricInputs[0];
+      if (fromInput === undefined) throw new Error("开始时间输入框缺失");
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setValue?.call(fromInput, "");
+      fromInput.dispatchEvent(new Event("change", { bubbles: true }));
+      metricForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(container.textContent).toContain("请输入有效的开始和结束时间");
+    expect(api.agentMetrics).toHaveBeenCalledTimes(appliedCallCount);
     expect(container.querySelector(".trajectory-viewer-link")).toBeNull();
     expect(container.querySelector("iframe")).toBeNull();
 

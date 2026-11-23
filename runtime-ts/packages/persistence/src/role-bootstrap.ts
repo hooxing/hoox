@@ -98,6 +98,7 @@ const waitingRecoveryTables = new Set([
   "waiting_recovery_effect_outbox",
 ]);
 const workspaceRuntimeTables = new Set(["runtime_recovery_metrics"]);
+const runModelPricingTables = new Set(["run_model_pricing_snapshots"]);
 const workspaceManifestTables = new Set([
   "workspace_revision_manifests",
   "workspace_revision_files",
@@ -762,6 +763,22 @@ async function hasWorkspaceRuntimeState(client: PoolClient, schema: string): Pro
   return result.rows[0]?.present === true;
 }
 
+async function hasRunModelPricingState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.run_model_pricing_snapshots', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasAgentMetricsState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.admin_agent_metrics_hourly', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasWorkspaceManifestState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.workspace_revision_manifests', $1::text)) IS NOT NULL
@@ -1295,6 +1312,7 @@ const adminRunExplorerViews = [
   "admin_run_event_outline",
   "admin_run_event_content",
   "admin_run_trajectory_directory",
+  "admin_agent_metrics_hourly",
 ] as const;
 
 async function hasRunCompactionSettingsState(client: PoolClient, schema: string): Promise<boolean> {
@@ -1501,6 +1519,11 @@ export async function activeTablePolicy(
   }
   if (!(await hasWorkspaceRuntimeState(client, schema))) {
     for (const table of workspaceRuntimeTables) policy.delete(table);
+  }
+  if (await hasRunModelPricingState(client, schema)) {
+    for (const table of runModelPricingTables) policy.set(table, new Set(["SELECT", "INSERT"]));
+  } else {
+    for (const table of runModelPricingTables) policy.delete(table);
   }
   if (!(await hasWorkspaceManifestState(client, schema))) {
     for (const table of workspaceManifestTables) policy.delete(table);
@@ -2594,6 +2617,7 @@ async function assertAdminControlBoundary(
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
   const runExplorerEnabled = enabled && (await hasAdminRunExplorerState(client, context.schema));
+  const agentMetricsEnabled = enabled && (await hasAgentMetricsState(client, context.schema));
   const runTrajectoryEnabled =
     enabled && (await hasAdminRunTrajectoryState(client, context.schema));
   const integrationTenantDirectoryEnabled =
@@ -2859,7 +2883,9 @@ async function assertAdminControlBoundary(
               ? integrationTenantDirectoryEnabled
               : row.view_name === "admin_run_trajectory_directory"
                 ? runTrajectoryEnabled
-                : runExplorerEnabled;
+                : row.view_name === "admin_agent_metrics_hourly"
+                  ? agentMetricsEnabled
+                  : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3629,6 +3655,19 @@ async function rebindRoleScopedPolicies(
         );
       }
     }
+    if (await hasAgentMetricsState(client, context.schema)) {
+      for (const [table, policy] of [
+        ["runs", "runs_agent_metrics_read"],
+        ["threads", "threads_agent_metrics_read"],
+        ["thread_continuity_metric_observations", "model_metrics_agent_metrics_read"],
+        ["run_agent_snapshots", "run_agent_snapshots_agent_metrics_read"],
+        ["run_model_pricing_snapshots", "pricing_snapshots_agent_metrics_read"],
+      ] as const) {
+        await client.query(
+          `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.migratorRole)}`,
+        );
+      }
+    }
     if (await hasAdminRunInputProjectionPolicyState(client, context.schema)) {
       await client.query(
         `ALTER POLICY run_execution_inputs_admin_projection_read ON ${schema}.run_execution_inputs TO ${quoteIdentifier(context.migratorRole)}`,
@@ -3869,12 +3908,18 @@ async function grantAdminControlAccess(
     const trajectoryView = (await hasAdminRunTrajectoryState(client, context.schema))
       ? `, ${schema}.admin_run_trajectory_directory`
       : "";
+    const metricsView = (await hasAgentMetricsState(client, context.schema))
+      ? `, ${schema}.admin_agent_metrics_hourly`
+      : "";
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
        GRANT SELECT ON TABLE ${adminRunExplorerViews
-         .filter((view) => view !== "admin_run_trajectory_directory")
+         .filter(
+           (view) =>
+             view !== "admin_run_trajectory_directory" && view !== "admin_agent_metrics_hourly",
+         )
          .map((view) => `${schema}.${view}`)
-         .join(",")}${trajectoryView} TO ${control}`,
+         .join(",")}${trajectoryView}${metricsView} TO ${control}`,
     );
   }
   if (await hasAdminIntegrationTenantDirectoryState(client, context.schema)) {
@@ -4753,6 +4798,11 @@ export async function bootstrapRuntimeAccessOnClient(
     // 恢复指标是只追加审计事实。
     await client.query(
       `GRANT SELECT, INSERT ON TABLE ${schema}.runtime_recovery_metrics TO ${role}`,
+    );
+  }
+  if (await hasRunModelPricingState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.run_model_pricing_snapshots TO ${role}`,
     );
   }
   if (await hasWorkspaceManifestState(client, context.schema)) {

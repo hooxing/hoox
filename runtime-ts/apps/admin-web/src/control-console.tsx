@@ -18,6 +18,7 @@ import { AdminControlApi, type AdminControlApiContract } from "./control-api.js"
 import { IdentityConfigurationPanel } from "./identity-configuration-panel.js";
 import {
   ControlDataUnavailable,
+  AgentMetricsDashboard,
   OperationsDashboard,
   UserManagementWorkspace,
 } from "./operations-console.js";
@@ -183,6 +184,10 @@ interface EditableModelRow {
   readonly supportsImages: boolean;
   readonly contextWindow: string;
   readonly maxTokens: string;
+  readonly currency: string;
+  readonly inputPrice: string;
+  readonly outputPrice: string;
+  readonly cacheReadPrice: string;
 }
 
 function newModelRow(
@@ -198,6 +203,15 @@ function newModelRow(
     supportsImages: seed?.input.includes("image") ?? false,
     contextWindow: String(seed?.contextWindow ?? 128_000),
     maxTokens: String(seed?.maxTokens ?? 8_192),
+    currency: seed !== undefined && "pricing" in seed ? (seed.pricing?.currency ?? "USD") : "USD",
+    inputPrice:
+      seed !== undefined && "pricing" in seed ? String(seed.pricing?.inputPerMillion ?? "") : "",
+    outputPrice:
+      seed !== undefined && "pricing" in seed ? String(seed.pricing?.outputPerMillion ?? "") : "",
+    cacheReadPrice:
+      seed !== undefined && "pricing" in seed
+        ? String(seed.pricing?.cacheReadPerMillion ?? "")
+        : "",
   };
 }
 
@@ -339,6 +353,22 @@ function ModelDraftForm({
           input: model.supportsImages ? ["text", "image"] : ["text"],
           contextWindow: Number(model.contextWindow),
           maxTokens: Number(model.maxTokens),
+          ...([model.inputPrice, model.outputPrice, model.cacheReadPrice].some(
+            (price) => price !== "",
+          )
+            ? {
+                pricing: {
+                  currency: model.currency.trim().toUpperCase(),
+                  ...(model.inputPrice === "" ? {} : { inputPerMillion: Number(model.inputPrice) }),
+                  ...(model.outputPrice === ""
+                    ? {}
+                    : { outputPerMillion: Number(model.outputPrice) }),
+                  ...(model.cacheReadPrice === ""
+                    ? {}
+                    : { cacheReadPerMillion: Number(model.cacheReadPrice) }),
+                },
+              }
+            : {}),
         }));
         const defaultModelId =
           catalog.models.find((model) => model.clientId === catalog.defaultClientId)?.id.trim() ??
@@ -548,6 +578,58 @@ function ModelDraftForm({
                     }
                   />
                   推理模型
+                </label>
+                <label>
+                  计价币种
+                  <input
+                    required={[model.inputPrice, model.outputPrice, model.cacheReadPrice].some(
+                      (price) => price !== "",
+                    )}
+                    maxLength={3}
+                    value={model.currency}
+                    onChange={(event) =>
+                      updateModel(model.clientId, { currency: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  输入单价 / 百万 Token
+                  <input
+                    type="number"
+                    min={0}
+                    max={1_000_000}
+                    step="any"
+                    value={model.inputPrice}
+                    onChange={(event) =>
+                      updateModel(model.clientId, { inputPrice: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  输出单价 / 百万 Token
+                  <input
+                    type="number"
+                    min={0}
+                    max={1_000_000}
+                    step="any"
+                    value={model.outputPrice}
+                    onChange={(event) =>
+                      updateModel(model.clientId, { outputPrice: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  缓存读取单价 / 百万 Token
+                  <input
+                    type="number"
+                    min={0}
+                    max={1_000_000}
+                    step="any"
+                    value={model.cacheReadPrice}
+                    onChange={(event) =>
+                      updateModel(model.clientId, { cacheReadPrice: event.target.value })
+                    }
+                  />
                 </label>
               </div>
             </details>
@@ -1436,7 +1518,10 @@ export function AdminControlConsole({
             />
           )
         ) : (
-          <OperationsDashboard value={overview} />
+          <>
+            <OperationsDashboard value={overview} />
+            <AgentMetricsDashboard api={api} />
+          </>
         )
       ) : view === "users" ? (
         <UserManagementWorkspace

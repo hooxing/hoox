@@ -145,6 +145,68 @@ export class HooxClient {
     return this.request("submitToolResult", { threadId, runId }, body, undefined, options);
   }
 
+  listArtifacts(
+    threadId: string,
+    runId: string,
+    options?: RequestOptions,
+  ): Promise<Data<"listArtifacts">> {
+    return this.request("listArtifacts", { threadId, runId }, undefined, undefined, options);
+  }
+
+  previewArtifact(
+    threadId: string,
+    runId: string,
+    artifactId: string,
+    options?: RequestOptions,
+  ): Promise<Data<"previewArtifact">> {
+    return this.request(
+      "previewArtifact",
+      { threadId, runId, artifactId },
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  downloadArtifact(
+    threadId: string,
+    runId: string,
+    artifactId: string,
+    options?: RequestOptions,
+  ): Promise<Data<"downloadArtifact">> {
+    return this.request(
+      "downloadArtifact",
+      { threadId, runId, artifactId },
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  async readArtifactContent(
+    threadId: string,
+    runId: string,
+    artifactId: string,
+    options: RequestOptions = {},
+  ): Promise<Uint8Array> {
+    const connection = this.connection(options);
+    try {
+      const response = await this.send(
+        "readArtifactContent",
+        { threadId, runId, artifactId },
+        undefined,
+        undefined,
+        options,
+        connection.signal,
+      );
+      return new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      throw connection.error(error);
+    } finally {
+      connection.close();
+    }
+  }
+
   async *streamRunEvents(
     threadId: string,
     runId: string,
@@ -321,7 +383,12 @@ export class HooxClient {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
     const headers = new Headers({
-      accept: operation === "streamRunEvents" ? "text/event-stream" : "application/json",
+      accept:
+        operation === "streamRunEvents"
+          ? "text/event-stream"
+          : operation === "readArtifactContent"
+            ? "application/octet-stream"
+            : "application/json",
     });
     if (this.#apiKey) headers.set("Authorization", `Bearer ${this.#apiKey}`);
     if (this.#endUser !== undefined) headers.set("Hoox-End-User", this.#endUser);

@@ -1,6 +1,6 @@
 # TypeScript SDK
 
-本文面向通过业务后端或浏览器代理接入 Hoox 的开发者，说明 `@hoox/sdk` 的调用方式、SSE 恢复及客户端工具边界。服务端协议、权限与结果大小限制以[公开 API v1](public-api.md)为准。
+本文面向通过业务后端或浏览器代理接入 Hoox 的开发者，说明 `@hoox/sdk` 的调用方式、SSE 恢复及客户端工具边界。可嵌入聊天组件见[聊天组件参考](chat-embed.md)。服务端协议、权限与结果大小限制以[公开 API v1](public-api.md)为准。
 
 ## 环境与凭据
 
@@ -37,6 +37,8 @@ const snapshot = await client.getRun(thread.id, run.id);
 ```
 
 方法返回成功信封中的 `data`。查询方法还包括 `listAgents()`、`listThreads({cursor, limit})`、`getThread(threadId)`、`listThreadRuns(threadId, {limit})` 和 `listRunEvents(threadId, runId, {after, limit})`；`cancelRun(threadId, runId)` 请求服务端取消。创建 Thread/Run 必须显式提供幂等键，同一业务重试应保留原键与请求正文。SDK 不自动重试普通 HTTP 请求；网络失败不代表服务端没有接受写入。
+
+Artifact 可通过 `listArtifacts(threadId, runId)` 查询；`previewArtifact(...)` 与 `downloadArtifact(...)` 返回公开 API 的交付数据（文本预览或短时效 URL）。需要在客户端读取有界原始内容时使用 `readArtifactContent(...)`，其返回 `Uint8Array`，不假设内容为 JSON。所有方法接受可选 `RequestOptions`，支持 `signal` 与 `timeoutMs`；失败沿用 `HooxError`，错误响应不回显 API Key 或终端用户 ID。
 
 各请求可传 `signal`、`timeoutMs`；`timeoutMs` 是一次 HTTP 请求（含响应正文）或一次 SSE 连接的时限，默认 60000 毫秒，不是整个 Run 的截止时间。退出迭代器只关闭连接，不取消 Run；取消远端执行必须调用 `cancelRun`。
 

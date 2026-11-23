@@ -100,6 +100,80 @@ describe("SDK HTTP", () => {
     expect(JSON.stringify(client)).not.toContain("placeholder-api-key");
   });
 
+  it("查询 Artifact 元数据并读取原始内容字节", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ items: [] }))
+      .mockResolvedValueOnce(ok({ artifact: { id: "artifact_sdk" }, text: "预览" }))
+      .mockResolvedValueOnce(
+        ok({ artifact: { id: "artifact_sdk" }, url: "https://files.invalid/x" }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([0, 255, 10]), {
+          headers: { "content-type": "application/octet-stream" },
+        }),
+      );
+    const client = new HooxClient({
+      baseUrl: "https://api.example.invalid/proxy",
+      apiKey: "placeholder-api-key",
+      fetch: fetcher,
+    });
+
+    await expect(client.listArtifacts("thread/a", "run b")).resolves.toEqual({ items: [] });
+    await expect(client.previewArtifact("thread/a", "run b", "artifact ?")).resolves.toMatchObject({
+      text: "预览",
+    });
+    await expect(client.downloadArtifact("thread/a", "run b", "artifact ?")).resolves.toMatchObject(
+      {
+        url: "https://files.invalid/x",
+      },
+    );
+    await expect(client.readArtifactContent("thread/a", "run b", "artifact ?")).resolves.toEqual(
+      new Uint8Array([0, 255, 10]),
+    );
+    const [url, init] = fetcher.mock.calls[3] as unknown as [URL, RequestInit];
+    expect(url.pathname).toBe(
+      "/proxy/v1/threads/thread%2Fa/runs/run%20b/artifacts/artifact%20%3F/content",
+    );
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer placeholder-api-key");
+    expect(new Headers(init.headers).get("Accept")).toBe("application/octet-stream");
+  });
+
+  it("原始 Artifact 内容请求支持取消并脱敏错误", async () => {
+    const controller = new AbortController();
+    const client = new HooxClient({
+      baseUrl: "https://api.example.invalid",
+      apiKey: "secret-key",
+      fetch: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("secret-key detail")), {
+            once: true,
+          });
+        }),
+    });
+    const pending = expect(
+      client.readArtifactContent("thread_sdk", "run_sdk", "artifact_sdk", {
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ code: "ABORTED", message: "操作已取消" });
+    controller.abort("secret-key");
+    await pending;
+
+    const failedClient = new HooxClient({
+      baseUrl: "https://api.example.invalid",
+      apiKey: "secret-key",
+      fetch: async () => new Response("secret-key private upstream detail", { status: 503 }),
+    });
+    let failure: HooxError | undefined;
+    try {
+      await failedClient.readArtifactContent("thread_sdk", "run_sdk", "artifact_sdk");
+    } catch (caught) {
+      failure = caught as HooxError;
+    }
+    expect(failure).toMatchObject({ code: "HTTP_ERROR", status: 503, retryable: true });
+    expect(`${failure?.message} ${failure?.stack}`).not.toContain("secret-key");
+  });
+
   it("无 Key 的浏览器代理模式不注入 Authorization；不自动重试创建请求", async () => {
     const fetcher = vi.fn(async () => {
       throw new Error("network detail");

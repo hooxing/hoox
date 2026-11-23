@@ -1,4 +1,4 @@
-import { loadDevelopmentEnvironment } from "@hoox/process-runtime";
+import { EnvironmentConfigurationError, loadDevelopmentEnvironment } from "@hoox/process-runtime";
 import { selectSchedulerProcessEnvironment, startSchedulerProcess } from "./process-entry.js";
 
 try {
@@ -22,8 +22,11 @@ try {
   }
   if (readiness.status !== "ready") console.info("Scheduler 等待沙箱配置；保存配置后自动就绪");
   console.info("Scheduler 开发进程已启动");
-} catch {
-  // 入口只输出稳定分类，不能泄露数据库或 Cube 配置。
-  console.error("Scheduler 开发进程启动失败");
+} catch (error) {
+  console.error(
+    error instanceof EnvironmentConfigurationError
+      ? `Scheduler 开发进程启动失败：${error.message}`
+      : "Scheduler 开发进程启动失败",
+  );
   process.exitCode = 1;
 }

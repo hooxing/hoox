@@ -21,6 +21,13 @@ export type ProviderSecretRef =
 
 export type ModelInputCapability = "text" | "image";
 
+export interface ModelPricingConfiguration {
+  readonly currency: string;
+  readonly inputPerMillion?: number;
+  readonly outputPerMillion?: number;
+  readonly cacheReadPerMillion?: number;
+}
+
 /** 对齐 Pi Provider 模型的必要字段；enabled 是平台控制面的发布策略。 */
 export interface ModelProviderModelConfiguration {
   readonly id: string;
@@ -30,6 +37,7 @@ export interface ModelProviderModelConfiguration {
   readonly input: readonly ModelInputCapability[];
   readonly contextWindow: number;
   readonly maxTokens: number;
+  readonly pricing?: ModelPricingConfiguration;
 }
 
 export interface ModelProviderConfiguration {
@@ -235,6 +243,7 @@ export type ControlMutationResult<T> =
 
 export interface AdminControlRepository {
   resolveRole(userId: string): Promise<ControlOperatorRole | undefined>;
+  readAgentMetrics?(input: AgentMetricsQuery): Promise<readonly AgentMetricsBucket[]>;
   generation(userId: string): Promise<number>;
   listModelProviders(
     userId: string,
@@ -330,6 +339,43 @@ export interface AdminControlRepository {
   ): Promise<ControlMutationResult<PlatformUserSummary>>;
 }
 
+export interface AgentMetricsQuery {
+  readonly actorUserId: string;
+  readonly from: string;
+  readonly to: string;
+  readonly agentDefinitionId?: string;
+  readonly agentRevisionId?: string;
+  readonly tenantId?: string;
+  readonly origin?: "normal" | "api" | "playground" | "evaluation";
+}
+
+export interface AgentMetricsBucket {
+  readonly windowStart: string;
+  readonly agentDefinitionId: string | null;
+  readonly agentRevisionId: string | null;
+  readonly tenantId: string;
+  readonly origin: string;
+  readonly currency: string | null;
+  readonly runCount: number;
+  readonly succeededCount: number;
+  readonly failedCount: number;
+  readonly resultUnknownCount: number;
+  readonly successRate: number | null;
+  readonly failureRate: number | null;
+  readonly resultUnknownRate: number | null;
+  readonly toolFailureRate: number | null;
+  readonly latencyP50Ms: number | null;
+  readonly latencyP90Ms: number | null;
+  readonly latencyP99Ms: number | null;
+  readonly averageModelRounds: number | null;
+  readonly toolCalls: number;
+  readonly failedToolCalls: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cost: number | null;
+}
+
 export interface AdminControlStatisticsPort {
   read(userId: string): Promise<RuntimeStatistics>;
 }
@@ -341,7 +387,13 @@ export interface ProviderProbePort {
 
 export class AdminControlServiceError extends Error {
   constructor(
-    readonly code: "NOT_AUTHORIZED" | "NOT_FOUND" | "CONFLICT" | "KEY_CONFLICT" | "PROBE_FAILED",
+    readonly code:
+      | "NOT_AUTHORIZED"
+      | "NOT_FOUND"
+      | "CONFLICT"
+      | "KEY_CONFLICT"
+      | "PROBE_FAILED"
+      | "INVALID_INPUT",
   ) {
     super(code);
     this.name = "AdminControlServiceError";
@@ -468,6 +520,38 @@ function normalizedModelProviderConfiguration(
     const contextWindow = boundedInteger(model.contextWindow, "上下文窗口", 1, 10_000_000);
     const maxTokens = boundedInteger(model.maxTokens, "最大输出 Token", 1, 10_000_000);
     if (maxTokens > contextWindow) throw new TypeError("最大输出 Token 不能超过上下文窗口");
+    let pricing: ModelPricingConfiguration | undefined;
+    if (model.pricing !== undefined) {
+      if (!/^[A-Z]{3}$/.test(model.pricing.currency))
+        throw new TypeError("计价币种必须是三位大写代码");
+      for (const [label, price] of [
+        ["输入", model.pricing.inputPerMillion],
+        ["输出", model.pricing.outputPerMillion],
+        ["缓存读取", model.pricing.cacheReadPerMillion],
+      ] as const) {
+        if (
+          price !== undefined &&
+          (!Number.isFinite(price) ||
+            price < 0 ||
+            price > 1_000_000 ||
+            !Number.isInteger(price * 1_000_000))
+        ) {
+          throw new TypeError(`${label}单价无效`);
+        }
+      }
+      pricing = Object.freeze({
+        currency: model.pricing.currency,
+        ...(model.pricing.inputPerMillion === undefined
+          ? {}
+          : { inputPerMillion: model.pricing.inputPerMillion }),
+        ...(model.pricing.outputPerMillion === undefined
+          ? {}
+          : { outputPerMillion: model.pricing.outputPerMillion }),
+        ...(model.pricing.cacheReadPerMillion === undefined
+          ? {}
+          : { cacheReadPerMillion: model.pricing.cacheReadPerMillion }),
+      });
+    }
     return Object.freeze({
       id,
       name: normalizedText(model.name, "模型名称", 120),
@@ -476,6 +560,7 @@ function normalizedModelProviderConfiguration(
       input: Object.freeze(capabilities),
       contextWindow,
       maxTokens,
+      ...(pricing === undefined ? {} : { pricing }),
     });
   });
   if (!models.some((model) => model.enabled)) throw new TypeError("至少需要启用一个模型");
@@ -697,6 +782,27 @@ export class AdminControlService {
       statistics,
       deploymentSettings: this.deploymentSettings,
     });
+  }
+
+  async agentMetrics(
+    actorUserId: string,
+    query: Omit<AgentMetricsQuery, "actorUserId">,
+  ): Promise<readonly AgentMetricsBucket[]> {
+    requireRole(await this.repository.resolveRole(actorUserId), ["viewer", "operator", "admin"]);
+    const from = Date.parse(query.from);
+    const to = Date.parse(query.to);
+    if (
+      !Number.isFinite(from) ||
+      !Number.isFinite(to) ||
+      to <= from ||
+      to - from > 90 * 86_400_000
+    ) {
+      throw new AdminControlServiceError("INVALID_INPUT");
+    }
+    if (this.repository.readAgentMetrics === undefined) {
+      throw new AdminControlServiceError("INVALID_INPUT");
+    }
+    return this.repository.readAgentMetrics({ actorUserId, ...query });
   }
 
   async listModelProviders(actorUserId: string) {

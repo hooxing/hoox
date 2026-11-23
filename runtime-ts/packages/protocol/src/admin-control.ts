@@ -38,6 +38,17 @@ export const ModelProviderModelConfigurationDtoSchema = Type.Object(
     }),
     contextWindow: Type.Integer({ minimum: 1, maximum: 10_000_000 }),
     maxTokens: Type.Integer({ minimum: 1, maximum: 10_000_000 }),
+    pricing: Type.Optional(
+      Type.Object(
+        {
+          currency: Type.String({ pattern: "^[A-Z]{3}$" }),
+          inputPerMillion: Type.Optional(Type.Number({ minimum: 0, maximum: 1_000_000 })),
+          outputPerMillion: Type.Optional(Type.Number({ minimum: 0, maximum: 1_000_000 })),
+          cacheReadPerMillion: Type.Optional(Type.Number({ minimum: 0, maximum: 1_000_000 })),
+        },
+        strict,
+      ),
+    ),
   },
   strict,
 );
@@ -61,6 +72,60 @@ export const ModelProviderConfigurationDtoSchema = Type.Object(
   strict,
 );
 export type ModelProviderConfigurationDto = Static<typeof ModelProviderConfigurationDtoSchema>;
+
+export const AgentMetricsQueryDtoSchema = Type.Object(
+  {
+    from: Type.String({ minLength: 20, maxLength: 64 }),
+    to: Type.String({ minLength: 20, maxLength: 64 }),
+    agentDefinitionId: Type.Optional(IdSchema),
+    agentRevisionId: Type.Optional(IdSchema),
+    tenantId: Type.Optional(IdSchema),
+    origin: Type.Optional(
+      Type.Union([
+        Type.Literal("normal"),
+        Type.Literal("api"),
+        Type.Literal("playground"),
+        Type.Literal("evaluation"),
+      ]),
+    ),
+  },
+  strict,
+);
+export type AgentMetricsQueryDto = Static<typeof AgentMetricsQueryDtoSchema>;
+
+export const AgentMetricsRowDtoSchema = Type.Object(
+  {
+    windowStart: IsoTimestampSchema,
+    agentDefinitionId: Type.Union([IdSchema, Type.Null()]),
+    agentRevisionId: Type.Union([IdSchema, Type.Null()]),
+    tenantId: IdSchema,
+    origin: Type.String(),
+    currency: Type.Union([Type.String(), Type.Null()]),
+    runCount: Type.Integer({ minimum: 0 }),
+    succeededCount: Type.Integer({ minimum: 0 }),
+    failedCount: Type.Integer({ minimum: 0 }),
+    resultUnknownCount: Type.Integer({ minimum: 0 }),
+    successRate: Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()]),
+    failureRate: Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()]),
+    resultUnknownRate: Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()]),
+    toolFailureRate: Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()]),
+    latencyP50Ms: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+    latencyP90Ms: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+    latencyP99Ms: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+    averageModelRounds: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+    toolCalls: Type.Integer({ minimum: 0 }),
+    failedToolCalls: Type.Integer({ minimum: 0 }),
+    inputTokens: Type.Number({ minimum: 0 }),
+    outputTokens: Type.Number({ minimum: 0 }),
+    cacheReadTokens: Type.Number({ minimum: 0 }),
+    cost: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+  },
+  strict,
+);
+export type AgentMetricsRowDto = Static<typeof AgentMetricsRowDtoSchema>;
+export const AgentMetricsSuccessEnvelopeSchema = successEnvelopeSchema(
+  Type.Object({ items: Type.Array(AgentMetricsRowDtoSchema) }, strict),
+);
 
 export const PiModelCatalogProviderDtoSchema = Type.Object(
   {

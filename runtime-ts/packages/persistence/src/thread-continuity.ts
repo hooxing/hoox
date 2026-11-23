@@ -55,7 +55,36 @@ export class PgThreadContinuityMetrics
       throw new TypeError("模型用量观测无效");
     }
     await withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
-      // 四项事实在同一事务内落库，缓存率和吞吐量不会读取到半组样本。
+      await client.query(
+        `INSERT INTO run_model_pricing_snapshots(
+           tenant_id,run_id,model_id,currency,input_per_million,output_per_million,cache_read_per_million
+         )
+         SELECT $1,$2,selected.model_id,model_price.pricing->>'currency',
+                CASE WHEN model_price.pricing->>'inputPerMillion' ~ '^[0-9]+([.][0-9]+)?$' THEN (model_price.pricing->>'inputPerMillion')::numeric END,
+                CASE WHEN model_price.pricing->>'outputPerMillion' ~ '^[0-9]+([.][0-9]+)?$' THEN (model_price.pricing->>'outputPerMillion')::numeric END,
+                CASE WHEN model_price.pricing->>'cacheReadPerMillion' ~ '^[0-9]+([.][0-9]+)?$' THEN (model_price.pricing->>'cacheReadPerMillion')::numeric END
+           FROM run_runtime_config_snapshots snapshot
+           JOIN admin_control_config_revisions revision
+             ON revision.object_kind='model_provider'
+            AND revision.object_key=snapshot.model_object_key AND revision.revision=snapshot.model_revision
+           JOIN LATERAL (
+             SELECT COALESCE(agent.content #>> '{model,modelId}',revision.configuration->>'defaultModelId') AS model_id
+               FROM run_agent_snapshots agent
+              WHERE agent.tenant_id=snapshot.tenant_id AND agent.run_id=snapshot.run_id
+              UNION ALL
+             SELECT revision.configuration->>'defaultModelId'
+              WHERE NOT EXISTS (SELECT 1 FROM run_agent_snapshots agent WHERE agent.tenant_id=snapshot.tenant_id AND agent.run_id=snapshot.run_id)
+             LIMIT 1
+           ) selected ON true
+           LEFT JOIN LATERAL (
+             SELECT model->'pricing' AS pricing FROM jsonb_array_elements(revision.configuration->'models') model
+              WHERE model->>'id'=selected.model_id LIMIT 1
+           ) model_price ON true
+          WHERE snapshot.tenant_id=$1 AND snapshot.run_id=$2
+         ON CONFLICT(tenant_id,run_id) DO NOTHING`,
+        [input.tenantId, input.runId],
+      );
+      // 同次调用的用量与轮次数在同一事务落库，避免比率和均值读到半组样本。
       await client.query(
         `INSERT INTO thread_continuity_metric_observations(
            tenant_id,observation_id,thread_id,run_id,metric_name,value,unit
@@ -63,7 +92,8 @@ export class PgThreadContinuityMetrics
            ($1,$2 || ':input',$3,$4,'model_input_tokens',$5,'tokens'),
            ($1,$2 || ':output',$3,$4,'model_output_tokens',$6,'tokens'),
            ($1,$2 || ':cache-read',$3,$4,'model_cache_read_tokens',$7,'tokens'),
-           ($1,$2 || ':duration',$3,$4,'model_generation_duration_ms',$8,'milliseconds')
+           ($1,$2 || ':duration',$3,$4,'model_generation_duration_ms',$8,'milliseconds'),
+           ($1,$2 || ':count',$3,$4,'model_generation_count',1,'count')
          ON CONFLICT (tenant_id,observation_id) DO NOTHING`,
         [
           input.tenantId,

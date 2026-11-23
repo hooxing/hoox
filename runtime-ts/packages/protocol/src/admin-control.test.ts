@@ -90,6 +90,24 @@ describe("后台运营协议", () => {
     };
     expect(Value.Check(CreateModelProviderDraftRequestSchema, draft)).toBe(true);
     expect(
+      Value.Check(CreateModelProviderDraftRequestSchema, {
+        ...draft,
+        models: [{ ...draft.models[0], pricing: { currency: "USD", inputPerMillion: 0.2 } }],
+      }),
+    ).toBe(true);
+    for (const pricing of [
+      { currency: "usd", inputPerMillion: 0.2 },
+      { currency: "USD", inputPerMillion: -1 },
+      { currency: "USD", cacheReadPerMillion: "0.1" },
+    ]) {
+      expect(
+        Value.Check(CreateModelProviderDraftRequestSchema, {
+          ...draft,
+          models: [{ ...draft.models[0], pricing }],
+        }),
+      ).toBe(false);
+    }
+    expect(
       Value.Check(CreateModelProviderDraftRequestSchema, { ...draft, reason: "不应由用户填写" }),
     ).toBe(false);
     expect(

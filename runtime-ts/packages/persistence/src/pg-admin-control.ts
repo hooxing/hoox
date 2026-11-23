@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import {
   type AdminControlRepository,
   type AdminControlStatisticsPort,
+  type AgentMetricsBucket,
+  type AgentMetricsQuery,
   type ControlAuditEvent,
   type ControlMutationContext,
   type ControlMutationResult,
@@ -1024,6 +1026,78 @@ export class PgAdminControlRepository
       );
     } catch (error) {
       throw mapPersistenceError(error, "更新后台用户状态");
+    }
+  }
+
+  async readAgentMetrics(input: AgentMetricsQuery): Promise<readonly AgentMetricsBucket[]> {
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        await client.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
+        const result = await client.query<QueryResultRow & Record<string, unknown>>(
+          `SELECT window_start,agent_definition_id,agent_revision_id,tenant_id,origin,currency,
+                  run_count,succeeded_count,failed_count,result_unknown_count,
+                  success_rate,failure_rate,result_unknown_rate,tool_failure_rate,
+                  latency_p50_ms,latency_p90_ms,latency_p99_ms,average_model_rounds,
+                  tool_calls,failed_tool_calls,input_tokens,output_tokens,cache_read_tokens,cost
+             FROM admin_agent_metrics_hourly
+            WHERE window_start >= date_trunc('hour',$1::timestamptz)
+              AND window_start < $2::timestamptz
+              AND ($3::text IS NULL OR agent_definition_id=$3)
+              AND ($4::text IS NULL OR agent_revision_id=$4)
+              AND ($5::text IS NULL OR tenant_id=$5)
+              AND (CASE WHEN $6::text IS NULL THEN origin NOT IN ('playground','evaluation') ELSE origin=$6 END)
+            ORDER BY window_start,agent_definition_id,agent_revision_id,tenant_id,currency
+            LIMIT 10001`,
+          [
+            input.from,
+            input.to,
+            input.agentDefinitionId ?? null,
+            input.agentRevisionId ?? null,
+            input.tenantId ?? null,
+            input.origin ?? null,
+          ],
+        );
+        if (result.rows.length > 10_000)
+          throw new Error("指标筛选结果过多，请缩短时间范围或增加筛选条件");
+        const num = (value: unknown): number => {
+          const parsed = Number(value);
+          if (!Number.isFinite(parsed)) throw new Error("指标聚合数据损坏");
+          return parsed;
+        };
+        const nullableNum = (value: unknown): number | null => (value === null ? null : num(value));
+        return Object.freeze(
+          result.rows.map((row) =>
+            Object.freeze({
+              windowStart: timestamp(row.window_start as Date | string),
+              agentDefinitionId: row.agent_definition_id as string | null,
+              agentRevisionId: row.agent_revision_id as string | null,
+              tenantId: String(row.tenant_id),
+              origin: String(row.origin),
+              currency: row.currency as string | null,
+              runCount: num(row.run_count),
+              succeededCount: num(row.succeeded_count),
+              failedCount: num(row.failed_count),
+              resultUnknownCount: num(row.result_unknown_count),
+              successRate: nullableNum(row.success_rate),
+              failureRate: nullableNum(row.failure_rate),
+              resultUnknownRate: nullableNum(row.result_unknown_rate),
+              toolFailureRate: nullableNum(row.tool_failure_rate),
+              latencyP50Ms: nullableNum(row.latency_p50_ms),
+              latencyP90Ms: nullableNum(row.latency_p90_ms),
+              latencyP99Ms: nullableNum(row.latency_p99_ms),
+              averageModelRounds: nullableNum(row.average_model_rounds),
+              toolCalls: num(row.tool_calls),
+              failedToolCalls: num(row.failed_tool_calls),
+              inputTokens: num(row.input_tokens),
+              outputTokens: num(row.output_tokens),
+              cacheReadTokens: num(row.cache_read_tokens),
+              cost: nullableNum(row.cost),
+            }),
+          ),
+        );
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "读取 Agent 指标");
     }
   }
 

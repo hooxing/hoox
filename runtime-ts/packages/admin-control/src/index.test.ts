@@ -146,6 +146,36 @@ describe("后台控制面领域规则", () => {
     ).toThrow("最大输出 Token 不能超过上下文窗口");
   });
 
+  it("保留有效单价并拒绝负值、非有限值和非法币种", () => {
+    const priced = normalizeModelProviderConfiguration({
+      ...modelConfiguration(),
+      models: [
+        {
+          ...firstModelConfiguration(),
+          pricing: { currency: "USD", inputPerMillion: 0.2, outputPerMillion: 1.5 },
+        },
+      ],
+    });
+    expect(priced.models[0]?.pricing).toEqual({
+      currency: "USD",
+      inputPerMillion: 0.2,
+      outputPerMillion: 1.5,
+    });
+    for (const pricing of [
+      { currency: "usd", inputPerMillion: 1 },
+      { currency: "USD", inputPerMillion: -1 },
+      { currency: "USD", outputPerMillion: Number.POSITIVE_INFINITY },
+      { currency: "USD", cacheReadPerMillion: 0.0000001 },
+    ]) {
+      expect(() =>
+        normalizeModelProviderConfiguration({
+          ...modelConfiguration(),
+          models: [{ ...firstModelConfiguration(), pricing }],
+        }),
+      ).toThrow();
+    }
+  });
+
   it("拒绝未知记忆秘密引用", () => {
     expect(() =>
       normalizeMemoryProviderConfiguration({

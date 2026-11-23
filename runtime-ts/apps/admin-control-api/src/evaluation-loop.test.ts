@@ -34,6 +34,7 @@ describe("评测循环", () => {
     try {
       const execute = evaluationCommandClient("https://internal.example.invalid");
       const input = {
+        batchId: crypto.randomUUID(),
         token: crypto.randomUUID(),
         tenantId: "tenant",
         userId: "user",

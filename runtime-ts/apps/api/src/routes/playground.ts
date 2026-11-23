@@ -109,8 +109,9 @@ export function registerEvaluationCommandRoute(
         body: {
           type: "object",
           additionalProperties: false,
-          required: ["tenantId", "userId", "generation", "plannedRunId"],
+          required: ["batchId", "tenantId", "userId", "generation", "plannedRunId"],
           properties: {
+            batchId: IdSchema,
             tenantId: IdSchema,
             userId: IdSchema,
             generation: { type: "string", pattern: "^[0-9]{1,19}$" },

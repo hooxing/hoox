@@ -33,11 +33,11 @@ const compareQuery = Type.Object(
 export interface EvaluationAdminPort {
   listSuites(actorUserId: string, definitionId: string): Promise<readonly EvaluationSuite[]>;
   saveSuite(actorUserId: string, suite: EvaluationSuite): Promise<void>;
-  deleteSuite(actorUserId: string, suiteId: string): Promise<void>;
+  deleteSuite(actorUserId: string, definitionId: string, suiteId: string): Promise<boolean>;
   startRun(
     actorUserId: string,
-    input: EvaluationRunRequest & { readonly suiteId: string },
-  ): Promise<EvaluationRunSummary>;
+    input: EvaluationRunRequest & { readonly definitionId: string; readonly suiteId: string },
+  ): Promise<EvaluationRunSummary | undefined>;
   listRuns(actorUserId: string, definitionId: string): Promise<readonly EvaluationRunSummary[]>;
   readRun(actorUserId: string, runId: string): Promise<EvaluationRunDetail | undefined>;
   cancelRun(actorUserId: string, runId: string): Promise<boolean>;
@@ -91,7 +91,12 @@ export function registerEvaluationRoutes(
       schema: { params: evaluationSuitePath, response: response(Type.Null()) },
     },
     async (request) => {
-      await evaluations.deleteSuite(await helpers.actor(request), request.params.suiteId);
+      const deleted = await evaluations.deleteSuite(
+        await helpers.actor(request),
+        request.params.definitionId,
+        request.params.suiteId,
+      );
+      if (!deleted) return helpers.notFound();
       return helpers.success(request, null);
     },
   );
@@ -108,14 +113,15 @@ export function registerEvaluationRoutes(
         response: response(EvaluationRunSummarySchema),
       },
     },
-    async (request) =>
-      helpers.success(
-        request,
-        await evaluations.startRun(await helpers.actor(request), {
-          ...request.body,
-          suiteId: request.params.suiteId,
-        }),
-      ),
+    async (request) => {
+      const started = await evaluations.startRun(await helpers.actor(request), {
+        ...request.body,
+        definitionId: request.params.definitionId,
+        suiteId: request.params.suiteId,
+      });
+      if (!started) return helpers.notFound();
+      return helpers.success(request, started);
+    },
   );
   app.get<{ Params: { definitionId: string } }>(
     `${base}/runs`,

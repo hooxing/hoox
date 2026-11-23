@@ -1515,6 +1515,38 @@ h2 {
   gap: 12px;
   margin-top: 5px;
 }
+.run-feedback {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: fit-content;
+  margin: 0.35rem 0 0 2.5rem;
+  padding: 0;
+  border: 0;
+}
+.run-feedback button {
+  border: 0;
+  border-radius: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+.run-feedback button[aria-pressed="true"] {
+  color: var(--focus-color);
+  background: var(--surface-raised);
+}
+.run-feedback label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: min(22rem, 70vw);
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+.run-feedback textarea {
+  min-height: 4rem;
+  resize: vertical;
+}
 .agent-turn-blocks .run-thinking {
   margin-top: 0;
 }

@@ -130,6 +130,63 @@ export type ArtifactTextPreviewDto = {
   disposition: "preview";
 };
 export interface Operations {
+  getRunFeedback: {
+    body: never;
+    query: Record<string, never>;
+    response: {
+      version: "v1";
+      requestId: string;
+      data: {
+        feedback: {
+          runId: string;
+          revisionId: string;
+          userId: string;
+          rating: "up" | "down";
+          comment?: string;
+          createdAt: string;
+          updatedAt: string;
+        } | null;
+      };
+    };
+  };
+  putRunFeedback: {
+    body: { rating: "up" | "down"; comment?: string };
+    query: Record<string, never>;
+    response: {
+      version: "v1";
+      requestId: string;
+      data: {
+        feedback: {
+          runId: string;
+          revisionId: string;
+          userId: string;
+          rating: "up" | "down";
+          comment?: string;
+          createdAt: string;
+          updatedAt: string;
+        } | null;
+      };
+    };
+  };
+  deleteRunFeedback: {
+    body: never;
+    query: Record<string, never>;
+    response: {
+      version: "v1";
+      requestId: string;
+      data: {
+        feedback: {
+          runId: string;
+          revisionId: string;
+          userId: string;
+          rating: "up" | "down";
+          comment?: string;
+          createdAt: string;
+          updatedAt: string;
+        } | null;
+      };
+    };
+  };
   submitToolResult: {
     body: { callId: string; outcome: "succeeded" | "failed"; result: string };
     query: Record<string, never>;
@@ -209,6 +266,9 @@ export interface Operations {
   readArtifactContent: { body: never; query: Record<string, never>; response: never };
 }
 export const routes = {
+  getRunFeedback: { method: "GET", path: "/v1/threads/{threadId}/runs/{runId}/feedback" },
+  putRunFeedback: { method: "PUT", path: "/v1/threads/{threadId}/runs/{runId}/feedback" },
+  deleteRunFeedback: { method: "DELETE", path: "/v1/threads/{threadId}/runs/{runId}/feedback" },
   submitToolResult: { method: "POST", path: "/v1/threads/{threadId}/runs/{runId}/tool-results" },
   listAgents: { method: "GET", path: "/v1/agents" },
   createThread: { method: "POST", path: "/v1/threads" },

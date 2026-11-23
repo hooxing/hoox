@@ -1,4 +1,5 @@
 import type { InternalTrajectoryEventV1 } from "@hoox/trajectory";
+import type { RunFeedbackDto } from "@hoox/protocol";
 import { adminAuthorizationHeader } from "./admin-session.js";
 import { AdminApiError } from "./api.js";
 
@@ -93,7 +94,10 @@ export interface RunPageDto {
 }
 
 export interface RunDetailDto {
-  readonly run: RunSummaryDto & { readonly attempts: readonly RunAttemptDto[] };
+  readonly run: RunSummaryDto & {
+    readonly attempts: readonly RunAttemptDto[];
+    readonly feedback?: readonly RunFeedbackDto[];
+  };
   readonly attemptId?: string;
   readonly timeline: RunTimelineDto;
   readonly contentAccess: boolean;

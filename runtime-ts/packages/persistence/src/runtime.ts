@@ -15,6 +15,7 @@ import {
 } from "./pg-core-repositories.js";
 import { PgIdentityConfigurationRepository } from "./pg-identity-configuration.js";
 import { PgClientToolResults } from "./pg-client-tool-calls.js";
+import { PgRunFeedbackRepository } from "./pg-run-feedback.js";
 import { PgPlaygroundRepository } from "./pg-playground.js";
 import { PgApiKeyRepository } from "./pg-api-keys.js";
 import { PgLocalAccountRepository } from "./pg-local-account.js";
@@ -93,6 +94,7 @@ export interface MigrationRuntime {
 export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
   readonly clientToolResults: PgClientToolResults;
+  readonly runFeedback: PgRunFeedbackRepository;
   readonly playground: PgPlaygroundRepository;
   readonly agentDefinitions: PgAgentDefinitionRepository;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -141,6 +143,7 @@ export function createApiPersistenceRuntime(
   return Object.freeze({
     repositories: new PgCoreRepositories(pool),
     clientToolResults: new PgClientToolResults(pool),
+    runFeedback: new PgRunFeedbackRepository(pool),
     playground: new PgPlaygroundRepository(pool),
     agentDefinitions: new PgAgentDefinitionRepository(pool),
     archiveThread: new PgArchiveThreadCommand(pool),

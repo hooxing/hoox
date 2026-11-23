@@ -6,6 +6,12 @@ function source(path: string): string {
 }
 
 describe("Demo 持续部署契约", () => {
+  it("pipefail 下不把命令输出直接管道给 grep -q，避免 SIGPIPE 使判断随机失败", () => {
+    const script = source("deploy/demo/remote-deploy.sh");
+    expect(script).toContain("set -euo pipefail");
+    expect(script).not.toMatch(/\|\s*grep\s+-[a-zA-Z]*q/u);
+  });
+
   it.each(["scheduler", "admin-control"])(
     "%s 轨迹对象存储必填项完整，且不混用 Skill 发布凭据",
     (service) => {

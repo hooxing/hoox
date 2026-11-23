@@ -1,3 +1,4 @@
+import { AssistantMessage } from "@hoox/chat-ui/assistant-message";
 import { filePreviewKind, readFileReferences } from "@hoox/protocol/file-references";
 import {
   Archive,
@@ -19,15 +20,14 @@ import {
   X,
 } from "lucide-react";
 import {
-  Fragment,
   type FormEventHandler,
+  Fragment,
   type ReactNode,
   type RefObject,
   useEffect,
   useRef,
   useState,
 } from "react";
-import { AssistantMessage } from "@hoox/chat-ui/assistant-message";
 import {
   type Artifact,
   type AvailableAgent,
@@ -1224,6 +1224,7 @@ function RunFeedbackControl({
       setFeedback(value.feedback);
       setComment(value.feedback?.comment ?? "");
       setRating(value.feedback?.rating);
+      setLoadError(false);
     } catch {
       setSaveError(true);
     } finally {
@@ -1239,6 +1240,7 @@ function RunFeedbackControl({
       setFeedback(null);
       setComment("");
       setRating(undefined);
+      setLoadError(false);
     } catch {
       setSaveError(true);
     } finally {
@@ -1289,6 +1291,7 @@ function RunFeedbackControl({
           反馈附言
           <textarea
             maxLength={2000}
+            disabled={pending}
             value={comment}
             onChange={(event) => {
               editVersion.current += 1;

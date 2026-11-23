@@ -107,6 +107,70 @@ describe("工作台展示组件", () => {
       await act(async () => root.unmount());
     }
   });
+  it("保存期间锁定附言，保存成功后清除读取错误", async () => {
+    let resolvePut!: (value: {
+      feedback: {
+        runId: string;
+        revisionId: string;
+        userId: string;
+        rating: "up" | "down";
+        createdAt: string;
+        updatedAt: string;
+      };
+    }) => void;
+    const feedbackApi = {
+      getRunFeedback: vi.fn(async () => {
+        throw new Error("读取失败");
+      }),
+      putRunFeedback: vi.fn(
+        () =>
+          new Promise<Parameters<typeof resolvePut>[0]>((resolve) => {
+            resolvePut = resolve;
+          }),
+      ),
+      deleteRunFeedback: vi.fn(async () => ({ feedback: null })),
+    };
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ThreadTranscript
+            messages={[]}
+            currentRun={{ ...running, status: "succeeded" }}
+            threadId="thread-1"
+            feedbackApi={feedbackApi}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain("反馈读取失败");
+      const buttons = container.querySelectorAll<HTMLButtonElement>(".run-feedback button");
+      await act(async () => buttons[0]?.click());
+      const submit = Array.from(
+        container.querySelectorAll<HTMLButtonElement>(".run-feedback button"),
+      ).find((button) => button.textContent === "提交反馈");
+      await act(async () => submit?.click());
+      const textarea = container.querySelector<HTMLTextAreaElement>(".run-feedback textarea");
+      expect(textarea?.disabled).toBe(true);
+      await act(async () =>
+        resolvePut({
+          feedback: {
+            runId: "run-1",
+            revisionId: "revision-1",
+            userId: "user-1",
+            rating: "up",
+            createdAt: "2026-11-20T00:00:00.000Z",
+            updatedAt: "2026-11-20T00:00:00.000Z",
+          },
+        }),
+      );
+      expect(textarea?.disabled).toBe(false);
+      expect(container.textContent).not.toContain("反馈读取失败");
+      expect(container.textContent).toContain("已保存");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
   it("迟到的反馈读取不会覆盖加载期间编辑的草稿", async () => {
     let resolveFeedback!: (value: { feedback: null }) => void;
     const feedbackApi = {

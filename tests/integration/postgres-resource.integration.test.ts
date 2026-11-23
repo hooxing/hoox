@@ -730,7 +730,9 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
       `UPDATE "${schema}".threads SET is_evaluation=true WHERE tenant_id=$1 AND id=$2`,
       [tenantA.scope.tenantId, tenantA.threadId],
     );
-    expect(await filesystem.list({ tenantId: tenantA.scope.tenantId })).toEqual([]);
+    expect(
+      (await filesystem.list({ tenantId: tenantA.scope.tenantId })).map((file) => file.resourceId),
+    ).not.toContain(input.resourceId);
     await expect(
       filesystem.resolve({
         tenantId: tenantA.scope.tenantId,

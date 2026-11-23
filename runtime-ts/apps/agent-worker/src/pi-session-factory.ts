@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createExternalToolFactory } from "@hoox/pi-adapter";
 import { ExternalToolSnapshotError } from "@hoox/run-contracts";
 import type {
+  ClientToolAction,
   ExternalToolRuntimeSnapshot,
   ExternalToolSnapshotReader,
   ExternalToolTransport,
@@ -46,6 +47,8 @@ import {
   AutomationUpdateArgumentError,
   automationToolMutation,
   createPlaygroundClientToolMocks,
+  createClientTools,
+  clientToolsForSession,
   type AutomationUpdateToolArguments,
 } from "@hoox/tool-router";
 import {
@@ -181,8 +184,7 @@ export interface PromptImageLoaderPort {
 
 /**
  * Worker 的生产 Pi 绑定只返回应用层窄接口；原始 AgentSession 和 compact() 从未跨越适配层。
- * waiting 未来由 request_user_input 工具适配器产生；本阶段只实现持久 RolloutProjection 的恢复机制，
- * 再用 prompt 真正启动模型，绝不对空 Session 调 followUp。
+ * waiting 恢复从持久投影和回执重新 prompt，绝不对空 Session 调 followUp。
  */
 export interface WorkerExternalToolConfiguration {
   readonly snapshots: ExternalToolSnapshotReader;
@@ -246,6 +248,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly enabledTools?: readonly RuntimeToolName[],
     private readonly telemetry?: WorkerTelemetry,
     private readonly externalToolConfiguration?: WorkerExternalToolConfiguration,
+    private readonly hasClientToolHistoryForThread?: (
+      scope: Parameters<AgentSessionFactoryPort["create"]>[0]["scope"],
+    ) => Promise<boolean>,
   ) {
     this.enabledTools = normalizeRuntimeToolSelection(enabledTools);
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
@@ -289,6 +294,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       input.enabledTools ?? this.enabledTools,
       this.telemetry,
       this.externalToolConfiguration,
+      this.hasClientToolHistoryForThread,
     );
   }
 
@@ -313,9 +319,25 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       }
     };
 
-    const attemptWireTraces = this.modelWireTraces?.createAttempt(input.attemptId);
+    const configuredTools = input.agentSnapshot.content.tools;
+    const hasClientTools =
+      configuredTools.mode === "configured" && configuredTools.clientTools.length > 0;
+    let threadHasClientToolHistory = true;
+    if (this.hasClientToolHistoryForThread !== undefined) {
+      try {
+        threadHasClientToolHistory = await this.hasClientToolHistoryForThread(input.scope);
+      } catch {
+        // 无法确认 Thread 是否含客户端调用时关闭诊断，但不影响 Run 执行。
+      }
+    }
+    const protectDiagnosticContent = hasClientTools || threadHasClientToolHistory;
+    // 客户端参数与回执可能出现在任意 Thread 历史切片，包括子 Agent 的用户消息。
+    if (protectDiagnosticContent) this.telemetry?.suppressAttemptContent(input.attemptId);
+    const attemptWireTraces = protectDiagnosticContent
+      ? undefined
+      : this.modelWireTraces?.createAttempt(input.attemptId);
     const trajectoryRecorder =
-      this.internalTrajectoryDiagnostics === undefined
+      protectDiagnosticContent || this.internalTrajectoryDiagnostics === undefined
         ? undefined
         : new InternalTrajectoryAttemptRecorder(
             {
@@ -422,6 +444,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       | "IDEMPOTENCY_CONFLICT"
       | "EXTERNAL_TOOL_RESULT_UNKNOWN"
       | undefined;
+    const pendingClientTools: ClientToolAction[] = [];
     let toolEffectRejected = false;
     const skillSnapshot: RunSkillSnapshot =
       input.skillSnapshot ??
@@ -728,7 +751,15 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         });
       },
     };
-    const configuredTools = input.agentSnapshot.content.tools;
+    // Provider 只保证本次对话中的 ID；公开回调可能迟到，不能把旧 Attempt 的结果交给新调用。
+    const clientCallId = (providerId: string) =>
+      `client_${createHash("sha256")
+        .update(JSON.stringify([input.attemptId, providerId]))
+        .digest("hex")}`;
+    const clientDefinitions = clientToolsForSession(
+      configuredTools.mode === "configured" ? configuredTools.clientTools : [],
+      input.agent?.agentKind ?? "root",
+    );
     const configuredVersions = new Map(
       configuredTools.mode === "configured"
         ? configuredTools.externalTools.map(({ versionId, kind }) => [versionId, kind] as const)
@@ -908,27 +939,39 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               return externalToolFactory(externalSnapshots);
             },
           }),
-      ...(input.origin !== "playground" ||
-      configuredTools.mode !== "configured" ||
-      configuredTools.clientTools.length === 0
+      ...(clientDefinitions.length === 0
         ? {}
         : {
+            suspendAfterTurn: () => pendingClientTools.length > 0,
             clientTools: (ports: {
-              readonly recordControlledReceipt: (
-                callId: string,
-                toolName: string,
-                outcome: "succeeded" | "failed",
-                executionMode?: "playground_mock",
-              ) => Promise<unknown>;
-            }) =>
-              createPlaygroundClientToolMocks(configuredTools.clientTools, {
-                origin: input.origin,
-                mocks: input.playgroundMocks,
-                persistStarted: async ({ callId, toolName }) => {
-                  await recordStartedTool({ toolCallId: callId, toolName });
-                },
+              recordControlledReceipt: Parameters<typeof createClientTools>[1]["recordReceipt"];
+            }) => {
+              const definitions = clientDefinitions;
+              const shared = {
+                persistStarted: async ({
+                  callId,
+                  toolName,
+                }: {
+                  callId: string;
+                  toolName: string;
+                }) => recordStartedTool({ toolCallId: callId, toolName }),
                 recordReceipt: ports.recordControlledReceipt,
-              }),
+              };
+              return input.origin === "playground"
+                ? createPlaygroundClientToolMocks(definitions, {
+                    ...shared,
+                    origin: input.origin,
+                    mocks: input.playgroundMocks,
+                  })
+                : createClientTools(definitions, {
+                    ...shared,
+                    stage: (action) => {
+                      if (pendingClientTools.length >= 8) return false;
+                      pendingClientTools.push({ ...action, callId: clientCallId(action.callId) });
+                      return true;
+                    },
+                  });
+            },
           }),
       createToolObservationRecorder: (outputs: ControlledToolReceiptSource) => {
         const recorder = this.createObservationRecorder(input, outputs);
@@ -1140,7 +1183,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 >,
               ) => {
                 if (externalSnapshots.length > 0) await readExternalSnapshots();
-                const persisted = await input.onTurnSafePoint?.(event);
+                const waitingForClient = pendingClientTools.length > 0;
+                const persisted = await input.onTurnSafePoint?.(event, waitingForClient);
+                if (waitingForClient) return undefined;
                 if (persisted === undefined) return undefined;
                 let replacement: ThreadActiveHistoryV1 | undefined;
                 if (this.prepareThreadHistory !== undefined) {
@@ -1359,6 +1404,28 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         if (observationRecoveryCode !== undefined) {
           return { kind: "recovery_required", code: observationRecoveryCode };
         }
+        if (pendingClientTools.length > 0) {
+          // 未启用 Thread 历史的 Run 也要带走本 Attempt 最新的 durable 回执，不能只存 Session 启动前的投影。
+          const tail =
+            recoveredThreadHistory === undefined
+              ? await prepareObservationSession?.(input, compatibility)
+              : undefined;
+          return {
+            kind: "waiting",
+            question: "等待客户端工具结果",
+            actions: pendingClientTools,
+            rolloutProjection: {
+              schemaVersion: 2,
+              items:
+                tail === undefined
+                  ? activeRolloutProjection.items
+                  : recoveredProjection === undefined
+                    ? [...input.rolloutProjection.items, ...tail.items]
+                    : tail.items,
+              checkpointId: `${input.attemptId}/client-tools`,
+            },
+          };
+        }
         return { kind: "completed" };
       },
       steer: async (userInput) => {
@@ -1378,6 +1445,16 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       },
       subscribe: (listener) =>
         controller.subscribe((event) => {
+          if (
+            input.origin !== "playground" &&
+            (event.type === "tool.started" ||
+              event.type === "tool.updated" ||
+              event.type === "tool.completed") &&
+            clientDefinitions.some((t) => t.name === event.name)
+          ) {
+            listener({ ...event, callId: clientCallId(event.callId) });
+            return;
+          }
           if (
             input.agent?.agentKind === "subagent" &&
             (event.type === "tool.started" ||

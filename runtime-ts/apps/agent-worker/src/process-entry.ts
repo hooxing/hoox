@@ -37,6 +37,7 @@ import { PgRunTrajectoryStore } from "@hoox/persistence/trajectory";
 import {
   PgAgentControlRepository,
   PgBackedSandboxSessionRegistry,
+  PgClientToolCallHistoryReader,
   ExternalToolCredentialDecryptor,
   PgExternalToolSnapshotReader,
   PgExecutionPersistence,
@@ -1015,6 +1016,7 @@ async function assembleWorkerRuntime(
       policy: { maxModelObservationBytes: 4 * 1024 },
     });
     const threadContextHistory = new PgThreadContextHistoryRepository(pool, blobs);
+    const clientToolCallHistory = new PgClientToolCallHistoryReader(pool);
     const threadContextBodies = new ThreadContextBodyPersistence(
       new DurableTraceBlobPersistenceAdapter(blobRepository, blobs),
       configuration.threadContext.inlineBodyMaxBytes,
@@ -1369,6 +1371,11 @@ async function assembleWorkerRuntime(
             }),
         allowPrivateAddresses: configuration.externalToolsAllowPrivateAddresses,
       },
+      async (scope) =>
+        await clientToolCallHistory.hasClientToolHistoryForThread({
+          tenantId: scope.tenantId,
+          threadId: scope.threadId,
+        }),
     );
     const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(
       pool,

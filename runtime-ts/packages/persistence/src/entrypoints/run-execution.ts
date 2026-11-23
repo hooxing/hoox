@@ -1,5 +1,6 @@
 // Worker 执行事实：调度领取、执行状态、Rollout、恢复、协作、定时任务与 Workspace 提交。
 export * from "../pg-agent-control.js";
+export { PgClientToolCallHistoryReader } from "../pg-client-tool-calls.js";
 export * from "../pg-memory-ingestion.js";
 export * from "../pg-model-wire-trace.js";
 export * from "../pg-recovery-metrics.js";

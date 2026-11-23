@@ -29,6 +29,10 @@ const content: AgentRevisionContent = {
   sandboxIdleAction: "pause",
   memory: { mode: "configured", longTermEnabled: false },
 };
+const configuredTools = content.tools as Extract<
+  AgentRevisionContent["tools"],
+  { mode: "configured" }
+>;
 describe("AgentDefinition 领域约束", () => {
   it("版本说明可省略且最多 2000 字符", () => {
     expect(() => validateAgentVersionNotes(undefined)).not.toThrow();
@@ -72,6 +76,51 @@ describe("AgentDefinition 领域约束", () => {
         },
       }),
     ).toThrow("模型引用无效");
+  });
+  it("拒绝 PTC 客户端工具组合并校验客户端等待时限", () => {
+    const clientTool = {
+      name: "send_order",
+      description: "创建订单",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      waitTimeoutMs: 30_000,
+    };
+    expect(
+      validateAgentRevisionContent({
+        ...content,
+        tools: { ...configuredTools, clientTools: [clientTool] },
+      }).tools,
+    ).toMatchObject({
+      clientTools: [{ ...clientTool, inputSchema: { ...clientTool.inputSchema, required: [] } }],
+    });
+    expect(() =>
+      validateAgentRevisionContent({
+        ...content,
+        tools: {
+          ...configuredTools,
+          clientTools: [
+            {
+              ...clientTool,
+              inputSchema: { type: "object", properties: {}, additionalProperties: true },
+            },
+          ],
+        },
+      }),
+    ).toThrow("封闭对象");
+    expect(() =>
+      validateAgentRevisionContent({
+        ...content,
+        tools: { ...configuredTools, clientTools: [clientTool], toolCallingMode: "ptc" },
+      }),
+    ).toThrow("不支持 PTC 模式与客户端工具同时启用");
+    expect(() =>
+      validateAgentRevisionContent({
+        ...content,
+        tools: {
+          ...configuredTools,
+          clientTools: [{ ...clientTool, waitTimeoutMs: 999 }],
+        },
+      }),
+    ).toThrow("等待时限");
   });
   it("拒绝请求级模板值并验证指令 UTF-8 字节上限", () => {
     expect(() =>

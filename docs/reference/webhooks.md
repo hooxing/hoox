@@ -10,20 +10,23 @@ Webhook 用于 Hoox 在 Run 完成等事件发生时通知部署方系统。平�
 
 ## 事件
 
-订阅类型为 `run.waiting`、`run.requires_action`、`run.succeeded`、`run.failed`、`run.cancelled`、`artifact.published`。`run.requires_action` 专指客户端工具等待事实；普通 `waiting` 不会被解释为该事件。客户端工具等待事件由 C4 在写入等待事实的同一事务产生，因此在 C4 接入前不能订阅到该类投递。
+订阅类型为 `run.waiting`、`run.requires_action`、`run.succeeded`、`run.failed`、`run.cancelled`、`artifact.published`。`run.requires_action` 专指客户端工具等待事实；普通 `waiting` 不会被解释为该事件。每个待处理调用产生一个事件；同一次等待也会产生普通状态事件 `run.waiting`。
 
 Run 事件覆盖所有提交 Run 状态转换的路径：Worker 收尾、API 取消、过期 Attempt 的安全失败恢复以及团队解散时的批量取消。事件与状态转换在同一事务提交；事务回滚则不产生事件。
 
 ## 载荷
 
-载荷字段为封闭白名单，不包含附件字节、文件名、路径或下载 URL：
+载荷字段为封闭白名单，平台不自动附加附件字节、文件名、路径或下载 URL：
 
 | 事件 | 字段 |
 | --- | --- |
-| `run.*` | `id`、`type`、`createdAt`、`data.runId`、`data.status` |
+| `run.waiting`、`run.succeeded`、`run.failed`、`run.cancelled` | `id`、`type`、`createdAt`、`data.runId`、`data.status` |
+| `run.requires_action` | `id`、`type`、`createdAt`；`data` 包含 `threadId`、`runId`、`callId`、`toolName`、`arguments`、`deadline` |
 | `artifact.published` | `id`、`type`、`createdAt`、`data.artifactId`、`data.runId` |
 
-事件 `id` 由业务事实确定性派生：同一 Run 状态转换或同一 Artifact 发布在同一 Tenant 的所有订阅间使用同一 ID，重放不会产生新 ID；单个订阅对同一事件最多有一条投递记录。`createdAt` 为业务事实提交时间。
+工具参数由模型提供，可能含敏感业务数据。仅向有权接收参数的服务订阅 `run.requires_action`；不要记录原始载荷。投递可能迟到或重复，开始操作前检查截止时间和 Run 状态；取消或超时不会撤销外部已经发生的副作用。验签、去重后按[公开 API](public-api.md#执行客户端工具并回传)提交结果。
+
+事件 `id` 由业务事实确定性派生：同一 Run 状态转换、同一客户端工具调用或同一 Artifact 发布在同一 Tenant 的所有订阅间使用同一 ID，重放不会产生新 ID；单个订阅对同一事件最多有一条投递记录。`createdAt` 为业务事实提交时间。
 
 ## 签名验证
 

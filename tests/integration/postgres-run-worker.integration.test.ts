@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   createModels,
   fauxAssistantMessage,
+  fauxToolCall,
   fauxProvider,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
@@ -13,6 +14,7 @@ import {
   createWorkspace,
   isoTimestamp,
   membershipId,
+  rehydrateThread,
   resourceId,
   resourceVersionId,
   runId,
@@ -26,6 +28,7 @@ import {
 } from "@hoox/domain";
 import type {
   ControlledRolloutProjection,
+  ExecutionFence,
   ExecutionScope,
   RuntimeMutation,
   RuntimeOutboxV1,
@@ -40,13 +43,18 @@ import {
 } from "@hoox/run-contracts/mutation-protocol";
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createPgDurableObservationSession } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
+import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
+import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
+import { fakeAgentSnapshot } from "../../runtime-ts/apps/agent-worker/src/testing/agent-snapshot.js";
 import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
 import {
   FakeCancellationPort,
   FakeClock,
   FakeRecoveryMetrics,
   FakeRevisionVerifier,
+  FakeThreadContextBodies,
 } from "../../runtime-ts/apps/agent-worker/src/testing/fakes.js";
 import { performWorkerMaintenance } from "../../runtime-ts/apps/agent-worker/src/worker-maintenance.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
@@ -92,6 +100,7 @@ import {
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
 import { PgSkillRuntimeRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
+import { PgThreadForkRepository } from "../../runtime-ts/packages/persistence/src/pg-team-collaboration.js";
 import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/pg-thread-input.js";
 import { PgThreadSandboxLifecycleConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-thread-sandbox-lifecycle-consumer.js";
 import {
@@ -114,6 +123,10 @@ import {
   withTenantTransaction,
   withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import {
+  PgClientToolCallHistoryReader,
+  PgClientToolResults,
+} from "../../runtime-ts/packages/persistence/src/pg-client-tool-calls.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
 import { PgThreadSandboxSessionLifecycle } from "../../runtime-ts/packages/persistence/src/thread-sandbox-session.js";
@@ -189,11 +202,16 @@ interface SerialQueueFixture {
     readonly userId: ReturnType<typeof userId>;
   };
   readonly user: ReturnType<typeof createUser>;
+  readonly tenant: ReturnType<typeof createPersonalTenant>["tenant"];
+  readonly membership: ReturnType<typeof createPersonalTenant>["ownerMembership"];
   readonly thread: ReturnType<typeof createThread>;
   readonly workspace: ReturnType<typeof createWorkspace>;
 }
 
-async function serialQueueFixture(label: string): Promise<SerialQueueFixture> {
+async function serialQueueFixture(
+  label: string,
+  clientTimeoutMs?: number,
+): Promise<SerialQueueFixture> {
   const now = isoTimestamp("2099-07-26T00:00:00.000Z");
   const user = createUser(userId(`serial-user-${label}`), now);
   const personal = createPersonalTenant({
@@ -210,7 +228,7 @@ async function serialQueueFixture(label: string): Promise<SerialQueueFixture> {
       membership: personal.ownerMembership,
     }),
   ).toEqual({ outcome: "created" });
-  const thread = createThread({
+  let thread = createThread({
     id: threadId(`serial-thread-${label}`),
     tenant: personal.tenant,
     user,
@@ -218,6 +236,46 @@ async function serialQueueFixture(label: string): Promise<SerialQueueFixture> {
     title: "Thread 串行队列集成测试",
     now,
   });
+  if (clientTimeoutMs !== undefined) {
+    const id = `agent-${label}`;
+    const snapshot = fakeAgentSnapshot({
+      tools: {
+        mode: "configured",
+        toolCallingMode: "native",
+        builtinTools: [],
+        externalTools: [],
+        clientTools: [
+          {
+            name: "client_lookup",
+            description: "客户端查询",
+            inputSchema: {
+              type: "object",
+              properties: { city: { type: "string" } },
+              required: ["city"],
+              additionalProperties: false,
+            },
+            waitTimeoutMs: clientTimeoutMs,
+          },
+        ],
+      },
+    });
+    await withTransaction(admin, async (client) => {
+      await client.query(
+        `INSERT INTO "${schema}".agent_definitions(id,status,availability_mode,current_revision_id) VALUES($1,'published','all_tenants',$2)`,
+        [id, `${id}-rev`],
+      );
+      await client.query(
+        `INSERT INTO "${schema}".agent_revisions(id,definition_id,revision,status,content,content_digest,created_by) VALUES($1,$2,1,'published',$3,$4,$5)`,
+        [`${id}-rev`, id, snapshot.content, snapshot.revisionDigest, user.id],
+      );
+    });
+    thread = rehydrateThread(
+      { ...thread, agentDefinitionId: id },
+      personal.tenant,
+      user,
+      personal.ownerMembership,
+    );
+  }
   expect(await repositories.threads.create(tenantScope, thread)).toMatchObject({
     outcome: "created",
   });
@@ -229,7 +287,14 @@ async function serialQueueFixture(label: string): Promise<SerialQueueFixture> {
   expect(await repositories.workspaces.create(tenantScope, workspace)).toEqual({
     outcome: "created",
   });
-  return { tenantScope, user, thread, workspace };
+  return {
+    tenantScope,
+    user,
+    tenant: personal.tenant,
+    membership: personal.ownerMembership,
+    thread,
+    workspace,
+  };
 }
 
 function requestDigest(value: string): string {
@@ -4675,6 +4740,454 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ),
     ).resolves.toEqual({ outcome: "protocol_invalid" });
   });
+
+  it.each(["submit", "timeout", "cancel"] as const)(
+    "客户端工具 %s 与 waiting、持久事件和再次投递共享同一状态机",
+    async (mode) => {
+      const label = `client-${mode}-${suffix}`;
+      const base = await serialQueueFixture(label, mode === "timeout" ? 1000 : 300_000);
+      const run = createRun({
+        id: runId(`run-${label}`),
+        thread: base.thread,
+        now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+      });
+      const scope: ExecutionScope = {
+        tenantId: base.tenantScope.tenantId,
+        threadId: base.thread.id,
+        runId: run.id,
+        rootRunId: run.id,
+        workspaceId: base.workspace.id,
+      };
+      const f = { ...base, scope };
+      const actor = base.tenantScope;
+      await subscribeWebhook(f, ["run.waiting", "run.requires_action"]);
+      const clientToolHistory = new PgClientToolCallHistoryReader(runtime);
+      await expect(
+        clientToolHistory.hasClientToolHistoryForThread({
+          tenantId: scope.tenantId,
+          threadId: scope.threadId,
+        }),
+      ).resolves.toBe(false);
+      await new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true }).createQueuedRun({
+        scope: actor,
+        run,
+        thread: base.thread,
+        origin: "api",
+        inputText: "查询指定城市",
+        idempotency: { key: label, requestHash: requestDigest(label) },
+      });
+      const dispatch = () =>
+        runDispatchOutbox.claim({
+          tenantId: scope.tenantId,
+          dispatcherId: "client-test",
+          limit: 1,
+          leaseMilliseconds: 30_000,
+        });
+      const first = (await dispatch())[0];
+      if (!first) throw new Error("未领取投递");
+      const toolName = "client_lookup";
+      const faux = fauxProvider({
+        api: `client-${mode}`,
+        provider: `client-${mode}`,
+        tokensPerSecond: 100_000,
+      });
+      const credentials = new InMemoryCredentialStore();
+      await credentials.modify(faux.provider.id, async () => ({
+        type: "api_key",
+        key: "placeholder-key",
+      }));
+      const models = createModels({ credentials });
+      models.setProvider(faux.provider);
+      const gateway = new FakeSandboxGateway();
+      const execute = () => {
+        const registry = new PgBackedSandboxSessionRegistry(runtime, {
+          acquire: async () => {
+            const sandbox = await gateway.create({ templateId: "client-test", ttlSeconds: 120 });
+            const id = randomUUID();
+            return {
+              outcome: "ready",
+              session: {
+                registryId: id,
+                providerKey: "cube",
+                providerSandboxId: id,
+                mode: "created",
+                sandbox,
+              },
+            };
+          },
+          settle: async () => ({ outcome: "settled" }),
+        });
+        const blobs = {} as BlobStore; // 本用例的受控回执和 Thread 历史均为内联正文。
+        const observations = createPgDurableObservationSession({
+          blobRepository: new PgBlobLifecycleRepository(runtime),
+          blobs,
+          rolloutRepository: new PgRuntimeRolloutRepository(runtime),
+          policy: { maxModelObservationBytes: 4096 },
+        });
+        return new RunWorker(
+          {
+            persistence: new PgExecutionPersistence(runtime, { threadContextWriteEnabled: true }),
+            threadContextBodies: new FakeThreadContextBodies(),
+            revisions: new FakeRevisionVerifier(),
+            sandboxes: registry,
+            orphanSandboxes: registry,
+            sessions: new PiWorkerSessionFactory(
+              faux.getModel(),
+              models,
+              observations.createRecorder,
+              undefined,
+              observations.prepare,
+              undefined,
+              undefined,
+              mode !== "submit"
+                ? undefined
+                : async (input, compatibility) => {
+                    const history = await new PgThreadContextHistoryRepository(
+                      runtime,
+                      blobs,
+                    ).readActiveHistory({
+                      scope: input.scope,
+                      attemptId: input.attemptId,
+                      throughSequence: input.contextThroughSequence ?? 0,
+                      compatibilityDigest: digestCanonical(compatibility),
+                      mode: "read",
+                    });
+                    if (history.outcome !== "ready") throw new Error("无法从 Thread 事实重建会话");
+                    return history.history;
+                  },
+            ),
+            cancellation: new FakeCancellationPort(),
+            clock: new FakeClock(),
+            metrics: new FakeRecoveryMetrics(),
+          },
+          {
+            threadContextWriteEnabled: true,
+            workerId: `client-${randomUUID()}`,
+            leaseDurationMs: 30_000,
+            heartbeatMs: 10_000,
+          },
+        ).execute(scope);
+      };
+      faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxToolCall(toolName, { city: "上海" }, { id: "lookup-1" }),
+            ...(mode === "submit"
+              ? [fauxToolCall(toolName, { city: "上海" }, { id: "lookup-2" })]
+              : []),
+          ],
+          {
+            stopReason: "toolUse",
+          },
+        ),
+      ]);
+      expect(await execute()).toEqual({ outcome: "waiting" });
+      expect(await execute()).toMatchObject({ outcome: "ignored", reason: "waiting_for_answer" });
+      expect(await dispatch()).toHaveLength(0);
+      const outbox = await webhookOutbox(f);
+      expect(outbox).toHaveLength(mode === "submit" ? 3 : 2);
+      const data = outbox.find((e) => e.event_type === "run.requires_action")?.payload.data;
+      if (typeof data?.callId !== "string") throw new Error("未发布客户端调用");
+      const callId = data.callId;
+      expect(callId).toMatch(/^client_[a-f0-9]{64}$/u);
+      expect(callId).not.toBe("lookup-1");
+      const sourceHasClientToolHistory = await clientToolHistory.hasClientToolHistoryForThread({
+        tenantId: scope.tenantId,
+        threadId: scope.threadId,
+      });
+      expect(sourceHasClientToolHistory).toBe(true);
+      if (mode === "submit") {
+        const attempt = await withTenantTransaction(
+          runtime,
+          actor,
+          async (client) =>
+            await client.query<{ readonly attempt_id: string }>(
+              `SELECT attempt_id FROM execution_attempts
+              WHERE tenant_id=$1 AND run_id=$2 ORDER BY created_at DESC LIMIT 1`,
+              [scope.tenantId, scope.runId],
+            ),
+        );
+        const attemptId = attempt.rows[0]?.attempt_id;
+        if (attemptId === undefined) throw new Error("客户端工具 Attempt 缺失");
+        await withTenantTransaction(runtime, actor, async (client) => {
+          await client.query(
+            `INSERT INTO memory_ingestion_outbox(
+               tenant_id,run_id,thread_id,attempt_id,subject_user_id,tenant_kind,
+               source_through_sequence
+             ) SELECT tenant.id,run.id,thread.id,$4,
+                      COALESCE(tenant.owner_user_id,thread.created_by_user_id),tenant.kind,1
+                 FROM tenants tenant
+                 JOIN threads thread ON thread.tenant_id=tenant.id AND thread.id=$2
+                 JOIN runs run ON run.tenant_id=tenant.id AND run.id=$3 AND run.thread_id=thread.id
+                WHERE tenant.id=$1`,
+            [scope.tenantId, scope.threadId, scope.runId, attemptId],
+          );
+        });
+        const memory = new PgMemoryIngestionStore(runtime, {} as BlobStore);
+        await expect(
+          memory.claimNext({
+            tenantId: scope.tenantId,
+            workerId: `client-history-memory-${label}`,
+            leaseMs: 30_000,
+          }),
+        ).resolves.toBeUndefined();
+        const memoryState = await withTenantTransaction(runtime, actor, (client) =>
+          client.query<{ readonly state: string; readonly last_error_code: string | null }>(
+            `SELECT state,last_error_code FROM memory_ingestion_outbox
+              WHERE tenant_id=$1 AND run_id=$2`,
+            [scope.tenantId, scope.runId],
+          ),
+        );
+        expect(memoryState.rows[0]).toEqual({
+          state: "skipped",
+          last_error_code: null,
+        });
+      }
+      if (mode === "submit") {
+        const childThread = createThread({
+          id: threadId(`fork-${label}`),
+          tenant: base.tenant,
+          user: base.user,
+          membership: base.membership,
+          title: "客户端历史分支集成测试",
+          now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+        });
+        expect(await repositories.threads.create(actor, childThread)).toMatchObject({
+          outcome: "created",
+        });
+        expect(
+          await repositories.workspaces.create(
+            actor,
+            createWorkspace({
+              id: workspaceId(`fork-workspace-${label}`),
+              thread: childThread,
+              now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+            }),
+          ),
+        ).toEqual({ outcome: "created" });
+        await expect(
+          new PgThreadForkRepository(runtime).seed({
+            scope: actor,
+            childThreadId: childThread.id,
+            sourceTenantId: actor.tenantId,
+            sourceThreadId: scope.threadId,
+            kind: "branch",
+            hasClientToolHistory: sourceHasClientToolHistory,
+            messages: [
+              {
+                role: "user",
+                text: "历史客户端工具参数与回执",
+                createdAt: isoTimestamp("2099-07-26T00:00:00.000Z"),
+              },
+            ],
+          }),
+        ).resolves.toBe("seeded");
+        await expect(
+          clientToolHistory.hasClientToolHistoryForThread({
+            tenantId: scope.tenantId,
+            threadId: childThread.id,
+          }),
+        ).resolves.toBe(true);
+      }
+      await expect(
+        clientToolHistory.hasClientToolHistoryForThread({
+          tenantId: scope.tenantId,
+          threadId: threadId(`unrelated-${label}`),
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        clientToolHistory.hasClientToolHistoryForThread({
+          tenantId: tenantId(`unrelated-${label}`),
+          threadId: scope.threadId,
+        }),
+      ).resolves.toBe(true);
+      if (mode === "submit") {
+        const laterRunId = runId(`run-later-${label}`);
+        const laterScope: ExecutionScope = {
+          ...scope,
+          runId: laterRunId,
+          rootRunId: laterRunId,
+        };
+        const laterFence: ExecutionFence = {
+          scope: laterScope,
+          runClaim: {
+            token: "later-run-claim",
+            epoch: 1,
+            expiresAt: isoTimestamp("2099-07-27T00:00:00.000Z"),
+          },
+          workspaceLease: {
+            rootRunId: laterRunId,
+            epoch: 1,
+            expiresAt: isoTimestamp("2099-07-27T00:00:00.000Z"),
+          },
+        };
+        const suppressContent = vi.fn();
+        const createRawTrace = vi.fn();
+        const laterTrajectory: unknown[] = [];
+        const laterSessions = new PiWorkerSessionFactory(
+          faux.getModel(),
+          models,
+          () => ({
+            recordStarted: async () => "recorded" as const,
+            record: async () => ({
+              outcome: "recorded" as const,
+              observation: "",
+              isTruncated: false,
+            }),
+          }),
+          undefined,
+          undefined,
+          { createAttempt: createRawTrace } as never,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            persist: async (record: unknown) => {
+              laterTrajectory.push(record);
+            },
+          },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { suppressAttemptContent: suppressContent } as never,
+          undefined,
+          async (laterAttemptScope) =>
+            await clientToolHistory.hasClientToolHistoryForThread({
+              tenantId: laterAttemptScope.tenantId,
+              threadId: laterAttemptScope.threadId,
+            }),
+        );
+        const laterSession = await laterSessions.create({
+          scope: laterScope,
+          attemptId: `attempt-later-${label}`,
+          fence: laterFence,
+          agentSnapshot: fakeAgentSnapshot(),
+          origin: "normal",
+          playgroundMocks: {},
+          ensureSandboxReady: async () => {
+            throw new Error("后续 Session 不应准备 Sandbox");
+          },
+          rolloutProjection: {
+            schemaVersion: 2,
+            checkpointId: `later-${label}`,
+            items: [],
+          },
+          authorizeToolEffect: async () => {
+            throw new Error("后续 Session 不执行工具");
+          },
+          writeTodo: async () => {
+            throw new Error("后续 Session 不写 Todo");
+          },
+        });
+        expect(suppressContent).toHaveBeenCalledWith(`attempt-later-${label}`);
+        expect(createRawTrace).not.toHaveBeenCalled();
+        laterSession.dispose();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(laterTrajectory).toHaveLength(0);
+      }
+      expect(data).toMatchObject({
+        threadId: scope.threadId,
+        runId: scope.runId,
+        callId,
+        toolName,
+        arguments: { city: "上海" },
+        deadline: expect.any(String),
+      });
+      const page = await new PgRunExperienceReadRepository(runtime).listEvents({
+        scope: actor,
+        runId: scope.runId,
+        after: 0,
+        limit: 100,
+      });
+      expect(page).toMatchObject({
+        events: expect.arrayContaining([
+          expect.objectContaining({ kind: "run_waiting", payload: expect.objectContaining(data) }),
+        ]),
+      });
+      const results = new PgClientToolResults(runtime);
+      const input = {
+        scope: actor,
+        threadId: scope.threadId,
+        runId: scope.runId,
+        callId,
+        outcome: "succeeded" as const,
+        result: "界".repeat(3000),
+      };
+      expect(await results.submit({ ...input, result: "界".repeat(349_526) })).toBe("bad_request");
+      const outsider = await fixture(`outside-${mode}-${suffix}`);
+      expect(
+        await results.submit({
+          ...input,
+          scope: { tenantId: outsider.scope.tenantId, userId: outsider.user.id },
+        }),
+      ).toBe("not_found");
+      if (mode === "cancel") {
+        const run = await repositories.runs.get(actor, scope.runId);
+        if (!run) throw new Error("缺少 Run");
+        await repositories.runs.update(
+          actor,
+          transitionRun(run.entity, "cancelled", isoTimestamp(new Date().toISOString())),
+          run.version,
+        );
+        expect(await results.submit(input)).toBe("conflict");
+        return;
+      }
+      if (mode === "timeout") {
+        await new Promise((resolve) => setTimeout(resolve, 1050));
+        expect(await results.submit(input)).toBe("conflict");
+      } else {
+        const alternatives = [`${input.result}A`, `${input.result}B`];
+        const accepted = await Promise.all(
+          alternatives.map((result) => results.submit({ ...input, result })),
+        );
+        expect(accepted.toSorted()).toEqual(["accepted", "conflict"]);
+        const result = alternatives[accepted.indexOf("accepted")];
+        if (result === undefined) throw new Error("没有接受结果");
+        const replay = { ...input, result };
+        expect(await results.submit(replay)).toBe("accepted");
+        expect(await results.submit({ ...replay, outcome: "failed" })).toBe("conflict");
+      }
+      if (mode === "submit") {
+        expect(await dispatch()).toHaveLength(0);
+        expect(await execute()).toMatchObject({ outcome: "ignored", reason: "waiting_for_answer" });
+        const other = outbox.find(
+          (e) => e.event_type === "run.requires_action" && e.payload.data.callId !== callId,
+        )?.payload.data.callId;
+        if (typeof other !== "string") throw new Error("缺少同轮第二条调用");
+        expect(
+          await results.submit({
+            ...input,
+            callId: other,
+            outcome: "failed",
+            result: "设备不可用",
+          }),
+        ).toBe("accepted");
+      }
+      // 原 Worker 的迟到确认不能抹掉最后一个回执或超时安排的恢复投递。
+      await runDispatchOutbox.acknowledge({ claim: first, outcome: "waiting" });
+      expect(await dispatch()).toHaveLength(1);
+      let resumeMessages = "";
+      faux.setResponses([
+        (ctx) => {
+          resumeMessages = JSON.stringify(ctx.messages);
+          return fauxAssistantMessage("完成");
+        },
+      ]);
+      expect(await execute()).toEqual({ outcome: "succeeded" });
+      expect(resumeMessages).toContain(callId);
+      expect(resumeMessages).toContain("lookup-1");
+      if (mode === "timeout") expect(resumeMessages).toContain("timeout");
+      else {
+        expect(resumeMessages).toContain("界".repeat(2730));
+        expect(resumeMessages).not.toContain("界".repeat(2731));
+      }
+      expect(await webhookOutbox(f)).toHaveLength(outbox.length);
+    },
+  );
 
   it("waiting 回答使用 Run version 与旧值 CAS，不能无条件覆盖", async () => {
     const f = await fixture(`answer-${suffix}`);

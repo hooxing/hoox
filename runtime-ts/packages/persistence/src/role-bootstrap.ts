@@ -1354,6 +1354,14 @@ async function hasManagedSandboxState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
+async function hasClientTools(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.client_tool_calls',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasApiEndUserState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.api_end_users',$1::text)) IS NOT NULL AS present",
@@ -1379,6 +1387,8 @@ export async function activeTablePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
+  if (await hasClientTools(client, schema))
+    policy.set("client_tool_calls", new Set(["SELECT", "INSERT"]));
   if (await hasApiEndUserState(client, schema))
     policy.set("api_end_users", new Set(["SELECT", "INSERT"]));
   if (!(await hasApiKeyState(client, schema))) policy.delete("api_keys");
@@ -1572,6 +1582,24 @@ export async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  if (await hasClientTools(client, schema)) {
+    policy.set(
+      "client_tool_calls",
+      new Set(["outcome", "result_digest", "response_text", "truncated"]),
+    );
+    const historyMarker = await client.query<{ readonly present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_schema=$1 AND table_name='threads' AND column_name='has_client_tool_history'
+       ) AS present`,
+      [schema],
+    );
+    if (historyMarker.rows[0]?.present === true) {
+      const threadColumns = new Set(policy.get("threads") ?? []);
+      threadColumns.add("has_client_tool_history");
+      policy.set("threads", threadColumns);
+    }
+  }
   if (await hasWebhookState(client, schema))
     policy.set("tenant_webhooks", new Set(webhookRuntimeUpdateColumns));
   const apiKeyState = await hasApiKeyState(client, schema);
@@ -4226,6 +4254,10 @@ export async function bootstrapRuntimeAccessOnClient(
   );
   await rebindRoleScopedPolicies(client, context);
   await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
+  if (await hasClientTools(client, context.schema))
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE(outcome,result_digest,response_text,truncated) ON ${schema}.client_tool_calls TO ${role}`,
+    );
   if (await hasApiEndUserState(client, context.schema)) {
     await client.query(`GRANT SELECT,INSERT ON TABLE ${schema}.api_end_users TO ${role}`);
   }

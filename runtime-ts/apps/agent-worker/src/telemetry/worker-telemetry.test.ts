@@ -6,8 +6,13 @@ import {
   fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
-import { transitionRun } from "@hoox/domain";
-import { bindTrustedPiModelContextCapability } from "@hoox/pi-adapter";
+import { agentThreadId, transitionRun } from "@hoox/domain";
+import {
+  bindTrustedPiModelContextCapability,
+  type ThreadActiveHistoryV1,
+  threadActiveHistoryDigest,
+} from "@hoox/pi-adapter";
+import type { InternalTrajectoryDiagnosticRecord } from "@hoox/trajectory";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { AggregationTemporality, InMemoryMetricExporter } from "@opentelemetry/sdk-metrics";
 import { InMemorySpanExporter, type SpanExporter } from "@opentelemetry/sdk-trace";
@@ -58,6 +63,14 @@ async function workerRun(
     providerFails?: boolean;
     seed?: Partial<FakeSeed>;
     rebindModel?: boolean;
+    history?: ThreadActiveHistoryV1;
+    modelWireTraces?: { createAttempt: ReturnType<typeof vi.fn> };
+    trajectoryRecords?: InternalTrajectoryDiagnosticRecord[];
+    hasClientToolHistoryForThread?: (scope: {
+      readonly tenantId: string;
+      readonly threadId: string;
+    }) => Promise<boolean>;
+    disableClientToolHistoryReader?: boolean;
   } = {},
 ) {
   const credentials = new InMemoryCredentialStore();
@@ -108,19 +121,29 @@ async function workerRun(
     }),
     undefined,
     undefined,
+    options.modelWireTraces as never,
+    undefined,
+    options.history === undefined ? undefined : async () => options.history,
     undefined,
     undefined,
     undefined,
     undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
+    options.trajectoryRecords === undefined
+      ? undefined
+      : {
+          persist: async (record: InternalTrajectoryDiagnosticRecord) => {
+            options.trajectoryRecords?.push(record);
+          },
+        },
     undefined,
     undefined,
     undefined,
     undefined,
     telemetry,
+    undefined,
+    options.disableClientToolHistoryReader
+      ? undefined
+      : (options.hasClientToolHistoryForThread ?? (async () => false)),
   );
   const worker = new RunWorker(
     {
@@ -144,7 +167,60 @@ async function workerRun(
     },
     { workerId: "otel-test" },
   );
-  return { worker, scope, persistence, model };
+  return { worker, scope, persistence, model, faux, sessions: baseSessions };
+}
+
+function toolHistory(input: {
+  readonly callId: string;
+  readonly toolName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  readonly result: string;
+}): ThreadActiveHistoryV1 {
+  const messages: ThreadActiveHistoryV1["messages"] = [
+    {
+      sequence: 1,
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: input.callId,
+          name: input.toolName,
+          arguments: input.arguments,
+        },
+      ],
+      api: "openai-completions",
+      provider: "test-provider",
+      model: "test-model",
+      stopReason: "toolUse",
+      timestamp: 1,
+    },
+    {
+      sequence: 2,
+      role: "toolResult",
+      toolCallId: input.callId,
+      toolName: input.toolName,
+      text: input.result,
+      isError: false,
+      timestamp: 2,
+    },
+  ];
+  const unsigned = {
+    schemaVersion: 1 as const,
+    projectionSchemaVersion: 1 as const,
+    throughSequence: 2,
+    messages,
+  };
+  return { ...unsigned, digest: threadActiveHistoryDigest(unsigned) };
+}
+
+function userOnlyHistory(text: string): ThreadActiveHistoryV1 {
+  const unsigned = {
+    schemaVersion: 1 as const,
+    projectionSchemaVersion: 1 as const,
+    throughSequence: 7,
+    messages: [{ sequence: 7, role: "user" as const, text, timestamp: 7 }],
+  };
+  return { ...unsigned, digest: threadActiveHistoryDigest(unsigned) };
 }
 
 async function listener(run: RequestListener) {
@@ -337,6 +413,275 @@ describe("Worker OpenTelemetry", () => {
           "gen_ai.tool.call.arguments": expect.stringContaining("tool-args-canary"),
         },
       });
+    } finally {
+      await telemetry.close();
+    }
+  });
+
+  it("配置客户端工具时即便打开正文遥测也只导出元数据", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        seed: {
+          agent: fakeAgentSnapshot({
+            tools: {
+              mode: "configured",
+              toolCallingMode: "native",
+              builtinTools: ["exec_command"],
+              externalTools: [],
+              clientTools: [
+                {
+                  name: "lookup",
+                  description: "客户端查询",
+                  inputSchema: { type: "object", additionalProperties: false, properties: {} },
+                },
+              ],
+            },
+          }),
+        },
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      const spans = traces.getFinishedSpans();
+      expect(spans.length).toBeGreaterThan(1);
+      for (const { attributes } of spans)
+        for (const key of [
+          "gen_ai.input.messages",
+          "gen_ai.output.messages",
+          "gen_ai.tool.call.arguments",
+          "gen_ai.tool.call.result",
+        ])
+          expect(attributes[key]).toBeUndefined();
+    } finally {
+      await telemetry.close();
+    }
+  });
+  it("旧 Revision 的客户端工具历史在工具移除后仍屏蔽三类正文诊断", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    const oldRevisionCall = "cross-revision-client-args-canary";
+    const oldRevisionReceipt = "cross-revision-client-result-canary";
+    const history = toolHistory({
+      callId: "old-client-call",
+      toolName: "lookup",
+      arguments: { secret: oldRevisionCall },
+      result: oldRevisionReceipt,
+    });
+    const wireTraceCreateAttempt = vi.fn(() => ({
+      run: (_context: unknown, operation: () => unknown) => operation(),
+      drain: async () => undefined,
+      release: () => undefined,
+    }));
+    const trajectoryRecords: InternalTrajectoryDiagnosticRecord[] = [];
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        history,
+        modelWireTraces: { createAttempt: wireTraceCreateAttempt },
+        trajectoryRecords,
+        hasClientToolHistoryForThread: async (scope) => {
+          expect(scope.threadId).toBeDefined();
+          return true;
+        },
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      const spans = traces.getFinishedSpans();
+      const serialized = JSON.stringify(spans.map(({ attributes }) => attributes));
+      expect(serialized).not.toContain(oldRevisionCall);
+      expect(serialized).not.toContain(oldRevisionReceipt);
+      expect(wireTraceCreateAttempt).not.toHaveBeenCalled();
+      expect(JSON.stringify(trajectoryRecords)).not.toContain(oldRevisionCall);
+      expect(JSON.stringify(trajectoryRecords)).not.toContain(oldRevisionReceipt);
+      expect(trajectoryRecords).toHaveLength(0);
+    } finally {
+      await telemetry.close();
+    }
+  });
+
+  it("客户端工具历史类别读取失败时失败关闭诊断而不阻断 Run", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    const secret = "history-lookup-failure-canary";
+    const history = toolHistory({
+      callId: "unknown-client-call",
+      toolName: "lookup",
+      arguments: { secret },
+      result: secret,
+    });
+    const wireTraceCreateAttempt = vi.fn();
+    const trajectoryRecords: InternalTrajectoryDiagnosticRecord[] = [];
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        history,
+        modelWireTraces: { createAttempt: wireTraceCreateAttempt },
+        trajectoryRecords,
+        hasClientToolHistoryForThread: async () => {
+          throw new Error("history lookup unavailable");
+        },
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      const serialized = JSON.stringify(
+        traces.getFinishedSpans().map(({ attributes }) => attributes),
+      );
+      expect(serialized).not.toContain(secret);
+      expect(wireTraceCreateAttempt).not.toHaveBeenCalled();
+      expect(trajectoryRecords).toHaveLength(0);
+    } finally {
+      await telemetry.close();
+    }
+  });
+
+  it("缺少 Thread 读取器时 fail-closed 且不阻断 Run", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    const receipt = "missing-thread-reader-receipt-canary";
+    const createWireTrace = vi.fn();
+    const trajectoryRecords: InternalTrajectoryDiagnosticRecord[] = [];
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        history: userOnlyHistory(receipt),
+        modelWireTraces: { createAttempt: createWireTrace },
+        trajectoryRecords,
+        disableClientToolHistoryReader: true,
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      expect(
+        JSON.stringify(traces.getFinishedSpans().map(({ attributes }) => attributes)),
+      ).not.toContain(receipt);
+      expect(createWireTrace).not.toHaveBeenCalled();
+      expect(trajectoryRecords).toHaveLength(0);
+    } finally {
+      await telemetry.close();
+    }
+  });
+
+  it("历史仅含服务端工具调用时仍启用正文与内部诊断", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    const serviceHistoryCall = "old-server-call";
+    const serviceHistoryArgument = "server-history-argument-canary";
+    const serviceHistoryReceipt = "server-history-result-canary";
+    const history = toolHistory({
+      callId: serviceHistoryCall,
+      toolName: "exec_command",
+      arguments: { cmd: serviceHistoryArgument },
+      result: serviceHistoryReceipt,
+    });
+    const wireTraceCreateAttempt = vi.fn(() => ({
+      run: (_context: unknown, operation: () => unknown) => operation(),
+      drain: async () => undefined,
+      release: () => undefined,
+    }));
+    const trajectoryRecords: InternalTrajectoryDiagnosticRecord[] = [];
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        history,
+        modelWireTraces: { createAttempt: wireTraceCreateAttempt },
+        trajectoryRecords,
+        hasClientToolHistoryForThread: async (scope) => {
+          expect(scope.threadId).toBeDefined();
+          return false;
+        },
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      const spans = traces.getFinishedSpans();
+      const serializedSpans = JSON.stringify(spans.map(({ attributes }) => attributes));
+      expect(serializedSpans).toContain(serviceHistoryArgument);
+      expect(serializedSpans).toContain(serviceHistoryReceipt);
+      expect(wireTraceCreateAttempt).toHaveBeenCalledOnce();
+      expect(trajectoryRecords.length).toBeGreaterThan(0);
+    } finally {
+      await telemetry.close();
+    }
+  });
+
+  it("子 Agent 只继承回执 user 切片时仍按根 Thread 关闭诊断", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    const createWireTrace = vi.fn();
+    const trajectoryRecords: InternalTrajectoryDiagnosticRecord[] = [];
+    const { scope, persistence, sessions, faux } = await workerRun(telemetry, {
+      modelWireTraces: { createAttempt: createWireTrace },
+      trajectoryRecords,
+      hasClientToolHistoryForThread: async (lookupScope) => {
+        expect(lookupScope.threadId).toBe(scope.threadId);
+        return true;
+      },
+    });
+    const claimed = await persistence.claim({
+      scope,
+      workerId: "subagent-history-diagnostics",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("测试未取得 Attempt fence");
+    const providerOutput = "subagent-model-output-canary";
+    faux.setResponses([fauxAssistantMessage(providerOutput)]);
+    const suppress = vi.spyOn(telemetry, "suppressAttemptContent");
+    const history = userOnlyHistory(
+      "客户端工具参数：receipt-argument-canary；回执：receipt-result-canary",
+    );
+    try {
+      const result = await telemetry.runAttempt(
+        scope,
+        claimed.snapshot.attempt.attemptId,
+        async () => {
+          const session = await sessions.create({
+            scope,
+            attemptId: claimed.snapshot.attempt.attemptId,
+            fence: claimed.fence,
+            agent: {
+              agentKind: "subagent",
+              agentThreadId: agentThreadId("subagent_receipt_slice"),
+              agentTurnId: "turn_receipt_slice",
+            },
+            threadActiveHistory: history,
+            agentSnapshot: fakeAgentSnapshot(),
+            origin: "normal",
+            playgroundMocks: {},
+            ensureSandboxReady: async () => {
+              throw new Error("测试不应准备 Sandbox");
+            },
+            rolloutProjection: {
+              schemaVersion: 2,
+              checkpointId: "subagent-receipt-slice",
+              items: [],
+            },
+            authorizeToolEffect: async () => {
+              throw new Error("测试不执行工具");
+            },
+            writeTodo: async () => {
+              throw new Error("子 Agent 不写 Todo");
+            },
+          });
+          expect(suppress).toHaveBeenCalledWith(claimed.snapshot.attempt.attemptId);
+          try {
+            const prepared = await session.prepareInput({
+              text: "继续子任务",
+              attachments: [],
+            });
+            await expect(
+              session.runPrompt(prepared, {
+                permit: { effect: "agent_model_start", scope } as never,
+                consumedAt: "2026-11-22T00:00:00.000Z" as never,
+                consumedAtMonotonicMs: performance.now(),
+                maxContinuationDelayMs: 30_000,
+              }),
+            ).resolves.toEqual({ kind: "completed" });
+          } finally {
+            session.dispose();
+          }
+          return { outcome: "succeeded" };
+        },
+      );
+      expect(result).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(createWireTrace).not.toHaveBeenCalled();
+      expect(trajectoryRecords).toHaveLength(0);
+      const serialized = JSON.stringify(
+        traces.getFinishedSpans().map(({ attributes }) => attributes),
+      );
+      expect(serialized).not.toContain("receipt-argument-canary");
+      expect(serialized).not.toContain("receipt-result-canary");
+      expect(serialized).not.toContain(providerOutput);
     } finally {
       await telemetry.close();
     }

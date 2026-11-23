@@ -366,6 +366,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       undefined,
       undefined,
       { persist: async (record) => void trajectoryRecords.push(record) },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => false,
     );
     const sandboxes = new FakeSandboxRegistry();
     const sandbox: SandboxSessionRef = {

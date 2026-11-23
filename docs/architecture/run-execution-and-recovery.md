@@ -31,6 +31,7 @@ claimed/running/finalizing → recovery_required → abandoned | failed
 - 请求哈希绑定 Thread 与输入；同一幂等键只接受相同请求，不同请求稳定冲突。COMMIT 响应未知时只按原 scope、幂等键与请求哈希读回，禁止再次写入。
 - 输入上限为 1,048,576 UTF-8 字节，API 与 PostgreSQL 各自执行。
 - Worker 领取时验证固定 Agent 快照，在停止检查、续租及外部副作用许可边界验证 Revision 撤销事实。撤销不是用户取消；Run 在安全停止后失败，不继续发起模型或工具调用。Agent 的长期记忆策略随同 Revision 固定；`platform_default` 在执行时服从该 Run 的平台记忆配置，显式关闭不检索也不摄取。
+- Thread 一旦包含客户端工具调用，其持久化敏感历史标记单调保持为真；这类 Thread 不进入长期记忆采集。入队时必须明确读取到 `false` 才可登记任务，缺行、权限不足或读取失败均跳过；消费者认领时再次将已排队任务结算为失败，避免标记后仍将历史发送给记忆 Provider。该规则只限制采集，不改变记忆检索协议。
 - Worker 通过 Tenant assignment 发现有待处理工作的 Tenant，用短事务 `FOR UPDATE SKIP LOCKED` 领取 Outbox，并以 generation、claim token 与数据库租约作为确认栅栏。迟到确认是 no-op；Worker 仍负责 Attempt 级幂等。
 - 全局 Tenant 发现由独立 Worker Coordinator 数据库身份授权，只能读取 assignment 并更新 claim 栅栏列，不能读取业务表。团队解散会主动终止调度事实，避免撤权后的重试热循环。
 
@@ -91,6 +92,10 @@ Mock 仅用于 Playground 外部工具与客户端工具，配置随 Run 快照�
 Playground 不对 Sandbox 禁网：`exec_command`、Skill 脚本等 Sandbox 命令与正常 Run 一样可以访问网络，可能产生真实外部副作用，不在 Mock 覆盖范围内。这一边界保持与正常 Run 的命令行为一致；需要隔离时，由管理员在 Revision 中不启用命令工具，或使用无出网的 Sandbox 配置。
 
 ## 等待与恢复
+
+客户端工具不在宿主机或 Sandbox 中执行。根 Pi Session 在完整工具 turn 的安全点退出，不发起下一次模型请求；同轮最多暂存 8 个调用，每个参数对象的紧凑 JSON 最多 16 KiB。只有通过双栅栏的 waiting 收口事务才能发布调用：请求、截止时间、Rollout checkpoint、SSE 事件、Webhook Outbox 与 Run/Attempt 状态一起提交。提交前崩溃没有可执行的外部请求；提交后重启只读持久事实，不能再次发布。Playground 使用已固定的 Mock，未配置即返回受控失败，不创建待处理调用。
+
+回传、超时和取消以同一 Run 行锁串行化。Run 一旦取消，所有尚未完成的调用立即失效，以父 Run 状态作为唯一取消事实。数据库时钟决定是否越过截止时间；dispatch 调度在最近截止时唤醒并写 `timeout` 回执，不重放工具。最后一个回执到达后，事务把本轮有界结果写入恢复输入，重排原 dispatch 并使旧 claim token 失效；新 Attempt 以低信任回执继续模型循环，超时本身不使 Run 失败。外部副作用由订阅方按调用 ID 去重。
 
 - waiting 安全点持久化 scope、Rollout checkpoint、Workspace head、base revision 和可选 Sandbox 身份。Sandbox 只有在 Tenant、Thread、Workspace、base revision、session generation 全部匹配且生命周期明确为 `paused` 时才复用。
 - pause、connect、create、materialize 采用 intent/outbox Saga：持有有效租约时先提交意图，外部调用成功后才在同一事务线性化事件、Rollout 与决定事实。任何外部调用结果未知，或进程在意图后崩溃且没有成功证明，都持久化为 UNKNOWN 并停止自动重试。

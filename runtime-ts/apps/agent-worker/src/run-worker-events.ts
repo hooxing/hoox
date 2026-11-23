@@ -95,12 +95,14 @@ export function waitingEvent(
   context: ExecutionContext,
   question: string,
   checkpointId: string,
+  action?: import("@hoox/run-contracts").ClientToolAction,
+  offset = 0,
 ): RuntimeEventV1 {
   const event: RuntimeEventV1 = {
     schemaVersion: 1,
     kind: "run_waiting",
-    sequence: context.nextEventSequence,
-    payload: { question: question.slice(0, 4_000), checkpointId },
+    sequence: context.nextEventSequence + offset,
+    payload: { question: question.slice(0, 4_000), checkpointId, ...(action && { action }) },
   };
   assertProtocolSize(event);
   return event;

@@ -306,6 +306,7 @@ export interface ClaimedExecutionSnapshot {
   readonly input: string;
   readonly attachments?: readonly UserInputAttachmentReference[];
   readonly answer?: string;
+  readonly clientToolResume?: true;
   readonly rolloutProjection: ControlledRolloutProjection;
   /** 激活时冻结；当前 Run 自身输入不属于这段 predecessor history。 */
   readonly contextThroughSequence?: number;
@@ -458,6 +459,13 @@ export type StableWorkerErrorCode =
   | "IDEMPOTENCY_CONFLICT"
   | "INTERNAL";
 
+export interface ClientToolAction {
+  readonly callId: string;
+  readonly toolName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  readonly waitTimeoutMs: number;
+}
+
 export type RuntimeEventV1 =
   | {
       readonly schemaVersion: 1;
@@ -479,7 +487,11 @@ export type RuntimeEventV1 =
       readonly schemaVersion: 1;
       readonly kind: "run_waiting";
       readonly sequence: number;
-      readonly payload: { readonly question: string; readonly checkpointId: string };
+      readonly payload: {
+        readonly question: string;
+        readonly checkpointId: string;
+        readonly action?: ClientToolAction;
+      };
     }
   | {
       readonly schemaVersion: 1;
@@ -1043,6 +1055,7 @@ export type AgentTurnOutcome =
     }
   | {
       readonly kind: "waiting";
+      readonly actions?: readonly ClientToolAction[];
       readonly question: string;
       readonly rolloutProjection: ControlledRolloutProjection;
     };
@@ -1140,6 +1153,7 @@ export interface AgentSessionFactoryPort {
      */
     readonly onTurnSafePoint?: (
       event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
+      waitingForClient?: boolean,
     ) => Promise<{
       /** 只覆盖已经完成的 assistant/tool turn；steer user fact 由 Pi 队列在其后按序注入。 */
       readonly throughSequence: number;

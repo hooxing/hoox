@@ -10,7 +10,7 @@
 
 ## Webhook Outbox
 
-Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交该业务事实的同一事务写入 Tenant Webhook Outbox；所有提交 Run 状态转换的路径（Worker 收尾、API 取消、过期 Attempt 安全失败、团队解散批量取消）都经同一入队入口，事件 ID 由 Tenant、Run、转换后版本与状态（或 Artifact ID）确定性派生，重放不重复入队。Outbox 只保存字段白名单内、不含文件名与附件字节的事件载荷，不保存目的地址或签名密钥；投递端无需读取业务表。新增 Run 状态写入路径时必须同事务调用该入口。`run.requires_action` 只代表 C4 写入的客户端工具等待事实，不能从普通 `waiting` 推断；由 C4 在该事实事务中产生。Scheduler 使用独立数据库角色领取并结算 Outbox，按至少一次语义发送，接收端以事件 ID 去重。完整载荷、签名与重试语义见 [Webhook 参考](../reference/webhooks.md)。
+Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交该业务事实的同一事务写入 Tenant Webhook Outbox；所有提交 Run 状态转换的路径（Worker 收尾、API 取消、过期 Attempt 安全失败、团队解散批量取消）都经同一入队入口，事件 ID 由 Tenant、Run、转换后版本与状态（或 Artifact ID）确定性派生，重放不重复入队。Outbox 只保存白名单内的业务字段（客户端工具事件包含参数，其他状态事件不附带正文），不保存目的地址或签名密钥；投递端无需读取业务表。新增 Run 状态写入路径时必须同事务调用该入口。`run.requires_action` 只代表持久化的客户端工具请求，与请求在同一事务产生，不能从普通 `waiting` 推断。SSE 在 `run-events` 批次将该项投影为 `requires_action`。Scheduler 使用独立数据库角色领取并结算 Outbox，按至少一次语义发送，接收端以事件 ID 去重。完整载荷、签名与重试语义见 [Webhook 参考](../reference/webhooks.md)。
 
 ## 推送与续读
 
@@ -36,7 +36,7 @@ Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交�
 - 逻辑轨迹对象默认保留 30 天，由 `RUN_TRAJECTORY_RETENTION_DAYS` 配置；Scheduler 以独立只读角色从受限目录枚举租户，并以 Runtime Tenant RLS 逐租户清理到期索引。写入超时不代表提交终结。清理器先从 pending 索引恢复 Blob 提交，绑定稳定引用后才释放引用；只有 staging 已放弃并清理、稳定对象已回收或确认仍有其他引用时才移除索引；对象删除失败保留索引供下次周期重试。过期轨迹立即从读取视图隐藏。Scheduler、Worker 和后台 API 必须使用同一对象存储 bucket 与兼容凭据。
 - 模型用量（未缓存输入、输出、缓存读取 Token 与生成时长）原子写入租户隔离的低基数指标账本，后台只读取跨 Tenant 聚合视图，不保存 Provider 身份或模型正文。
 - Worker 的 [OpenTelemetry 导出](../maintainers/diagnostics.md#导出到-opentelemetry)只旁听 Provider 流与通过持久化验证的 Run/工具事件。同一 Tool Call 的重复读回不生成新 Span；没有已确认的结束事实不猜测结果。导出默认不含正文，不复制持久账本，也不作为界面投影、恢复或计费依据。
-- 诊断数据可能包含用户内容，必须按敏感数据处理；配置错误、日志和测试失败不得输出秘密值。
+- 开发模式的本地 Run 事件镜像对 `run_waiting` 只保留客户端调用元数据，剥离参数与结果；这与 OTel 正文、原始模型报文和内部轨迹的 Thread 敏感历史保护相互独立。诊断数据可能包含用户内容，必须按敏感数据处理；配置错误、日志和测试失败不得输出秘密值。
 
 ## 修改检查清单
 

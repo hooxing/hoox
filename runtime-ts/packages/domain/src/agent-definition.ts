@@ -1,3 +1,4 @@
+import { normalizeExternalToolSchema } from "./external-tool.js";
 import { sealEntity, type Entity } from "./entity.js";
 import { domainInvariant } from "./errors.js";
 import { isoTimestamp, sha256Digest, type Sha256Digest, type TenantId } from "./ids.js";
@@ -38,6 +39,7 @@ export interface AgentRevisionContent {
           readonly name: string;
           readonly description: string;
           readonly inputSchema: Readonly<Record<string, unknown>>;
+          readonly waitTimeoutMs?: number;
         }[];
         readonly toolCallingMode: "native" | "ptc";
       };
@@ -148,11 +150,50 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
       : ["mode", "builtinTools", "externalTools", "clientTools", "toolCallingMode"],
     "AgentRevision tools",
   );
+  const clientTools: Extract<
+    AgentRevisionContent["tools"],
+    { mode: "configured" }
+  >["clientTools"][number][] = [];
   if (value.tools.mode === "configured") {
     for (const item of value.tools.externalTools)
       exactKeys(item, ["kind", "versionId"], "AgentRevision external tool");
-    for (const item of value.tools.clientTools)
-      exactKeys(item, ["name", "description", "inputSchema"], "AgentRevision client tool");
+    const clientNames = new Set<string>();
+    for (const item of value.tools.clientTools) {
+      exactKeys(
+        item,
+        ["name", "description", "inputSchema", "waitTimeoutMs"],
+        "AgentRevision client tool",
+      );
+      domainInvariant(
+        /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(item.name) &&
+          !clientNames.has(item.name) &&
+          item.description.trim().length > 0 &&
+          Buffer.byteLength(item.description, "utf8") <= 2048 &&
+          Buffer.byteLength(JSON.stringify(item.inputSchema), "utf8") <= 16_384 &&
+          (item.waitTimeoutMs === undefined ||
+            (Number.isSafeInteger(item.waitTimeoutMs) &&
+              item.waitTimeoutMs >= 1_000 &&
+              item.waitTimeoutMs <= 86_400_000)),
+        "INVALID_ARGUMENT",
+        "客户端工具定义无效（名称须唯一；等待时限须为 1000 至 86400000 毫秒）",
+      );
+      try {
+        clientTools.push(
+          Object.freeze({
+            ...item,
+            inputSchema: normalizeExternalToolSchema(item.inputSchema).schema,
+          }),
+        );
+      } catch {
+        domainInvariant(false, "INVALID_ARGUMENT", "客户端工具参数必须使用受支持的封闭对象 Schema");
+      }
+      clientNames.add(item.name);
+    }
+    domainInvariant(
+      value.tools.toolCallingMode !== "ptc" || value.tools.clientTools.length === 0,
+      "INVALID_ARGUMENT",
+      "首版不支持 PTC 模式与客户端工具同时启用；请改用 native 工具调用或移除客户端工具",
+    );
   }
   for (const item of value.skillVersions)
     exactKeys(item, ["skillId", "version"], "AgentRevision Skill");
@@ -198,7 +239,7 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
     "INVALID_ARGUMENT",
     "模型引用无效",
   );
-  return Object.freeze({
+  const normalized: AgentRevisionContent = Object.freeze({
     ...value,
     suggestedQuestions: Object.freeze([...value.suggestedQuestions]),
     tools:
@@ -210,12 +251,16 @@ export function validateAgentRevisionContent(value: AgentRevisionContent): Agent
             externalTools: Object.freeze(
               value.tools.externalTools.map((item) => Object.freeze({ ...item })),
             ),
-            clientTools: Object.freeze(
-              value.tools.clientTools.map((item) => Object.freeze({ ...item })),
-            ),
+            clientTools: Object.freeze(clientTools),
           }),
     skillVersions: Object.freeze(value.skillVersions.map((item) => Object.freeze({ ...item }))),
   });
+  domainInvariant(
+    Buffer.byteLength(JSON.stringify(normalized)) <= 65_536,
+    "INVALID_ARGUMENT",
+    "Agent Revision 总大小超出限制",
+  );
+  return normalized;
 }
 export function createAgentDefinition(input: AgentDefinitionData): AgentDefinition {
   domainInvariant(

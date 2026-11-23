@@ -152,7 +152,10 @@ export class RunEventPipeline {
    * turn 安全点：原子提交 Thread Context 与终答收口事件，然后一次性合并当前已排队的 steer。
    * 任何失败都关闭事件入口并抛出，使 Pi 中止本 Attempt。
    */
-  async commitTurnSafePoint(event: TurnCompletedEvent): Promise<TurnSafePointResult> {
+  async commitTurnSafePoint(
+    event: TurnCompletedEvent,
+    waitingForClient = false,
+  ): Promise<TurnSafePointResult> {
     const context = this.context;
     const operations = this.operations;
     // turn 安全点可能从 Pi 的 prepare hook 进入，而流式公开事件仍在异步持久化队列中。
@@ -174,7 +177,7 @@ export class RunEventPipeline {
     }
     applyFinalizationTransition(context, finalization);
     const throughSequence = persisted.receipt.threadContext.lastSequence;
-    if (!this.threadInputRoutingV2Enabled) return { throughSequence };
+    if (waitingForClient || !this.threadInputRoutingV2Enabled) return { throughSequence };
     // 先持久化完整 assistant/tool 配对，再一次读取当前安全点已经排队的全部 steer；
     // 新到达的输入留给后续安全点，避免持续写入让本次 Provider continuation 饥饿。
     const pending = await operations.readPendingThreadSteers();

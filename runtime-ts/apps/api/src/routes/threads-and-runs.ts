@@ -15,6 +15,9 @@ import {
   type RunPath,
   RunPathSchema,
   RunSuccessEnvelopeSchema,
+  type SubmitToolResult,
+  SubmitToolResultSchema,
+  ToolResultSuccessEnvelopeSchema,
   type ThreadContextListQuery,
   ThreadContextListQuerySchema,
   ThreadContextPageSuccessEnvelopeSchema,
@@ -49,13 +52,50 @@ export function registerThreadAndRunRoutes(
   app: FastifyInstance,
   dependencies: Pick<
     ApiDependencies,
-    "resourceAttachments" | "threadContext" | "threadContinuity" | "threadForks"
+    | "clientToolResults"
+    | "resourceAttachments"
+    | "threadContext"
+    | "threadContinuity"
+    | "threadForks"
   >,
   createCapability: ApiCreateCapability | undefined,
   service: ApiService,
   authenticate: AuthenticateRequest,
   authenticateSelectedTenant: AuthenticateSelectedTenant,
 ): void {
+  app.post<{ Params: RunPath; Body: SubmitToolResult }>(
+    "/v1/threads/:threadId/runs/:runId/tool-results",
+    {
+      preValidation: async (request) => requireJsonContentType(request),
+      schema: {
+        params: RunPathSchema,
+        body: SubmitToolResultSchema,
+        response: {
+          200: ToolResultSuccessEnvelopeSchema,
+          400: ErrorEnvelopeSchema,
+          401: ErrorEnvelopeSchema,
+          403: ErrorEnvelopeSchema,
+          404: ErrorEnvelopeSchema,
+          409: ErrorEnvelopeSchema,
+          415: ErrorEnvelopeSchema,
+          500: ErrorEnvelopeSchema,
+          503: ErrorEnvelopeSchema,
+        },
+      },
+    },
+    async (request) => {
+      const auth = await authenticate(request, "tool-results:submit");
+      if (!auth.apiKey) throw new ApiFailure("forbidden");
+      if (!dependencies.clientToolResults) throw new ApiFailure("dependency_unavailable");
+      const outcome = await dependencies.clientToolResults.submit({
+        scope: auth.scope,
+        ...request.params,
+        ...request.body,
+      });
+      if (outcome !== "accepted") throw new ApiFailure(outcome);
+      return success(request, { callId: request.body.callId, accepted: true });
+    },
+  );
   if (createCapability !== undefined) {
     app.post<{ Body: CreateThreadRequest }>(
       "/v1/threads",
@@ -128,7 +168,7 @@ export function registerThreadAndRunRoutes(
             targetAuth.scope.tenantId === sourceAuth.scope.tenantId
               ? ("branch" as const)
               : ("team_publish" as const);
-          const messages = await readForkMessages(
+          const forkSnapshot = await readForkMessages(
             forkContext,
             sourceAuth.scope,
             threadId(source.id),
@@ -145,7 +185,8 @@ export function registerThreadAndRunRoutes(
             sourceTenantId: sourceAuth.scope.tenantId,
             sourceThreadId: threadId(source.id),
             kind,
-            messages,
+            messages: forkSnapshot.messages,
+            hasClientToolHistory: forkSnapshot.hasClientToolHistory,
           });
           if (seeded === "conflict") throw new ApiFailure("conflict");
           if (seeded !== "seeded") throw new ApiFailure("not_found");
@@ -548,6 +589,7 @@ async function readForkMessages(
     createdAt: string;
   }> = [];
   let after = 0;
+  let hasClientToolHistory = false;
   for (let page = 0; page < 10; page += 1) {
     const result = await reader.listMessages({
       scope,
@@ -556,12 +598,19 @@ async function readForkMessages(
       limit: 500,
     });
     if (result.outcome === "not_found") throw new ApiFailure("not_found");
+    // 读取器未提供持久敏感标记时按敏感处理，避免兼容路径放开诊断。
+    if (result.hasClientToolHistory === undefined) hasClientToolHistory = true;
+    else hasClientToolHistory ||= result.hasClientToolHistory;
     for (const item of result.items) {
       if (item.role === "runtime") continue;
       messages.push({ role: item.role, text: item.text, createdAt: item.createdAt });
     }
     const tail = result.items.at(-1);
-    if (!result.hasMore) return Object.freeze(messages);
+    if (!result.hasMore)
+      return Object.freeze({
+        messages: Object.freeze(messages),
+        hasClientToolHistory,
+      });
     if (tail === undefined) throw new ApiFailure("internal");
     after = tail.sequence;
   }

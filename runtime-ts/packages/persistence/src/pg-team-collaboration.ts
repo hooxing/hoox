@@ -487,6 +487,14 @@ export class PgThreadForkRepository implements ThreadForkPort {
           );
           // seed 事务要么完整提交、要么整体回滚；同一 child 的重放可直接视为完成。
           if (lineage.rowCount !== 1) return "seeded" as const;
+          if (input.hasClientToolHistory) {
+            const marked = await client.query(
+              `UPDATE threads SET has_client_tool_history=true
+                WHERE tenant_id=$1 AND id=$2`,
+              [input.scope.tenantId, input.childThreadId],
+            );
+            if (marked.rowCount !== 1) throw new Error("分支目标 Thread 不存在");
+          }
           if (input.messages.length === 0) return "seeded" as const;
           await client.query(
             `INSERT INTO thread_context_streams(tenant_id,thread_id,next_sequence)

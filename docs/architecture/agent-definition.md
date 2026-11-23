@@ -18,9 +18,13 @@
 - 紧急撤销是独立的持久事实。Worker 在领取、续租和停止检查读取撤销；许可签发、消费也拒绝该 Revision。已经发出的调用不能撤回。持有执行栅栏的 Worker 在后续安全点持久化 `AGENT_REVISION_REVOKED`，不等待清理结果，也不换绑其他 Revision；无法证明执行权时仍使用既有恢复协议。撤销不能覆盖既有外部调用待对账事实，见[UNKNOWN 与恢复](tool-calling-modes.md#unknown-与恢复)。
 - `platform_default` 模型和工具仍由平台配置控制。显式固定模型使用 `providerKey + providerRevision + modelId` 精确引用；解析必须命中对应已保存 Revision 和模型条目，否则失败关闭，绝不退回 active 或平台默认模型。显式内置工具清单只保留平台允许且实际存在的工具；子 Agent 还受父 Agent 的委派边界约束；外部工具默认不下放，显式授权持久化精确 `toolVersionId`，恢复与 Worker 重启不变。跨 Run 复用时仅保留新 Run 快照仍包含的同一版本，不按工具名换绑。Operator 指令来自快照，Revision 摘要只进入 Prompt 审计和恢复身份，不进入模型可见前缀。
 - Agent 自带 Skill 的精确版本引用随 Agent 快照固定，并按 Revision 的 `includeTenantSkills` 合并为该 Run 的可调用目录；冲突裁决与失败语义见 [Skill Runtime](skill-runtime.md#run-快照)。长期记忆支持显式开关或跟随平台设置；默认 Agent 的新 Revision 跟随平台，兼容改造前的平台记忆行为。Sandbox 的 `kill` 不允许暂停或交接，但 `pause` 不扩大平台的保留权限。
-- `sandboxTemplateId` 当前没有执行装配；快照出现非默认模板引用时以 `AGENT_CONFIGURATION_UNSUPPORTED` 失败关闭，不静默使用默认模板。客户端工具尚未接入。
+- `sandboxTemplateId` 当前没有执行装配；快照出现非默认模板引用时以 `AGENT_CONFIGURATION_UNSUPPORTED` 失败关闭，不静默使用默认模板。
 - 外部工具白名单由后台选择视图提供，Agent Revision 写入和发布时重新校验引用仍指向已发布且未撤销的匹配类型版本，并拒绝模型工具名重复。Worker 按 Run 快照授权读取精确版本与凭据，在 Worker 内解密后装配 Session；执行经过 Tool Router，不在运行时重新发现工具或换绑版本。
 - Worker 只在当前 Tenant/Run 的 Agent 快照作用域内读取额外的模型配置版本；端口不写运行快照，不读取其他未发布配置。模型条目必须已启用，且凭据必须能用 Worker 的平台密钥解密。引用缺失、不匹配或凭据不可用时，Worker 在创建模型 Session 前以 `PROVIDER` 失败，不使用 active 或部署模型。
+
+## 客户端工具配置
+
+客户端工具按 Run 的不可变 Revision 声明注册，仅根 Session 的 native 模式可见。后台保存和发布都拒绝 PTC 与客户端工具共存、重复或与平台保留名冲突的名称，以及不受支持的 JSON Schema（对象必须声明 `additionalProperties: false`）。描述和规范化参数 Schema 进入稳定的能力清单；调用 ID、实参、截止时间和回执不进入 system prompt 或工具 Schema。当前 Revision 声明客户端工具，或 Thread 的持久敏感历史标记为真时，该 Attempt 不捕获原始模型报文、内部轨迹镜像或 OTel 正文；Thread 分支复制历史时传播此标记。等待时限可设为 1000–86400000 毫秒，默认 300000 毫秒。[等待与恢复](run-execution-and-recovery.md#等待与恢复)说明正式 Run 与 Playground 的执行差异。
 
 ## 外部工具快照读取
 

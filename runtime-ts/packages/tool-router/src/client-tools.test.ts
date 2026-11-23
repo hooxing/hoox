@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPlaygroundClientToolMocks } from "./client-tools.js";
+import {
+  clientToolsForSession,
+  createClientTools,
+  createPlaygroundClientToolMocks,
+} from "./client-tools.js";
 
 const definitions = [
   {
@@ -9,11 +13,29 @@ const definitions = [
       type: "object",
       properties: { key: { type: "string" } },
       required: ["key"],
+      additionalProperties: false,
     },
   },
 ] as const;
 
 describe("Playground 客户端工具 Mock", () => {
+  it("只向根 Session 暴露客户端工具", () => {
+    expect(clientToolsForSession(definitions, "root")).toEqual(definitions);
+    expect(clientToolsForSession(definitions, "subagent")).toEqual([]);
+  });
+  it("正式调用只暂存可由 PostgreSQL 表示且大小有界的 JSON 参数", async () => {
+    const stage = vi.fn(() => true);
+    const [tool] = createClientTools(definitions, {
+      stage,
+      recordReceipt: async () => undefined,
+      persistStarted: async () => {},
+    });
+    if (!tool) throw new Error("缺少客户端工具");
+    for (const key of ["\0", "\ud800", "界".repeat(6000)])
+      expect((await tool.execute("rejected", { key })).details).toEqual({ pending: false });
+    expect((await tool.execute("accepted", { key: "\\u0000" })).details).toEqual({ pending: true });
+    expect(stage).toHaveBeenCalledOnce();
+  });
   it("Playground 命中时持久化 Mock 回执而不访问真实客户端", async () => {
     const recordReceipt = vi.fn(async () => undefined);
     const persistStarted = vi.fn(async () => undefined);

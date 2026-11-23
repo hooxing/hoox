@@ -12,9 +12,10 @@
 | `threads:create` | 创建 Thread |
 | `runs:read` | Run 查询、分页事件、SSE、Artifact 列表与交付 |
 | `runs:create` | 创建和取消 Run、上传文件 |
+| `tool-results:submit` | 提交客户端工具调用结果 |
 | `end-users:represent` | 允许携带 `Hoox-End-User` 代表终端用户；仍需接口本身的作用域 |
 
-认证失败返回 401；有效 Key 但作用域不足返回 403。Key 管理、Webhook 管理、登录会话、团队成员管理、客户端工具结果提交及工作台专用接口不接受 API Key。服务端继续从集成身份的 Membership 构造 TenantScope，并在 PostgreSQL RLS 下访问数据。
+认证失败返回 401；有效 Key 但作用域不足返回 403。Key 管理、Webhook 管理、登录会话、团队成员管理及工作台专用接口不接受 API Key。服务端继续从集成身份的 Membership 构造 TenantScope，并在 PostgreSQL RLS 下访问数据。
 
 ```sh
 export HOOX_API_ORIGIN="https://hoox.example.com"
@@ -55,6 +56,7 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads" \
 | `DELETE /v1/threads/{threadId}/runs/{runId}` | `runs:create` | 请求取消 Run |
 | `GET /v1/threads/{threadId}/runs/{runId}/events` | `runs:read` | 按序号分页读取事件 |
 | `GET /v1/threads/{threadId}/runs/{runId}/events/stream` | `runs:read` | SSE 订阅与续连 |
+| `POST /v1/threads/{threadId}/runs/{runId}/tool-results` | `tool-results:submit` | 按调用 ID 回传执行结果（仅 API Key） |
 | `POST /v1/resources/uploads` | `runs:create` | 上传不超过 16 MiB 的文件 |
 | `GET /v1/resources/{resourceId}/versions/{versionId}/download` | `runs:read` | 获取短时效下载 URL |
 | `GET /v1/threads/{threadId}/runs/{runId}/artifacts` | `runs:read` | 列出已发布 Artifact |
@@ -62,7 +64,7 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads" \
 | `GET /v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/download` | `runs:read` | 获取 Artifact 下载交付 |
 | `GET /v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/content` | `runs:read` | 读取有界原始字节 |
 
-Run 在公开 API 入口创建时，来源由服务端持久化为 `api`；客户端不能在请求体中指定来源。Run、Thread、上传和 Run 创建都要求 `Idempotency-Key`。相同 Key 与相同请求载荷重放原结果；相同 Key 携带不同载荷返回 409。Thread 与 Run 创建、上传要求 `application/json`（上传除外）或 `application/octet-stream`（上传），其他媒体类型返回 415。
+Run 在公开 API 入口创建时，来源由服务端持久化为 `api`；客户端不能在请求体中指定来源。创建 Thread、创建 Run 和上传文件都要求 `Idempotency-Key`；工具回传按 `callId` 去重。相同 Key 与相同请求载荷重放原结果；相同 Key 携带不同载荷返回 409。创建 Thread、创建 Run 和回传工具结果使用 `application/json`，上传使用 `application/octet-stream`；其他媒体类型返回 415。
 
 ## 创建 Thread 与 Run
 
@@ -107,10 +109,22 @@ curl -N "$HOOX_API_ORIGIN/v1/threads/$thread_id/runs/$run_id/events/stream" \
   -H 'Last-Event-ID: attempt_example-12'
 ```
 
+## 执行客户端工具并回传
+
+在 SSE 的 `run-events` 批次中查找 `page.items[].type === "requires_action"`，或订阅 [Webhook](webhooks.md) 的 `run.requires_action`。每条调用给出 `threadId`、`runId`、`callId`、`toolName`、`arguments` 和 UTC `deadline`（SSE 位于 `payload`，Webhook 位于 `data`）。普通 `run_waiting` 不是执行指令。调用方按 `runId + callId` 去重并自行授权、执行操作；不要把模型提供的参数当成身份或授权，也不要在日志中记录参数正文。
+
+```sh
+curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads/$thread_id/runs/$run_id/tool-results" \
+  -H "Authorization: Bearer $HOOX_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"callId":"client_REPLACE_WITH_CALL_ID","outcome":"succeeded","result":"订单已确认"}'
+```
+
+`outcome` 为 `succeeded` 或 `failed`；`result` 为 UTF-8 文本，最多 1 MiB，不接受 NUL 或无效 Unicode。模型最多读取每条结果的前 8192 字节；截断不拆开字符，回执带 `truncated` 标记。传 JSON 结果时先序列化为文本。服务端按完整文本和 `outcome` 比对重试，不要求 `Idempotency-Key`。首次接受和相同重试均返回 `200` 与 `data: {callId, accepted: true}`，更改内容、已超时或已取消返回 `409`。调用或父资源不存在、不可见时返回 `404`。使用终端用户映射时，必须带创建 Run 时相同的 `Hoox-End-User`，并同时持有代用户作用域。
+
+一个 turn 可以发出多条调用，全部有回执（含超时）后才恢复同一个 Run；截止后调用方不能用迟到结果覆盖超时。waiting 时 SSE 会以 `end` 结尾，回传后仍用原 Run 地址续连。客户端只负责提交结果，不应再创建 Run。
+
 ## 错误与版本
 
 JSON 成功响应统一为 `{ "version": "v1", "requestId": "…", "data": … }`；错误响应统一为 `{ "version": "v1", "requestId": "…", "error": { "code": "…", "message": "…", "retryable": false } }`。错误码包括 `INVALID_REQUEST`、`UNSUPPORTED_MEDIA_TYPE`、`UNAUTHORIZED`、`FORBIDDEN`、`NOT_FOUND`、`CONFLICT`、`AGENT_REVISION_UNAVAILABLE`、`INVALID_STATE`、`RATE_LIMITED`、`DEPENDENCY_UNAVAILABLE` 和 `INTERNAL`。内部异常、凭据明文和对象存储签名信息不进入错误正文或日志。
 
 兼容性契约由 `runtime-ts/packages/protocol` 的 TypeBox Schema 拥有。OpenAPI 3.1 产物位于 `docs/reference/openapi/public-v1.json`；运行 `pnpm api:openapi:generate` 生成，CI 通过 `pnpm api:openapi:check` 校验。破坏性变化通过新版本路径发布。
-
-客户端工具 `requires_action` / 结果提交尚不属于 v1 接口范围。

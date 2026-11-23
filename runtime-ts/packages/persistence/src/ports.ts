@@ -64,6 +64,7 @@ export interface ThreadContextReadPort {
         readonly outcome: "found";
         readonly items: readonly ThreadContextMessageView[];
         readonly hasMore: boolean;
+        readonly hasClientToolHistory?: boolean;
       }
     | { readonly outcome: "not_found" }
   >;
@@ -377,6 +378,7 @@ export interface ThreadForkPort {
     readonly sourceThreadId: ThreadId;
     readonly kind: "branch" | "team_publish";
     readonly messages: readonly ForkedThreadMessage[];
+    readonly hasClientToolHistory: boolean;
   }): Promise<"seeded" | "not_authorized" | "not_found" | "conflict">;
 }
 

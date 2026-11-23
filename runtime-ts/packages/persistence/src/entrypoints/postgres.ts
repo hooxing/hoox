@@ -22,3 +22,5 @@ export { PgAgentDefinitionRepository } from "../pg-agent-definition.js";
 export type { AgentDefinitionRepositoryPort } from "../agent-definition-port.js";
 export * from "../pg-playground.js";
 export { RunAgentUnavailableError } from "../pg-run-agent-snapshot.js";
+
+export type { PgClientToolResults } from "../pg-client-tool-calls.js";

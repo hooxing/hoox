@@ -159,6 +159,73 @@ describe("SDK 客户端工具", () => {
     expect(fetcher.mock.calls[0]?.[1].body).toEqual(fetcher.mock.calls[1]?.[1].body);
   });
 
+  it("共享调用允许单个等待者取消而不重跑处理函数", async () => {
+    let finish: ((value: string) => void) | undefined;
+    const handler = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const fetcher = vi.fn(async () => ok({ accepted: true }));
+    const client = new HooxClient({ baseUrl: "https://api.example.invalid", fetch: fetcher });
+    const tools = new ClientTools().register("lookup", handler);
+    const controller = new AbortController();
+    const first = tools.handle(client, action());
+    const second = tools.handle(client, action(), { signal: controller.signal });
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    controller.abort();
+    await expect(second).rejects.toMatchObject({ code: "ABORTED" });
+    finish?.("done");
+    await first;
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("批次提交失败时中止兄弟工具且不再提交迟到结果", async () => {
+    const first = action();
+    const second = { ...first, callId: "call_second" };
+    const data = JSON.parse(
+      events([0], "waiting", "attempt_sdk", first, "requires_action").split("data: ")[1] ?? "{}",
+    );
+    data.page.items.push({
+      ...data.page.items[0],
+      eventId: "attempt_sdk-1",
+      sequence: 1,
+      payload: second,
+    });
+    let finishSibling: (() => void) | undefined;
+    let siblingSignal: AbortSignal | undefined;
+    const fetcher = vi.fn(async (url: URL | RequestInfo) => {
+      if (String(url).endsWith("tool-results")) {
+        return new Response(JSON.stringify({ error: { message: "conflict", code: "CONFLICT" } }), {
+          status: 409,
+        });
+      }
+      return sseResponse(`event: run-events\ndata: ${JSON.stringify(data)}\n\n`);
+    });
+    const client = new HooxClient({ baseUrl: "https://api.example.invalid", fetch: fetcher });
+    const tools = new ClientTools().register("lookup", (_args, context) => {
+      if (context.callId === first.callId) return "first";
+      siblingSignal = context.signal;
+      return new Promise<string>((resolve) => {
+        finishSibling = () => resolve("late");
+      });
+    });
+    await expect(
+      (async () => {
+        for await (const _event of tools.stream(client, "thread_sdk", "run_sdk", { retry })) {
+        }
+      })(),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(siblingSignal?.aborted).toBe(true);
+    finishSibling?.();
+    await Promise.resolve();
+    expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith("tool-results"))).toHaveLength(
+      1,
+    );
+  });
+
   it("提交失败后再次处理不重新执行；不同客户端不共享幂等身份", async () => {
     const handler = vi.fn(() => "result");
     const fetcher = vi

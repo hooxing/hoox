@@ -27,6 +27,28 @@ function actionOf(value: Record<string, unknown>): ClientToolAction {
 
 type Entry = { result: Promise<SubmitToolResult | undefined>; submission?: Promise<void> };
 
+function waitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(aborted());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(aborted());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export class ClientTools {
   readonly #handlers = new Map<string, ClientToolHandler>();
   readonly #calls = new WeakMap<HooxClient, Map<string, Entry>>();
@@ -42,8 +64,19 @@ export class ClientTools {
     action: ClientToolAction,
     options: StreamOptions = {},
   ): Promise<void> {
+    return this.handleScoped(client, action, options);
+  }
+
+  private async handleScoped(
+    client: HooxClient,
+    action: ClientToolAction,
+    options: StreamOptions,
+    operationSignal?: AbortSignal,
+  ): Promise<void> {
     if (options.signal?.aborted) throw aborted();
     action = actionOf(action);
+    const requestOptions = { ...options };
+    delete requestOptions.signal;
     let calls = this.#calls.get(client);
     if (!calls) {
       calls = new Map();
@@ -52,25 +85,33 @@ export class ClientTools {
     const key = JSON.stringify([action.threadId, action.runId, action.callId]);
     let entry = calls.get(key);
     if (!entry) {
-      entry = { result: this.execute(action, options) };
+      entry = {
+        result: this.execute(action, {
+          ...requestOptions,
+          ...(operationSignal ? { signal: operationSignal } : {}),
+        }),
+      };
       calls.set(key, entry);
     }
-    const result = await entry.result;
+    const result = await waitWithSignal(entry.result, options.signal);
     if (!result) return;
     if (!entry.submission) {
       const policy = retryPolicy(options.retry);
       const submit = async () => {
         for (let attempt = 0; ; attempt += 1) {
-          if (options.signal?.aborted) throw aborted();
+          if (operationSignal?.aborted) throw aborted();
           if (Date.now() >= Date.parse(action.deadline)) return;
           try {
-            await client.submitToolResult(action.threadId, action.runId, result, options);
+            await client.submitToolResult(action.threadId, action.runId, result, {
+              ...requestOptions,
+              ...(operationSignal ? { signal: operationSignal } : {}),
+            });
             return;
           } catch (error) {
             if (!(error instanceof HooxError) || !error.retryable || attempt >= policy.maxRetries) {
               throw error;
             }
-            await pause(retryDelay(attempt, policy), options.signal);
+            await pause(retryDelay(attempt, policy), operationSignal);
           }
         }
       };
@@ -79,7 +120,7 @@ export class ClientTools {
         throw error;
       });
     }
-    await entry.submission;
+    await waitWithSignal(entry.submission, options.signal);
   }
 
   async *stream(
@@ -88,39 +129,56 @@ export class ClientTools {
     runId: string,
     options: StreamOptions = {},
   ): AsyncGenerator<RunStreamEvent> {
+    const scope = new AbortController();
+    const relayAbort = () => scope.abort();
+    if (options.signal?.aborted) scope.abort();
+    else options.signal?.addEventListener("abort", relayAbort, { once: true });
+    const scopedOptions = { ...options, signal: scope.signal };
+    const tasks = new Set<Promise<void>>();
     let cursor = options.lastEventId;
     const policy = retryPolicy(options.retry);
     let idle = 0;
-    while (true) {
-      let waiting = false;
-      let progress = false;
-      for await (const event of client.streamRunEvents(threadId, runId, {
-        ...options,
-        ...(cursor === undefined ? {} : { lastEventId: cursor }),
-      })) {
-        if (event.event === "run-events") {
-          cursor = event.id ?? cursor;
-          const active =
-            !["succeeded", "failed", "cancelled"].includes(event.data.run.status) &&
-            event.data.run.executionStatus !== "recovery_required";
-          waiting = active && event.data.run.status === "waiting";
-          progress ||= event.data.page.items.length > 0;
-          const actions = event.data.page.items
-            .filter((item) => active && item.type === "requires_action")
-            .map((item) => actionOf(item.payload));
-          if (actions.some((action) => action.threadId !== threadId || action.runId !== runId)) {
-            throw new HooxError("客户端工具调用不属于当前 Run", "INVALID_STREAM");
+    try {
+      while (true) {
+        let waiting = false;
+        let progress = false;
+        for await (const event of client.streamRunEvents(threadId, runId, {
+          ...scopedOptions,
+          ...(cursor === undefined ? {} : { lastEventId: cursor }),
+        })) {
+          if (event.event === "run-events") {
+            cursor = event.id ?? cursor;
+            const active =
+              !["succeeded", "failed", "cancelled"].includes(event.data.run.status) &&
+              event.data.run.executionStatus !== "recovery_required";
+            waiting = active && event.data.run.status === "waiting";
+            progress ||= event.data.page.items.length > 0;
+            const actions = event.data.page.items
+              .filter((item) => active && item.type === "requires_action")
+              .map((item) => actionOf(item.payload));
+            if (actions.some((action) => action.threadId !== threadId || action.runId !== runId)) {
+              throw new HooxError("客户端工具调用不属于当前 Run", "INVALID_STREAM");
+            }
+            const batch = actions.map((action) =>
+              this.handleScoped(client, action, scopedOptions, scope.signal),
+            );
+            for (const task of batch) tasks.add(task);
+            await Promise.all(batch);
+            for (const task of batch) tasks.delete(task);
           }
-          await Promise.all(actions.map((action) => this.handle(client, action, options)));
+          if (event.event !== "end" || !waiting) yield event;
         }
-        if (event.event !== "end" || !waiting) yield event;
+        if (!waiting) return;
+        idle = progress ? 0 : idle + 1;
+        if (idle > policy.maxRetries) {
+          throw new HooxError("客户端工具回传后 Run 未恢复", "RECONNECT_LIMIT");
+        }
+        await pause(retryDelay(idle, policy), scope.signal);
       }
-      if (!waiting) return;
-      idle = progress ? 0 : idle + 1;
-      if (idle > policy.maxRetries) {
-        throw new HooxError("客户端工具回传后 Run 未恢复", "RECONNECT_LIMIT");
-      }
-      await pause(retryDelay(idle, policy), options.signal);
+    } finally {
+      options.signal?.removeEventListener("abort", relayAbort);
+      scope.abort();
+      await Promise.allSettled(tasks);
     }
   }
 

@@ -344,7 +344,10 @@ export class HooxClient {
     }
     const detail = record(envelope) && record(envelope.error) ? envelope.error : undefined;
     const redact = (value: string) =>
-      this.#apiKey ? value.split(this.#apiKey).join("[REDACTED]") : value;
+      [this.#apiKey, this.#endUser]
+        .filter((secret): secret is string => Boolean(secret))
+        .sort((left, right) => right.length - left.length)
+        .reduce((result, secret) => result.split(secret).join("[REDACTED]"), value);
     throw new HooxError(
       redact(typeof detail?.message === "string" ? detail.message : "API 请求失败"),
       redact(typeof detail?.code === "string" ? detail.code : "HTTP_ERROR"),

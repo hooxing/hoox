@@ -6,6 +6,50 @@ import { events, ok, retry, run, sseResponse } from "./fixtures.js";
 afterEach(() => vi.useRealTimers());
 
 describe("SDK HTTP", () => {
+  it("拒绝超过 Node 定时器上限的退避参数", () => {
+    expect(
+      retryPolicy({ initialDelayMs: 2_147_483_647, maxDelayMs: 2_147_483_647 }).initialDelayMs,
+    ).toBe(2_147_483_647);
+    expect(retryPolicy({ maxDelayMs: 2_147_483_647 }).maxDelayMs).toBe(2_147_483_647);
+    for (const options of [{ initialDelayMs: 2_147_483_648 }, { maxDelayMs: 2_147_483_648 }]) {
+      expect(() => retryPolicy(options)).toThrowError(HooxError);
+    }
+  });
+
+  it("统一脱敏错误字段与异常栈中的 Key 和终端用户 ID", async () => {
+    for (const requestIdLocation of ["body", "header"] as const) {
+      const response = new Response(
+        JSON.stringify({
+          error: {
+            message: "key-secret user-123",
+            code: "user-123-key-secret",
+          },
+          ...(requestIdLocation === "body" ? { requestId: "key-secret-user-123" } : {}),
+        }),
+        {
+          status: 403,
+          headers: requestIdLocation === "header" ? { "x-request-id": "user-123-key-secret" } : {},
+        },
+      );
+      const client = new HooxClient({
+        baseUrl: "https://api.example.invalid",
+        apiKey: "key-secret",
+        endUser: "user-123",
+        fetch: async () => response,
+      });
+      let error: HooxError | undefined;
+      try {
+        await client.listAgents();
+      } catch (caught) {
+        error = caught as HooxError;
+      }
+      expect(error).toBeInstanceOf(HooxError);
+      expect(`${error?.message} ${error?.code} ${error?.requestId} ${error?.stack}`).not.toMatch(
+        /key-secret|user-123/u,
+      );
+      expect(JSON.stringify(error)).not.toMatch(/key-secret|user-123/u);
+    }
+  });
   it("拒绝不安全地址和无效超时；成功响应格式错误不伪装成网络故障", async () => {
     for (const baseUrl of [
       "not-a-url",

@@ -10,7 +10,9 @@ export function retryPolicy(options: RetryOptions = {}) {
   if (
     !Number.isFinite(policy.initialDelayMs) ||
     policy.initialDelayMs < 1 ||
+    policy.initialDelayMs > 2_147_483_647 ||
     !Number.isFinite(policy.maxDelayMs) ||
+    policy.maxDelayMs > 2_147_483_647 ||
     policy.maxDelayMs < policy.initialDelayMs ||
     !Number.isInteger(policy.maxRetries) ||
     policy.maxRetries < 0

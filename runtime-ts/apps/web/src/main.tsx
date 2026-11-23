@@ -72,6 +72,7 @@ import {
   type TeamWorkspaceApi,
 } from "./team-workspace.js";
 import "@hoox/ui-theme/theme.css";
+import "@hoox/chat-ui/styles.css";
 import "./styles.css";
 import {
   ConversationComposer,

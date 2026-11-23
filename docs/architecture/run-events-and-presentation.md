@@ -36,7 +36,7 @@ Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交�
 - 逻辑轨迹对象默认保留 30 天，由 `RUN_TRAJECTORY_RETENTION_DAYS` 配置；Scheduler 以独立只读角色从受限目录枚举租户，并以 Runtime Tenant RLS 逐租户清理到期索引。写入超时不代表提交终结。清理器先从 pending 索引恢复 Blob 提交，绑定稳定引用后才释放引用；只有 staging 已放弃并清理、稳定对象已回收或确认仍有其他引用时才移除索引；对象删除失败保留索引供下次周期重试。过期轨迹立即从读取视图隐藏。Scheduler、Worker 和后台 API 必须使用同一对象存储 bucket 与兼容凭据。
 - 模型用量（未缓存输入、输出、缓存读取 Token 与生成时长）原子写入租户隔离的低基数指标账本，后台只读取跨 Tenant 聚合视图，不保存 Provider 身份或模型正文。
 - Worker 的 [OpenTelemetry 导出](../maintainers/diagnostics.md#导出到-opentelemetry)只旁听 Provider 流与通过持久化验证的 Run/工具事件。同一 Tool Call 的重复读回不生成新 Span；没有已确认的结束事实不猜测结果。导出默认不含正文，不复制持久账本，也不作为界面投影、恢复或计费依据。
-- 诊断数据可能包含用户内容，必须按敏感数据处理；配置错误、日志和测试失败不得输出秘密值。
+- 开发模式的本地 Run 事件镜像对 `run_waiting` 只保留客户端调用元数据，剥离参数与结果；这与 OTel 正文、原始模型报文和内部轨迹的 Thread 敏感历史保护相互独立。诊断数据可能包含用户内容，必须按敏感数据处理；配置错误、日志和测试失败不得输出秘密值。
 
 ## 修改检查清单
 

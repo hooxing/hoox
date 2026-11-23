@@ -1372,7 +1372,7 @@ async function assembleWorkerRuntime(
         allowPrivateAddresses: configuration.externalToolsAllowPrivateAddresses,
       },
       async (scope) =>
-        await clientToolCallHistory.hasAnyForThread({
+        await clientToolCallHistory.hasClientToolHistoryForThread({
           tenantId: scope.tenantId,
           threadId: scope.threadId,
         }),

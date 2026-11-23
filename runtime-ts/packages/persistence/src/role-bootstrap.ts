@@ -1582,11 +1582,24 @@ export async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
-  if (await hasClientTools(client, schema))
+  if (await hasClientTools(client, schema)) {
     policy.set(
       "client_tool_calls",
       new Set(["outcome", "result_digest", "response_text", "truncated"]),
     );
+    const historyMarker = await client.query<{ readonly present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_schema=$1 AND table_name='threads' AND column_name='has_client_tool_history'
+       ) AS present`,
+      [schema],
+    );
+    if (historyMarker.rows[0]?.present === true) {
+      const threadColumns = new Set(policy.get("threads") ?? []);
+      threadColumns.add("has_client_tool_history");
+      policy.set("threads", threadColumns);
+    }
+  }
   if (await hasWebhookState(client, schema))
     policy.set("tenant_webhooks", new Set(webhookRuntimeUpdateColumns));
   const apiKeyState = await hasApiKeyState(client, schema);

@@ -540,6 +540,7 @@ function fixture(
     readonly modelWireTracePaginated?: boolean;
     readonly enableThreadContext?: boolean;
     readonly threadContextUserText?: string;
+    readonly threadContextHasClientToolHistory?: boolean;
     readonly enableThreadContinuity?: boolean;
     readonly enableThreadInputs?: boolean;
     readonly resourceAttachments?: ApiDependencies["resourceAttachments"];
@@ -731,6 +732,9 @@ function fixture(
                       },
                     ],
                     hasMore: false,
+                    ...(options.threadContextHasClientToolHistory === undefined
+                      ? {}
+                      : { hasClientToolHistory: options.threadContextHasClientToolHistory }),
                   }
                 : { outcome: "not_found" as const },
           },
@@ -2139,6 +2143,7 @@ describe("Fastify API 契约", () => {
     const seeded: Array<Parameters<NonNullable<ApiDependencies["threadForks"]>["seed"]>[0]> = [];
     const { app } = fixture({
       enableThreadContext: true,
+      threadContextHasClientToolHistory: true,
       threadForks: {
         seed: async (input) => {
           seeded.push(input);
@@ -2170,6 +2175,7 @@ describe("Fastify API 契约", () => {
         { role: "user", text: "Run A" },
         { role: "assistant", text: "Run A 回复" },
       ],
+      hasClientToolHistory: true,
     });
   });
 

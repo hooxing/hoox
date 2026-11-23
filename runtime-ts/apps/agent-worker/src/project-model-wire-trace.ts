@@ -141,6 +141,7 @@ export class ProjectRunEventMirror implements RunEventDiagnosticsPort {
   async persist(record: RunEventDiagnosticRecord): Promise<void> {
     assertModelWireTraceContext(record.context);
     assertRunEvent(record.event);
+    const event = diagnosticRunEvent(record.event);
     const directory = await openMirrorDirectory(this.#trustedBase, [
       ...this.#rootSegments,
       record.context.runId,
@@ -149,12 +150,51 @@ export class ProjectRunEventMirror implements RunEventDiagnosticsPort {
     try {
       const sequence = String(record.event.sequence).padStart(8, "0");
       const filename = `runtime-event-${sequence}-${record.event.kind}.json`;
-      const body = new TextEncoder().encode(`${canonicalJson(record.event)}\n`);
+      const body = new TextEncoder().encode(`${canonicalJson(event)}\n`);
       await writeOnceAtomically(directory, filename, body);
     } finally {
       await directory.close().catch(() => undefined);
     }
   }
+}
+
+function diagnosticRunEvent(event: RuntimeEventV1): unknown {
+  if (event.kind === "run_waiting" && event.payload.action !== undefined) {
+    return {
+      ...event,
+      payload: {
+        ...event.payload,
+        action: {
+          callId: event.payload.action.callId,
+          toolName: event.payload.action.toolName,
+          waitTimeoutMs: event.payload.action.waitTimeoutMs,
+        },
+      },
+    };
+  }
+  if (event.kind === "agent_event" && event.payload.type === "turn.completed") {
+    return {
+      ...event,
+      payload: {
+        ...event.payload,
+        assistant: {
+          ...event.payload.assistant,
+          content: event.payload.assistant.content.map((part) =>
+            part.type === "toolCall" ? { type: part.type, id: part.id, name: part.name } : part,
+          ),
+        },
+        toolResults: event.payload.toolResults.map(
+          ({ toolCallId, toolName, isError, timestamp }) => ({
+            toolCallId,
+            toolName,
+            isError,
+            timestamp,
+          }),
+        ),
+      },
+    };
+  }
+  return event;
 }
 
 /** 将首个 Provider 请求前的低基数分段耗时保存为单个不可变快照。 */

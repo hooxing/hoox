@@ -13,7 +13,10 @@ class ScriptedMemoryClient {
   readonly statements: Statement[] = [];
   releasedWith: unknown;
 
-  constructor(private readonly runOrigin: "normal" | "playground" = "normal") {}
+  constructor(
+    private readonly runOrigin: "normal" | "playground" = "normal",
+    private readonly clientToolHistory: boolean | "error" = false,
+  ) {}
 
   async query(sql: string, values?: readonly unknown[]) {
     this.statements.push({ sql, ...(values === undefined ? {} : { values }) });
@@ -21,6 +24,13 @@ class ScriptedMemoryClient {
       return { rows: [], rowCount: 0 };
     }
     if (sql.includes("set_config('app.tenant_id'")) return { rows: [], rowCount: 1 };
+    if (sql.includes("SELECT has_client_tool_history FROM threads")) {
+      if (this.clientToolHistory === "error") throw new Error("marker read denied");
+      return {
+        rows: [{ has_client_tool_history: this.clientToolHistory }],
+        rowCount: 1,
+      };
+    }
     if (sql.includes("SELECT origin FROM runs")) {
       return { rows: [{ origin: this.runOrigin }], rowCount: 1 };
     }
@@ -126,6 +136,29 @@ describe("PostgreSQL 记忆 Outbox", () => {
     expect(wake?.values).toEqual(["tenant-memory", expect.any(Date)]);
   });
 
+  it("客户端工具历史 Thread 不登记长期记忆，标记读取失败也失败关闭", async () => {
+    for (const clientToolHistory of [true, "error"] as const) {
+      const client = new ScriptedMemoryClient("normal", clientToolHistory);
+      await enqueueMemoryIngestion(client as unknown as PoolClient, {
+        tenantId: "tenant-memory",
+        threadId: "thread-memory",
+        runId: "run-memory",
+        attemptId: "attempt-memory",
+        sourceThroughSequence: 2,
+      });
+      expect(
+        client.statements.some((statement) =>
+          statement.sql.includes("INSERT INTO memory_ingestion_outbox"),
+        ),
+      ).toBe(false);
+      expect(
+        client.statements.some((statement) =>
+          statement.sql.includes("INSERT INTO worker_tenant_assignments"),
+        ),
+      ).toBe(false);
+    }
+  });
+
   it("Playground 来源不新建长期记忆任务，且旧待消费任务不会被领取", async () => {
     const client = new ScriptedMemoryClient("playground");
     await enqueueMemoryIngestion(client as unknown as PoolClient, {
@@ -158,6 +191,7 @@ describe("PostgreSQL 记忆 Outbox", () => {
       statement.sql.includes("SELECT memory.run_id"),
     );
     expect(claimQuery?.sql).toContain("source_run.origin<>'playground'");
+    expect(claimQuery?.sql).toContain("source_thread.has_client_tool_history=false");
     expect(
       client.statements.some((statement) => statement.sql.includes("FROM thread_context_entries")),
     ).toBe(false);

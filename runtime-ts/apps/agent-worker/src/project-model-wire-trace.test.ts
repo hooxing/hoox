@@ -256,6 +256,79 @@ describe("项目模型报文本地镜像", () => {
     ).rejects.toThrow("LOCAL_MODEL_WIRE_TRACE_CONFLICT");
   });
 
+  it("Run waiting 本地镜像只保留客户端调用元数据，不写入参数与回执", async () => {
+    const root = await temporaryRoot();
+    const mirror = new ProjectRunEventMirror(root);
+    await mirror.persist({
+      context: record().context,
+      event: {
+        schemaVersion: 1,
+        kind: "run_waiting",
+        sequence: 8,
+        payload: {
+          question: "需要外部操作",
+          checkpointId: "checkpoint_1",
+          action: {
+            callId: "client_0123",
+            toolName: "lookup",
+            arguments: { token: "client-tool-argument-canary" },
+            waitTimeoutMs: 300_000,
+          },
+        },
+      },
+    });
+
+    const body = await readFile(
+      join(root, "run_dev_1", "attempt_dev_1", "runtime-event-00000008-run_waiting.json"),
+      "utf8",
+    );
+    expect(body).toContain("client_0123");
+    expect(body).not.toContain("client-tool-argument-canary");
+    expect(body).not.toContain("token");
+
+    await mirror.persist({
+      context: record().context,
+      event: {
+        schemaVersion: 1,
+        kind: "agent_event",
+        sequence: 9,
+        payload: {
+          type: "turn.completed",
+          assistant: {
+            content: [
+              {
+                type: "toolCall",
+                id: "client_0123",
+                name: "lookup",
+                arguments: { token: "client-tool-argument-canary" },
+              },
+            ],
+            api: "test",
+            provider: "test",
+            model: "test",
+            stopReason: "toolUse",
+            timestamp: 1,
+          },
+          toolResults: [
+            {
+              toolCallId: "client_0123",
+              toolName: "lookup",
+              text: "client-tool-result-canary",
+              isError: false,
+              timestamp: 2,
+            },
+          ],
+        },
+      },
+    });
+    const turnBody = await readFile(
+      join(root, "run_dev_1", "attempt_dev_1", "runtime-event-00000009-agent_event.json"),
+      "utf8",
+    );
+    expect(turnBody).not.toContain("client-tool-argument-canary");
+    expect(turnBody).not.toContain("client-tool-result-canary");
+  });
+
   it("完整保存 Pi 原始事件并隔离 root 与 subagent sequence", async () => {
     const root = await temporaryRoot();
     const mirror = new ProjectInternalTrajectoryMirror(root);

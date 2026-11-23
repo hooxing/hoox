@@ -637,8 +637,8 @@ export class PgThreadContextReadRepository implements ThreadContextReadPort {
       this.pool,
       input.scope,
       async (client) => {
-        const authorized = await client.query(
-          `SELECT 1 FROM threads thread JOIN memberships membership
+        const authorized = await client.query<{ readonly has_client_tool_history: boolean }>(
+          `SELECT thread.has_client_tool_history FROM threads thread JOIN memberships membership
              ON membership.tenant_id=thread.tenant_id AND membership.user_id=$2
             AND membership.status='active'
             WHERE thread.tenant_id=$1 AND thread.id=$3`,
@@ -706,7 +706,12 @@ export class PgThreadContextReadRepository implements ThreadContextReadPort {
             });
           }
         }
-        return { outcome: "found", items, hasMore } as const;
+        return {
+          outcome: "found",
+          items,
+          hasMore,
+          hasClientToolHistory: authorized.rows[0]?.has_client_tool_history === true,
+        } as const;
       },
       { readOnly: true, isolationLevel: "REPEATABLE READ" },
     );

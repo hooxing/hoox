@@ -41,6 +41,12 @@ export async function persistClientAction(
       deadline,
     ],
   );
+  const marked = await client.query(
+    `UPDATE threads SET has_client_tool_history=true
+      WHERE tenant_id=$1 AND id=$2`,
+    [scope.tenantId, scope.threadId],
+  );
+  if (marked.rowCount !== 1) throw new Error("客户端调用所属 Thread 不存在");
   const data = {
     threadId: scope.threadId,
     runId: scope.runId,
@@ -109,19 +115,16 @@ async function advanceWait(client: PoolClient, tenantId: string, runId: string, 
 export class PgClientToolCallHistoryReader {
   constructor(private readonly pool: Pool) {}
 
-  async hasAnyForThread(input: {
+  async hasClientToolHistoryForThread(input: {
     readonly tenantId: string;
     readonly threadId: string;
   }): Promise<boolean> {
     return await withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
-      const result = await client.query<{ present: boolean }>(
-        `SELECT EXISTS (
-           SELECT 1 FROM client_tool_calls
-            WHERE tenant_id=$1 AND thread_id=$2
-         ) AS present`,
+      const result = await client.query<{ has_client_tool_history: boolean }>(
+        `SELECT has_client_tool_history FROM threads WHERE tenant_id=$1 AND id=$2`,
         [input.tenantId, input.threadId],
       );
-      return result.rows[0]?.present === true;
+      return result.rows[0]?.has_client_tool_history !== false;
     });
   }
 }

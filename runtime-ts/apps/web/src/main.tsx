@@ -430,6 +430,19 @@ function AuthenticatedWorkspace({
   const cloudDriveApi = useMemo(() => resolveCloudDriveApi(apiClient), [apiClient]);
   const teamWorkspaceApi = useMemo(() => resolveTeamWorkspaceApi(apiClient), [apiClient]);
   const personalizationApi = useMemo(() => resolvePersonalizationApi(apiClient), [apiClient]);
+  const runFeedbackApi = useMemo(() => {
+    if (
+      apiClient.getRunFeedback === undefined ||
+      apiClient.putRunFeedback === undefined ||
+      apiClient.deleteRunFeedback === undefined
+    )
+      return undefined;
+    return {
+      getRunFeedback: apiClient.getRunFeedback.bind(apiClient),
+      putRunFeedback: apiClient.putRunFeedback.bind(apiClient),
+      deleteRunFeedback: apiClient.deleteRunFeedback.bind(apiClient),
+    };
+  }, [apiClient]);
   const attachmentPreviewLoader = useMemo(
     () => apiClient.previewHistoryFile?.bind(apiClient),
     [apiClient],
@@ -1719,17 +1732,7 @@ function AuthenticatedWorkspace({
                 <div ref={runContentRef} className="run-content">
                   <ThreadTranscript
                     messages={state.threadContext ?? []}
-                    {...(apiClient.getRunFeedback !== undefined &&
-                    apiClient.putRunFeedback !== undefined &&
-                    apiClient.deleteRunFeedback !== undefined
-                      ? {
-                          feedbackApi: {
-                            getRunFeedback: apiClient.getRunFeedback.bind(apiClient),
-                            putRunFeedback: apiClient.putRunFeedback.bind(apiClient),
-                            deleteRunFeedback: apiClient.deleteRunFeedback.bind(apiClient),
-                          },
-                        }
-                      : {})}
+                    {...(runFeedbackApi === undefined ? {} : { feedbackApi: runFeedbackApi })}
                     threadId={selected.id}
                     pendingInputs={visiblePendingInputs}
                     loadRunEvents={(runId) =>

@@ -107,6 +107,103 @@ describe("工作台展示组件", () => {
       await act(async () => root.unmount());
     }
   });
+  it("迟到的反馈读取不会覆盖加载期间编辑的草稿", async () => {
+    let resolveFeedback!: (value: { feedback: null }) => void;
+    const feedbackApi = {
+      getRunFeedback: vi.fn(
+        () => new Promise<{ feedback: null }>((resolve) => (resolveFeedback = resolve)),
+      ),
+      putRunFeedback: vi.fn(async (_threadId: string, _runId: string, rating: "up" | "down") => ({
+        feedback: {
+          runId: "run-1",
+          revisionId: "revision-1",
+          userId: "user-1",
+          rating,
+          createdAt: "2026-11-20T00:00:00.000Z",
+          updatedAt: "2026-11-20T00:00:00.000Z",
+        },
+      })),
+      deleteRunFeedback: vi.fn(async () => ({ feedback: null })),
+    };
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ThreadTranscript
+            messages={[]}
+            currentRun={{ ...running, status: "succeeded" }}
+            threadId="thread-1"
+            feedbackApi={feedbackApi}
+          />,
+        ),
+      );
+      const buttons = container.querySelectorAll<HTMLButtonElement>(".run-feedback button");
+      await act(async () => buttons[0]?.click());
+      const textarea = container.querySelector<HTMLTextAreaElement>(".run-feedback textarea");
+      if (textarea === null) throw new Error("反馈附言输入框缺失");
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+          textarea,
+          "编辑中的草稿",
+        );
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => resolveFeedback({ feedback: null }));
+      expect(textarea.value).toBe("编辑中的草稿");
+      expect(container.textContent).toContain("有未提交的反馈草稿");
+      expect(buttons[0]?.getAttribute("aria-pressed")).toBe("true");
+      expect(buttons[1]?.getAttribute("aria-pressed")).toBe("false");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+  it("更改已保存评分时只选中当前草稿评分", async () => {
+    const feedbackApi = {
+      getRunFeedback: vi.fn(async () => ({
+        feedback: {
+          runId: "run-1",
+          revisionId: "revision-1",
+          userId: "user-1",
+          rating: "up" as const,
+          createdAt: "2026-11-20T00:00:00.000Z",
+          updatedAt: "2026-11-20T00:00:00.000Z",
+        },
+      })),
+      putRunFeedback: vi.fn(async () => ({
+        feedback: {
+          runId: "run-1",
+          revisionId: "revision-1",
+          userId: "user-1",
+          rating: "down" as const,
+          createdAt: "2026-11-20T00:00:00.000Z",
+          updatedAt: "2026-11-20T00:00:00.000Z",
+        },
+      })),
+      deleteRunFeedback: vi.fn(async () => ({ feedback: null })),
+    };
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ThreadTranscript
+            messages={[]}
+            currentRun={{ ...running, status: "succeeded" }}
+            threadId="thread-1"
+            feedbackApi={feedbackApi}
+          />,
+        ),
+      );
+      await act(async () => await Promise.resolve());
+      const buttons = container.querySelectorAll<HTMLButtonElement>(".run-feedback button");
+      await act(async () => buttons[1]?.click());
+      expect(buttons[0]?.getAttribute("aria-pressed")).toBe("false");
+      expect(buttons[1]?.getAttribute("aria-pressed")).toBe("true");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
   it.each(["native", "PTC"])("%s 真实组件共用安全工具展示，失败不混入模型正文", (mode) => {
     const container = document.createElement("div");
     const root = createRoot(container);

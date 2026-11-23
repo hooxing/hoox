@@ -1174,25 +1174,41 @@ function RunFeedbackControl({
   readonly threadId: string;
   readonly runId: string;
 }) {
-  const [feedback, setFeedback] = useState<RunFeedback | null>();
+  const [feedback, setFeedback] = useState<RunFeedback | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [comment, setComment] = useState("");
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [saveError, setSaveError] = useState(false);
   const [rating, setRating] = useState<"up" | "down">();
+  const editVersion = useRef(0);
+  const mutationVersion = useRef(0);
   useEffect(() => {
     let active = true;
+    const initialEditVersion = editVersion.current;
+    const initialMutationVersion = mutationVersion.current;
+    setLoaded(false);
+    setLoadError(false);
     void api
       .getRunFeedback(threadId, runId)
       .then((value) => {
-        if (active) {
+        if (
+          active &&
+          initialEditVersion === editVersion.current &&
+          initialMutationVersion === mutationVersion.current
+        ) {
           setFeedback(value.feedback);
           setComment(value.feedback?.comment ?? "");
           setRating(value.feedback?.rating);
         }
+        if (active) setLoaded(true);
       })
       .catch(() => {
-        if (active) setError(true);
+        if (active) {
+          setLoadError(true);
+          setLoaded(true);
+        }
       });
     return () => {
       active = false;
@@ -1200,17 +1216,23 @@ function RunFeedbackControl({
   }, [api, threadId, runId]);
   const save = async () => {
     if (rating === undefined) return;
+    mutationVersion.current += 1;
+    setSaveError(false);
     setPending(true);
     try {
       const value = await api.putRunFeedback(threadId, runId, rating, comment || undefined);
       setFeedback(value.feedback);
+      setComment(value.feedback?.comment ?? "");
+      setRating(value.feedback?.rating);
     } catch {
-      setError(true);
+      setSaveError(true);
     } finally {
       setPending(false);
     }
   };
   const revoke = async () => {
+    mutationVersion.current += 1;
+    setSaveError(false);
     setPending(true);
     try {
       await api.deleteRunFeedback(threadId, runId);
@@ -1218,19 +1240,24 @@ function RunFeedbackControl({
       setComment("");
       setRating(undefined);
     } catch {
-      setError(true);
+      setSaveError(true);
     } finally {
       setPending(false);
     }
   };
+  const activeRating = rating ?? feedback?.rating;
+  const hasDraft =
+    (rating !== undefined && rating !== feedback?.rating) || comment !== (feedback?.comment ?? "");
   return (
     <fieldset className="run-feedback" aria-label="回答反馈">
       <button
         type="button"
         disabled={pending}
-        aria-pressed={feedback?.rating === "up" || rating === "up"}
+        aria-pressed={activeRating === "up"}
         onClick={() => {
+          editVersion.current += 1;
           setRating("up");
+          setSaveError(false);
           setOpen(true);
         }}
       >
@@ -1239,9 +1266,11 @@ function RunFeedbackControl({
       <button
         type="button"
         disabled={pending}
-        aria-pressed={feedback?.rating === "down" || rating === "down"}
+        aria-pressed={activeRating === "down"}
         onClick={() => {
+          editVersion.current += 1;
           setRating("down");
+          setSaveError(false);
           setOpen(true);
         }}
       >
@@ -1251,7 +1280,7 @@ function RunFeedbackControl({
         附言
       </button>
       {feedback !== null && feedback !== undefined && (
-        <button type="button" disabled={pending} onClick={() => void revoke()}>
+        <button type="button" disabled={pending || !loaded} onClick={() => void revoke()}>
           撤销反馈
         </button>
       )}
@@ -1261,18 +1290,25 @@ function RunFeedbackControl({
           <textarea
             maxLength={2000}
             value={comment}
-            onChange={(event) => setComment(event.target.value)}
+            onChange={(event) => {
+              editVersion.current += 1;
+              setComment(event.target.value);
+              setSaveError(false);
+            }}
           />
           <button
             type="button"
-            disabled={pending || rating === undefined}
+            disabled={pending || !loaded || rating === undefined}
             onClick={() => void save()}
           >
             提交反馈
           </button>
         </label>
       )}
-      {error && <span role="status">反馈暂时无法保存</span>}
+      {hasDraft && <span>有未提交的反馈草稿</span>}
+      {loadError && <span role="alert">反馈读取失败，请重试</span>}
+      {saveError && <span role="alert">反馈保存失败，请重试</span>}
+      {loaded && !hasDraft && feedback !== null && <span>已保存</span>}
     </fieldset>
   );
 }

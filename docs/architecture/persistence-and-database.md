@@ -13,6 +13,7 @@
 
 - 外部工具版本、撤销事实与凭据由 Admin Control 写入，版本和凭据密文发布后不可修改；Runtime ACL 对这些底表及密文视图为零，许可消费只通过无密文的快照版本门控视图校验撤销。凭据管理投影只返回是否配置。Worker Coordinator 的专用连接只经校验数据库当前双栅栏事实的受限视图读取 Run 快照内的密文，不获得外部工具底表权限。
 - 业务表全部启用并 FORCE RLS，策略基于事务内的 `app.tenant_id`、`app.user_id` 等可信设置。应用授权与 RLS 同时生效，不能只依赖其中一层。
+- Run 反馈以 `(Tenant, Run, User)` 唯一，外键固定到该 Run 的 Revision 快照。Runtime 仅能在当前事务 User 身份下读取、写入、更新或撤销其可见的正式/API Run 反馈；Playground 与评测 Run 不接收反馈。管理员附言只经 `run_content.read` 审计视图读取，统计仅提供按 Agent/Revision 的点赞、点踩计数与比率。
 - 认证只证明 User 身份；Runtime 必须在事务内从 Membership 重建 TenantScope。客户端头部或模型参数不能构造 scope。API Key 在尚未知 Tenant 时只可经 RLS 按当前事务 `app.api_key_hash` 精确读取匹配记录；凭据成功后业务访问仍必须使用集成 User 的 Tenant Membership。
 - 跨表引用使用包含 `tenant_id` 的复合外键，阻止跨租户身份拼接。公开错误不泄漏跨 Tenant 实体是否存在。
 - 持久层映射数据库异常时，只在错误 `cause` 中附加经格式校验的 5 位 SQLSTATE；驱动消息、SQL、参数、连接信息和原始异常均不跨越错误边界。

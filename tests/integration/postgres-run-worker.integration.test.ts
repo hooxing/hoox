@@ -4897,6 +4897,53 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       });
       expect(sourceHasClientToolHistory).toBe(true);
       if (mode === "submit") {
+        const attempt = await withTenantTransaction(
+          runtime,
+          actor,
+          async (client) =>
+            await client.query<{ readonly attempt_id: string }>(
+              `SELECT attempt_id FROM execution_attempts
+              WHERE tenant_id=$1 AND run_id=$2 ORDER BY created_at DESC LIMIT 1`,
+              [scope.tenantId, scope.runId],
+            ),
+        );
+        const attemptId = attempt.rows[0]?.attempt_id;
+        if (attemptId === undefined) throw new Error("客户端工具 Attempt 缺失");
+        await withTenantTransaction(runtime, actor, async (client) => {
+          await client.query(
+            `INSERT INTO memory_ingestion_outbox(
+               tenant_id,run_id,thread_id,attempt_id,subject_user_id,tenant_kind,
+               source_through_sequence
+             ) SELECT tenant.id,run.id,thread.id,$4,
+                      COALESCE(tenant.owner_user_id,thread.created_by_user_id),tenant.kind,1
+                 FROM tenants tenant
+                 JOIN threads thread ON thread.tenant_id=tenant.id AND thread.id=$2
+                 JOIN runs run ON run.tenant_id=tenant.id AND run.id=$3 AND run.thread_id=thread.id
+                WHERE tenant.id=$1`,
+            [scope.tenantId, scope.threadId, scope.runId, attemptId],
+          );
+        });
+        const memory = new PgMemoryIngestionStore(runtime, {} as BlobStore);
+        await expect(
+          memory.claimNext({
+            tenantId: scope.tenantId,
+            workerId: `client-history-memory-${label}`,
+            leaseMs: 30_000,
+          }),
+        ).resolves.toBeUndefined();
+        const memoryState = await withTenantTransaction(runtime, actor, (client) =>
+          client.query<{ readonly state: string; readonly last_error_code: string | null }>(
+            `SELECT state,last_error_code FROM memory_ingestion_outbox
+              WHERE tenant_id=$1 AND run_id=$2`,
+            [scope.tenantId, scope.runId],
+          ),
+        );
+        expect(memoryState.rows[0]).toEqual({
+          state: "skipped",
+          last_error_code: null,
+        });
+      }
+      if (mode === "submit") {
         const childThread = createThread({
           id: threadId(`fork-${label}`),
           tenant: base.tenant,
@@ -4947,13 +4994,13 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           tenantId: scope.tenantId,
           threadId: threadId(`unrelated-${label}`),
         }),
-      ).resolves.toBe(false);
+      ).resolves.toBe(true);
       await expect(
         clientToolHistory.hasClientToolHistoryForThread({
           tenantId: tenantId(`unrelated-${label}`),
           threadId: scope.threadId,
         }),
-      ).resolves.toBe(false);
+      ).resolves.toBe(true);
       if (mode === "submit") {
         const laterRunId = runId(`run-later-${label}`);
         const laterScope: ExecutionScope = {

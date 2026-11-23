@@ -124,7 +124,7 @@ export class PgClientToolCallHistoryReader {
         `SELECT has_client_tool_history FROM threads WHERE tenant_id=$1 AND id=$2`,
         [input.tenantId, input.threadId],
       );
-      return result.rows[0]?.has_client_tool_history === true;
+      return result.rows[0]?.has_client_tool_history !== false;
     });
   }
 }

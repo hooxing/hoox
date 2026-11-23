@@ -31,6 +31,7 @@ claimed/running/finalizing → recovery_required → abandoned | failed
 - 请求哈希绑定 Thread 与输入；同一幂等键只接受相同请求，不同请求稳定冲突。COMMIT 响应未知时只按原 scope、幂等键与请求哈希读回，禁止再次写入。
 - 输入上限为 1,048,576 UTF-8 字节，API 与 PostgreSQL 各自执行。
 - Worker 领取时验证固定 Agent 快照，在停止检查、续租及外部副作用许可边界验证 Revision 撤销事实。撤销不是用户取消；Run 在安全停止后失败，不继续发起模型或工具调用。Agent 的长期记忆策略随同 Revision 固定；`platform_default` 在执行时服从该 Run 的平台记忆配置，显式关闭不检索也不摄取。
+- Thread 一旦包含客户端工具调用，其持久化敏感历史标记单调保持为真；这类 Thread 不进入长期记忆采集。入队时必须明确读取到 `false` 才可登记任务，缺行、权限不足或读取失败均跳过；消费者认领时再次将已排队任务结算为失败，避免标记后仍将历史发送给记忆 Provider。该规则只限制采集，不改变记忆检索协议。
 - Worker 通过 Tenant assignment 发现有待处理工作的 Tenant，用短事务 `FOR UPDATE SKIP LOCKED` 领取 Outbox，并以 generation、claim token 与数据库租约作为确认栅栏。迟到确认是 no-op；Worker 仍负责 Attempt 级幂等。
 - 全局 Tenant 发现由独立 Worker Coordinator 数据库身份授权，只能读取 assignment 并更新 claim 栅栏列，不能读取业务表。团队解散会主动终止调度事实，避免撤权后的重试热循环。
 

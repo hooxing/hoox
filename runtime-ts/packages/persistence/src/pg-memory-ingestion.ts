@@ -51,6 +51,23 @@ export async function enqueueMemoryIngestion(
   if (!Number.isSafeInteger(input.sourceThroughSequence) || input.sourceThroughSequence < 1) {
     throw new TypeError("记忆来源 sequence 无效");
   }
+  await client.query("SAVEPOINT memory_history_guard");
+  try {
+    const history = await client.query<{ readonly has_client_tool_history: boolean }>(
+      `SELECT has_client_tool_history FROM threads WHERE tenant_id=$1 AND id=$2`,
+      [input.tenantId, input.threadId],
+    );
+    if (history.rows[0]?.has_client_tool_history !== false) {
+      await client.query("ROLLBACK TO SAVEPOINT memory_history_guard");
+      await client.query("RELEASE SAVEPOINT memory_history_guard");
+      return;
+    }
+    await client.query("RELEASE SAVEPOINT memory_history_guard");
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT memory_history_guard");
+    await client.query("RELEASE SAVEPOINT memory_history_guard");
+    return;
+  }
   const inserted = await client.query(
     `INSERT INTO memory_ingestion_outbox(
        tenant_id,run_id,thread_id,attempt_id,subject_user_id,tenant_kind,
@@ -107,6 +124,25 @@ export class PgMemoryIngestionStore implements MemoryIngestionStore {
         this.pool,
         { tenantId: input.tenantId },
         async (client) => {
+          await client.query("SAVEPOINT memory_history_guard");
+          try {
+            await client.query(
+              `UPDATE memory_ingestion_outbox AS memory
+                  SET state='skipped',claim_token=NULL,claimed_by=NULL,claim_expires_at=NULL,
+                      last_error_code=NULL,completed_at=clock_timestamp(),
+                      updated_at=clock_timestamp()
+                 FROM threads AS thread
+                WHERE memory.tenant_id=$1 AND thread.tenant_id=memory.tenant_id
+                  AND thread.id=memory.thread_id AND thread.has_client_tool_history=true
+                  AND memory.state IN ('pending','submitted','claimed')`,
+              [input.tenantId],
+            );
+            await client.query("RELEASE SAVEPOINT memory_history_guard");
+          } catch {
+            await client.query("ROLLBACK TO SAVEPOINT memory_history_guard");
+            await client.query("RELEASE SAVEPOINT memory_history_guard");
+            return undefined;
+          }
           const result = await client.query<ClaimedMemoryRow>(
             `SELECT memory.run_id,memory.thread_id,memory.attempt_id,memory.subject_user_id,memory.tenant_kind,
                     memory.source_through_sequence::text,memory.provider_event_id::text,
@@ -114,7 +150,10 @@ export class PgMemoryIngestionStore implements MemoryIngestionStore {
                FROM memory_ingestion_outbox memory
                JOIN runs source_run
                  ON source_run.tenant_id=memory.tenant_id AND source_run.id=memory.run_id
-              WHERE memory.tenant_id=$1 AND source_run.origin<>'playground' AND (
+               JOIN threads source_thread
+                 ON source_thread.tenant_id=memory.tenant_id AND source_thread.id=memory.thread_id
+              WHERE memory.tenant_id=$1 AND source_run.origin<>'playground'
+                AND source_thread.has_client_tool_history=false AND (
                 (memory.state IN ('pending','submitted') AND memory.next_attempt_at<=clock_timestamp())
                 OR (memory.state='claimed' AND memory.claim_expires_at<=clock_timestamp())
               )

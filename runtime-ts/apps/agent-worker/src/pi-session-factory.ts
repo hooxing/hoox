@@ -1280,7 +1280,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             activeModelGeneration = undefined;
             if (generation === undefined) return;
             const usage = event.message.usage;
-            if (usage.input + usage.output + usage.cacheRead === 0) return;
             const write = this.modelUsageMetrics
               ?.recordModelUsage({
                 tenantId: input.scope.tenantId,

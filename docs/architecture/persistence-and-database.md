@@ -17,6 +17,8 @@
 - 跨表引用使用包含 `tenant_id` 的复合外键，阻止跨租户身份拼接。公开错误不泄漏跨 Tenant 实体是否存在。
 - 持久层映射数据库异常时，只在错误 `cause` 中附加经格式校验的 5 位 SQLSTATE；驱动消息、SQL、参数、连接信息和原始异常均不跨越错误边界。
 - 后台统计只通过 Migrator 拥有的受限视图跨 Tenant 聚合；底表保留 FORCE RLS，专属读取策略只面向 Migrator 并要求有效平台操作者。
+- Agent 运营指标通过按小时分组的只读视图提供，Control 只可读取聚合行，不获 Run、Attempt、事件、Thread、模型用量或计价快照底表权限。指标窗口与维度筛选在 Run 基表扫描阶段生效，`created_at` 范围索引支撑查询；同一时刻只允许一个指标聚合查询。
+- Run 用量首次落库时按 Run Agent 快照中的固定 Provider Key、Revision 和 Model ID 读取价格，并使用 `runtime_agent_pinned_model_read` 的 Run 级 RLS 上下文；无固定模型时使用 Run 固定运行配置 Revision。价格快照与用量同事务提交，后续配置 Revision 不会重算历史成本。迁移按稳定的 `:output` observation 后缀幂等回填历史模型生成次数。
 
 ## Thread 的 Agent 绑定
 

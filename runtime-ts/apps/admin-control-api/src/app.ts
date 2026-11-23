@@ -15,6 +15,9 @@ import {
 import type { AuthContextResolver } from "@hoox/identity/auth";
 import {
   AdminControlOverviewSuccessEnvelopeSchema,
+  AgentMetricsQueryDtoSchema,
+  AgentMetricsSuccessEnvelopeSchema,
+  type AgentMetricsQueryDto,
   ControlAuditListSuccessEnvelopeSchema,
   type ControlRevisionPath,
   ControlRevisionPathSchema,
@@ -104,6 +107,7 @@ const PiModelCatalogQuerySchema = Type.Object(
 type ControlServiceContract = Pick<
   AdminControlService,
   | "overview"
+  | "agentMetrics"
   | "listModelProviders"
   | "listMemoryProviders"
   | "listRuntimeSettings"
@@ -212,6 +216,25 @@ export function createAdminControlApiApp(
     "/v1/admin/control/overview",
     { schema: { response: responseSchemas(AdminControlOverviewSuccessEnvelopeSchema) } },
     async (request) => success(request, await dependencies.control.overview(await actor(request))),
+  );
+  app.get<{ Querystring: AgentMetricsQueryDto }>(
+    "/v1/admin/control/agent-metrics",
+    {
+      schema: {
+        querystring: AgentMetricsQueryDtoSchema,
+        response: responseSchemas(AgentMetricsSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      const { from, to, ...filters } = request.query;
+      return success(request, {
+        items: await dependencies.control.agentMetrics(await actor(request), {
+          from,
+          to,
+          ...filters,
+        }),
+      });
+    },
   );
   if (dependencies.sandbox) {
     const sandbox = dependencies.sandbox;
@@ -760,6 +783,7 @@ function failureKind(error: unknown, request: FastifyRequest): FailureKind {
   if (
     error instanceof PersistenceError &&
     (request.url.startsWith("/v1/admin/control/agent-definitions") ||
+      request.routeOptions.url?.startsWith("/v1/admin/control/agent-metrics") ||
       request.routeOptions.url?.startsWith(EXTERNAL_TOOL_ROUTE_PREFIX) ||
       request.routeOptions.url?.startsWith("/v1/admin/control/integrations/"))
   ) {
@@ -777,6 +801,7 @@ function failureKind(error: unknown, request: FastifyRequest): FailureKind {
     if (error.code === "NOT_FOUND") return "not_found";
     if (error.code === "CONFLICT" || error.code === "KEY_CONFLICT") return "conflict";
     if (error.code === "PROBE_FAILED") return "dependency_unavailable";
+    if (error.code === "INVALID_INPUT") return "bad_request";
   }
   const code =
     typeof error === "object" && error !== null && "code" in error

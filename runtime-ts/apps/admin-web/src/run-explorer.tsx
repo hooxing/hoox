@@ -12,6 +12,7 @@ import {
   type RunTrajectoryPageDto,
   type RunTrajectoryRecordDto,
   type RunTimelineRecordDto,
+  runOrigins,
   runStatuses,
 } from "./run-explorer-api.js";
 
@@ -217,10 +218,22 @@ function statusLabel(value: string): string {
 }
 
 /** datetime-local 输入按浏览器本地时区解释，提交前转为 UTC ISO 时间。 */
-function localInputToIso(value: string): string | undefined {
+export function localInputToIso(value: string): string | undefined {
   if (value.length === 0) return undefined;
   const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf()) ? undefined : parsed.toISOString();
+  if (Number.isNaN(parsed.valueOf())) return undefined;
+  const normalized = parsed.toISOString();
+  return isoToLocalInput(normalized) === value ? normalized : undefined;
+}
+
+export function isoToLocalInput(value: string | null): string {
+  if (value === null) return "";
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp)
+    ? new Date(timestamp - new Date(timestamp).getTimezoneOffset() * 60_000)
+        .toISOString()
+        .slice(0, 16)
+    : "";
 }
 
 function RunRow({
@@ -287,12 +300,41 @@ export function RunExplorerList({
   readonly api: RunExplorerApiContract;
   readonly onOpen: (run: RunSummaryDto) => void;
 }) {
-  const [tenantId, setTenantId] = useState("");
+  const [initialFilters] = useState<RunListFilters>(() => {
+    const initialParams = new URLSearchParams(window.location.search);
+    const initialTenantId = initialParams.get("tenantId") ?? "";
+    const initialAgentDefinitionId = initialParams.get("agentDefinitionId") ?? "";
+    const initialAgentRevisionId = initialParams.get("agentRevisionId") ?? "";
+    const rawOrigin = initialParams.get("origin");
+    const initialOrigin = runOrigins.find((value) => value === rawOrigin);
+    const initialFrom = initialParams.get("createdFrom");
+    const initialTo = initialParams.get("createdTo");
+    return {
+      ...(initialTenantId ? { tenantId: initialTenantId } : {}),
+      ...(initialAgentDefinitionId ? { agentDefinitionId: initialAgentDefinitionId } : {}),
+      ...(initialAgentRevisionId ? { agentRevisionId: initialAgentRevisionId } : {}),
+      ...(initialOrigin ? { origin: initialOrigin } : {}),
+      ...(initialFrom ? { createdFrom: initialFrom } : {}),
+      ...(initialTo ? { createdTo: initialTo } : {}),
+    };
+  });
+  const initialParams = new URLSearchParams(window.location.search);
+  const initialTenantId = initialParams.get("tenantId") ?? "";
+  const initialAgentDefinitionId = initialParams.get("agentDefinitionId") ?? "";
+  const initialAgentRevisionId = initialParams.get("agentRevisionId") ?? "";
+  const rawOrigin = initialParams.get("origin");
+  const initialOrigin = runOrigins.find((value) => value === rawOrigin);
+  const initialFrom = initialParams.get("createdFrom");
+  const initialTo = initialParams.get("createdTo");
+  const [tenantId, setTenantId] = useState(initialTenantId);
+  const [agentDefinitionId, setAgentDefinitionId] = useState(initialAgentDefinitionId);
+  const [agentRevisionId, setAgentRevisionId] = useState(initialAgentRevisionId);
+  const [origin, setOrigin] = useState<RunListFilters["origin"] | "">(initialOrigin ?? "");
   const [status, setStatus] = useState<RunStatus | "">("");
-  const [createdFrom, setCreatedFrom] = useState("");
-  const [createdTo, setCreatedTo] = useState("");
+  const [createdFrom, setCreatedFrom] = useState(isoToLocalInput(initialFrom));
+  const [createdTo, setCreatedTo] = useState(isoToLocalInput(initialTo));
   const [search, setSearch] = useState("");
-  const [filters, setFilters] = useState<RunListFilters>({});
+  const [filters, setFilters] = useState<RunListFilters>(initialFilters);
   const [page, setPage] = useState<RunPageDto>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -318,8 +360,8 @@ export function RunExplorerList({
   );
 
   useEffect(() => {
-    void load({}, false);
-  }, [load]);
+    void load(initialFilters, false);
+  }, [initialFilters, load]);
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -327,6 +369,9 @@ export function RunExplorerList({
     const to = localInputToIso(createdTo);
     const next: RunListFilters = {
       ...(tenantId.trim().length === 0 ? {} : { tenantId: tenantId.trim() }),
+      ...(agentDefinitionId.trim() ? { agentDefinitionId: agentDefinitionId.trim() } : {}),
+      ...(agentRevisionId.trim() ? { agentRevisionId: agentRevisionId.trim() } : {}),
+      ...(origin ? { origin } : {}),
       ...(status === "" ? {} : { status }),
       ...(from === undefined ? {} : { createdFrom: from }),
       ...(to === undefined ? {} : { createdTo: to }),
@@ -365,6 +410,36 @@ export function RunExplorerList({
             placeholder="全部 Tenant"
             onChange={(event) => setTenantId(event.target.value)}
           />
+        </label>
+        <label>
+          Agent ID
+          <input
+            aria-label="Agent ID"
+            value={agentDefinitionId}
+            onChange={(event) => setAgentDefinitionId(event.target.value)}
+          />
+        </label>
+        <label>
+          Revision ID
+          <input
+            aria-label="Revision ID"
+            value={agentRevisionId}
+            onChange={(event) => setAgentRevisionId(event.target.value)}
+          />
+        </label>
+        <label>
+          来源
+          <select
+            aria-label="Run 来源"
+            value={origin}
+            onChange={(event) => setOrigin(event.target.value as RunListFilters["origin"] | "")}
+          >
+            <option value="">全部来源</option>
+            <option value="normal">正常</option>
+            <option value="api">API</option>
+            <option value="playground">Playground</option>
+            <option value="evaluation">评测</option>
+          </select>
         </label>
         <label>
           状态

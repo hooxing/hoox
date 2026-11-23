@@ -225,11 +225,15 @@ rollback() {
     compose_file="$previous_release/docker-compose.yml"
     write_compose_env "$previous_image" "$existing_tenant" "$existing_admin_user"
     local -a restore_services=(postgres minio api web scheduler worker)
-    if compose config --services | grep -qx 'admin-control'; then
+    # 先完整读取服务列表再匹配：pipefail 下管道给 grep 的 -q 提前退出会让上游收到 SIGPIPE，
+    # 使判断随机为假并漏恢复服务。
+    local previous_services
+    previous_services="$(compose config --services 2>/dev/null || true)"
+    if grep -qx 'admin-control' <<<"$previous_services"; then
       restore_services+=(admin-control admin-web)
     fi
     # 兼容回滚到仍声明独立轨迹服务的旧版本：升级时 --remove-orphans 已删除其容器。
-    if compose config --services | grep -qx 'trajectory'; then
+    if grep -qx 'trajectory' <<<"$previous_services"; then
       restore_services+=(trajectory)
     fi
     compose up -d --force-recreate "${restore_services[@]}" || true

@@ -176,8 +176,10 @@ jobs:
         # 新增套件时在 suites 数组中追加一行。
         run: |
           pnpm --filter "@hoox/persistence..." build
+          pnpm --filter "@hoox/api..." build
           suites=(
             tests/integration/postgres-admin-run-explorer.integration.test.ts
+            tests/integration/sdk-public-api.integration.test.ts
           )
           pnpm exec vitest run --config vitest.integration.config.ts "${suites[@]}"
 

@@ -85,6 +85,26 @@ if ! verify_scheduler_configuration; then
   exit 2
 fi
 
+verify_object_storage_configuration() {
+  local file key value
+  for file in scheduler.env admin-control.env; do
+    for key in S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_FORCE_PATH_STYLE; do
+      value="$(shared_value "$file" "$key")"
+      if [[ ! "$value" =~ [^[:space:]] || "$value" == '""' || "$value" == "''" ]]; then
+        echo "Demo $file 缺少环境变量：$key" >&2
+        return 1
+      fi
+      if [[ "$key" == S3_FORCE_PATH_STYLE && "$value" != true && "$value" != false ]]; then
+        echo "Demo $file 环境变量无效：$key" >&2
+        return 1
+      fi
+    done
+  done
+}
+if ! verify_object_storage_configuration; then
+  exit 2
+fi
+
 if [[ -L "$root/current" ]]; then
   previous_release="$(readlink -f "$root/current")"
 fi
@@ -121,9 +141,11 @@ if [[ -f "$compose_env" ]]; then
 fi
 write_compose_env "$image" "$existing_tenant" "$existing_admin_user"
 
-compose() {
+compose() (
+  # 发布调用方仍携带候选镜像；所有插值只取自原子写入的 compose.env，回滚也不能例外。
+  unset HOOX_DEMO_IMAGE HOOX_DEMO_ROOT HOOX_DEMO_RELEASE_DIR HOOX_DEMO_RELEASE_ID DEMO_TENANT_ID DEMO_ADMIN_USER_ID
   docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" "$@"
-}
+)
 
 # shellcheck source=deploy/demo/runtime-config.sh
 source "$(dirname "${BASH_SOURCE[0]}")/runtime-config.sh"
@@ -188,26 +210,21 @@ rollback() {
   if (( ${#temporary_files[@]} > 0 )); then
     rm -f -- "${temporary_files[@]}"
   fi
-  docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
-    stop admin-control admin-web >/dev/null 2>&1 || true
-  docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
-    stop api web scheduler worker >/dev/null 2>&1 || true
+  compose stop admin-control admin-web >/dev/null 2>&1 || true
+  compose stop api web scheduler worker >/dev/null 2>&1 || true
   if [[ -n "$previous_release" && -f "$previous_release/docker-compose.yml" && -n "$previous_image" ]]; then
     release_dir="$previous_release"
     compose_file="$previous_release/docker-compose.yml"
     write_compose_env "$previous_image" "$existing_tenant" "$existing_admin_user"
     local -a restore_services=(postgres minio api web scheduler worker)
-    if docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
-      config --services | grep -qx 'admin-control'; then
+    if compose config --services | grep -qx 'admin-control'; then
       restore_services+=(admin-control admin-web)
     fi
     # 兼容回滚到仍声明独立轨迹服务的旧版本：升级时 --remove-orphans 已删除其容器。
-    if docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
-      config --services | grep -qx 'trajectory'; then
+    if compose config --services | grep -qx 'trajectory'; then
       restore_services+=(trajectory)
     fi
-    docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
-      up -d --force-recreate "${restore_services[@]}" || true
+    compose up -d --force-recreate "${restore_services[@]}" || true
     ln -sfn "$previous_release" "$root/current"
   fi
   echo "Hoox Demo 发布失败，已尝试恢复上一应用版本；数据库迁移不会自动回退" >&2

@@ -789,6 +789,123 @@ async function seedWebhookRun(
 }
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("真实 Migrator 跨租户回填客户端工具 Thread 及多级 Fork 后代", async () => {
+    const target = await createIsolatedMigrationTarget("client_history_backfill");
+    const migrationDir = await mkdtemp(join(tmpdir(), "hoox-client-history-migrations-"));
+    const runtime = createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema: target.context.schema,
+      maxConnections: 4,
+    });
+    try {
+      const migrations = await loadMigrations();
+      const markerMigration = migrations.find(
+        (migration) => migration.name === "thread_client_tool_history",
+      );
+      if (markerMigration === undefined) throw new Error("缺少客户端历史标记迁移");
+      const previousMigrations = migrations.filter(
+        (migration) => migration.version < markerMigration.version,
+      );
+      for (const migration of previousMigrations) {
+        for (const direction of ["up", "down"] as const) {
+          const name = `${String(migration.version).padStart(4, "0")}_${migration.name}.${direction}.sql`;
+          await copyFile(join(sourceMigrationDirectory, name), join(migrationDir, name));
+        }
+      }
+      const identity = await target.pool.query<{ readonly current_user: string }>(
+        "SELECT current_user",
+      );
+      expect(identity.rows[0]?.current_user).toBe(target.context.migratorRole);
+      await migrateUp(target.pool, { ...target.context, directory: migrationDir });
+
+      const suffix = `client_history_backfill_${process.pid}_${Date.now()}`;
+      const source = await createFixture(`${suffix}_source`, new PgCoreRepositories(runtime));
+      const child = await createFixture(`${suffix}_child`, new PgCoreRepositories(runtime));
+      const grandchild = await createFixture(
+        `${suffix}_grandchild`,
+        new PgCoreRepositories(runtime),
+      );
+      const unrelated = await createFixture(`${suffix}_unrelated`, new PgCoreRepositories(runtime));
+      for (const [targetFixture, sourceFixture] of [
+        [child, source],
+        [grandchild, child],
+      ] as const) {
+        await asTenant(
+          runtime,
+          targetFixture.scope.tenantId,
+          targetFixture.user.id,
+          async (client) => {
+            await client.query(
+              `INSERT INTO thread_forks(
+               tenant_id,child_thread_id,source_tenant_id,source_thread_id,
+               fork_kind,created_by_user_id
+             ) VALUES($1,$2,$3,$4,'team_publish',$5)`,
+              [
+                targetFixture.scope.tenantId,
+                targetFixture.thread.id,
+                sourceFixture.scope.tenantId,
+                sourceFixture.thread.id,
+                targetFixture.user.id,
+              ],
+            );
+          },
+        );
+      }
+
+      await withTransaction(administrativePool, async (client) => {
+        await client.query("SET LOCAL session_replication_role='replica'");
+        await client.query(
+          `INSERT INTO "${target.context.schema}".client_tool_calls(
+             tenant_id,run_id,thread_id,attempt_id,call_id,tool_name,arguments,deadline
+           ) VALUES($1,'legacy_run',$2,'legacy_attempt','legacy_call','lookup',
+                    '{"secret":"redacted-fixture"}'::jsonb,clock_timestamp())`,
+          [source.scope.tenantId, source.thread.id],
+        );
+      });
+
+      await migrateUp(target.pool, target.context);
+      const observed: boolean[] = [];
+      for (const fixture of [source, child, grandchild, unrelated]) {
+        const result = await asTenant(
+          runtime,
+          fixture.scope.tenantId,
+          fixture.user.id,
+          async (client) =>
+            await client.query<{ readonly has_client_tool_history: boolean }>(
+              `SELECT has_client_tool_history FROM threads WHERE tenant_id=$1 AND id=$2`,
+              [fixture.scope.tenantId, fixture.thread.id],
+            ),
+        );
+        observed.push(result.rows[0]?.has_client_tool_history ?? true);
+      }
+      expect(observed).toEqual([true, true, true, false]);
+      expect(observed.filter(Boolean)).toHaveLength(3);
+      const rls = await target.pool.query<{
+        readonly relrowsecurity: boolean;
+        readonly relforcerowsecurity: boolean;
+      }>(
+        `SELECT relrowsecurity,relforcerowsecurity FROM pg_class
+          WHERE oid=ANY(ARRAY['threads'::regclass,'thread_forks'::regclass,'client_tool_calls'::regclass])
+          ORDER BY relname`,
+      );
+      expect(rls.rows).toHaveLength(3);
+      expect(rls.rows.every((row) => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
+      expect(
+        (
+          await target.pool.query(
+            `SELECT policyname FROM pg_policies
+              WHERE schemaname=current_schema()
+                AND policyname LIKE 'client_tool_history_backfill_%'`,
+          )
+        ).rows,
+      ).toEqual([]);
+    } finally {
+      await runtime.end();
+      await rm(migrationDir, { recursive: true, force: true });
+      await target.close();
+    }
+  });
+
   it("14→15 升级以真实 Migrator 回填正常 Webhook，并允许 Dispatcher 投递且可回退", async () => {
     const target = await createIsolatedMigrationTarget("webhook_v15_backfill");
     const webhook = await webhookIsolatedPools(target);

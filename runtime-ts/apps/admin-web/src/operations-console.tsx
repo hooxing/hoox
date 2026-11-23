@@ -1,9 +1,13 @@
 import type {
+  AgentMetricsQueryDto,
+  AgentMetricsRowDto,
   AdminControlOverviewDto,
   PlatformUserPageDto,
   PlatformUserSummaryDto,
 } from "@hoox/protocol";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AdminControlApiContract } from "./control-api.js";
+import { isoToLocalInput, localInputToIso } from "./run-explorer.js";
 
 function formatDate(value: string | undefined): string {
   if (value === undefined) return "尚无活动";
@@ -253,6 +257,271 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
             </dd>
           </div>
         </dl>
+      </section>
+    </div>
+  );
+}
+
+export function AgentMetricsDashboard({ api }: { readonly api: AdminControlApiContract }) {
+  const initialTo = new Date();
+  const initialFrom = new Date(initialTo.valueOf() - 30 * 86_400_000);
+  const initialQuery = {
+    from: initialFrom.toISOString(),
+    to: initialTo.toISOString(),
+  } satisfies AgentMetricsQueryDto;
+  const [filters, setFilters] = useState({
+    from: isoToLocalInput(initialFrom.toISOString()),
+    to: isoToLocalInput(initialTo.toISOString()),
+    agentDefinitionId: "",
+    agentRevisionId: "",
+    tenantId: "",
+    origin: "" as AgentMetricsQueryDto["origin"] | "",
+  });
+  const [appliedQuery, setAppliedQuery] = useState<AgentMetricsQueryDto>(initialQuery);
+  const [items, setItems] = useState<readonly AgentMetricsRowDto[]>([]);
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const requestSequence = useRef(0);
+  const load = useCallback(
+    async (query: AgentMetricsQueryDto) => {
+      const sequence = ++requestSequence.current;
+      setBusy(true);
+      setError(undefined);
+      try {
+        const result = await api.agentMetrics(query);
+        if (requestSequence.current === sequence) setItems(result);
+      } catch {
+        if (requestSequence.current === sequence)
+          setError("指标读取失败，请缩短时间范围或增加筛选条件后重试。");
+      } finally {
+        if (requestSequence.current === sequence) setBusy(false);
+      }
+    },
+    [api],
+  );
+  useEffect(() => {
+    void load(appliedQuery);
+  }, [appliedQuery, load]);
+  const trend = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of items)
+      counts.set(item.windowStart, (counts.get(item.windowStart) ?? 0) + item.runCount);
+    const entries = [...counts].sort(([left], [right]) => left.localeCompare(right));
+    const maximum = Math.max(1, ...entries.map(([, count]) => count));
+    return entries.map(([date, count]) => ({
+      date,
+      count,
+      height: Math.max(4, (count / maximum) * 100),
+    }));
+  }, [items]);
+  const hasUnappliedFilters =
+    filters.from !== isoToLocalInput(appliedQuery.from) ||
+    filters.to !== isoToLocalInput(appliedQuery.to) ||
+    filters.agentDefinitionId !== (appliedQuery.agentDefinitionId ?? "") ||
+    filters.agentRevisionId !== (appliedQuery.agentRevisionId ?? "") ||
+    filters.tenantId !== (appliedQuery.tenantId ?? "") ||
+    filters.origin !== (appliedQuery.origin ?? "");
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const from = localInputToIso(filters.from);
+    const to = localInputToIso(filters.to);
+    if (from === undefined || to === undefined || Date.parse(to) <= Date.parse(from)) {
+      setError("请输入有效的开始和结束时间，并确保结束时间晚于开始时间。");
+      return;
+    }
+    if (Date.parse(to) - Date.parse(from) > 90 * 86_400_000) {
+      setError("指标时间范围不能超过 90 天。");
+      return;
+    }
+    setAppliedQuery({
+      from,
+      to,
+      ...(filters.agentDefinitionId ? { agentDefinitionId: filters.agentDefinitionId } : {}),
+      ...(filters.agentRevisionId ? { agentRevisionId: filters.agentRevisionId } : {}),
+      ...(filters.tenantId ? { tenantId: filters.tenantId } : {}),
+      ...(filters.origin ? { origin: filters.origin } : {}),
+    });
+  };
+  const runLink = (item: AgentMetricsRowDto) => {
+    const hour = Date.parse(item.windowStart);
+    const bucketEnd = hour + 3_599_999;
+    const params = new URLSearchParams({
+      createdFrom: new Date(Math.max(hour, Date.parse(appliedQuery.from))).toISOString(),
+      createdTo: new Date(Math.min(bucketEnd, Date.parse(appliedQuery.to))).toISOString(),
+    });
+    if (item.agentDefinitionId) params.set("agentDefinitionId", item.agentDefinitionId);
+    if (item.agentRevisionId) params.set("agentRevisionId", item.agentRevisionId);
+    if (item.tenantId) params.set("tenantId", item.tenantId);
+    params.set("origin", item.origin);
+    return `/runs?${params.toString()}`;
+  };
+  return (
+    <div className="operations-dashboard agent-metrics-dashboard">
+      <section className="operations-summary">
+        <div>
+          <span className="eyebrow">Agent observability</span>
+          <h2>Agent 运营指标</h2>
+          <p>按小时聚合 Run 结果、延迟、轮次、Token 与成本；不读取 Prompt 或正文。</p>
+        </div>
+      </section>
+      <form className="control-form agent-metrics-filters" onSubmit={submit}>
+        <label>
+          开始时间
+          <input
+            type="datetime-local"
+            value={filters.from}
+            onChange={(event) => setFilters({ ...filters, from: event.target.value })}
+          />
+        </label>
+        <label>
+          结束时间
+          <input
+            type="datetime-local"
+            value={filters.to}
+            onChange={(event) => setFilters({ ...filters, to: event.target.value })}
+          />
+        </label>
+        <label>
+          Agent ID
+          <input
+            value={filters.agentDefinitionId}
+            onChange={(event) => setFilters({ ...filters, agentDefinitionId: event.target.value })}
+          />
+        </label>
+        <label>
+          Revision ID
+          <input
+            value={filters.agentRevisionId}
+            onChange={(event) => setFilters({ ...filters, agentRevisionId: event.target.value })}
+          />
+        </label>
+        <label>
+          Tenant ID
+          <input
+            value={filters.tenantId}
+            onChange={(event) => setFilters({ ...filters, tenantId: event.target.value })}
+          />
+        </label>
+        <label>
+          来源
+          <select
+            value={filters.origin}
+            onChange={(event) =>
+              setFilters({ ...filters, origin: event.target.value as typeof filters.origin })
+            }
+          >
+            <option value="">业务来源（默认排除 Playground、评测）</option>
+            <option value="normal">正常</option>
+            <option value="api">API</option>
+            <option value="playground">Playground</option>
+            <option value="evaluation">评测</option>
+          </select>
+        </label>
+        <button type="submit" disabled={busy}>
+          {busy ? "读取中…" : "应用筛选"}
+        </button>
+      </form>
+      {hasUnappliedFilters && (
+        <p role="status" className="muted-note">
+          筛选条件已修改；点击“应用筛选”后更新结果。
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="empty-state">
+          {error}
+        </p>
+      )}
+      <section className="metric-section">
+        <div className="metric-section-heading">
+          <div>
+            <h3>Run 趋势</h3>
+            <p>每根柱表示一个小时窗口内的 Run 总量。</p>
+          </div>
+        </div>
+        <div className="agent-metrics-trend" role="img" aria-label="每小时 Run 数趋势">
+          {trend.map((point) => (
+            <span
+              key={point.date}
+              title={`${formatDate(point.date)} · ${point.count} Run`}
+              style={{ height: `${point.height}%` }}
+            />
+          ))}
+        </div>
+      </section>
+      <section className="metric-section">
+        <div className="metric-section-heading">
+          <div>
+            <h3>Revision 对比与明细</h3>
+            <p>
+              成功/失败/结果未知率以已结束或结果未知 Run
+              为分母；工具失败率按失败调用数/工具调用数计算。延迟为 Run 创建至最新 Attempt
+              结束（含排队）的 P50/P90/P99；平均轮次按已记录模型生成次数计算。
+            </p>
+          </div>
+        </div>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>Agent / Revision</th>
+                <th>Tenant / 来源</th>
+                <th>Run</th>
+                <th>成功 / 失败 / 未知</th>
+                <th>工具失败率</th>
+                <th>P50 / P90 / P99</th>
+                <th>平均轮次</th>
+                <th>Token（输入/输出/缓存）</th>
+                <th>成本</th>
+                <th>Run 浏览器</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr
+                  key={`${item.windowStart}:${item.agentDefinitionId}:${item.agentRevisionId}:${item.tenantId}:${item.origin}:${item.currency}`}
+                >
+                  <td>{formatDate(item.windowStart)}</td>
+                  <td>
+                    {item.agentDefinitionId ?? "—"}
+                    <br />
+                    {item.agentRevisionId ?? "—"}
+                  </td>
+                  <td>
+                    {item.tenantId}
+                    <br />
+                    {item.origin}
+                  </td>
+                  <td>{item.runCount}</td>
+                  <td>
+                    {formatRate(item.successRate)} / {formatRate(item.failureRate)} /{" "}
+                    {formatRate(item.resultUnknownRate)}
+                  </td>
+                  <td>{formatRate(item.toolFailureRate)}</td>
+                  <td>
+                    {[item.latencyP50Ms, item.latencyP90Ms, item.latencyP99Ms]
+                      .map((value) => (value === null ? "—" : `${Math.round(value)}ms`))
+                      .join(" / ")}
+                  </td>
+                  <td>{formatThroughput(item.averageModelRounds)}</td>
+                  <td>
+                    {[item.inputTokens, item.outputTokens, item.cacheReadTokens]
+                      .map((value) => Math.round(value).toLocaleString("zh-CN"))
+                      .join(" / ")}
+                  </td>
+                  <td>
+                    {item.cost === null
+                      ? "未配置单价"
+                      : `${item.currency ?? ""} ${item.cost.toFixed(6)}`}
+                  </td>
+                  <td>
+                    <a href={runLink(item)}>查看 Run</a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
     </div>
   );

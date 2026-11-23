@@ -20,6 +20,8 @@ import type {
   AgentDefinitionDto,
   AgentRevisionDto,
   AdminControlOverviewDto,
+  AgentMetricsQueryDto,
+  AgentMetricsRowDto,
   ControlAuditEventDto,
   CreateMemoryProviderDraftRequest,
   CreateModelProviderDraftRequest,
@@ -276,6 +278,16 @@ export class AdminControlApi {
     return this.request("/overview");
   }
 
+  async agentMetrics(query: AgentMetricsQueryDto) {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query))
+      if (value !== undefined) params.set(key, value);
+    const response = await this.request<{ readonly items: readonly AgentMetricsRowDto[] }>(
+      `/agent-metrics?${params.toString()}`,
+    );
+    return response.items;
+  }
+
   getIdentityConfiguration(): Promise<IdentityAdminConfigurationDto> {
     return this.request("/identity");
   }
@@ -445,6 +457,7 @@ function catalogServiceUnavailable(reason: unknown): reason is AdminApiError {
 export type AdminControlApiContract = Pick<
   AdminControlApi,
   | "overview"
+  | "agentMetrics"
   | "getIdentityConfiguration"
   | "updateIdentityConfiguration"
   | "listModelProviders"

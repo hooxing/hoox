@@ -211,31 +211,28 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
   });
 
   it.each(["scheduler.env", "admin-control.env"])(
-    "%s 按解析后的值接受引号、行尾注释和 CRLF",
+    "%s 只接受不加引号的单行 S3 值，其他写法在发布前拒绝",
     (file) => {
-      const result = deploy("success", (root) => {
-        const path = join(root, "shared", file);
-        const source = readFileSync(path, "utf8")
-          .replace(
-            "S3_ENDPOINT=http://127.0.0.1:19000",
-            'S3_ENDPOINT="http://127.0.0.1:19000" # endpoint',
-          )
-          .replace("S3_BUCKET=agent-runtime-demo", 'S3_BUCKET="agent-runtime-demo" # bucket')
-          .replace("S3_REGION=us-east-1", 'S3_REGION="us-east-1" # region')
-          .replace(
-            "S3_ACCESS_KEY_ID=s3-access-placeholder",
-            'S3_ACCESS_KEY_ID="s3-access-placeholder" # key',
-          )
-          .replace(
-            "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
-            'S3_SECRET_ACCESS_KEY="s3-secret-placeholder" # secret',
-          )
-          .replace("S3_FORCE_PATH_STYLE=true", "S3_FORCE_PATH_STYLE=true # bool")
-          .replaceAll("\n", "\r\n");
-        writeFileSync(path, source);
-      });
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain("Hoox Demo 发布完成：candidate");
+      for (const replacement of [
+        'S3_BUCKET="agent-runtime-demo"',
+        "S3_BUCKET='agent-runtime-demo'",
+        "S3_BUCKET=agent-runtime-demo # bucket",
+        "S3_BUCKET=agent-runtime-demo\r",
+        "S3_BUCKET=agent-runtime-demo\nS3_BUCKET=agent-runtime-demo",
+        " S3_BUCKET=agent-runtime-demo",
+      ]) {
+        const result = deploy("success", (root) => {
+          const path = join(root, "shared", file);
+          writeFileSync(
+            path,
+            readFileSync(path, "utf8").replace("S3_BUCKET=agent-runtime-demo", replacement),
+          );
+        });
+        expect(result.status, replacement).toBe(2);
+        expect(result.stderr).toContain("S3_BUCKET");
+        expect(result.stderr).not.toContain("agent-runtime-demo");
+        expect(result.log).toBe("");
+      }
     },
   );
 
@@ -280,7 +277,7 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
   );
 
   it.each(["scheduler.env", "admin-control.env"])(
-    "%s 拒绝 Compose 插值语法，但接受单引号中的字面值",
+    "%s 拒绝 Compose 插值语法与引号包裹的字面值",
     (file) => {
       const invalid = deploy("success", (root) => {
         const path = join(root, "shared", file);
@@ -306,7 +303,8 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
           ),
         );
       });
-      expect(literal.status, literal.stderr).toBe(0);
+      expect(literal.status, literal.stderr).toBe(2);
+      expect(literal.log).toBe("");
     },
   );
 

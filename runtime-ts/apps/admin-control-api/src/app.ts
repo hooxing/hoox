@@ -84,6 +84,7 @@ import type { IdentityAdminService } from "./identity-configuration.js";
 import type { PiModelCatalogPort } from "./pi-model-catalog.js";
 import { registerIntegrationRoutes, type IntegrationAdminPort } from "./integration-routes.js";
 import { registerRunExplorerRoutes, type RunExplorerRouteService } from "./run-explorer-routes.js";
+import { registerEvaluationRoutes, type EvaluationAdminPort } from "./evaluation-routes.js";
 
 const strict = { additionalProperties: false } as const;
 const AuditQuerySchema = Type.Object(
@@ -125,6 +126,7 @@ export interface AdminControlApiDependencies {
   readonly runs?: RunExplorerRouteService;
   readonly externalTools?: ExternalToolAdminService;
   readonly agents?: AgentDefinitionAdminRepositoryPort;
+  readonly evaluations?: EvaluationAdminPort;
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
   readonly identity: IdentityAdminService;
@@ -300,6 +302,17 @@ export function createAdminControlApiApp(
       success,
       requireJson,
       idempotencyKey: requireIdempotencyKey,
+      responseSchemas,
+      notFound: () => {
+        throw new AdminControlApiFailure("not_found");
+      },
+    });
+  }
+  if (dependencies.evaluations) {
+    registerEvaluationRoutes(app, dependencies.evaluations, {
+      actor,
+      success,
+      requireJson,
       responseSchemas,
       notFound: () => {
         throw new AdminControlApiFailure("not_found");

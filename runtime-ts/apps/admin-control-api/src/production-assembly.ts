@@ -1,3 +1,4 @@
+import { evaluationCommandClient, startEvaluationLoop } from "./evaluation-loop.js";
 import { createAdminSessionAuthResolver } from "./session-auth.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
@@ -20,6 +21,8 @@ import {
   PgIntegrationAdminRepository,
   PgAdminRunExplorerRepository,
   PgAgentDefinitionRepository,
+  PgEvaluationRepository,
+  PgEvaluationDriver,
   PgIdentityConfigurationRepository,
   PgSandboxControlRepository,
   PgSkillPublicationAuthorization,
@@ -172,6 +175,7 @@ async function assembleRealService(
       controlPool,
       new ModelProviderCredentialCipher(configuration.providerSecrets.modelCredentialEncryptionKey),
     );
+    const explorer = new PgAdminRunExplorerRepository(controlPool);
     const dependencies = {
       integrations: new PgIntegrationAdminRepository(
         controlPool,
@@ -215,8 +219,9 @@ async function assembleRealService(
         },
       ),
       agents: new PgAgentDefinitionRepository(controlPool),
+      evaluations: new PgEvaluationRepository(controlPool),
       runs: new RunExplorerService(
-        new PgAdminRunExplorerRepository(controlPool),
+        explorer,
         () => `run_content_${randomUUID().replaceAll("-", "")}`,
         trajectoryStore,
       ),
@@ -253,8 +258,20 @@ async function assembleRealService(
     await dependencies.readiness.probe();
     await app.listen({ host: configuration.listenHost, port: configuration.listenPort });
     const listeningApp = app;
+    const pollMs = configuration.evaluationPollMs ?? 1000;
+    const stopLoop = startEvaluationLoop(
+      new PgEvaluationDriver(
+        controlPool,
+        evaluationCommandClient(configuration.identityApiUrl ?? "http://127.0.0.1:3001"),
+        (user, tenant, run) => explorer.evaluationEvidence(user, tenant, run),
+        { pollMs, globalLimit: configuration.evaluationGlobalConcurrency ?? 8, leaseMs: 30000 },
+      ),
+      pollMs,
+    );
     return Object.freeze({
-      stopAccepting: () => listeningApp.close(),
+      stopAccepting: async () => {
+        await Promise.all([stopLoop(), listeningApp.close()]);
+      },
       resources: Object.freeze([
         { name: "object-storage", close: async () => activePublisher.close() },
         { name: "skill-publisher-postgres", close: () => skillPublisherPool.end() },

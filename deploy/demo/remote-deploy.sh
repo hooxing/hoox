@@ -29,7 +29,76 @@ for file in infra.env migration.env api.env admin-control.env scheduler.env work
 done
 
 shared_value() {
-  sed -n "s/^$2=//p" "$shared_dir/$1" | tail -n 1
+  local file="$shared_dir/$1" target="$2" line name raw value result=""
+  local quote content suffix character index closed escaped
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+    name="${line%%=*}"
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    [[ "$name" == "$target" ]] || continue
+
+    raw="${line#*=}"
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    quote="${raw:0:1}"
+    if [[ "$quote" == '"' || "$quote" == "'" ]]; then
+      content="${raw:1}"
+      value=""
+      closed=false
+      escaped=false
+      for ((index = 0; index < ${#content}; index += 1)); do
+        character="${content:index:1}"
+        if [[ "$escaped" == true ]]; then
+          if [[ "$quote" == '"' ]]; then
+            case "$character" in
+              n) value+=$'\n' ;;
+              r) value+=$'\r' ;;
+              t) value+=$'\t' ;;
+              "\\"|"'"|"\"") value+="$character" ;;
+              *) value+="\\$character" ;;
+            esac
+          elif [[ "$character" == "'" ]]; then
+            value+="$character"
+          else
+            value+="\\$character"
+          fi
+          escaped=false
+          continue
+        fi
+        if [[ "$character" == "\\" ]]; then
+          escaped=true
+          continue
+        fi
+        if [[ "$character" == "$quote" ]]; then
+          suffix="${content:index+1}"
+          if [[ -z "$suffix" || "$suffix" =~ ^[[:space:]]+# ]]; then
+            closed=true
+          fi
+          break
+        fi
+        value+="$character"
+      done
+      if [[ "$closed" != true || "$escaped" == true ]]; then
+        value="__HOOX_INVALID_SHARED_VALUE__"
+      fi
+    else
+      value="$raw"
+      if [[ "$raw" =~ ^([^#]*[^[:space:]])[[:space:]]+# ]]; then
+        value="${BASH_REMATCH[1]}"
+      elif [[ "$raw" == \#* ]]; then
+        value=""
+      fi
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+    fi
+    if [[ "${3:-}" == literal && "$quote" != "'" && "$value" == *'$'* ]]; then
+      value="__HOOX_INVALID_SHARED_VALUE__"
+    fi
+    result="$value"
+  done <"$file"
+  printf '%s' "$result"
 }
 
 # 目录读取与 Webhook 投递使用独立凭据。部署前跨文件校对，不将密码或 DSN 写入日志。
@@ -86,12 +155,22 @@ if ! verify_scheduler_configuration; then
 fi
 
 verify_object_storage_configuration() {
-  local file key value
+  local file key value trimmed_value
   for file in scheduler.env admin-control.env; do
     for key in S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_FORCE_PATH_STYLE; do
-      value="$(shared_value "$file" "$key")"
-      if [[ ! "$value" =~ [^[:space:]] || "$value" == '""' || "$value" == "''" ]]; then
+      value="$(shared_value "$file" "$key" literal)"
+      if [[ "$value" == __HOOX_INVALID_SHARED_VALUE__ ]]; then
+        echo "Demo $file 环境变量格式无效：$key" >&2
+        return 1
+      fi
+      if [[ ! "$value" =~ [^[:space:]] ]]; then
         echo "Demo $file 缺少环境变量：$key" >&2
+        return 1
+      fi
+      trimmed_value="${value#"${value%%[![:space:]]*}"}"
+      trimmed_value="${trimmed_value%"${trimmed_value##*[![:space:]]}"}"
+      if [[ "$key" != S3_FORCE_PATH_STYLE && "$value" != "$trimmed_value" ]]; then
+        echo "Demo $file 环境变量无效：$key" >&2
         return 1
       fi
       if [[ "$key" == S3_FORCE_PATH_STYLE && "$value" != true && "$value" != false ]]; then
@@ -289,7 +368,7 @@ wait_http "http://127.0.0.1:4173/"
 set -a
 # shellcheck disable=SC1091
 source "$shared_dir/infra.env"
-DEV_ADMIN_CONTROL_TOKEN="$(sed -n 's/^DEV_ADMIN_CONTROL_TOKEN=//p' "$shared_dir/admin-control.env" | tail -n 1)"
+DEV_ADMIN_CONTROL_TOKEN="$(shared_value admin-control.env DEV_ADMIN_CONTROL_TOKEN)"
 # shellcheck disable=SC1091
 source "$shared_dir/demo-account.env"
 set +a

@@ -83,7 +83,7 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 | `worker.env` | Worker 所需数据库角色、S3 运行时账号、进程身份和稳定加密根；租户 ID 由发布脚本注入。 |
 | `demo-account.env` | `DEMO_ACCOUNT_DISPLAY_NAME`、`DEMO_ACCOUNT_EMAIL`、`DEMO_ACCOUNT_PASSWORD`，供脚本创建或登录固定 Demo 管理员。文件由 shell `source` 读取，值须是有效 shell 赋值；已有账号不会因修改文件而自动改密码。 |
 
-`scheduler.env` 与 `admin-control.env` 都必须显式包含 `S3_ENDPOINT=http://127.0.0.1:19000`、`S3_BUCKET=agent-runtime-demo`、`S3_REGION=us-east-1`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` 和 `S3_FORCE_PATH_STYLE=true`。端点与桶必须指向 Worker 的同一存储；Demo 当前使用 `infra.env` 中运行时 S3 用户的凭据，不能误填 Skill Publisher 或 MinIO root 凭据。`minio-init` 当前为运行时与 Skill Publisher 用户绑定通用 `readwrite` 策略，尚未自动创建 Scheduler/Admin Control 的受限用户。生产应按[配置参考](../reference/configuration.md#对象存储)分别授权，而不是照搬 Demo 的宽权限。
+`scheduler.env` 与 `admin-control.env` 都必须显式包含 `S3_ENDPOINT=http://127.0.0.1:19000`、`S3_BUCKET=agent-runtime-demo`、`S3_REGION=us-east-1`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` 和 `S3_FORCE_PATH_STYLE=true`。端点与桶必须指向 Worker 的同一存储；Demo 当前使用 `infra.env` 中运行时 S3 用户的凭据，不能误填 Skill Publisher 或 MinIO root 凭据。值可使用单/双引号和 CRLF；未加引号的行尾注释须与值空格分隔，带引号值的注释须位于闭合引号之后并以空格分隔。S3 配置禁止 Compose 变量插值，需引用字面 `$` 时用单引号。预检不执行 env 文件，只接受这一受限语法并拒绝无法解析的值。`minio-init` 当前为运行时与 Skill Publisher 用户绑定通用 `readwrite` 策略，尚未自动创建 Scheduler/Admin Control 的受限用户。生产应按[配置参考](../reference/configuration.md#对象存储)分别授权，而不是照搬 Demo 的宽权限。
 
 发布脚本在拉取镜像、改写 `compose.env` 或停止现有容器之前校验这两个文件的六项 `S3_*`：缺失、空值或非法路径风格布尔值均以退出码 2 失败，只报告文件与变量名，不输出值。其他格式和服务权限仍由进程解析与实际依赖检查校验。Scheduler 启动时的环境解析错误输出变量名和 `MISSING`/`INVALID` 等稳定分类，不输出配置值或底层异常。
 

@@ -1,3 +1,5 @@
+import { parseEnv } from "node:util";
+
 export const expectedEnvironmentKeys = Object.freeze([
   "DATABASE_URL",
   "DATABASE_DOCKER_URL",
@@ -243,25 +245,25 @@ function looksLikePlaceholder(key, value) {
  * 只返回变量名级别的错误，绝不把配置值拼入异常或日志。
  */
 export function validateEnvironmentExample(source) {
-  const values = new Map();
+  const values = new Map(Object.entries(parseEnv(source)));
   const issues = [];
+  const seen = new Set();
 
   for (const rawLine of source.split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (line === "" || line.startsWith("#")) continue;
 
-    const match = /^([A-Z][A-Z0-9_]*)=(.*)$/u.exec(line);
+    const match = /^([A-Z][A-Z0-9_]*)\s*=/u.exec(line);
     if (!match) {
       issues.push("存在无法解析的配置行");
       continue;
     }
 
-    const [, key, value] = match;
-    if (values.has(key)) {
+    const [, key] = match;
+    if (seen.has(key)) {
       issues.push(`环境变量重复：${key}`);
-      continue;
     }
-    values.set(key, value);
+    seen.add(key);
   }
 
   const expected = new Set([...expectedEnvironmentKeys, ...optionalEnvironmentKeys]);
@@ -301,6 +303,8 @@ export function validateS3EnvironmentExample(values) {
     const value = values.get(key);
     if (value !== undefined && value.trim() === "") {
       issues.push(`环境变量不能为空：${key}`);
+    } else if (value !== undefined && value.trim() !== value) {
+      issues.push(`环境变量不能包含首尾空白：${key}`);
     }
   }
   const forcePathStyle = values.get("S3_FORCE_PATH_STYLE");

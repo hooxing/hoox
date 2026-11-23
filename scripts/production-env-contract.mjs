@@ -3,6 +3,7 @@ import {
   validateOtelEnvironmentExample,
   validateS3EnvironmentExample,
 } from "./env-contract.mjs";
+import { parseEnv } from "node:util";
 
 export const expectedProductionEnvironmentKeys = Object.freeze([
   "RUNTIME_ENV",
@@ -182,22 +183,22 @@ const secretKeys = new Set([
 ]);
 
 function parseLines(source) {
-  const values = new Map();
+  const values = new Map(Object.entries(parseEnv(source)));
   const issues = [];
+  const seen = new Set();
   for (const rawLine of source.split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (line === "" || line.startsWith("#")) continue;
-    const match = /^([A-Z][A-Z0-9_]*)=(.*)$/u.exec(line);
+    const match = /^([A-Z][A-Z0-9_]*)\s*=/u.exec(line);
     if (!match) {
       issues.push("存在无法解析的生产配置行");
       continue;
     }
-    const [, key, value] = match;
-    if (values.has(key)) {
+    const [, key] = match;
+    if (seen.has(key)) {
       issues.push(`环境变量重复：${key}`);
-      continue;
     }
-    values.set(key, value);
+    seen.add(key);
   }
   return { values, issues };
 }

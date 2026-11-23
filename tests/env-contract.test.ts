@@ -69,6 +69,47 @@ function validExample(): string {
 }
 
 describe("环境变量示例契约", () => {
+  it("按运行时 dotenv 解析带引号值、行尾注释和 CRLF", () => {
+    const source = validExample()
+      .replace("S3_ENDPOINT=example", "S3_ENDPOINT=https://s3.example.invalid # endpoint")
+      .replace("S3_BUCKET=example", 'S3_BUCKET="runtime-test" # bucket')
+      .replace("S3_REGION=example", "S3_REGION=us-east-1 # region")
+      .replace(
+        "S3_ACCESS_KEY_ID=replace-with-value",
+        'S3_ACCESS_KEY_ID="replace-with-access-key" # key',
+      )
+      .replace(
+        "S3_SECRET_ACCESS_KEY=replace-with-value",
+        'S3_SECRET_ACCESS_KEY="replace-with-secret-key" # secret',
+      )
+      .replace("S3_FORCE_PATH_STYLE=false", 'S3_FORCE_PATH_STYLE="false" # boolean')
+      .replaceAll("\n", "\r\n");
+    expect(validateEnvironmentExample(source)).toEqual([]);
+  });
+
+  it.each([
+    "S3_ENDPOINT",
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_FORCE_PATH_STYLE",
+  ])("解析后的空串或纯空白 %s 会失败", (key) => {
+    const line = new RegExp(`^${key}=.*$`, "mu");
+    for (const value of ['""', '"   "', "   # comment"]) {
+      expect(validateEnvironmentExample(validExample().replace(line, `${key}=${value}`))).toContain(
+        `环境变量不能为空：${key}`,
+      );
+    }
+  });
+
+  it("S3 字符串拒绝非空的首尾空白", () => {
+    const issues = validateEnvironmentExample(
+      validExample().replace("S3_BUCKET=example", 'S3_BUCKET=" runtime-test "'),
+    );
+    expect(issues).toContain("环境变量不能包含首尾空白：S3_BUCKET");
+  });
+
   it.each([
     "S3_ENDPOINT",
     "S3_BUCKET",

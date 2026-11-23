@@ -36,6 +36,11 @@ const s3Configuration = [
   "",
 ].join("\n");
 const applicationServices = ["api", "web", "admin-control", "admin-web", "scheduler", "worker"];
+const baseServices = ["postgres", "minio", ...applicationServices];
+
+function composeFixture(services: readonly string[]): string {
+  return [`services:`, ...services.map((service) => `  ${service}: {}`), ""].join("\n");
+}
 const webhookFiles = {
   infra:
     "DATABASE_WEBHOOK_DISPATCHER_ROLE=hoox_demo_webhook_dispatcher\nDATABASE_WEBHOOK_DISPATCHER_PASSWORD=placeholder-password\nDATABASE_TRAJECTORY_DIRECTORY_ROLE=trajectory_directory\nDATABASE_TRAJECTORY_DIRECTORY_PASSWORD=directory-placeholder\n",
@@ -96,7 +101,14 @@ exports.Client = class {
   }
 };\n`,
   );
-  for (const file of ["docker-compose.yml", "postgres-init.sh", "nginx.conf.template"]) {
+  writeFileSync(join(root, "releases/candidate/docker-compose.yml"), composeFixture(baseServices));
+  const previousServices =
+    mode === "legacy-startup-failure" ? [...baseServices, "trajectory"] : baseServices;
+  writeFileSync(
+    join(root, "releases/previous/docker-compose.yml"),
+    composeFixture(previousServices),
+  );
+  for (const file of ["postgres-init.sh", "nginx.conf.template"]) {
     writeFileSync(join(root, "releases/candidate", file), "");
     writeFileSync(join(root, "releases/previous", file), "");
   }
@@ -198,6 +210,106 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
     expect(result.log).toBe("");
   });
 
+  it.each(["scheduler.env", "admin-control.env"])(
+    "%s 按解析后的值接受引号、行尾注释和 CRLF",
+    (file) => {
+      const result = deploy("success", (root) => {
+        const path = join(root, "shared", file);
+        const source = readFileSync(path, "utf8")
+          .replace(
+            "S3_ENDPOINT=http://127.0.0.1:19000",
+            'S3_ENDPOINT="http://127.0.0.1:19000" # endpoint',
+          )
+          .replace("S3_BUCKET=agent-runtime-demo", 'S3_BUCKET="agent-runtime-demo" # bucket')
+          .replace("S3_REGION=us-east-1", 'S3_REGION="us-east-1" # region')
+          .replace(
+            "S3_ACCESS_KEY_ID=s3-access-placeholder",
+            'S3_ACCESS_KEY_ID="s3-access-placeholder" # key',
+          )
+          .replace(
+            "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
+            'S3_SECRET_ACCESS_KEY="s3-secret-placeholder" # secret',
+          )
+          .replace("S3_FORCE_PATH_STYLE=true", "S3_FORCE_PATH_STYLE=true # bool")
+          .replaceAll("\n", "\r\n");
+        writeFileSync(path, source);
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("Hoox Demo 发布完成：candidate");
+    },
+  );
+
+  it.each(["scheduler.env", "admin-control.env"])(
+    "%s 将引号内空白解析为空配置并在发布前拒绝",
+    (file) => {
+      const result = deploy("success", (root) => {
+        const path = join(root, "shared", file);
+        writeFileSync(
+          path,
+          readFileSync(path, "utf8").replace(
+            "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
+            'S3_SECRET_ACCESS_KEY="   " # blank secret',
+          ),
+        );
+      });
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain("S3_SECRET_ACCESS_KEY");
+      expect(result.log).toBe("");
+    },
+  );
+
+  it.each(["scheduler.env", "admin-control.env"])(
+    "%s 拒绝 S3 字符串首尾空白与未闭合/尾随垃圾引号",
+    (file) => {
+      for (const [replacement, key] of [
+        ['S3_BUCKET=" agent-runtime-demo "', "S3_BUCKET"],
+        ['S3_BUCKET="agent-runtime-demo"suffix', "S3_BUCKET"],
+      ] as const) {
+        const result = deploy("success", (root) => {
+          const path = join(root, "shared", file);
+          writeFileSync(
+            path,
+            readFileSync(path, "utf8").replace("S3_BUCKET=agent-runtime-demo", replacement),
+          );
+        });
+        expect(result.status, result.stderr).toBe(2);
+        expect(result.stderr).toContain(key);
+        expect(result.log).toBe("");
+      }
+    },
+  );
+
+  it.each(["scheduler.env", "admin-control.env"])(
+    "%s 拒绝 Compose 插值语法，但接受单引号中的字面值",
+    (file) => {
+      const invalid = deploy("success", (root) => {
+        const path = join(root, "shared", file);
+        writeFileSync(
+          path,
+          readFileSync(path, "utf8").replace(
+            "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
+            "S3_SECRET_ACCESS_KEY=$UNDEFINED_SECRET",
+          ),
+        );
+      });
+      expect(invalid.status, invalid.stderr).toBe(2);
+      expect(invalid.stderr).toContain("S3_SECRET_ACCESS_KEY");
+      expect(invalid.log).toBe("");
+
+      const literal = deploy("success", (root) => {
+        const path = join(root, "shared", file);
+        writeFileSync(
+          path,
+          readFileSync(path, "utf8").replace(
+            "S3_SECRET_ACCESS_KEY=s3-secret-placeholder",
+            "S3_SECRET_ACCESS_KEY='$literal-secret'",
+          ),
+        );
+      });
+      expect(literal.status, literal.stderr).toBe(0);
+    },
+  );
+
   it.each(["scheduler-startup-failure", "legacy-startup-failure"])(
     "%s 后所有应用容器使用上一版镜像与发布目录，不受调用方环境覆盖",
     (mode) => {
@@ -218,12 +330,18 @@ describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
           ? [...applicationServices, "trajectory"]
           : applicationServices;
       for (const service of services) {
-        expect(readFileSync(join(result.root, `${service}.image`), "utf8"), service).toBe(
+        expect(
+          readFileSync(join(result.root, `${service}.image`), "utf8"),
+          `${service}: ${result.log}`,
+        ).toBe(
           `test/previous@sha256:previous|${realpathSync(join(result.root, "releases/previous"))}|previous|tenant_previous|user_previous`,
         );
       }
       expect(result.log).toContain("up image=test/candidate@sha256:candidate");
       expect(result.log).toContain("up image=test/previous@sha256:previous");
+      expect(result.log).toContain(
+        `-f ${realpathSync(join(result.root, "releases/previous/docker-compose.yml"))} up`,
+      );
       expect(result.stdout).not.toContain("Hoox Demo 发布完成");
       expect(realpathSync(join(result.root, "current"))).toBe(
         realpathSync(join(result.root, "releases/previous")),

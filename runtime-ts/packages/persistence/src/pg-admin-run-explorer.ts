@@ -13,6 +13,7 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTransaction } from "./postgres.js";
+import { mapRunFeedback, type RunFeedbackRow } from "./pg-run-feedback.js";
 
 interface DirectoryRow extends QueryResultRow {
   readonly tenant_id: string;
@@ -267,6 +268,15 @@ export class PgAdminRunExplorerRepository implements RunExplorerRepository {
              VALUES($1,$2,$3,$4,NULL,'{"type":"run_detail_input"}'::jsonb,1)`,
             [input.inputAuditId, input.actorUserId, input.tenantId, input.runId],
           );
+          await client.query("SELECT set_config('app.run_content_audit_id',$1,true)", [
+            input.inputAuditId,
+          ]);
+          const feedback = await client.query<RunFeedbackRow>(
+            `SELECT run_id,revision_id,user_id,rating,comment,created_at,updated_at
+             FROM admin_run_feedback_content WHERE tenant_id=$1 AND run_id=$2 ORDER BY created_at,user_id`,
+            [input.tenantId, input.runId],
+          );
+          return { ...mapRun(row), feedback: feedback.rows.map(mapRunFeedback) };
         }
         return row === undefined ? undefined : mapRun(row);
       });

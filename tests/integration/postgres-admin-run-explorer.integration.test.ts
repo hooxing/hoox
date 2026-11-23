@@ -1,7 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { RunExplorerService } from "../../runtime-ts/packages/admin-control/src/index.js";
-import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import {
+  loadMigrations,
+  migrateDown,
+  migrateUp,
+} from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
   artifactWebhookPayload,
   enqueueRunStatusWebhook,
@@ -9,6 +13,7 @@ import {
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
 import { PgAdminControlRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
+import { PgRunFeedbackRepository } from "../../runtime-ts/packages/persistence/src/pg-run-feedback.js";
 import { PgThreadContinuityMetrics } from "../../runtime-ts/packages/persistence/src/thread-continuity.js";
 import {
   listRunTrajectoryCleanupTenants,
@@ -21,6 +26,7 @@ import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persiste
 import {
   createPostgresPool,
   type Pool,
+  withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { loadPostgreSqlMigrationContract } from "./postgres-migration-contract.js";
 
@@ -249,6 +255,125 @@ async function auditRows() {
 }
 
 describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
+  it("终端用户反馈绑定 Revision、仅本人可读写并进入无正文聚合", async () => {
+    await administrator.query(
+      `BEGIN; SET LOCAL session_replication_role=replica;
+       INSERT INTO "${schema}".run_agent_snapshots(
+         tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content
+       ) VALUES('tenant_b','run_b1','thread_1','agent_pinned','revision_pinned',repeat('a',64),'{}'::jsonb);
+       COMMIT`,
+    );
+    await administrator.query(
+      `INSERT INTO "${schema}".memberships(tenant_id,id,user_id,role,status,created_at) VALUES
+       ('tenant_b','member_owner_b','user_owner_b','owner','active',now()),
+       ('tenant_b','member_viewer_b','user_viewer','member','active',now())`,
+    );
+    const repository = new PgRunFeedbackRepository(runtime);
+    const scope = { tenantId: "tenant_b", userId: "user_owner_b" } as never;
+    const saved = await repository.execute({
+      scope,
+      threadId: "thread_1",
+      runId: "run_b1",
+      operation: "put",
+      feedback: { rating: "up", comment: "可用" },
+    });
+    expect(saved).toMatchObject({
+      feedback: { revisionId: "revision_pinned", rating: "up", comment: "可用" },
+    });
+    const updated = await repository.execute({
+      scope,
+      threadId: "thread_1",
+      runId: "run_b1",
+      operation: "put",
+      feedback: { rating: "down" },
+    });
+    expect(updated).toMatchObject({ feedback: { rating: "down" } });
+    expect(
+      await repository.execute({
+        scope: { tenantId: "tenant_b", userId: "user_viewer" } as never,
+        threadId: "thread_1",
+        runId: "run_b1",
+        operation: "get",
+      }),
+    ).toEqual({ feedback: null });
+    const privateRows = await withTenantTransaction(
+      runtime,
+      { tenantId: "tenant_b", userId: "user_viewer" } as never,
+      async (client) => {
+        const selected = await client.query(
+          "SELECT run_id FROM run_feedback WHERE tenant_id='tenant_b' AND run_id='run_b1'",
+        );
+        const changed = await client.query(
+          "UPDATE run_feedback SET rating='up' WHERE tenant_id='tenant_b' AND run_id='run_b1' AND user_id='user_owner_b'",
+        );
+        return { selected: selected.rowCount, changed: changed.rowCount };
+      },
+    );
+    expect(privateRows).toEqual({ selected: 0, changed: 0 });
+    expect(
+      await repository.execute({
+        scope: { tenantId: "tenant_a", userId: "user_owner_a" } as never,
+        threadId: "thread_1",
+        runId: "run_b1",
+        operation: "put",
+        feedback: { rating: "up" },
+      }),
+    ).toBe("not_found");
+    expect(
+      await repository.execute({
+        scope,
+        threadId: "thread_1",
+        runId: "run_b1",
+        operation: "put",
+        feedback: { rating: "up", comment: "x".repeat(2001) },
+      }),
+    ).toBe("bad_request");
+    expect(
+      await repository.execute({
+        scope,
+        threadId: "thread_1",
+        runId: "run_b1",
+        operation: "delete",
+      }),
+    ).toEqual({ feedback: null });
+    const forbidden = await administrator.query(
+      `INSERT INTO "${schema}".run_feedback(tenant_id,run_id,revision_id,user_id,rating,comment)
+       VALUES('tenant_b','run_b1','revision_pinned','user_owner_b','up','已审核内容') RETURNING run_id`,
+    );
+    expect(forbidden.rows).toHaveLength(1);
+    const noContent = await new PgAdminRunExplorerRepository(control).getRun({
+      actorUserId: "user_admin",
+      tenantId: "tenant_b",
+      runId: "run_b1",
+    });
+    expect(noContent?.feedback).toBeUndefined();
+    const auditedContent = await new PgAdminRunExplorerRepository(control).getRun({
+      actorUserId: "user_admin",
+      tenantId: "tenant_b",
+      runId: "run_b1",
+      inputAuditId: `feedback_audit_${unique}`,
+    });
+    expect(auditedContent?.feedback).toMatchObject([{ rating: "up", comment: "已审核内容" }]);
+    const feedbackMetrics = await new PgAdminControlRepository(
+      control,
+      {} as never,
+      "unused",
+    ).readAgentMetrics({
+      actorUserId: "user_admin",
+      from: "2026-11-19T02:00:00.000Z",
+      to: "2026-11-19T03:00:00.000Z",
+    });
+    expect(feedbackMetrics).toMatchObject([
+      { feedbackUpCount: 1, feedbackDownCount: 0, feedbackUpRate: 1, feedbackDownRate: 0 },
+    ]);
+    await administrator.query(
+      `DELETE FROM "${schema}".run_feedback WHERE tenant_id='tenant_b' AND run_id='run_b1'`,
+    );
+    await administrator.query(
+      `DELETE FROM "${schema}".run_agent_snapshots WHERE tenant_id='tenant_b' AND run_id='run_b1'`,
+    );
+  });
+
   it("Agent 指标仅呈现无正文的按小时聚合且默认排除 Playground 与评测来源", async () => {
     await administrator.query(
       `INSERT INTO "${schema}".runs(tenant_id,id,thread_id,status,created_at,updated_at,origin)
@@ -1129,8 +1254,11 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
          tenant_id,observation_id,thread_id,run_id,metric_name,value,unit
        ) VALUES('tenant_a','legacy-model-call:output','thread_1','run_a1','model_output_tokens',0,'tokens')`,
     );
+    const migrations = await loadMigrations();
+    const metricsMigration = migrations.find((migration) => migration.name === "agent_metrics");
+    if (metricsMigration === undefined) throw new Error("Agent 指标迁移缺失");
     const migrationContract = await loadPostgreSqlMigrationContract();
-    const previousVersion = migrationContract.latestVersion - 1;
+    const previousVersion = metricsMigration.version - 1;
     await expect(
       migrateDown(migrator, {
         ...security,
@@ -1140,6 +1268,10 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
         runtimeRole: roles.runtimeRole,
       }),
     ).resolves.toHaveLength(previousVersion);
+    expect(
+      (await administrator.query(`SELECT to_regclass('"${schema}".run_feedback') AS table`)).rows[0]
+        ?.table,
+    ).toBeNull();
     expect(
       (
         await administrator.query(

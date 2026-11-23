@@ -92,10 +92,48 @@ function fixture(canManage: boolean) {
     deactivateAgentDefinition: vi.fn(async () => definition),
     revokeAgentRevision: vi.fn(async () => definition),
     setAgentAvailability: vi.fn(async () => definition),
+    exportAgentConfiguration: vi.fn(async () => "schemaVersion: 1\n"),
+    validateAgentConfiguration: vi.fn(async () => ({ valid: true })),
+    importAgentConfiguration: vi.fn(async () => ({ definition, revision: current })),
   } satisfies AgentDefinitionApiContract;
 }
 
 describe("后台 Agent 管理", () => {
+  it("导入页先校验 YAML，再确认生成未发布草稿", async () => {
+    const api = fixture(true);
+    const view = render(
+      <AgentDefinitionsPage
+        api={api}
+        destination={{ kind: "list" }}
+        onOpen={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    await settle();
+    act(() => button(view, "导入 YAML").click());
+    const textarea = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Agent YAML 配置"]',
+    );
+    if (!textarea) throw new Error("未呈现 Agent YAML 配置输入框");
+    enter(textarea, "schemaVersion: 1");
+    act(() => button(document.body, "校验配置").click());
+    await settle();
+    expect(api.validateAgentConfiguration).toHaveBeenCalledWith(
+      "schemaVersion: 1",
+      undefined,
+      undefined,
+    );
+    expect(button(document.body, "确认导入为草稿").disabled).toBe(false);
+    act(() => button(document.body, "确认导入为草稿").click());
+    await settle();
+    expect(api.importAgentConfiguration).toHaveBeenCalledWith(
+      "schemaVersion: 1",
+      undefined,
+      undefined,
+    );
+    expect(view.textContent).toContain("已导入新的 Agent 草稿，未发布。");
+  });
+
   it("增删客户端工具并保存编辑后的 Schema 与等待时限", async () => {
     const onSave = vi.fn(async () => undefined);
     const view = render(

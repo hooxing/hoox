@@ -217,6 +217,71 @@ export class AdminControlApi {
     return this.request("/agent-definitions", { cache: "no-store" });
   }
 
+  async exportAgentConfiguration(id: string, revisionId: string): Promise<string> {
+    const headers = new Headers({ Accept: "application/yaml" });
+    const authorizationHeader = this.authorizationHeader();
+    if (authorizationHeader !== undefined) headers.set("Authorization", authorizationHeader);
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.baseUrl}${agentRevisionPath(id, revisionId)}/export`, {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers,
+      });
+    } catch {
+      throw new AdminApiError("无法连接后台控制服务。", 0, true);
+    }
+    if (!response.ok) {
+      throw new AdminApiError(messageFor(response.status), response.status, response.status >= 500);
+    }
+    return response.text();
+  }
+
+  validateAgentConfiguration(
+    yaml: string,
+    definitionId?: string,
+    expectedGeneration?: number,
+  ): Promise<{
+    valid: boolean;
+    definitionId?: string;
+    errors?: readonly { path: string; code: string; message: string }[];
+  }> {
+    return this.transferAgentConfiguration(yaml, true, definitionId, expectedGeneration);
+  }
+
+  importAgentConfiguration(
+    yaml: string,
+    definitionId?: string,
+    expectedGeneration?: number,
+  ): Promise<unknown> {
+    return this.transferAgentConfiguration(yaml, false, definitionId, expectedGeneration);
+  }
+
+  private transferAgentConfiguration(
+    yaml: string,
+    dryRun: boolean,
+    definitionId?: string,
+    expectedGeneration?: number,
+  ): Promise<{
+    valid: boolean;
+    definitionId?: string;
+    errors?: readonly { path: string; code: string; message: string }[];
+  }> {
+    return this.request(
+      definitionId === undefined
+        ? "/agent-definitions/import"
+        : `${agentPath(definitionId)}/import`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          yaml,
+          dryRun,
+          ...(expectedGeneration === undefined ? {} : { expectedGeneration }),
+        }),
+      },
+    );
+  }
+
   listAgentRevisions(id: string): Promise<AdminAgentRevisionHistory> {
     return this.request(`${agentPath(id)}/revisions`, { cache: "no-store" });
   }
@@ -497,6 +562,9 @@ export type AgentDefinitionApiContract = Pick<
   | "deactivateAgentDefinition"
   | "revokeAgentRevision"
   | "setAgentAvailability"
+  | "exportAgentConfiguration"
+  | "validateAgentConfiguration"
+  | "importAgentConfiguration"
 >;
 
 function mcpDraftPath(id: string): string {

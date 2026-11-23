@@ -12,6 +12,7 @@
 | [Prompt、上下文预算与模型交互](prompt-and-model-io.md) | 修改提示词、工具描述、记忆注入、预算或模型适配时 | 哪些内容可以进入固定前缀，信任分层和模型绑定规则是什么 |
 | [运行事件与对话展示](run-events-and-presentation.md) | 修改事件、SSE、对话渲染或诊断数据时 | 事件如何持久化、推送和投影，诊断数据有哪些边界 |
 | [后台控制面与运行配置](admin-control-plane.md) | 修改后台配置、凭据或 Worker 配置读取时 | 配置如何版本化、加密和按 Run 固定，未配置时进程如何表现 |
+| [Agent 定义、版本与 Run 快照](agent-definition.md) | 修改 Agent 配置、Revision、导入导出或 Run 绑定时 | Definition 与 Revision 如何生效、配置引用如何保持安全 |
 | [身份、账号与会话](identity-and-session.md) | 接入登录方式、维护账号映射或排查会话时 | Better Auth、Hoox 账号、Cookie、业务 Session 和后台配置如何分工 |
 | [Thread 连续上下文](thread-continuity.md) | 修改 Thread、Run、输入、Compaction、恢复或 Sandbox 生命周期时 | 连续上下文由谁持久化，何时压缩、恢复和释放 |
 | [Agent 协作与 Todo](agent-collaboration.md) | 修改子 Agent、协作控制面或任务计划展示时 | Agent 能调用哪些协作工具，隔离、并发、持久化和 Todo 约束是什么 |

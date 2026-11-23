@@ -1,6 +1,7 @@
 import {
   validateExternalToolsPrivateAddressesExample,
   validateOtelEnvironmentExample,
+  validateS3EnvironmentExample,
 } from "./env-contract.mjs";
 
 export const expectedProductionEnvironmentKeys = Object.freeze([
@@ -265,6 +266,7 @@ export function validateProductionEnvironmentExample(source) {
     if (values.get(key) !== "true") issues.push(`生产样例 ${key} 必须为 true`);
   }
   issues.push(...validateOtelEnvironmentExample(values));
+  issues.push(...validateS3EnvironmentExample(values));
   issues.push(...validateExternalToolsPrivateAddressesExample(values));
   for (const key of secretKeys) {
     const value = values.get(key);

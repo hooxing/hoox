@@ -272,6 +272,7 @@ export function validateEnvironmentExample(source) {
     if (!expected.has(key)) issues.push(`未登记的环境变量：${key}`);
   }
   issues.push(...validateOtelEnvironmentExample(values));
+  issues.push(...validateS3EnvironmentExample(values));
   issues.push(...validateExternalToolsPrivateAddressesExample(values));
   for (const key of placeholderOnlyKeys) {
     const value = values.get(key);
@@ -284,6 +285,28 @@ export function validateEnvironmentExample(source) {
     }
   }
 
+  return issues;
+}
+
+export function validateS3EnvironmentExample(values) {
+  const issues = [];
+  for (const key of [
+    "S3_ENDPOINT",
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_FORCE_PATH_STYLE",
+  ]) {
+    const value = values.get(key);
+    if (value !== undefined && value.trim() === "") {
+      issues.push(`环境变量不能为空：${key}`);
+    }
+  }
+  const forcePathStyle = values.get("S3_FORCE_PATH_STYLE");
+  if (forcePathStyle !== undefined && forcePathStyle !== "true" && forcePathStyle !== "false") {
+    issues.push("S3_FORCE_PATH_STYLE 必须为 true 或 false");
+  }
   return issues;
 }
 

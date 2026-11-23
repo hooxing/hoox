@@ -9,6 +9,31 @@ import {
 const example = readFileSync(new URL("../deploy/production.env.example", import.meta.url), "utf8");
 
 describe("production 部署配置契约", () => {
+  it.each([
+    "S3_ENDPOINT",
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_FORCE_PATH_STYLE",
+  ])("Scheduler 与 Admin Control 也需要的 %s 必须声明且不能为空", (key) => {
+    const pattern = new RegExp(`^${key}=.*$`, "mu");
+    expect(validateProductionEnvironmentExample(example.replace(pattern, ""))).toContain(
+      `缺少环境变量：${key}`,
+    );
+    expect(validateProductionEnvironmentExample(example.replace(pattern, `${key}=`))).toContain(
+      `环境变量不能为空：${key}`,
+    );
+  });
+
+  it("对象存储路径开关必须是布尔值且不回显非法配置", () => {
+    const issues = validateProductionEnvironmentExample(
+      example.replace("S3_FORCE_PATH_STYLE=false", "S3_FORCE_PATH_STYLE=invalid-placeholder"),
+    );
+    expect(issues).toContain("S3_FORCE_PATH_STYLE 必须为 true 或 false");
+    expect(issues.join(" ")).not.toContain("invalid-placeholder");
+  });
+
   it("OTLP 样例拒绝带凭据的端点和请求头且不回显配置值", () => {
     const issues = validateProductionEnvironmentExample(
       example

@@ -12,6 +12,7 @@ function validExample(): string {
     .map((key) => {
       switch (key) {
         case "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES":
+        case "S3_FORCE_PATH_STYLE":
         case "OTEL_EXPORT_ENABLED":
         case "OTEL_EXPORT_CONTENT_ENABLED":
           return `${key}=false`;
@@ -68,6 +69,34 @@ function validExample(): string {
 }
 
 describe("环境变量示例契约", () => {
+  it.each([
+    "S3_ENDPOINT",
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_FORCE_PATH_STYLE",
+  ])("轨迹对象存储配置 %s 必须声明且不能为空", (key) => {
+    const pattern = new RegExp(`^${key}=.*$`, "mu");
+    expect(validateEnvironmentExample(validExample().replace(pattern, ""))).toContain(
+      `缺少环境变量：${key}`,
+    );
+    expect(validateEnvironmentExample(validExample().replace(pattern, `${key}=`))).toContain(
+      `环境变量不能为空：${key}`,
+    );
+  });
+
+  it("对象存储路径开关必须是布尔值且不回显非法配置", () => {
+    const issues = validateEnvironmentExample(
+      validExample().replace(
+        "S3_FORCE_PATH_STYLE=false",
+        "S3_FORCE_PATH_STYLE=invalid-placeholder",
+      ),
+    );
+    expect(issues).toContain("S3_FORCE_PATH_STYLE 必须为 true 或 false");
+    expect(issues.join(" ")).not.toContain("invalid-placeholder");
+  });
+
   it("各受限角色连接与 Bootstrap 指向同一开发数据库", async () => {
     const example = await readFile(new URL("../.env.example", import.meta.url), "utf8");
     const values = new Map(

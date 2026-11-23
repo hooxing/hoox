@@ -2301,7 +2301,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         revisionId: change.revisionId,
         databaseNow,
         historyFilesystemEnabled: this.options.historyFilesystemEnabled ?? false,
-        isPlayground: row.run_origin === "playground",
+        runOrigin: row.run_origin,
         historyDirectoryTimeZone:
           this.options.historyDirectoryTimeZone ?? DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
       });
@@ -3101,7 +3101,7 @@ async function settleWorkspaceArtifactIntents(
     readonly revisionId: string;
     readonly databaseNow: ReturnType<typeof isoTimestamp>;
     readonly historyFilesystemEnabled: boolean;
-    readonly isPlayground: boolean;
+    readonly runOrigin: "normal" | "playground" | "evaluation" | "api";
     readonly historyDirectoryTimeZone: string;
   },
 ): Promise<void> {
@@ -3198,7 +3198,7 @@ async function settleWorkspaceArtifactIntents(
         intent.resource_id,
         intent.resource_name,
         intent.resource_version_id,
-        !input.isPlayground && intent.purpose === "deliverable"
+        ["normal", "api"].includes(input.runOrigin) && intent.purpose === "deliverable"
           ? "searchable"
           : "pending_explicit_commit",
         input.databaseNow,
@@ -3303,7 +3303,7 @@ async function settleWorkspaceArtifactIntents(
       }),
     });
     if (
-      !input.isPlayground &&
+      ["normal", "api"].includes(input.runOrigin) &&
       shouldIndexArtifactInHistory({
         historyFilesystemEnabled: input.historyFilesystemEnabled,
         purpose: intent.purpose,

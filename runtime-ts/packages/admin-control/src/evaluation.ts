@@ -12,23 +12,36 @@ export interface EvaluationAssertionResult {
   readonly reason: string;
 }
 
-function safePattern(pattern: string): RegExp {
+const MAX_REGEX_EVIDENCE_LENGTH = 32_768;
+const REGEX_WORKER_TIMEOUT_MS = 250;
+const regexWorkerSource = `
+  const { parentPort } = require("node:worker_threads");
+  parentPort.once("message", ({ pattern, text }) => {
+    try {
+      parentPort.postMessage({ matched: new RegExp(pattern).test(text) });
+    } catch {
+      parentPort.postMessage({ error: true });
+    }
+  });
+`;
+
+function safePattern(pattern: string): void {
   if (pattern.length > 256 || /[()\\]/.test(pattern)) {
     throw new TypeError("正则仅支持不含分组和转义的安全子集，且最长 256 字符");
   }
   const quantifiers = pattern.match(/[+*?]|\{\d+(?:,\d*)?\}/g) ?? [];
   if (quantifiers.length > 1) throw new TypeError("正则最多包含一个量词");
   try {
-    return new RegExp(pattern);
+    new RegExp(pattern);
   } catch {
     throw new TypeError("正则表达式格式无效");
   }
 }
 
-export function evaluateAssertion(
+export async function evaluateAssertion(
   assertion: EvaluationAssertion,
   evidence: EvaluationEvidence,
-): EvaluationAssertionResult {
+): Promise<EvaluationAssertionResult> {
   let passed: boolean;
   switch (assertion.kind) {
     case "text_contains":
@@ -36,7 +49,10 @@ export function evaluateAssertion(
       if (assertion.negate) passed = !passed;
       break;
     case "text_regex":
-      passed = safePattern(assertion.pattern).test(evidence.finalText);
+      if (evidence.finalText.length > MAX_REGEX_EVIDENCE_LENGTH)
+        throw new TypeError("正则断言证据超过长度限制");
+      safePattern(assertion.pattern);
+      passed = await testRegexInWorker(assertion.pattern, evidence.finalText);
       if (assertion.negate) passed = !passed;
       break;
     case "tool_called":
@@ -55,6 +71,30 @@ export function evaluateAssertion(
       break;
   }
   return { passed, reason: passed ? "断言通过" : "断言未通过" };
+}
+
+async function testRegexInWorker(pattern: string, text: string): Promise<boolean> {
+  const { Worker } = await import("node:worker_threads");
+  const worker = new Worker(regexWorkerSource, { eval: true });
+  return await new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error, value?: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      if (error) reject(error);
+      else resolve(value === true);
+    };
+    const timer = setTimeout(() => finish(new Error("正则断言执行超时")), REGEX_WORKER_TIMEOUT_MS);
+    worker.once("message", (message: { matched?: unknown; error?: unknown }) => {
+      if (message.error === true || typeof message.matched !== "boolean")
+        finish(new Error("正则断言执行失败"));
+      else finish(undefined, message.matched);
+    });
+    worker.once("error", () => finish(new Error("正则断言执行失败")));
+    worker.postMessage({ pattern, text });
+  });
 }
 
 export function evaluationReviewerPrompt(): string {
@@ -132,12 +172,15 @@ export async function evaluateCase(input: {
       throw new TypeError("评审模型结果缺少通过状态或理由");
     }
   }
-  const assertionResults = input.testCase.assertions.map((assertion) =>
-    evaluateAssertion(assertion, {
-      ...input.evidence,
-      ...(score === undefined ? {} : { modelScore: score.score }),
-    }),
-  );
+  const assertionResults = [];
+  for (const assertion of input.testCase.assertions) {
+    assertionResults.push(
+      await evaluateAssertion(assertion, {
+        ...input.evidence,
+        ...(score === undefined ? {} : { modelScore: score.score }),
+      }),
+    );
+  }
   const passed = assertionResults.every((result) => result.passed);
   const reason = [
     ...assertionResults.map((result) => result.reason),

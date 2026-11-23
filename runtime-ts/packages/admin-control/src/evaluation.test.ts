@@ -14,25 +14,45 @@ const evidence = {
 };
 
 describe("评测确定性断言", () => {
-  it("检查文本、工具与 Artifact 事实", () => {
-    expect(evaluateAssertion({ kind: "text_contains", value: "完成" }, evidence).passed).toBe(true);
-    expect(evaluateAssertion({ kind: "tool_called", toolName: "lookup" }, evidence).passed).toBe(
-      true,
-    );
+  it("检查文本、工具与 Artifact 事实", async () => {
     expect(
-      evaluateAssertion(
-        { kind: "artifact_exists", name: "invoice", type: "application/pdf" },
-        evidence,
+      (await evaluateAssertion({ kind: "text_contains", value: "完成" }, evidence)).passed,
+    ).toBe(true);
+    expect(
+      (await evaluateAssertion({ kind: "tool_called", toolName: "lookup" }, evidence)).passed,
+    ).toBe(true);
+    expect(
+      (
+        await evaluateAssertion(
+          { kind: "artifact_exists", name: "invoice", type: "application/pdf" },
+          evidence,
+        )
       ).passed,
     ).toBe(true);
   });
 
-  it("限制危险正则表达式", () => {
+  it("在可终止 Worker 中执行受限正则，并拒绝超长证据", async () => {
     expect(
-      evaluateAssertion({ kind: "text_regex", pattern: "^订单.*完成$" }, evidence).passed,
+      (await evaluateAssertion({ kind: "text_regex", pattern: "^订单.*完成$" }, evidence)).passed,
     ).toBe(true);
-    expect(() => evaluateAssertion({ kind: "text_regex", pattern: "(a+)+$" }, evidence)).toThrow();
-    expect(() => evaluateAssertion({ kind: "text_regex", pattern: "a*a*a" }, evidence)).toThrow();
+    await expect(
+      evaluateAssertion({ kind: "text_regex", pattern: "(a+)+$" }, evidence),
+    ).rejects.toThrow();
+    await expect(
+      evaluateAssertion({ kind: "text_regex", pattern: "a*a*a" }, evidence),
+    ).rejects.toThrow();
+    await expect(
+      evaluateAssertion(
+        { kind: "text_regex", pattern: "a+$" },
+        { ...evidence, finalText: `${"a".repeat(32_767)}!` },
+      ),
+    ).rejects.toThrow("超时");
+    await expect(
+      evaluateAssertion(
+        { kind: "text_regex", pattern: "a+" },
+        { ...evidence, finalText: "a".repeat(32_769) },
+      ),
+    ).rejects.toThrow("过长");
   });
 
   it("评审 Prompt 固定且不拼入用例正文", () => {

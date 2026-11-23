@@ -100,6 +100,7 @@ import {
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
 import { PgSkillRuntimeRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
+import { PgThreadForkRepository } from "../../runtime-ts/packages/persistence/src/pg-team-collaboration.js";
 import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/pg-thread-input.js";
 import { PgThreadSandboxLifecycleConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-thread-sandbox-lifecycle-consumer.js";
 import {
@@ -201,6 +202,8 @@ interface SerialQueueFixture {
     readonly userId: ReturnType<typeof userId>;
   };
   readonly user: ReturnType<typeof createUser>;
+  readonly tenant: ReturnType<typeof createPersonalTenant>["tenant"];
+  readonly membership: ReturnType<typeof createPersonalTenant>["ownerMembership"];
   readonly thread: ReturnType<typeof createThread>;
   readonly workspace: ReturnType<typeof createWorkspace>;
 }
@@ -284,7 +287,14 @@ async function serialQueueFixture(
   expect(await repositories.workspaces.create(tenantScope, workspace)).toEqual({
     outcome: "created",
   });
-  return { tenantScope, user, thread, workspace };
+  return {
+    tenantScope,
+    user,
+    tenant: personal.tenant,
+    membership: personal.ownerMembership,
+    thread,
+    workspace,
+  };
 }
 
 function requestDigest(value: string): string {
@@ -4753,7 +4763,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       await subscribeWebhook(f, ["run.waiting", "run.requires_action"]);
       const clientToolHistory = new PgClientToolCallHistoryReader(runtime);
       await expect(
-        clientToolHistory.hasAnyForThread({
+        clientToolHistory.hasClientToolHistoryForThread({
           tenantId: scope.tenantId,
           threadId: scope.threadId,
         }),
@@ -4881,20 +4891,65 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       const callId = data.callId;
       expect(callId).toMatch(/^client_[a-f0-9]{64}$/u);
       expect(callId).not.toBe("lookup-1");
+      const sourceHasClientToolHistory = await clientToolHistory.hasClientToolHistoryForThread({
+        tenantId: scope.tenantId,
+        threadId: scope.threadId,
+      });
+      expect(sourceHasClientToolHistory).toBe(true);
+      if (mode === "submit") {
+        const childThread = createThread({
+          id: threadId(`fork-${label}`),
+          tenant: base.tenant,
+          user: base.user,
+          membership: base.membership,
+          title: "客户端历史分支集成测试",
+          now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+        });
+        expect(await repositories.threads.create(actor, childThread)).toMatchObject({
+          outcome: "created",
+        });
+        expect(
+          await repositories.workspaces.create(
+            actor,
+            createWorkspace({
+              id: workspaceId(`fork-workspace-${label}`),
+              thread: childThread,
+              now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+            }),
+          ),
+        ).toEqual({ outcome: "created" });
+        await expect(
+          new PgThreadForkRepository(runtime).seed({
+            scope: actor,
+            childThreadId: childThread.id,
+            sourceTenantId: actor.tenantId,
+            sourceThreadId: scope.threadId,
+            kind: "branch",
+            hasClientToolHistory: sourceHasClientToolHistory,
+            messages: [
+              {
+                role: "user",
+                text: "历史客户端工具参数与回执",
+                createdAt: isoTimestamp("2099-07-26T00:00:00.000Z"),
+              },
+            ],
+          }),
+        ).resolves.toBe("seeded");
+        await expect(
+          clientToolHistory.hasClientToolHistoryForThread({
+            tenantId: scope.tenantId,
+            threadId: childThread.id,
+          }),
+        ).resolves.toBe(true);
+      }
       await expect(
-        clientToolHistory.hasAnyForThread({
-          tenantId: scope.tenantId,
-          threadId: scope.threadId,
-        }),
-      ).resolves.toBe(true);
-      await expect(
-        clientToolHistory.hasAnyForThread({
+        clientToolHistory.hasClientToolHistoryForThread({
           tenantId: scope.tenantId,
           threadId: threadId(`unrelated-${label}`),
         }),
       ).resolves.toBe(false);
       await expect(
-        clientToolHistory.hasAnyForThread({
+        clientToolHistory.hasClientToolHistoryForThread({
           tenantId: tenantId(`unrelated-${label}`),
           threadId: scope.threadId,
         }),
@@ -4952,7 +5007,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           { suppressAttemptContent: suppressContent } as never,
           undefined,
           async (laterAttemptScope) =>
-            await clientToolHistory.hasAnyForThread({
+            await clientToolHistory.hasClientToolHistoryForThread({
               tenantId: laterAttemptScope.tenantId,
               threadId: laterAttemptScope.threadId,
             }),

@@ -5393,6 +5393,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           "title_source",
           "title_generated_at",
           "title_generation_version",
+          "has_client_tool_history",
         ]),
       ],
       ["memberships", new Set(["lock_marker", "status"])],

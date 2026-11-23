@@ -24,7 +24,7 @@
 
 ## 客户端工具配置
 
-客户端工具按 Run 的不可变 Revision 声明注册，仅根 Session 的 native 模式可见。后台保存和发布都拒绝 PTC 与客户端工具共存、重复或与平台保留名冲突的名称，以及不受支持的 JSON Schema（对象必须声明 `additionalProperties: false`）。描述和规范化参数 Schema 进入稳定的能力清单；调用 ID、实参、截止时间和回执不进入 system prompt 或工具 Schema。包含客户端工具的 Attempt 不捕获原始模型报文、内部轨迹镜像或 OTel 正文，避免参数及回执落入调试日志。等待时限可设为 1000–86400000 毫秒，默认 300000 毫秒。[等待与恢复](run-execution-and-recovery.md#等待与恢复)说明正式 Run 与 Playground 的执行差异。
+客户端工具按 Run 的不可变 Revision 声明注册，仅根 Session 的 native 模式可见。后台保存和发布都拒绝 PTC 与客户端工具共存、重复或与平台保留名冲突的名称，以及不受支持的 JSON Schema（对象必须声明 `additionalProperties: false`）。描述和规范化参数 Schema 进入稳定的能力清单；调用 ID、实参、截止时间和回执不进入 system prompt 或工具 Schema。当前 Revision 声明客户端工具，或 Thread 的持久敏感历史标记为真时，该 Attempt 不捕获原始模型报文、内部轨迹镜像或 OTel 正文；Thread 分支复制历史时传播此标记。等待时限可设为 1000–86400000 毫秒，默认 300000 毫秒。[等待与恢复](run-execution-and-recovery.md#等待与恢复)说明正式 Run 与 Playground 的执行差异。
 
 ## 外部工具快照读取
 

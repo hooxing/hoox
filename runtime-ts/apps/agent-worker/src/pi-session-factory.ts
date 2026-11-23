@@ -248,7 +248,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly enabledTools?: readonly RuntimeToolName[],
     private readonly telemetry?: WorkerTelemetry,
     private readonly externalToolConfiguration?: WorkerExternalToolConfiguration,
-    private readonly hasClientToolCallsForThread?: (
+    private readonly hasClientToolHistoryForThread?: (
       scope: Parameters<AgentSessionFactoryPort["create"]>[0]["scope"],
     ) => Promise<boolean>,
   ) {
@@ -294,7 +294,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       input.enabledTools ?? this.enabledTools,
       this.telemetry,
       this.externalToolConfiguration,
-      this.hasClientToolCallsForThread,
+      this.hasClientToolHistoryForThread,
     );
   }
 
@@ -322,15 +322,15 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const configuredTools = input.agentSnapshot.content.tools;
     const hasClientTools =
       configuredTools.mode === "configured" && configuredTools.clientTools.length > 0;
-    let threadHasClientToolCalls = true;
-    if (this.hasClientToolCallsForThread !== undefined) {
+    let threadHasClientToolHistory = true;
+    if (this.hasClientToolHistoryForThread !== undefined) {
       try {
-        threadHasClientToolCalls = await this.hasClientToolCallsForThread(input.scope);
+        threadHasClientToolHistory = await this.hasClientToolHistoryForThread(input.scope);
       } catch {
         // 无法确认 Thread 是否含客户端调用时关闭诊断，但不影响 Run 执行。
       }
     }
-    const protectDiagnosticContent = hasClientTools || threadHasClientToolCalls;
+    const protectDiagnosticContent = hasClientTools || threadHasClientToolHistory;
     // 客户端参数与回执可能出现在任意 Thread 历史切片，包括子 Agent 的用户消息。
     if (protectDiagnosticContent) this.telemetry?.suppressAttemptContent(input.attemptId);
     const attemptWireTraces = protectDiagnosticContent

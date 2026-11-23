@@ -12,6 +12,10 @@
 - 受理 Run 时在同一事务内写入 `RunAgentSnapshot`、`RunSkillSnapshot` 和其他受理事实。快照保存 Thread 绑定、Revision ID、内容摘要及完整内容（包括外部工具精确版本 ID，不含外部工具凭据）。Worker 的读取授权与错误分类见[外部工具快照读取](#外部工具快照读取)。可转成 follow-up 的 steer 候选在输入受理时一起固定两个快照，实际转入队列时不重新解析。
 - 当前 Revision 不可见、不是已发布状态或内容无法验证时，持久化返回 `agent_revision_unavailable`。自带的精确 Skill 版本缺失、撤销或校验不通过时，持久化抛出 `AGENT_REVISION_UNAVAILABLE`。两种情况均不创建 Run，也不留下部分写入；已经受理的相同幂等键仍可读回原结果。
 
+## 评测集与发布门槛
+
+评测集属于单个 AgentDefinition，评测集、用例、指定 Revision 的运行和用例结果由后台管理角色管理；表级 FORCE RLS 限制有效 Agent 管理员访问。确定性断言结构由协议 Schema 校验，发布请求可以选择评测集和最低通过率。该门槛在发布事务锁定 Definition 后检查同一评测集、目标草稿 Revision 的完整评测结果；缺少结果或比例不足时事务失败，Revision 不会发布。评测数据和来源边界见[Agent 评测](agent-evaluation.md)。
+
 ## 执行与失败边界
 
 - 每个 Attempt 领取时校验同一份快照。Worker 重启、恢复和子 Agent 都不反查当前 Revision。快照缺失或摘要不匹配时以 `AGENT_SNAPSHOT_INVALID` 停止，不用默认 Agent 修补历史 Run。升级前已受理但未结束的 Run 没有这一快照，部署前应先排空。

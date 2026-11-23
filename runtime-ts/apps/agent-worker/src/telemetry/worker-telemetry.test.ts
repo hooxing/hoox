@@ -7,7 +7,12 @@ import {
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { transitionRun } from "@hoox/domain";
-import { bindTrustedPiModelContextCapability } from "@hoox/pi-adapter";
+import {
+  bindTrustedPiModelContextCapability,
+  type ThreadActiveHistoryV1,
+  threadActiveHistoryDigest,
+} from "@hoox/pi-adapter";
+import type { InternalTrajectoryDiagnosticRecord } from "@hoox/trajectory";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { AggregationTemporality, InMemoryMetricExporter } from "@opentelemetry/sdk-metrics";
 import { InMemorySpanExporter, type SpanExporter } from "@opentelemetry/sdk-trace";
@@ -58,6 +63,13 @@ async function workerRun(
     providerFails?: boolean;
     seed?: Partial<FakeSeed>;
     rebindModel?: boolean;
+    history?: ThreadActiveHistoryV1;
+    modelWireTraces?: { createAttempt: ReturnType<typeof vi.fn> };
+    trajectoryRecords?: InternalTrajectoryDiagnosticRecord[];
+    findClientToolHistoryCallIds?: (
+      scope: { readonly tenantId: string; readonly threadId: string },
+      callIds: readonly string[],
+    ) => Promise<readonly string[]>;
   } = {},
 ) {
   const credentials = new InMemoryCredentialStore();
@@ -108,19 +120,27 @@ async function workerRun(
     }),
     undefined,
     undefined,
+    options.modelWireTraces as never,
+    undefined,
+    options.history === undefined ? undefined : async () => options.history,
     undefined,
     undefined,
     undefined,
     undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
+    options.trajectoryRecords === undefined
+      ? undefined
+      : {
+          persist: async (record: InternalTrajectoryDiagnosticRecord) => {
+            options.trajectoryRecords?.push(record);
+          },
+        },
     undefined,
     undefined,
     undefined,
     undefined,
     telemetry,
+    undefined,
+    options.findClientToolHistoryCallIds,
   );
   const worker = new RunWorker(
     {
@@ -145,6 +165,49 @@ async function workerRun(
     { workerId: "otel-test" },
   );
   return { worker, scope, persistence, model };
+}
+
+function toolHistory(input: {
+  readonly callId: string;
+  readonly toolName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  readonly result: string;
+}): ThreadActiveHistoryV1 {
+  const messages: ThreadActiveHistoryV1["messages"] = [
+    {
+      sequence: 1,
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: input.callId,
+          name: input.toolName,
+          arguments: input.arguments,
+        },
+      ],
+      api: "openai-completions",
+      provider: "test-provider",
+      model: "test-model",
+      stopReason: "toolUse",
+      timestamp: 1,
+    },
+    {
+      sequence: 2,
+      role: "toolResult",
+      toolCallId: input.callId,
+      toolName: input.toolName,
+      text: input.result,
+      isError: false,
+      timestamp: 2,
+    },
+  ];
+  const unsigned = {
+    schemaVersion: 1 as const,
+    projectionSchemaVersion: 1 as const,
+    throughSequence: 2,
+    messages,
+  };
+  return { ...unsigned, digest: threadActiveHistoryDigest(unsigned) };
 }
 
 async function listener(run: RequestListener) {
@@ -380,6 +443,120 @@ describe("Worker OpenTelemetry", () => {
       await telemetry.close();
     }
   });
+  it("旧 Revision 的客户端工具历史在工具移除后仍屏蔽三类正文诊断", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    const oldRevisionCall = "cross-revision-client-args-canary";
+    const oldRevisionReceipt = "cross-revision-client-result-canary";
+    const history = toolHistory({
+      callId: "old-client-call",
+      toolName: "lookup",
+      arguments: { secret: oldRevisionCall },
+      result: oldRevisionReceipt,
+    });
+    const wireTraceCreateAttempt = vi.fn(() => ({
+      run: (_context: unknown, operation: () => unknown) => operation(),
+      drain: async () => undefined,
+      release: () => undefined,
+    }));
+    const trajectoryRecords: InternalTrajectoryDiagnosticRecord[] = [];
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        history,
+        modelWireTraces: { createAttempt: wireTraceCreateAttempt },
+        trajectoryRecords,
+        findClientToolHistoryCallIds: async (_scope, callIds) => {
+          expect(callIds).toEqual(["old-client-call"]);
+          return ["old-client-call"];
+        },
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      const spans = traces.getFinishedSpans();
+      const serialized = JSON.stringify(spans.map(({ attributes }) => attributes));
+      expect(serialized).not.toContain(oldRevisionCall);
+      expect(serialized).not.toContain(oldRevisionReceipt);
+      expect(wireTraceCreateAttempt).not.toHaveBeenCalled();
+      expect(JSON.stringify(trajectoryRecords)).not.toContain(oldRevisionCall);
+      expect(JSON.stringify(trajectoryRecords)).not.toContain(oldRevisionReceipt);
+      expect(trajectoryRecords).toHaveLength(0);
+    } finally {
+      await telemetry.close();
+    }
+  });
+
+  it("客户端工具历史类别读取失败时失败关闭诊断而不阻断 Run", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    const secret = "history-lookup-failure-canary";
+    const history = toolHistory({
+      callId: "unknown-client-call",
+      toolName: "lookup",
+      arguments: { secret },
+      result: secret,
+    });
+    const wireTraceCreateAttempt = vi.fn();
+    const trajectoryRecords: InternalTrajectoryDiagnosticRecord[] = [];
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        history,
+        modelWireTraces: { createAttempt: wireTraceCreateAttempt },
+        trajectoryRecords,
+        findClientToolHistoryCallIds: async () => {
+          throw new Error("history lookup unavailable");
+        },
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      const serialized = JSON.stringify(
+        traces.getFinishedSpans().map(({ attributes }) => attributes),
+      );
+      expect(serialized).not.toContain(secret);
+      expect(wireTraceCreateAttempt).not.toHaveBeenCalled();
+      expect(trajectoryRecords).toHaveLength(0);
+    } finally {
+      await telemetry.close();
+    }
+  });
+
+  it("历史仅含服务端工具调用时仍启用正文与内部诊断", async () => {
+    const { telemetry, traces } = memoryTelemetry({ contentEnabled: true });
+    const serviceHistoryCall = "old-server-call";
+    const serviceHistoryArgument = "server-history-argument-canary";
+    const serviceHistoryReceipt = "server-history-result-canary";
+    const history = toolHistory({
+      callId: serviceHistoryCall,
+      toolName: "exec_command",
+      arguments: { cmd: serviceHistoryArgument },
+      result: serviceHistoryReceipt,
+    });
+    const wireTraceCreateAttempt = vi.fn(() => ({
+      run: (_context: unknown, operation: () => unknown) => operation(),
+      drain: async () => undefined,
+      release: () => undefined,
+    }));
+    const trajectoryRecords: InternalTrajectoryDiagnosticRecord[] = [];
+    try {
+      const { worker, scope } = await workerRun(telemetry, {
+        history,
+        modelWireTraces: { createAttempt: wireTraceCreateAttempt },
+        trajectoryRecords,
+        findClientToolHistoryCallIds: async (_scope, callIds) => {
+          expect(callIds).toEqual([serviceHistoryCall]);
+          return [];
+        },
+      });
+      expect(await worker.execute(scope)).toEqual({ outcome: "succeeded" });
+      await telemetry.flush();
+      const spans = traces.getFinishedSpans();
+      const serializedSpans = JSON.stringify(spans.map(({ attributes }) => attributes));
+      expect(serializedSpans).toContain(serviceHistoryArgument);
+      expect(serializedSpans).toContain(serviceHistoryReceipt);
+      expect(wireTraceCreateAttempt).toHaveBeenCalledOnce();
+      expect(trajectoryRecords.length).toBeGreaterThan(0);
+    } finally {
+      await telemetry.close();
+    }
+  });
+
   it("Agent 快照无效时只记录失败的 Attempt 根 Span，不执行模型或工具", async () => {
     const { telemetry, traces } = memoryTelemetry();
     try {

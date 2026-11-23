@@ -121,7 +121,10 @@ import {
   withTenantTransaction,
   withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
-import { PgClientToolResults } from "../../runtime-ts/packages/persistence/src/pg-client-tool-calls.js";
+import {
+  PgClientToolCallHistoryReader,
+  PgClientToolResults,
+} from "../../runtime-ts/packages/persistence/src/pg-client-tool-calls.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
 import { PgThreadSandboxSessionLifecycle } from "../../runtime-ts/packages/persistence/src/thread-sandbox-session.js";
@@ -4869,6 +4872,13 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       if (typeof data?.callId !== "string") throw new Error("未发布客户端调用");
       const callId = data.callId;
       expect(callId).toMatch(/^client_[a-f0-9]{64}$/u);
+      await expect(
+        new PgClientToolCallHistoryReader(runtime).findMatches({
+          tenantId: scope.tenantId,
+          threadId: scope.threadId,
+          callIds: [callId, "service-call-not-client"],
+        }),
+      ).resolves.toEqual([callId]);
       expect(data).toMatchObject({
         threadId: scope.threadId,
         runId: scope.runId,

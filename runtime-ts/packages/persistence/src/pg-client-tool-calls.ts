@@ -106,6 +106,26 @@ async function advanceWait(client: PoolClient, tenantId: string, runId: string, 
   await schedule(client, tenantId, runId, new Date(0));
 }
 
+export class PgClientToolCallHistoryReader {
+  constructor(private readonly pool: Pool) {}
+
+  async findMatches(input: {
+    readonly tenantId: string;
+    readonly threadId: string;
+    readonly callIds: readonly string[];
+  }): Promise<readonly string[]> {
+    if (input.callIds.length === 0) return [];
+    return await withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
+      const result = await client.query<{ call_id: string }>(
+        `SELECT call_id FROM client_tool_calls
+            WHERE tenant_id=$1 AND thread_id=$2 AND call_id=ANY($3::text[])`,
+        [input.tenantId, input.threadId, [...new Set(input.callIds)]],
+      );
+      return result.rows.map(({ call_id }) => call_id);
+    });
+  }
+}
+
 export class PgClientToolResults {
   constructor(private readonly pool: Pool) {}
   async submit(input: {

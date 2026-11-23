@@ -62,6 +62,7 @@ export class PgRunFeedbackRepository {
          JOIN run_agent_snapshots snapshot ON snapshot.tenant_id=r.tenant_id AND snapshot.run_id=r.id
          JOIN memberships m ON m.tenant_id=r.tenant_id AND m.user_id=$4 AND m.status='active'
          WHERE r.tenant_id=$1 AND r.id=$2 AND r.thread_id=$3
+           AND t.created_by_user_id=$4
            AND r.origin IN ('normal','api') AND NOT t.is_playground`,
         [scope.tenantId, runId, threadId, scope.userId],
       );

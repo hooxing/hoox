@@ -295,7 +295,26 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
         runId: "run_b1",
         operation: "get",
       }),
-    ).toEqual({ feedback: null });
+    ).toBe("not_found");
+    for (const operation of ["put", "delete"] as const) {
+      expect(
+        await repository.execute({
+          scope: { tenantId: "tenant_b", userId: "user_viewer" } as never,
+          threadId: "thread_1",
+          runId: "run_b1",
+          operation,
+          ...(operation === "put" ? { feedback: { rating: "down" as const } } : {}),
+        }),
+      ).toBe("not_found");
+    }
+    expect(
+      await repository.execute({
+        scope,
+        threadId: "thread_1",
+        runId: "run_b1",
+        operation: "get",
+      }),
+    ).toMatchObject({ feedback: { rating: "down" } });
     const privateRows = await withTenantTransaction(
       runtime,
       { tenantId: "tenant_b", userId: "user_viewer" } as never,
@@ -310,6 +329,17 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
       },
     );
     expect(privateRows).toEqual({ selected: 0, changed: 0 });
+    await expect(
+      withTenantTransaction(
+        runtime,
+        { tenantId: "tenant_b", userId: "user_viewer" } as never,
+        (client) =>
+          client.query(
+            `INSERT INTO run_feedback(tenant_id,run_id,revision_id,user_id,rating)
+             VALUES('tenant_b','run_b1','revision_pinned','user_viewer','up')`,
+          ),
+      ),
+    ).rejects.toThrow();
     expect(
       await repository.execute({
         scope: { tenantId: "tenant_a", userId: "user_owner_a" } as never,

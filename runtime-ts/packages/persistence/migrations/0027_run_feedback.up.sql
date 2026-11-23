@@ -22,12 +22,16 @@ BEGIN
       AND user_id=NULLIF(current_setting('app.user_id',true),'')
       AND EXISTS (SELECT 1 FROM memberships m WHERE m.tenant_id=run_feedback.tenant_id AND m.user_id=run_feedback.user_id AND m.status='active')
       AND EXISTS (SELECT 1 FROM runs r JOIN threads t ON t.tenant_id=r.tenant_id AND t.id=r.thread_id
-                   WHERE r.tenant_id=run_feedback.tenant_id AND r.id=run_feedback.run_id AND r.origin IN ('normal','api') AND NOT t.is_playground))
+                   WHERE r.tenant_id=run_feedback.tenant_id AND r.id=run_feedback.run_id
+                     AND t.created_by_user_id=run_feedback.user_id
+                     AND r.origin IN ('normal','api') AND NOT t.is_playground))
     WITH CHECK (tenant_id=NULLIF(current_setting('app.tenant_id',true),'')
       AND user_id=NULLIF(current_setting('app.user_id',true),'')
       AND EXISTS (SELECT 1 FROM memberships m WHERE m.tenant_id=run_feedback.tenant_id AND m.user_id=run_feedback.user_id AND m.status='active')
       AND EXISTS (SELECT 1 FROM runs r JOIN threads t ON t.tenant_id=r.tenant_id AND t.id=r.thread_id
-                   WHERE r.tenant_id=run_feedback.tenant_id AND r.id=run_feedback.run_id AND r.origin IN ('normal','api') AND NOT t.is_playground))$policy$,runtime_role);
+                   WHERE r.tenant_id=run_feedback.tenant_id AND r.id=run_feedback.run_id
+                     AND t.created_by_user_id=run_feedback.user_id
+                     AND r.origin IN ('normal','api') AND NOT t.is_playground))$policy$,runtime_role);
   EXECUTE format('CREATE POLICY run_feedback_admin_projection ON run_feedback FOR SELECT TO %I USING (EXISTS (SELECT 1 FROM platform_control_operators actor WHERE actor.user_id=NULLIF(current_setting(''app.user_id'',true),'''') AND actor.status=''active''))',current_user);
 END $$;
 

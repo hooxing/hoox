@@ -12,6 +12,8 @@ import type {
   SubmitToolResult,
 } from "./types.js";
 
+const MAX_ARTIFACT_CONTENT_BYTES = 24 * 1024 * 1024;
+
 export type HooxClientOptions = {
   baseUrl: string;
   apiKey?: string;
@@ -199,7 +201,36 @@ export class HooxClient {
         options,
         connection.signal,
       );
-      return new Uint8Array(await response.arrayBuffer());
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_ARTIFACT_CONTENT_BYTES) {
+        await response.body?.cancel();
+        throw new HooxError("Artifact 内容超过读取上限", "RESPONSE_TOO_LARGE", response.status);
+      }
+      if (!response.body) return new Uint8Array();
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_ARTIFACT_CONTENT_BYTES) {
+            await reader.cancel();
+            throw new HooxError("Artifact 内容超过读取上限", "RESPONSE_TOO_LARGE", response.status);
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const content = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        content.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return content;
     } catch (error) {
       throw connection.error(error);
     } finally {

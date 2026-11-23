@@ -174,6 +174,29 @@ describe("SDK HTTP", () => {
     expect(`${failure?.message} ${failure?.stack}`).not.toContain("secret-key");
   });
 
+  it("原始 Artifact 内容限制实际读取字节并取消超限流", async () => {
+    let cancelled = false;
+    const client = new HooxClient({
+      baseUrl: "https://api.example.invalid",
+      fetch: async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(24 * 1024 * 1024));
+              controller.enqueue(new Uint8Array([1]));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+        ),
+    });
+    await expect(
+      client.readArtifactContent("thread_sdk", "run_sdk", "artifact_sdk"),
+    ).rejects.toMatchObject({ code: "RESPONSE_TOO_LARGE" });
+    expect(cancelled).toBe(true);
+  });
+
   it("无 Key 的浏览器代理模式不注入 Authorization；不自动重试创建请求", async () => {
     const fetcher = vi.fn(async () => {
       throw new Error("network detail");

@@ -94,16 +94,16 @@ verify_object_storage_configuration() {
     for key in S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_FORCE_PATH_STYLE; do
       lines="$(grep -c "^[[:space:]]*$key[[:space:]]*=" "$shared_dir/$file" || true)"
       if [[ "$lines" == 0 ]]; then
-        echo "Demo $file 缺少环境变量：$key" >&2
+        echo "Demo $file 缺少环境变量：${key}" >&2
         return 1
       fi
       value="$(sed -n "s/^$key=//p" "$shared_dir/$file")"
       if [[ "$lines" != 1 || ! "$value" =~ $simple_value ]]; then
-        echo "Demo $file 环境变量格式无效：$key（须为不加引号、无空白和注释的单行 $key=值）" >&2
+        echo "Demo $file 环境变量格式无效：${key}（须为不加引号、无空白和注释的单行 $key=值）" >&2
         return 1
       fi
       if [[ "$key" == S3_FORCE_PATH_STYLE && "$value" != true && "$value" != false ]]; then
-        echo "Demo $file 环境变量无效：$key" >&2
+        echo "Demo $file 环境变量无效：${key}" >&2
         return 1
       fi
     done

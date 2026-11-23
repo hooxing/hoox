@@ -2,9 +2,9 @@ import { EventEmitter } from "node:events";
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
 import {
+  type PgClaimedWorkerTenantAssignment,
   PgWorkerDispatchWakeListener,
   PgWorkerTenantAssignments,
-  type PgClaimedWorkerTenantAssignment,
   WORKER_DISPATCH_WAKE_CHANNEL,
 } from "./pg-worker-tenant-assignment.js";
 

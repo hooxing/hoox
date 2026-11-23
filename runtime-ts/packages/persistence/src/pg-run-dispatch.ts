@@ -1,27 +1,27 @@
-import { expireClientToolCalls } from "./pg-client-tool-calls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT } from "@hoox/admin-control";
 import { isoTimestamp, type Run, rehydrateRun } from "@hoox/domain";
 import { rolloutProjectionDigest } from "@hoox/run-contracts/mutation-protocol";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
-import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";
-import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
+import { expireClientToolCalls } from "./pg-client-tool-calls.js";
 import {
   createRunConfigurationSnapshots,
   RunAgentUnavailableError,
 } from "./pg-run-agent-snapshot.js";
 import { SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
-import { scheduleWorkerTenant, wakeWorkerTenant } from "./pg-worker-tenant-assignment.js";
-import {
-  enqueueThreadTitleGeneration,
-  isThreadTitleGenerationEnabled,
-} from "./pg-thread-title-generation.js";
 import {
   enqueueThreadFollowUp,
   LegacyRunDrainRequiredError,
   legacyInitialProjection,
 } from "./pg-thread-run-queue.js";
+import {
+  enqueueThreadTitleGeneration,
+  isThreadTitleGenerationEnabled,
+} from "./pg-thread-title-generation.js";
+import { scheduleWorkerTenant, wakeWorkerTenant } from "./pg-worker-tenant-assignment.js";
+import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";
+import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 
 const maxInputBytes = 1_048_576;
 const legacyInitialProjectionDigest = rolloutProjectionDigest(legacyInitialProjection);

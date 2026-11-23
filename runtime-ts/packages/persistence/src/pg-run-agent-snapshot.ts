@@ -63,6 +63,24 @@ export async function createPlaygroundConfigurationSnapshots(
   return await finalizeSkillSnapshot(client, input, inserted.rows[0]);
 }
 
+export async function createEvaluationConfigurationSnapshots(
+  client: PoolClient,
+  input: AgentScope & { readonly userId: string; readonly revisionId: string },
+): Promise<RunAgentSnapshot> {
+  const inserted = await client.query<SnapshotRow>(
+    `INSERT INTO run_agent_snapshots(tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content)
+     SELECT t.tenant_id,$3,t.id,t.agent_definition_id,r.id,r.content_digest,r.content
+       FROM threads t
+       JOIN runs run ON run.tenant_id=t.tenant_id AND run.id=$3 AND run.thread_id=t.id AND run.origin='evaluation'
+       JOIN agent_revisions r ON r.definition_id=t.agent_definition_id AND r.id=$4
+        AND r.status IN ('draft','published')
+      WHERE t.tenant_id=$1 AND t.id=$2
+     RETURNING definition_id,revision_id,revision_digest,content`,
+    [input.tenantId, input.threadId, input.runId, input.revisionId],
+  );
+  return await finalizeSkillSnapshot(client, input, inserted.rows[0]);
+}
+
 async function finalizeSkillSnapshot(
   client: PoolClient,
   input: Parameters<typeof createRunSkillSnapshot>[1],

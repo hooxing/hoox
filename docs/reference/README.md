@@ -9,6 +9,7 @@
 | [配置参考](configuration.md) | 配置 API、Worker、Scheduler、存储、模型或 Sandbox 时 | 有哪些环境变量、默认值、必填范围和秘密边界 |
 | [命令参考](commands.md) | 启动、迁移、校验或执行外部服务 Gate 时 | 应运行哪个命令，前置条件和影响范围是什么 |
 | [Development API 契约](development-api.md) | 开发 Web 或本地集成时 | 当前 development HTTP 接口、身份和错误契约是什么 |
+| [评测管理 API](admin-evaluations.md) | 管理 Agent 评测集和用例时 | 评测资源如何按 AgentDefinition 读写，当前提供哪些管理路由 |
 | [公开 API v1](public-api.md) | 以服务凭据接入 Hoox 时 | 哪些 v1 路由属于兼容契约，如何认证、续连事件和处理幂等？ |
 | [Agent 配置文件](agent-configuration.md) | 在后台或自动化流程导入、导出 Agent 时 | YAML 字段、引用校验、dry-run 和管理接口如何使用？ |
 | [可嵌入聊天组件](chat-embed.md) | 把 Agent 对话嵌入业务网站时 | 如何挂载 React/原生入口、定制主题并通过同源代理安全认证？ |

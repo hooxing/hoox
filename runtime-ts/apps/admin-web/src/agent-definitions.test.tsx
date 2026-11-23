@@ -89,6 +89,7 @@ function fixture(canManage: boolean) {
     createAgentDefinition: vi.fn(async () => ({ definition, revision: current })),
     saveAgentRevision: vi.fn(async () => current),
     publishAgentRevision: vi.fn(async () => definition),
+    listEvaluationSuites: vi.fn(async () => []),
     deactivateAgentDefinition: vi.fn(async () => definition),
     revokeAgentRevision: vi.fn(async () => definition),
     setAgentAvailability: vi.fn(async () => definition),
@@ -480,9 +481,32 @@ describe("后台 Agent 管理", () => {
     await settle();
     act(() => button(container, "发布").click());
     await settle();
+    act(() => button(document.body, "确认发布").click());
+    await settle();
     expect(api.publishAgentRevision).toHaveBeenCalledWith(definition.id, current.id, {
       expectedGeneration: definition.generation,
     });
+  });
+
+  it("发布确认说明评测门槛会在发布事务中验证", async () => {
+    const api = fixture(true);
+    api.listAgentRevisions.mockResolvedValue({
+      definition,
+      items: [{ ...summary(current), status: "draft" }],
+    });
+    const container = render(
+      <AgentDefinitionsPage
+        api={api}
+        destination={{ kind: "detail", id: definition.id }}
+        onOpen={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    await settle();
+    act(() => button(container, "发布").click());
+    await settle();
+    expect(document.body.textContent).toContain("完整评测结果");
+    expect(api.listEvaluationSuites).toHaveBeenCalledWith(definition.id);
   });
 
   it("设置 Tenant 范围提交读取时的 generation", async () => {

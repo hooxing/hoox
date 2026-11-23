@@ -722,6 +722,25 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
       }),
     ).toEqual({ status: "not_found" });
 
+    await admin.query(
+      `UPDATE "${schema}".runs SET origin='evaluation' WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, tenantA.runId],
+    );
+    await admin.query(
+      `UPDATE "${schema}".threads SET is_evaluation=true WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, tenantA.threadId],
+    );
+    expect(
+      (await filesystem.list({ tenantId: tenantA.scope.tenantId })).map((file) => file.resourceId),
+    ).not.toContain(input.resourceId);
+    await expect(
+      filesystem.resolve({
+        tenantId: tenantA.scope.tenantId,
+        resourceId: input.resourceId,
+        versionId: input.resourceVersionId,
+      }),
+    ).resolves.toBeUndefined();
+
     await admin.query(`DROP POLICY it_hide_runs_for_resource_reader ON "${schema}".runs`);
     await admin.query(
       `DELETE FROM "${schema}".artifact_publications WHERE tenant_id=$1 AND id=$2`,
@@ -736,6 +755,10 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
       tenantA.scope.tenantId,
       tenantA.runId,
     ]);
+    await admin.query(
+      `UPDATE "${schema}".threads SET is_evaluation=false WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, tenantA.threadId],
+    );
     await admin.query(
       `UPDATE "${schema}".memberships SET role='owner'
         WHERE tenant_id=$1 AND user_id=$2`,
@@ -1276,5 +1299,37 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
     await expect(
       filesystem.listRecentDirectories({ tenantId: tenantB.scope.tenantId }),
     ).resolves.toEqual([]);
+    await admin.query(
+      `UPDATE "${schema}".runs SET origin='evaluation' WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, tenantA.runId],
+    );
+    await admin.query(
+      `UPDATE "${schema}".threads SET is_evaluation=true WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, tenantA.threadId],
+    );
+    await expect(
+      filesystem.listThreadFiles({ tenantId: tenantA.scope.tenantId, threadId: tenantA.threadId }),
+    ).resolves.toBeUndefined();
+    await expect(
+      filesystem.resolveHistoryFile({ tenantId: tenantA.scope.tenantId, directoryName, entryName }),
+    ).resolves.toBeUndefined();
+    await expect(
+      filesystem.resolveThreadFile({
+        tenantId: tenantA.scope.tenantId,
+        threadId: tenantA.threadId,
+        entryName,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      filesystem.listRecentDirectories({ tenantId: tenantA.scope.tenantId }),
+    ).resolves.toEqual([]);
+    await admin.query(
+      `UPDATE "${schema}".threads SET is_evaluation=false WHERE tenant_id=$1 AND id=$2`,
+      [tenantA.scope.tenantId, tenantA.threadId],
+    );
+    await admin.query(`UPDATE "${schema}".runs SET origin='normal' WHERE tenant_id=$1 AND id=$2`, [
+      tenantA.scope.tenantId,
+      tenantA.runId,
+    ]);
   });
 });

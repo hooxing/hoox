@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   EncryptedIdentitySecrets,
   IdentityConfiguration,
@@ -8,7 +9,6 @@ import {
   encryptIdentitySecrets,
   hydrateIdentityConfiguration,
 } from "@hoox/identity";
-import { randomUUID } from "node:crypto";
 import type { Pool, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTransaction } from "./postgres.js";

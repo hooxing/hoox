@@ -16,6 +16,10 @@
 
 后台以 `schemaVersion: 1` 的 YAML 交换 Definition 元数据和单个 Revision 的可发布配置。格式字段与接口见 [Agent 配置文件参考](../reference/agent-configuration.md)。导出只读取配置正文和引用，不读取凭据密文或明文；导入和 dry-run 都使用管理权限，并重新校验已保存的模型凭据引用、外部工具版本与 Tenant 范围。新增 Definition 或追加 Revision 均只创建草稿，不会发布；导入和导出分别写入独立审计动作。追加到现有 Definition 时，配置文件 ID 与可用范围必须匹配目标，并提供预期 generation。
 
+## 评测集与发布门槛
+
+评测集属于单个 AgentDefinition，评测集、用例、指定 Revision 的运行和用例结果由后台管理角色管理；表级 FORCE RLS 限制有效 Agent 管理员访问。确定性断言结构由协议 Schema 校验，发布请求可以选择评测集和最低通过率。该门槛在发布事务锁定 Definition 后检查同一评测集、目标草稿 Revision 的完整评测结果；缺少结果或比例不足时事务失败，Revision 不会发布。评测数据和来源边界见[Agent 评测](agent-evaluation.md)。
+
 ## 执行与失败边界
 
 - 每个 Attempt 领取时校验同一份快照。Worker 重启、恢复和子 Agent 都不反查当前 Revision。快照缺失或摘要不匹配时以 `AGENT_SNAPSHOT_INVALID` 停止，不用默认 Agent 修补历史 Run。升级前已受理但未结束的 Run 没有这一快照，部署前应先排空。

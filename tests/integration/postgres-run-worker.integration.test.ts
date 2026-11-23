@@ -848,7 +848,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         WHERE tenant_id=$1 AND id=$2`,
       [f.scope.tenantId, `delivery-${suffixId}`],
     );
-    expect(settled.rows[0]).toEqual({ state: "disabled", last_error_code: "playground_source" });
+    expect(settled.rows[0]).toEqual({ state: "disabled", last_error_code: "source_not_allowed" });
     const unresolved = await admin.query<{
       readonly state: string;
       readonly last_error_code: string | null;
@@ -857,7 +857,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         WHERE tenant_id=$1 AND id=$2`,
       [f.scope.tenantId, `delivery-unknown-${suffixId}`],
     );
-    expect(unresolved.rows[0]).toEqual({ state: "pending", last_error_code: null });
+    expect(unresolved.rows[0]).toEqual({
+      state: "disabled",
+      last_error_code: "source_not_allowed",
+    });
 
     const unknownPermitId = `delivery-unknown-permit-${suffixId}`;
     const unknownToken = `unknown-claim-${suffixId}`;
@@ -897,7 +900,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         WHERE tenant_id=$1 AND id=$2`,
       [f.scope.tenantId, unknownPermitId],
     );
-    expect(unresolvedPermit.rows[0]).toEqual({ state: "claimed", last_error_code: null });
+    expect(unresolvedPermit.rows[0]).toEqual({
+      state: "disabled",
+      last_error_code: "source_not_allowed",
+    });
 
     const permitId = `delivery-permit-${suffixId}`;
     const token = `legacy-claim-${suffixId}`;
@@ -936,7 +942,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         WHERE tenant_id=$1 AND id=$2`,
       [f.scope.tenantId, permitId],
     );
-    expect(result.rows[0]).toEqual({ state: "disabled", last_error_code: "playground_source" });
+    expect(result.rows[0]).toEqual({ state: "disabled", last_error_code: "source_not_allowed" });
     expect(
       (
         await new PgWebhookRepository(runtime).list({

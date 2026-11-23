@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import type { Pool, PoolClient } from "pg";
 import type { ClientToolAction, ExecutionScope } from "@hoox/run-contracts";
-import { withTenantTransaction } from "./postgres.js";
-import type { TenantScope } from "./ports.js";
+import type { Pool, PoolClient } from "pg";
 import { enqueueClientActionWebhook } from "./pg-webhooks.js";
 import { scheduleWorkerTenantAt } from "./pg-worker-tenant-assignment.js";
+import type { TenantScope } from "./ports.js";
+import { withTenantTransaction } from "./postgres.js";
 
 /** Run 行锁是 waiting、结果、超时和取消的共同线性化点。重排同一 dispatch 会清除旧 token，使迟到 ack 无效。 */
 async function schedule(client: PoolClient, tenantId: string, runId: string, at: Date) {

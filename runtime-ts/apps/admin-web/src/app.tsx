@@ -34,6 +34,7 @@ import {
   useParams,
 } from "react-router-dom";
 import { AgentDefinitionsPage } from "./agent-definitions.js";
+import { EvaluationsPage } from "./evaluations.js";
 import { readAdminAccessToken } from "./admin-session.js";
 import {
   AdminApiError,
@@ -962,6 +963,7 @@ const navigation: NonNullable<MenuProps["items"]> = [
     label: "Agent",
     children: [
       { key: "/agent-definitions", icon: <RobotOutlined />, label: "Agent 管理" },
+      { key: "/evaluations", icon: <ExperimentOutlined />, label: "评测" },
       { key: "/playground", icon: <ExperimentOutlined />, label: "Playground" },
       { key: "/external-tools", icon: <ToolOutlined />, label: "外部工具" },
     ],
@@ -1010,6 +1012,7 @@ const pageMetadata: Readonly<
   "/integration-api-keys": { title: "API Key", description: "按 Tenant 管理部署方的集成凭据" },
   "/integration-webhooks": { title: "Webhook", description: "按 Tenant 管理部署方的事件订阅" },
   "/playground": { title: "Playground", description: "测试 Agent 草稿与已发布版本，查看执行轨迹" },
+  "/evaluations": { title: "评测集", description: "管理评测用例与断言，验证 Agent Revision" },
   "/agent-definitions": {
     title: "Agent 管理",
     description: "维护草稿、发布版本和 Tenant 可用范围",
@@ -1283,6 +1286,10 @@ function AdminPlatform({
             <Route
               path="/agent-definitions/:definitionId"
               element={<AgentDefinitionsRoute api={agentApi} kind="detail" />}
+            />
+            <Route
+              path="/evaluations"
+              element={<EvaluationsPage agents={agentApi} api={defaultManagementApi} />}
             />
             <Route
               path="/playground"

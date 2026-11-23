@@ -50,6 +50,7 @@ export interface AgentDefinitionCommandInput {
 }
 export interface PublishAgentRevisionInput extends AgentDefinitionCommandInput {
   readonly revisionId: string;
+  readonly evaluationGate?: { readonly suiteId: string; readonly minimumPassRate: number };
 }
 export interface RevokeAgentRevisionInput extends PublishAgentRevisionInput {
   readonly reason: string;

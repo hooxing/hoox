@@ -12,7 +12,6 @@ import {
   runId,
   tenantId,
   threadId,
-  transitionRun,
 } from "@hoox/domain";
 import type {
   CoreRepositories,
@@ -35,7 +34,11 @@ import {
   validFileSelection,
   type FileReference,
 } from "@hoox/protocol/file-references";
-import { PersistenceError, type RunExperienceReadPort } from "@hoox/persistence/postgres";
+import {
+  cancelScopedRun,
+  PersistenceError,
+  type RunExperienceReadPort,
+} from "@hoox/persistence/postgres";
 import { toRunDto, toThreadDto } from "@hoox/protocol-mapper";
 import {
   appendAttachmentsToLatestUserPrompt,
@@ -684,25 +687,16 @@ export class ApiService {
   async cancelRun(auth: AuthContext, rawThreadId: string, rawRunId: string): Promise<RunDto> {
     const id = runId(rawRunId);
     const expectedThreadId = threadId(rawThreadId);
-    const current = await this.dependencies.repositories.runs.get(auth.scope, id);
-    if (current === undefined || current.entity.threadId !== expectedThreadId) {
-      throw new ApiFailure("not_found");
-    }
-    if (current.entity.status === "cancelled") return toRunDto(current.entity);
     try {
-      const cancelled = transitionRun(current.entity, "cancelled", this.dependencies.clock.now());
-      const result = await this.dependencies.repositories.runs.update(
+      const result = await cancelScopedRun(
+        this.dependencies.repositories.runs,
         auth.scope,
-        cancelled,
-        current.version,
+        expectedThreadId,
+        id,
+        () => this.dependencies.clock.now(),
       );
-      if (result.outcome === "not_found") throw new ApiFailure("not_found");
-      if (result.outcome === "conflict") {
-        const latest = await this.dependencies.repositories.runs.get(auth.scope, id);
-        if (latest?.entity.status === "cancelled") return toRunDto(latest.entity);
-        throw new ApiFailure("conflict");
-      }
-      return toRunDto(cancelled);
+      if (typeof result === "string") throw new ApiFailure(result);
+      return toRunDto(result);
     } catch (error) {
       return mapDomainFailure(error);
     }

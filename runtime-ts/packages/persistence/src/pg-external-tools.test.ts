@@ -1,6 +1,6 @@
+import { normalizeExternalToolSchema } from "@hoox/domain";
 import type { Pool, PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { normalizeExternalToolSchema } from "@hoox/domain";
 import { ExternalToolCredentialCipher } from "./external-tool-credential.js";
 import { PgExternalToolRegistry } from "./pg-external-tools.js";
 

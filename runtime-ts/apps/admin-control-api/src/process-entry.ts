@@ -31,6 +31,16 @@ const optional = [] as const;
 const production = ["production"] as const;
 
 const environmentSchema = Object.freeze({
+  EVALUATION_POLL_MS: integerEnvironmentField({
+    requiredIn: optional,
+    minimum: 50,
+    maximum: 60000,
+  }),
+  EVALUATION_GLOBAL_CONCURRENCY: integerEnvironmentField({
+    requiredIn: optional,
+    minimum: 1,
+    maximum: 1024,
+  }),
   ADMIN_CONTROL_DATABASE_URL: urlEnvironmentField({
     secret: true,
     protocols: ["postgres:", "postgresql:"],
@@ -145,6 +155,8 @@ export interface AdminControlApiProcessConfiguration {
   readonly skillPublisherDatabaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   readonly betterAuthSecret: string;
+  readonly evaluationPollMs?: number;
+  readonly evaluationGlobalConcurrency?: number;
   readonly identityApiUrl?: string;
   readonly databaseAdminControlRole?: string;
   readonly databaseSkillPublisherRole?: string;
@@ -320,6 +332,8 @@ export function parseAdminControlApiProcessEnvironment(
       : { skillPublisherDatabaseSsl: productionSkillPublisherDatabase.ssl }),
     databaseSchema,
     betterAuthSecret,
+    evaluationPollMs: parsed.values.EVALUATION_POLL_MS ?? 1000,
+    evaluationGlobalConcurrency: parsed.values.EVALUATION_GLOBAL_CONCURRENCY ?? 8,
     identityApiUrl: parsed.values.ADMIN_CONTROL_IDENTITY_API_URL ?? "http://127.0.0.1:3001",
     ...(databaseAdminControlRole === undefined ? {} : { databaseAdminControlRole }),
     ...(databaseSkillPublisherRole === undefined ? {} : { databaseSkillPublisherRole }),

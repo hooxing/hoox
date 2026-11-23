@@ -2,13 +2,14 @@ import type { ScheduledTaskManagementPort } from "@hoox/automation";
 import type { InstallationRepository } from "@hoox/identity";
 import type { BlobStore } from "@hoox/persistence/blob";
 import type {
-  CoreRepositories,
-  PgPlaygroundRepository,
-  PgClientToolResults,
-  PgRunFeedbackRepository,
   AgentDefinitionRepositoryPort,
-  PgApiKeyRepository,
+  CoreRepositories,
   PersonalizationSettingsPort,
+  PgApiKeyRepository,
+  PgClientToolResults,
+  PgEvaluationCommand,
+  PgPlaygroundRepository,
+  PgRunFeedbackRepository,
   RunExperienceReadPort,
   TeamCollaborationPort,
   ThreadContextReadPort,
@@ -41,6 +42,7 @@ import type {
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
   readonly clientToolResults?: Pick<PgClientToolResults, "submit">;
+  readonly evaluationCommand?: Pick<PgEvaluationCommand, "execute">;
   readonly runFeedback?: Pick<PgRunFeedbackRepository, "execute">;
   readonly playground?: Pick<PgPlaygroundRepository, "accept">;
   readonly apiKeys?: PgApiKeyRepository;

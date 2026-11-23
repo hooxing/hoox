@@ -11,9 +11,9 @@ import type { ThreadContextBodyV1 } from "@hoox/run-contracts";
 import type { Pool, PoolClient } from "pg";
 import type { BlobStore } from "./blob-store.js";
 import { mapPersistenceError } from "./errors.js";
+import { scheduleWorkerTenant } from "./pg-worker-tenant-assignment.js";
 import { withTenantTransaction } from "./postgres.js";
 import { readThreadContextBody } from "./thread-context.js";
-import { scheduleWorkerTenant } from "./pg-worker-tenant-assignment.js";
 
 interface ClaimedMemoryRow {
   readonly run_id: string;

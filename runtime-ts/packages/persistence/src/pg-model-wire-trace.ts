@@ -3,10 +3,10 @@ import type { QueryResultRow } from "pg";
 import type { BlobStore, StableBlobGcPort, StableBlobRef } from "./blob-store.js";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import {
-  TransactionCommitUnknownError,
-  withTenantTransaction,
   type Pool,
   type PoolClient,
+  TransactionCommitUnknownError,
+  withTenantTransaction,
 } from "./postgres.js";
 import {
   createDurableTraceBlobPersistence,

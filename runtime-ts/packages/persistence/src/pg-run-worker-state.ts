@@ -1,10 +1,4 @@
-import { persistClientAction, scheduleClientWait } from "./pg-client-tool-calls.js";
 import { randomUUID } from "node:crypto";
-import {
-  artifactWebhookPayload,
-  enqueueRunStatusWebhook,
-  enqueueWebhookEvent,
-} from "./pg-webhooks.js";
 import {
   isoTimestamp,
   type Run,
@@ -48,16 +42,22 @@ import {
 import { parseWorkspaceManifest } from "@hoox/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { PersistenceError } from "./errors.js";
-import { isRunAgentRevoked, readRunAgentSnapshot } from "./pg-run-agent-snapshot.js";
-import { RUN_EVENT_WAKE_CHANNEL, runEventWakeKey } from "./pg-run-event-wake.js";
+import { persistClientAction, scheduleClientWait } from "./pg-client-tool-calls.js";
 import { enqueueMemoryIngestion } from "./pg-memory-ingestion.js";
 import {
   DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
   insertHistoryAgentDeliverable,
   shouldIndexArtifactInHistory,
 } from "./pg-personal-history.js";
+import { isRunAgentRevoked, readRunAgentSnapshot } from "./pg-run-agent-snapshot.js";
+import { RUN_EVENT_WAKE_CHANNEL, runEventWakeKey } from "./pg-run-event-wake.js";
 import { readRunSkillSnapshot } from "./pg-skill-runtime.js";
 import { lockThreadExecutionHead, settleActiveThreadRun } from "./pg-thread-run-queue.js";
+import {
+  artifactWebhookPayload,
+  enqueueRunStatusWebhook,
+  enqueueWebhookEvent,
+} from "./pg-webhooks.js";
 import {
   TransactionCommitUnknownError,
   withRetriedSerializableTenantTransaction,
@@ -2301,7 +2301,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         revisionId: change.revisionId,
         databaseNow,
         historyFilesystemEnabled: this.options.historyFilesystemEnabled ?? false,
-        isPlayground: row.run_origin === "playground",
+        runOrigin: row.run_origin,
         historyDirectoryTimeZone:
           this.options.historyDirectoryTimeZone ?? DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
       });
@@ -3101,7 +3101,7 @@ async function settleWorkspaceArtifactIntents(
     readonly revisionId: string;
     readonly databaseNow: ReturnType<typeof isoTimestamp>;
     readonly historyFilesystemEnabled: boolean;
-    readonly isPlayground: boolean;
+    readonly runOrigin: "normal" | "playground" | "evaluation" | "api";
     readonly historyDirectoryTimeZone: string;
   },
 ): Promise<void> {
@@ -3198,7 +3198,7 @@ async function settleWorkspaceArtifactIntents(
         intent.resource_id,
         intent.resource_name,
         intent.resource_version_id,
-        !input.isPlayground && intent.purpose === "deliverable"
+        ["normal", "api"].includes(input.runOrigin) && intent.purpose === "deliverable"
           ? "searchable"
           : "pending_explicit_commit",
         input.databaseNow,
@@ -3303,7 +3303,7 @@ async function settleWorkspaceArtifactIntents(
       }),
     });
     if (
-      !input.isPlayground &&
+      ["normal", "api"].includes(input.runOrigin) &&
       shouldIndexArtifactInHistory({
         historyFilesystemEnabled: input.historyFilesystemEnabled,
         purpose: intent.purpose,

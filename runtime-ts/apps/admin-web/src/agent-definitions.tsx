@@ -7,10 +7,24 @@ import type {
   AgentRevisionContentDto,
   AgentRevisionDto,
   AgentRevisionSection,
+  EvaluationSuite,
 } from "@hoox/protocol";
 import { agentRevisionChangedFields } from "@hoox/protocol";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Input, Modal, Space, Spin, Tag, Typography } from "antd";
+import {
+  Alert,
+  Button,
+  Card,
+  Empty,
+  Input,
+  InputNumber,
+  Modal,
+  Select,
+  Space,
+  Spin,
+  Tag,
+  Typography,
+} from "antd";
 import { type FormEvent, useId, useRef, useState } from "react";
 import {
   AgentDefinitionEditor,
@@ -430,7 +444,12 @@ function AgentHistory({
   const [selected, setSelected] = useState<string>();
   const [comparison, setComparison] = useState("");
   const [reason, setReason] = useState("");
+  const [publishTarget, setPublishTarget] = useState<{ revisionId: string; generation: number }>();
+  const [evaluationSuiteId, setEvaluationSuiteId] = useState<string>();
+  const [minimumPassRate, setMinimumPassRate] = useState(0.8);
   const reasonId = useId();
+  const evaluationSuiteFieldId = useId();
+  const minimumPassRateFieldId = useId();
   const [notice, setNotice] = useState<string>();
   const [transferError, setTransferError] = useState<string>();
   const mutation = useMutation({
@@ -449,6 +468,12 @@ function AgentHistory({
     id,
     !edit && comparison !== activeRevisionId ? comparison || undefined : undefined,
   );
+  const evaluationSuites = useQuery({
+    queryKey: ["admin-evaluation-suites", id],
+    queryFn: () => api.listEvaluationSuites(id),
+    enabled: publishTarget !== undefined && canManage,
+    gcTime: 0,
+  });
 
   async function run(write: () => Promise<unknown>, message: string) {
     setNotice(undefined);
@@ -673,15 +698,14 @@ function AgentHistory({
                         <Button
                           type="primary"
                           disabled={busy}
-                          onClick={() =>
-                            action(
-                              () =>
-                                api.publishAgentRevision(id, item.id, {
-                                  expectedGeneration: definition.generation,
-                                }),
-                              `已发布版本 ${item.revision}。版本说明在草稿保存时固定。`,
-                            )
-                          }
+                          onClick={() => {
+                            setEvaluationSuiteId(undefined);
+                            setMinimumPassRate(0.8);
+                            setPublishTarget({
+                              revisionId: item.id,
+                              generation: definition.generation,
+                            });
+                          }}
                         >
                           发布
                         </Button>
@@ -805,6 +829,69 @@ function AgentHistory({
               onChange={(event) => setReason(event.target.value)}
             />
           </label>
+          {mutation.error && <Alert type="error" showIcon title={mutation.error.message} />}
+        </Modal>
+      )}
+      {canManage && publishTarget && (
+        <Modal
+          open
+          title="发布版本"
+          okText="确认发布"
+          cancelText="取消"
+          confirmLoading={busy}
+          onCancel={() => {
+            if (!busy) setPublishTarget(undefined);
+          }}
+          onOk={() => {
+            const target = publishTarget;
+            action(
+              () =>
+                api.publishAgentRevision(id, target.revisionId, {
+                  expectedGeneration: target.generation,
+                  ...(evaluationSuiteId
+                    ? { evaluationGate: { suiteId: evaluationSuiteId, minimumPassRate } }
+                    : {}),
+                }),
+              "版本已发布。",
+            );
+            setPublishTarget(undefined);
+          }}
+        >
+          <p>可选评测门槛会在发布事务中校验此 Revision 的完整评测结果。</p>
+          {evaluationSuites.isLoading ? (
+            <Spin aria-label="正在读取评测集" />
+          ) : evaluationSuites.isError ? (
+            <Alert type="error" showIcon title={evaluationSuites.error.message} />
+          ) : (
+            <>
+              <label className="agent-field" htmlFor={evaluationSuiteFieldId}>
+                <span>评测集（留空则不设置门槛）</span>
+                <Select
+                  id={evaluationSuiteFieldId}
+                  allowClear
+                  value={evaluationSuiteId}
+                  options={(evaluationSuites.data ?? []).map((suite: EvaluationSuite) => ({
+                    value: suite.id,
+                    label: suite.name,
+                  }))}
+                  onChange={setEvaluationSuiteId}
+                />
+              </label>
+              {evaluationSuiteId && (
+                <label className="agent-field" htmlFor={minimumPassRateFieldId}>
+                  <span>最低通过率</span>
+                  <InputNumber
+                    id={minimumPassRateFieldId}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={minimumPassRate}
+                    onChange={(value) => setMinimumPassRate(value ?? 0)}
+                  />
+                </label>
+              )}
+            </>
+          )}
           {mutation.error && <Alert type="error" showIcon title={mutation.error.message} />}
         </Modal>
       )}

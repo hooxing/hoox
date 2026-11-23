@@ -6,7 +6,7 @@ import {
   threadId,
   workspaceId,
 } from "@hoox/domain";
-import { ExternalToolSnapshotError, type ExecutionFence } from "@hoox/run-contracts";
+import { type ExecutionFence, ExternalToolSnapshotError } from "@hoox/run-contracts";
 import type { Pool, PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { PgExternalToolSnapshotReader } from "./pg-external-tool-snapshot-reader.js";

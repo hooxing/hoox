@@ -1,3 +1,4 @@
+import type { EvaluationCommand } from "@hoox/persistence/postgres";
 import { ErrorEnvelopeSchema, IdSchema, MAX_RUN_INPUT_UTF8_BYTES } from "@hoox/protocol";
 import type { FastifyInstance } from "fastify";
 import type { ApiDependencies } from "../dependencies.js";
@@ -92,6 +93,39 @@ export function registerPlaygroundRoutes(
       if (!accepted) throw new ApiFailure("forbidden");
       void reply.header("cache-control", "private, no-store");
       return success(request, accepted);
+    },
+  );
+}
+
+export function registerEvaluationCommandRoute(
+  app: FastifyInstance,
+  capability: ApiDependencies["evaluationCommand"],
+): void {
+  if (!capability) return;
+  app.post<{ Body: Omit<EvaluationCommand, "token"> }>(
+    "/internal/evaluation-command",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["batchId", "tenantId", "userId", "generation", "plannedRunId"],
+          properties: {
+            batchId: IdSchema,
+            tenantId: IdSchema,
+            userId: IdSchema,
+            generation: { type: "string", pattern: "^[0-9]{1,19}$" },
+            plannedRunId: { type: "string", format: "uuid" },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const token = /^Bearer ([a-f0-9-]{36})$/.exec(request.headers.authorization ?? "")?.[1];
+      if (!token) throw new ApiFailure("unauthorized");
+      const result = await capability.execute({ ...request.body, token });
+      if (result === "stale") throw new ApiFailure("not_found");
+      return reply.header("cache-control", "no-store").send({ status: result });
     },
   );
 }

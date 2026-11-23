@@ -1,12 +1,12 @@
 import type { ThreadTitleGenerationClaim } from "@hoox/thread-title";
 import type { Pool, PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
+import { PgRunDispatchCreation } from "./pg-run-dispatch.js";
 import {
   enqueueThreadTitleGeneration,
   isThreadTitleGenerationEnabled,
   PgThreadTitleGenerationStore,
 } from "./pg-thread-title-generation.js";
-import { PgRunDispatchCreation } from "./pg-run-dispatch.js";
 
 interface Statement {
   readonly sql: string;

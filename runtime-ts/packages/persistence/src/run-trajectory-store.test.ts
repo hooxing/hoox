@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
+import { describe, expect, it, vi } from "vitest";
 import {
   PgRunTrajectoryStore,
   RUN_TRAJECTORY_PAGE_BYTE_BUDGET,

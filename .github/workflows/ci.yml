@@ -193,7 +193,16 @@ jobs:
         # postgres-core 体量大，只运行 Agent 平台新增的用例；必须在 M4 删除受限角色之前执行。
         run: |
           pnpm --filter "@hoox/admin-control-api^..." build
-          pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts tests/integration/postgres-demo-webhook.integration.test.ts -t "带数据旧库升级|Webhook|默认 Agent|AgentDefinition|后台 Agent 管理|RunAgentSnapshot|外部工具注册管理|外部工具密文|外部工具 Agent 选择投影|外部工具原始名称迁移|外部工具快照视图|API Key|集成 Membership|Key 无法认证|down 的 DDL 与 ACL 收敛失败|down 只有显式 test 授权|Agent 自带 Skill"
+          pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-core.integration.test.ts tests/integration/postgres-demo-webhook.integration.test.ts -t "带数据旧库升级|Webhook|默认 Agent|AgentDefinition|后台 Agent 管理|RunAgentSnapshot|外部工具注册管理|外部工具密文|外部工具 Agent 选择投影|外部工具原始名称迁移|外部工具快照视图|API Key|集成 Membership|Key 无法认证|down 的 DDL 与 ACL 收敛失败|down 只有显式 test 授权|Agent 自带 Skill|评测|HTTP API 经真实 PostgreSQL RLS 隔离 Thread/Run 并完成取消"
+
+      - name: 验证 ResourceFS PostgreSQL 来源隔离与历史目录
+        env:
+          DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          MIGRATION_DATABASE_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-resource.integration.test.ts
 
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:

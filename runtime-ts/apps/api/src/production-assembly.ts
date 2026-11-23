@@ -159,6 +159,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           clientToolResults: persistence.clientToolResults,
           runFeedback: persistence.runFeedback,
           playground: persistence.playground,
+          evaluationCommand: persistence.evaluationCommand,
           apiKeys: persistence.apiKeys,
           personalizations: persistence.personalizations,
           scheduledTasks: persistence.scheduledTasks,

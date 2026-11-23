@@ -6,15 +6,14 @@ import {
   type ControlOperatorRole,
 } from "@hoox/admin-control";
 import {
+  type AgentAvailability,
+  type AgentRevisionContent,
   DomainError,
   tenantId,
   validateAgentRevisionContent,
   validateAgentVersionNotes,
-  type AgentAvailability,
-  type AgentRevisionContent,
 } from "@hoox/domain";
 import type { QueryResultRow } from "pg";
-import { mapPersistenceError, PersistenceError } from "./errors.js";
 import type {
   AgentDefinitionAdminRepositoryPort,
   AgentDefinitionRepositoryPort,
@@ -23,8 +22,9 @@ import type {
   StoredAgentRevision,
   StoredAgentRevisionSummary,
 } from "./agent-definition-port.js";
-import { mapSavedModelProviderConfiguration } from "./pg-admin-control.js";
+import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { EXTERNAL_TOOL_REVOCATION_LOCK } from "./external-tool-version-write.js";
+import { mapSavedModelProviderConfiguration } from "./pg-admin-control.js";
 import type { Pool, PoolClient } from "./postgres.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
 
@@ -789,6 +789,7 @@ export class PgAgentDefinitionRepository
     revisionId: string;
     idempotencyKey: string;
     expectedGeneration: number;
+    evaluationGate?: { readonly suiteId: string; readonly minimumPassRate: number };
   }): Promise<StoredAgentDefinition> {
     try {
       return await admin(this.pool, input.actorUserId, async (client) => {
@@ -808,6 +809,50 @@ export class PgAgentDefinitionRepository
         )
           throw new PersistenceError("CONSTRAINT_VIOLATION", "Agent 草稿 Revision 不存在");
         await validateDraft(client, revision.content);
+        if (input.evaluationGate !== undefined) {
+          const suite = await client.query<{ content_version: string }>(
+            "SELECT content_version::text FROM agent_evaluation_suites WHERE id=$1 AND definition_id=$2 FOR UPDATE",
+            [input.evaluationGate.suiteId, input.definitionId],
+          );
+          const suiteVersion = suite.rows[0]?.content_version;
+          const gate =
+            suiteVersion === undefined
+              ? undefined
+              : await client.query<{
+                  total_cases: string;
+                  passed_cases: string;
+                  result_count: string;
+                }>(
+                  `SELECT run.total_cases::text,
+                    count(result.case_id) FILTER (WHERE result.outcome='passed')::text AS passed_cases,
+                    count(result.case_id)::text AS result_count
+               FROM agent_evaluation_suites suite
+               JOIN agent_evaluation_runs run ON run.suite_id=suite.id
+               LEFT JOIN agent_evaluation_results result ON result.evaluation_run_id=run.id
+              WHERE suite.id=$1 AND suite.definition_id=$2 AND run.revision_id=$3
+                AND run.suite_version=$4 AND suite.content_version=$4
+                AND run.status='completed' AND run.total_cases>0
+              GROUP BY run.id ORDER BY run.finished_at DESC LIMIT 1`,
+                  [
+                    input.evaluationGate.suiteId,
+                    input.definitionId,
+                    input.revisionId,
+                    suiteVersion,
+                  ],
+                );
+          const result = gate?.rows[0];
+          if (
+            result === undefined ||
+            Number(result.result_count) !== Number(result.total_cases) ||
+            Number(result.passed_cases) / Number(result.total_cases) <
+              input.evaluationGate.minimumPassRate
+          ) {
+            throw new PersistenceError(
+              "CONSTRAINT_VIOLATION",
+              "指定评测集尚无该 Revision 的完整评测结果，或通过率未达到发布门槛",
+            );
+          }
+        }
         await client.query(
           "UPDATE agent_definition_tenants SET available=true WHERE definition_id=$1",
           [input.definitionId],

@@ -217,7 +217,7 @@ describe("PostgreSQL ResourceFS 稳定 Thread 入口", () => {
     expect(query?.sql).toContain("reference.purpose=version.blob_purpose");
   });
 
-  it("历史文件目录、普通资源目录和直接下载都按持久化来源排除 Playground 产物", async () => {
+  it("历史文件目录、普通资源目录和直接下载只接受 normal/api 来源", async () => {
     const client = new ScriptedHistoryLibraryClient();
     const catalog = new PgResourceFilesystemCatalog(poolFor(client));
     await catalog.listThreadIds({ tenantId: tenantId("tenant-a") });
@@ -242,9 +242,11 @@ describe("PostgreSQL ResourceFS 稳定 Thread 入口", () => {
         statement.sql.includes("artifact_publications publication"),
     );
     expect(sourceQueries.length).toBeGreaterThanOrEqual(6);
-    expect(sourceQueries.every((statement) => statement.sql.includes("origin='playground'"))).toBe(
-      true,
-    );
+    expect(
+      sourceQueries.every((statement) =>
+        /(?:source_run|publication_run)\.origin IN \('normal','api'\)/u.test(statement.sql),
+      ),
+    ).toBe(true);
   });
 
   it("Agent deliverable 直接复用 workspace Stable Blob", async () => {

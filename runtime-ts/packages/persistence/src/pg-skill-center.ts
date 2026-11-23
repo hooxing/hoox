@@ -4,8 +4,8 @@ import type {
   SkillCatalogPage,
   SkillCenterPort,
   SkillConfigureResult,
-  SkillInstallResult,
   SkillInstallation,
+  SkillInstallResult,
   SkillUninstallResult,
   TrustedSkillContext,
 } from "@hoox/skill";

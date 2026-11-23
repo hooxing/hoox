@@ -554,6 +554,7 @@ function fixture(
     readonly threadForks?: ApiDependencies["threadForks"];
     readonly localAccounts?: ApiDependencies["localAccounts"];
     readonly clientToolResults?: ApiDependencies["clientToolResults"];
+    readonly runFeedback?: ApiDependencies["runFeedback"];
     readonly apiKeys?: ApiDependencies["apiKeys"];
     readonly installation?: ApiDependencies["installation"];
     readonly demoAdminUserId?: string;
@@ -631,6 +632,7 @@ function fixture(
     },
     ...(options.localAccounts === undefined ? {} : { localAccounts: options.localAccounts }),
     ...(options.clientToolResults ? { clientToolResults: options.clientToolResults } : {}),
+    ...(options.runFeedback === undefined ? {} : { runFeedback: options.runFeedback }),
     ...(options.apiKeys === undefined ? {} : { apiKeys: options.apiKeys }),
     ...(options.installation === undefined ? {} : { installation: options.installation }),
     ...(options.demoAdminUserId === undefined ? {} : { demoAdminUserId: options.demoAdminUserId }),
@@ -1299,6 +1301,56 @@ describe("管理员 Playground 受理", () => {
 });
 
 describe("API Key 路由授权", () => {
+  it("公开反馈路由支持读取、修改、撤销并校验附言边界", async () => {
+    const execute = vi
+      .fn<NonNullable<ApiDependencies["runFeedback"]>["execute"]>()
+      .mockResolvedValueOnce({ feedback: null })
+      .mockResolvedValueOnce({
+        feedback: {
+          runId: "run_1",
+          revisionId: "revision_1",
+          userId: "user_owner_a",
+          rating: "up",
+          comment: "有帮助",
+          createdAt: baseTime,
+          updatedAt: baseTime,
+        },
+      })
+      .mockResolvedValueOnce({ feedback: null });
+    const { app } = fixture({ runFeedback: { execute } });
+    openApps.push(app);
+    const url = "/v1/threads/thread_1/runs/run_1/feedback";
+    const headers = { authorization: "Bearer token-a", "x-tenant-id": "tenant_owner_a" };
+    expect((await app.inject({ method: "GET", url, headers })).json().data).toEqual({
+      feedback: null,
+    });
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url,
+          headers,
+          payload: { rating: "up", comment: "有帮助" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await app.inject({ method: "DELETE", url, headers })).json().data).toEqual({
+      feedback: null,
+    });
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url,
+          headers,
+          payload: { rating: "up", comment: "x".repeat(2001) },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
+
   it("按 API Key 空间授权上传文件下载，并对作用域与空间失败关闭", async () => {
     const token = createApiKeyToken();
     const owner = personalBundle("owner_a");

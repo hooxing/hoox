@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
+import { describe, expect, it } from "vitest";
 import { assertPtcReceipt } from "./pg-runtime-rollout.js";
 
 describe("PTC 固定受控回执验证", () => {

@@ -1313,6 +1313,7 @@ const adminRunExplorerViews = [
   "admin_run_event_content",
   "admin_run_trajectory_directory",
   "admin_agent_metrics_hourly",
+  "admin_run_feedback_content",
 ] as const;
 
 async function hasRunCompactionSettingsState(client: PoolClient, schema: string): Promise<boolean> {
@@ -1404,6 +1405,14 @@ async function hasClientTools(client: PoolClient, schema: string): Promise<boole
   return result.rows[0]?.present === true;
 }
 
+async function hasRunFeedback(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.run_feedback',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasApiEndUserState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.api_end_users',$1::text)) IS NOT NULL AS present",
@@ -1429,6 +1438,8 @@ export async function activeTablePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
+  if (await hasRunFeedback(client, schema))
+    policy.set("run_feedback", new Set(["SELECT", "INSERT", "DELETE"]));
   if (await hasClientTools(client, schema))
     policy.set("client_tool_calls", new Set(["SELECT", "INSERT"]));
   if (await hasApiEndUserState(client, schema))
@@ -1642,6 +1653,8 @@ export async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  if (await hasRunFeedback(client, schema))
+    policy.set("run_feedback", new Set(["rating", "comment", "updated_at"]));
   if (await hasClientTools(client, schema)) {
     policy.set(
       "client_tool_calls",
@@ -2935,7 +2948,9 @@ async function assertAdminControlBoundary(
                           "admin_evaluation_queue",
                         ].includes(row.view_name)
                       ? enabled && (await hasAgentEvaluationExecutionState(client, context.schema))
-                      : runExplorerEnabled;
+                      : row.view_name === "admin_run_feedback_content"
+                        ? await hasRunFeedback(client, context.schema)
+                        : runExplorerEnabled;
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
@@ -3565,6 +3580,12 @@ async function rebindRoleScopedPolicies(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const schema = quoteIdentifier(context.schema);
+  if (await hasRunFeedback(client, context.schema)) {
+    await client.query(
+      `ALTER POLICY run_feedback_own ON ${schema}.run_feedback TO ${quoteIdentifier(context.runtimeRole)};
+       ALTER POLICY run_feedback_admin_projection ON ${schema}.run_feedback TO ${quoteIdentifier(context.migratorRole)}`,
+    );
+  }
   if (await hasApiEndUserState(client, context.schema)) {
     await client.query(
       `ALTER POLICY end_users_runtime ON ${schema}.api_end_users TO ${quoteIdentifier(context.runtimeRole)};
@@ -3970,15 +3991,20 @@ async function grantAdminControlAccess(
     const metricsView = (await hasAgentMetricsState(client, context.schema))
       ? `, ${schema}.admin_agent_metrics_hourly`
       : "";
+    const feedbackView = (await hasRunFeedback(client, context.schema))
+      ? `, ${schema}.admin_run_feedback_content`
+      : "";
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_run_content_access_audits TO ${control};
        GRANT SELECT ON TABLE ${adminRunExplorerViews
          .filter(
            (view) =>
-             view !== "admin_run_trajectory_directory" && view !== "admin_agent_metrics_hourly",
+             view !== "admin_run_trajectory_directory" &&
+             view !== "admin_agent_metrics_hourly" &&
+             view !== "admin_run_feedback_content",
          )
          .map((view) => `${schema}.${view}`)
-         .join(",")}${trajectoryView}${metricsView} TO ${control}`,
+         .join(",")}${trajectoryView}${metricsView}${feedbackView} TO ${control}`,
     );
   }
   if (await hasAdminIntegrationTenantDirectoryState(client, context.schema)) {
@@ -4423,6 +4449,10 @@ export async function bootstrapRuntimeAccessOnClient(
   );
   await rebindRoleScopedPolicies(client, context);
   await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
+  if (await hasRunFeedback(client, context.schema))
+    await client.query(
+      `GRANT SELECT,INSERT,DELETE,UPDATE(rating,comment,updated_at) ON ${schema}.run_feedback TO ${role}`,
+    );
   if (await hasClientTools(client, context.schema))
     await client.query(
       `GRANT SELECT,INSERT,UPDATE(outcome,result_digest,response_text,truncated) ON ${schema}.client_tool_calls TO ${role}`,

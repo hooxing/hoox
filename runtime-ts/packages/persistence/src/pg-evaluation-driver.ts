@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { evaluateAssertion, type EvaluationEvidence } from "@hoox/admin-control";
+import { type EvaluationEvidence, evaluateAssertion } from "@hoox/admin-control";
 import type { EvaluationCase, EvaluationCaseResult } from "@hoox/protocol";
 import { refreshEvaluationBatch } from "./pg-evaluation.js";
 import type { EvaluationCommand, EvaluationCommandResult } from "./pg-evaluation-command.js";

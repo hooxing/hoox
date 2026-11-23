@@ -1,22 +1,22 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
-  apiKeyScope,
-  isoTimestamp,
   type ApiKeyRecord,
   type ApiKeyScope,
+  apiKeyScope,
+  isoTimestamp,
   tenantId,
   userId,
 } from "@hoox/domain";
 import {
-  hashApiKey,
-  isExternalEndUserId,
   type ApiKeyAuthenticationPort,
   type ApiKeyPrincipal,
+  hashApiKey,
+  isExternalEndUserId,
 } from "@hoox/identity";
 import type { PoolClient, QueryResultRow } from "pg";
 import { PersistenceError } from "./errors.js";
 import type { TenantScope } from "./ports.js";
-import { TransactionCommitUnknownError, withTransaction, type Pool as PgPool } from "./postgres.js";
+import { type Pool as PgPool, TransactionCommitUnknownError, withTransaction } from "./postgres.js";
 
 interface ApiKeyRow extends QueryResultRow {
   id: string;

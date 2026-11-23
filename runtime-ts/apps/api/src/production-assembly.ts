@@ -157,6 +157,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           repositories: persistence.repositories,
           agentDefinitions: persistence.agentDefinitions,
           clientToolResults: persistence.clientToolResults,
+          runFeedback: persistence.runFeedback,
           playground: persistence.playground,
           evaluationCommand: persistence.evaluationCommand,
           apiKeys: persistence.apiKeys,

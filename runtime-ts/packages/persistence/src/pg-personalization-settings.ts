@@ -6,9 +6,9 @@ import {
 import type { Pool, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {
-  PersonalPersonalizationView,
   PersonalizationSettingsPort,
   PersonalizationUpdateResult,
+  PersonalPersonalizationView,
   RunPersonalizationReadPort,
   TeamPersonalizationView,
   TenantScope,

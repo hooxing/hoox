@@ -1,4 +1,4 @@
-import { transitionRun, type IsoTimestamp, type Run } from "@hoox/domain";
+import { type IsoTimestamp, type Run, transitionRun } from "@hoox/domain";
 import type { RunRepository, TenantScope } from "./ports.js";
 
 export async function cancelScopedRun(

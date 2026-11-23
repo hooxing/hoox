@@ -5,8 +5,8 @@ import type {
   EvaluationRunSummary,
   EvaluationSuite,
 } from "@hoox/protocol";
-import type { Pool, PoolClient } from "./postgres.js";
 import { PersistenceError } from "./errors.js";
+import type { Pool, PoolClient } from "./postgres.js";
 import { withTransaction } from "./postgres.js";
 
 async function authorized(client: PoolClient, actorUserId: string): Promise<boolean> {

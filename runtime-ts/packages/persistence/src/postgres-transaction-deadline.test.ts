@@ -1,8 +1,8 @@
 import { createServer, type Socket } from "node:net";
 import { type Client, Pool, type PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { TransactionCommitUnknownError, withTransaction } from "./postgres.js";
 import { PgWebhookOutboxStore } from "./pg-webhooks.js";
+import { TransactionCommitUnknownError, withTransaction } from "./postgres.js";
 
 function fixture(hangOn: string) {
   const release = vi.fn();

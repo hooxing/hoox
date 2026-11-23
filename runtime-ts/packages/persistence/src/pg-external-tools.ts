@@ -1,9 +1,9 @@
-import { EXTERNAL_TOOL_REVOCATION_LOCK } from "./external-tool-version-write.js";
-import type { Pool, PoolClient } from "pg";
 import type { ExternalToolVersion } from "@hoox/domain";
 import { validateExternalToolVersion } from "@hoox/domain";
-import { withTransaction } from "./postgres.js";
+import type { Pool, PoolClient } from "pg";
 import type { ExternalToolCredentialCipher } from "./external-tool-credential.js";
+import { EXTERNAL_TOOL_REVOCATION_LOCK } from "./external-tool-version-write.js";
+import { withTransaction } from "./postgres.js";
 
 export interface ExternalToolAdminProjection extends Omit<ExternalToolVersion, "credentialRef"> {
   readonly credentialRef: string | null;

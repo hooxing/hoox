@@ -365,6 +365,10 @@ export interface AgentMetricsBucket {
   readonly successRate: number | null;
   readonly failureRate: number | null;
   readonly resultUnknownRate: number | null;
+  readonly feedbackUpCount: number;
+  readonly feedbackDownCount: number;
+  readonly feedbackUpRate: number | null;
+  readonly feedbackDownRate: number | null;
   readonly toolFailureRate: number | null;
   readonly latencyP50Ms: number | null;
   readonly latencyP90Ms: number | null;

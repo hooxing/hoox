@@ -9,6 +9,13 @@ import type {
 import { archiveThread, isoTimestamp, renameThread } from "@hoox/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
+import { createRunConfigurationSnapshots } from "./pg-run-agent-snapshot.js";
+import {
+  cancelThreadQueuedRun,
+  lockThreadExecutionHead,
+  settleActiveThreadRun,
+} from "./pg-thread-run-queue.js";
+import { enqueueRunStatusWebhook } from "./pg-webhooks.js";
 import type {
   ArchiveThreadCommandPort,
   ArchiveThreadResult,
@@ -16,8 +23,8 @@ import type {
   CreateResult,
   RenamePersonalThreadCommandPort,
   RenamePersonalThreadResult,
-  RunRepository,
   RunReadSnapshot,
+  RunRepository,
   TenantBundle,
   TenantRepository,
   TenantScope,
@@ -28,15 +35,8 @@ import type {
   VersionedUpdateResult,
   WorkspaceRepository,
 } from "./ports.js";
-import { createRunConfigurationSnapshots } from "./pg-run-agent-snapshot.js";
-import { enqueueRunStatusWebhook } from "./pg-webhooks.js";
 import { withTenantTransaction } from "./postgres.js";
 import { mapRun, mapTenant, mapTenantBundle, mapThread, mapWorkspace } from "./row-mappers.js";
-import {
-  cancelThreadQueuedRun,
-  lockThreadExecutionHead,
-  settleActiveThreadRun,
-} from "./pg-thread-run-queue.js";
 
 const tenantColumns = `
   t.id AS tenant_id, t.kind AS tenant_kind, t.owner_user_id, t.display_name,

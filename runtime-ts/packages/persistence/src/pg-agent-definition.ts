@@ -6,15 +6,14 @@ import {
   type ControlOperatorRole,
 } from "@hoox/admin-control";
 import {
+  type AgentAvailability,
+  type AgentRevisionContent,
   DomainError,
   tenantId,
   validateAgentRevisionContent,
   validateAgentVersionNotes,
-  type AgentAvailability,
-  type AgentRevisionContent,
 } from "@hoox/domain";
 import type { QueryResultRow } from "pg";
-import { mapPersistenceError, PersistenceError } from "./errors.js";
 import type {
   AgentDefinitionAdminRepositoryPort,
   AgentDefinitionRepositoryPort,
@@ -23,8 +22,9 @@ import type {
   StoredAgentRevision,
   StoredAgentRevisionSummary,
 } from "./agent-definition-port.js";
-import { mapSavedModelProviderConfiguration } from "./pg-admin-control.js";
+import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { EXTERNAL_TOOL_REVOCATION_LOCK } from "./external-tool-version-write.js";
+import { mapSavedModelProviderConfiguration } from "./pg-admin-control.js";
 import type { Pool, PoolClient } from "./postgres.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
 

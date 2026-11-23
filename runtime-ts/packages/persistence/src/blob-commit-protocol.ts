@@ -1,11 +1,11 @@
 import {
-  type StableBlobRef,
-  type StableBlobLifecycleAllocation,
-  type PromotionAuthorizationRef,
-  type StagedBlobRef,
-  type TenantBlobScope,
   assertBlobRef,
   assertTenantScope,
+  type PromotionAuthorizationRef,
+  type StableBlobLifecycleAllocation,
+  type StableBlobRef,
+  type StagedBlobRef,
+  type TenantBlobScope,
 } from "./blob-store.js";
 
 /**

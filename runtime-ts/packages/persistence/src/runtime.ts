@@ -1,4 +1,3 @@
-import { PgEvaluationCommand } from "./pg-evaluation-command.js";
 import type { PromotionCapabilityVerifier, ResourceCatalog } from "@hoox/resource";
 import type { BlobStore } from "./blob-store.js";
 import { PersistenceError } from "./errors.js";
@@ -8,18 +7,20 @@ import {
   type ModelWireTraceReadPort,
   PgModelWireTraceReadRepository,
 } from "./model-wire-trace-read.js";
+import { PgAgentDefinitionRepository } from "./pg-agent-definition.js";
+import { PgApiKeyRepository } from "./pg-api-keys.js";
 import { type PgBlobLifecycleOptions, PgBlobLifecycleRepository } from "./pg-blob-lifecycle.js";
+import { PgClientToolResults } from "./pg-client-tool-calls.js";
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
   PgRenamePersonalThreadCommand,
 } from "./pg-core-repositories.js";
+import { PgEvaluationCommand } from "./pg-evaluation-command.js";
 import { PgIdentityConfigurationRepository } from "./pg-identity-configuration.js";
-import { PgClientToolResults } from "./pg-client-tool-calls.js";
-import { PgPlaygroundRepository } from "./pg-playground.js";
-import { PgApiKeyRepository } from "./pg-api-keys.js";
 import { PgLocalAccountRepository } from "./pg-local-account.js";
 import { PgPersonalizationSettingsRepository } from "./pg-personalization-settings.js";
+import { PgPlaygroundRepository } from "./pg-playground.js";
 import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
 import {
   PgResourceCatalog,
@@ -28,23 +29,23 @@ import {
 } from "./pg-resource-library.js";
 import { PgResourceUploadRepository } from "./pg-resource-upload.js";
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
-import { PgScheduledTaskRepository } from "./pg-scheduled-tasks.js";
 import { PgRunEventWakeListener } from "./pg-run-event-wake.js";
+import { PgRunFeedbackRepository } from "./pg-run-feedback.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
+import { PgScheduledTaskRepository } from "./pg-scheduled-tasks.js";
 import { PgSkillCenterRepository } from "./pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "./pg-skill-filesystem.js";
-import { PgThreadCreation } from "./pg-thread-creation.js";
-import { PgAgentDefinitionRepository } from "./pg-agent-definition.js";
 import { PgTeamCollaborationRepository, PgThreadForkRepository } from "./pg-team-collaboration.js";
+import { PgThreadCreation } from "./pg-thread-creation.js";
 import { PgThreadInputRouting } from "./pg-thread-input.js";
 import type {
   ArchiveThreadCommandPort,
   CoreRepositories,
   RenamePersonalThreadCommandPort,
   RunExperienceReadPort,
+  TenantScope,
   ThreadContextReadPort,
   ThreadContinuityReadPort,
-  TenantScope,
 } from "./ports.js";
 import {
   createPostgresPool,
@@ -95,6 +96,7 @@ export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
   readonly clientToolResults: PgClientToolResults;
   readonly evaluationCommand: PgEvaluationCommand;
+  readonly runFeedback: PgRunFeedbackRepository;
   readonly playground: PgPlaygroundRepository;
   readonly agentDefinitions: PgAgentDefinitionRepository;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -144,6 +146,7 @@ export function createApiPersistenceRuntime(
     repositories: new PgCoreRepositories(pool),
     clientToolResults: new PgClientToolResults(pool),
     evaluationCommand: new PgEvaluationCommand(pool),
+    runFeedback: new PgRunFeedbackRepository(pool),
     playground: new PgPlaygroundRepository(pool),
     agentDefinitions: new PgAgentDefinitionRepository(pool),
     archiveThread: new PgArchiveThreadCommand(pool),

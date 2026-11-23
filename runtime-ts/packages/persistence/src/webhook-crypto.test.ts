@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { verifyWebhookSignature, WebhookSecretCipher, signWebhook } from "./webhook-crypto.js";
+import { signWebhook, verifyWebhookSignature, WebhookSecretCipher } from "./webhook-crypto.js";
 
 describe("Webhook secret and request signatures", () => {
   it("encrypts secrets with tenant and webhook identity bound as AAD", () => {

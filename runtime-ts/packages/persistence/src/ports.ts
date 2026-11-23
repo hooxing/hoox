@@ -1,6 +1,7 @@
 import type {
   Membership,
   Run,
+  RunPersonalizationSnapshot,
   Tenant,
   TenantId,
   Thread,
@@ -11,7 +12,6 @@ import type {
   WorkspaceId,
   WorkspaceRevisionCommitPort,
   WorkspaceWriteScope,
-  RunPersonalizationSnapshot,
 } from "@hoox/domain";
 import type { ResourceAttachmentReference } from "@hoox/resource";
 import type { ExplicitSkillInvocation } from "@hoox/skill";

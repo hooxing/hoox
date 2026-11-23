@@ -14,13 +14,13 @@ import {
   digestControlRequest,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
+  normalizeRuntimeSettingsConfiguration,
+  normalizeStoredMemoryProviderConfiguration,
+  normalizeStoredModelProviderConfiguration,
   type PinnedRunModelConfiguration,
   type PinnedRunModelConfigurationPort,
   type PinnedRunModelReference,
   PinnedRunModelUnavailableError,
-  normalizeRuntimeSettingsConfiguration,
-  normalizeStoredMemoryProviderConfiguration,
-  normalizeStoredModelProviderConfiguration,
   type PlatformUserPage,
   type PlatformUserStatus,
   type PlatformUserSummary,
@@ -1060,7 +1060,8 @@ export class PgAdminControlRepository
                   run_count,succeeded_count,failed_count,result_unknown_count,
                   success_rate,failure_rate,result_unknown_rate,tool_failure_rate,
                   latency_p50_ms,latency_p90_ms,latency_p99_ms,average_model_rounds,
-                  tool_calls,failed_tool_calls,input_tokens,output_tokens,cache_read_tokens,cost
+                  tool_calls,failed_tool_calls,input_tokens,output_tokens,cache_read_tokens,cost,
+                  feedback_up_count,feedback_down_count,feedback_up_rate,feedback_down_rate
              FROM admin_agent_metrics_hourly
             ORDER BY window_start,agent_definition_id,agent_revision_id,tenant_id,currency
             LIMIT 10001`,
@@ -1089,6 +1090,10 @@ export class PgAdminControlRepository
               successRate: nullableNum(row.success_rate),
               failureRate: nullableNum(row.failure_rate),
               resultUnknownRate: nullableNum(row.result_unknown_rate),
+              feedbackUpCount: num(row.feedback_up_count),
+              feedbackDownCount: num(row.feedback_down_count),
+              feedbackUpRate: nullableNum(row.feedback_up_rate),
+              feedbackDownRate: nullableNum(row.feedback_down_rate),
               toolFailureRate: nullableNum(row.tool_failure_rate),
               latencyP50Ms: nullableNum(row.latency_p50_ms),
               latencyP90Ms: nullableNum(row.latency_p90_ms),

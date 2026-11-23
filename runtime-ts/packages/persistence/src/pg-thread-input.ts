@@ -3,16 +3,6 @@ import { isoTimestamp, type Run, rehydrateRun } from "@hoox/domain";
 import { historyFilesystemEntryName, historyFilesystemTimestamp } from "@hoox/resource";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
-import type {
-  ThreadInputReceiptView,
-  ThreadInputRoutingPort,
-  ThreadInputSubmitResult,
-} from "./ports.js";
-import {
-  TransactionCommitUnknownError,
-  withRetriedSerializableTenantTransaction,
-  withTenantTransaction,
-} from "./postgres.js";
 import {
   allocateHistoryName,
   ensureHistoryDirectory,
@@ -24,14 +14,24 @@ import {
 } from "./pg-run-agent-snapshot.js";
 import { SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
 import {
-  enqueueThreadTitleGeneration,
-  isThreadTitleGenerationEnabled,
-} from "./pg-thread-title-generation.js";
-import {
   activateNextThreadRun,
   LegacyRunDrainRequiredError,
   lockOrCreateThreadExecutionHead,
 } from "./pg-thread-run-queue.js";
+import {
+  enqueueThreadTitleGeneration,
+  isThreadTitleGenerationEnabled,
+} from "./pg-thread-title-generation.js";
+import type {
+  ThreadInputReceiptView,
+  ThreadInputRoutingPort,
+  ThreadInputSubmitResult,
+} from "./ports.js";
+import {
+  TransactionCommitUnknownError,
+  withRetriedSerializableTenantTransaction,
+  withTenantTransaction,
+} from "./postgres.js";
 
 const maxInputBytes = 1_048_576;
 const attachmentIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;

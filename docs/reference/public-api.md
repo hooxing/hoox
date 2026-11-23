@@ -56,6 +56,9 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads" \
 | `POST /v1/threads/{threadId}/runs` | `runs:create` | 创建 Run 并提交初始输入 |
 | `GET /v1/threads/{threadId}/runs/{runId}` | `runs:read` | 查询 Run |
 | `DELETE /v1/threads/{threadId}/runs/{runId}` | `runs:create` | 请求取消 Run |
+| `GET /v1/threads/{threadId}/runs/{runId}/feedback` | `runs:read` | 读取当前终端用户的反馈（需 `Hoox-End-User`） |
+| `PUT /v1/threads/{threadId}/runs/{runId}/feedback` | `runs:create` | 创建或修改当前终端用户反馈（评分 `up`/`down`，可选附言最多 2000 字符） |
+| `DELETE /v1/threads/{threadId}/runs/{runId}/feedback` | `runs:create` | 撤销当前终端用户反馈 |
 | `GET /v1/threads/{threadId}/runs/{runId}/events` | `runs:read` | 按序号分页读取事件 |
 | `GET /v1/threads/{threadId}/runs/{runId}/events/stream` | `runs:read` | SSE 订阅与续连 |
 | `POST /v1/threads/{threadId}/runs/{runId}/tool-results` | `tool-results:submit` | 按调用 ID 回传执行结果（仅 API Key） |
@@ -65,6 +68,8 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads" \
 | `GET /v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/preview` | `runs:read` | 安全预览 Artifact |
 | `GET /v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/download` | `runs:read` | 获取 Artifact 下载交付 |
 | `GET /v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/content` | `runs:read` | 读取有界原始字节 |
+
+反馈通过 `Hoox-End-User` 映射到集成身份下的终端用户；每位用户对同一 Run 只有一条反馈。API 响应只返回当前用户自己的反馈，Run 不存在、不可见或来源为 Playground/评测时返回 `404`。公开 API Schema 及 SDK 类型以 OpenAPI 文档为准。
 
 Run 在公开 API 入口创建时，来源由服务端持久化为 `api`；客户端不能在请求体中指定来源。创建 Thread、创建 Run 和上传文件都要求 `Idempotency-Key`；工具回传按 `callId` 去重。相同 Key 与相同请求载荷重放原结果；相同 Key 携带不同载荷返回 409。创建 Thread、创建 Run 和回传工具结果使用 `application/json`，上传使用 `application/octet-stream`；其他媒体类型返回 415。
 

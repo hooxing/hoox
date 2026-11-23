@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type { SandboxProviderKey } from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type { Pool } from "pg";
 import { readSessionSandboxPolicy } from "./pg-sandbox-configuration.js";
 import { withTenantTransaction } from "./postgres.js";

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isoTimestamp, userId, type UserId } from "@hoox/domain";
+import { isoTimestamp, type UserId, userId } from "@hoox/domain";
 import type {
   SkillPublicationAuthorizationPort,
   SkillPublicationCommandResult,

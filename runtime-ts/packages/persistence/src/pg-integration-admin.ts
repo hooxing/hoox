@@ -1,16 +1,16 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import {
+  type ApiKeyAttributes,
   apiKeyAttributes,
   isoTimestamp,
   tenantId,
   userId,
-  type ApiKeyAttributes,
 } from "@hoox/domain";
 import { createApiKeyToken, hashApiKey } from "@hoox/identity";
 import type { Pool, PoolClient } from "pg";
-import type { TenantScope } from "./ports.js";
 import { PgApiKeyRepository } from "./pg-api-keys.js";
 import { PgWebhookRepository } from "./pg-webhooks.js";
+import type { TenantScope } from "./ports.js";
 import { withTransaction } from "./postgres.js";
 import type { WebhookSecretCipher } from "./webhook-crypto.js";
 

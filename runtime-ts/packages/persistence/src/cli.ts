@@ -1,7 +1,7 @@
 import { loadDatabaseDevelopmentEnvironment } from "./development-database-environment.js";
 import { PersistenceError } from "./errors.js";
-import { migrateDown, migrateUp } from "./migrations.js";
 import { assertDestructiveMigrationAllowed } from "./migration-safety.js";
+import { migrateDown, migrateUp } from "./migrations.js";
 import { createPostgresPool, probePostgres } from "./postgres.js";
 
 const environment = await loadDatabaseDevelopmentEnvironment(

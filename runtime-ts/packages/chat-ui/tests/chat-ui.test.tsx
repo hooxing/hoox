@@ -26,6 +26,41 @@ afterEach(() => {
   for (const host of hosts.splice(0)) host.remove();
 });
 
+async function submitMessage(host: HTMLElement, value: string) {
+  const textarea = host.querySelector("textarea");
+  if (!textarea) throw new Error("缺少输入框");
+  const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  await act(async () => {
+    valueSetter?.call(textarea, value);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    host
+      .querySelector("form")
+      ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+function runEvent(
+  status: "running" | "waiting" | "succeeded" | "failed" | "cancelled",
+  items = [],
+): RunStreamEvent {
+  return {
+    event: "run-events",
+    id: "attempt-0",
+    data: {
+      run: {
+        id: "run_embed",
+        threadId: "thread_embed",
+        tenantId: "tenant_embed",
+        status,
+        createdAt: "",
+        updatedAt: "",
+      },
+      page: { attemptId: "attempt", items },
+    },
+  };
+}
+
 describe("chat-ui Markdown", () => {
   it("拒绝原始 HTML、脚本、危险链接和远程图片", () => {
     const host = mount(
@@ -160,5 +195,136 @@ describe("ChatWidget 客户端工具", () => {
       expect.any(Object),
     );
     expect(host.textContent).toContain("已查询账户");
+  });
+
+  it("失败终态显示不含内部错误的状态提示", async () => {
+    const client = {
+      createThread: vi.fn(async () => ({ id: "thread_embed" })),
+      createRun: vi.fn(async () => ({ id: "run_embed" })),
+      streamRunEvents: vi.fn(async function* () {
+        yield runEvent("failed");
+      }),
+      listArtifacts: vi.fn(async () => ({ items: [] })),
+    } as unknown as HooxClient;
+    const host = mount(<ChatWidget client={client} agentDefinitionId="agent_demo" />);
+    await submitMessage(host, "触发失败");
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("暂时无法完成请求");
+  });
+
+  it("卸载时取消 Artifact 请求，且迟到结果不能覆盖较新的预览", async () => {
+    const artifact = (id: string) => ({
+      id,
+      runId: "run_embed",
+      threadId: "thread_embed",
+      name: `${id}.txt`,
+      mediaType: "text/plain",
+      size: 1,
+      createdAt: "",
+    });
+    let resolveFirst: ((value: { artifact: object; text: string }) => void) | undefined;
+    let firstSignal: AbortSignal | undefined;
+    const client = {
+      createThread: vi.fn(async () => ({ id: "thread_embed" })),
+      createRun: vi.fn(async () => ({ id: "run_embed" })),
+      streamRunEvents: vi.fn(async function* () {
+        yield runEvent("succeeded");
+      }),
+      listArtifacts: vi.fn(async () => ({ items: [artifact("one"), artifact("two")] })),
+      previewArtifact: vi.fn(
+        (_threadId: string, _runId: string, id: string, options?: { signal?: AbortSignal }) => {
+          if (id === "one") {
+            firstSignal = options?.signal;
+            return new Promise<{ artifact: object; text: string }>((resolve) => {
+              resolveFirst = resolve;
+            });
+          }
+          return Promise.resolve({ artifact: {}, text: "second preview" });
+        },
+      ),
+    } as unknown as HooxClient;
+    const host = mount(<ChatWidget client={client} agentDefinitionId="agent_demo" />);
+    await submitMessage(host, "完成任务");
+    const previewButtons = host.querySelectorAll(".hoox-chat-artifacts button");
+    await act(async () => {
+      (previewButtons[0] as HTMLButtonElement).click();
+      (previewButtons[2] as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(firstSignal?.aborted).toBe(true);
+    expect(host.textContent).toContain("second preview");
+    await act(async () => {
+      resolveFirst?.({ artifact: {}, text: "stale preview" });
+      await Promise.resolve();
+    });
+    expect(host.textContent).not.toContain("stale preview");
+
+    await act(async () => (previewButtons[0] as HTMLButtonElement).click());
+    const unmountSignal = firstSignal;
+    const root = roots.at(-1);
+    if (!root) throw new Error("缺少 React root");
+    await act(async () => root.unmount());
+    roots.splice(roots.indexOf(root), 1);
+    expect(unmountSignal?.aborted).toBe(true);
+  });
+
+  it("并发客户端工具全部结束前保持忙碌状态", async () => {
+    let releaseFirst: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    const makeAction = (callId: string, sequence: number) => ({
+      eventId: `attempt-${sequence}`,
+      sequence,
+      type: "requires_action",
+      kind: "agent_event" as const,
+      payload: {
+        threadId: "thread_embed",
+        runId: "run_embed",
+        callId,
+        toolName: "slow_action",
+        arguments: { callId },
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+      },
+      occurredAt: "",
+    });
+    const client = {
+      createThread: vi.fn(async () => ({ id: "thread_embed" })),
+      createRun: vi.fn(async () => ({ id: "run_embed" })),
+      streamRunEvents: vi.fn(async function* () {
+        yield {
+          ...runEvent("waiting"),
+          data: {
+            ...runEvent("waiting").data,
+            page: { attemptId: "attempt", items: [makeAction("one", 0), makeAction("two", 1)] },
+          },
+        };
+        yield runEvent("succeeded");
+      }),
+      submitToolResult: vi.fn(async () => ({ accepted: true as const })),
+      listArtifacts: vi.fn(async () => ({ items: [] })),
+    } as unknown as HooxClient;
+    const host = mount(
+      <ChatWidget
+        client={client}
+        agentDefinitionId="agent_demo"
+        tools={{
+          slow_action: async (args) =>
+            new Promise<string>((resolve) => {
+              if (args.callId === "one") releaseFirst = () => resolve("one");
+              else releaseSecond = () => resolve("two");
+            }),
+        }}
+      />,
+    );
+    await submitMessage(host, "并发操作");
+    expect(host.textContent).toContain("正在处理页面操作");
+    await act(async () => {
+      releaseFirst?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(host.textContent).toContain("正在处理页面操作");
+    await act(async () => {
+      releaseSecond?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(host.textContent).not.toContain("正在处理页面操作");
   });
 });

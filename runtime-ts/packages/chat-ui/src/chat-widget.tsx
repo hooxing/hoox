@@ -32,6 +32,7 @@ const copy = {
     placeholder: "输入消息…",
     working: "正在回复…",
     failed: "暂时无法完成请求，请重试。",
+    cancelled: "回复已取消。",
     artifacts: "文件与交付物",
     download: "下载",
     preview: "预览",
@@ -43,6 +44,7 @@ const copy = {
     placeholder: "Type a message…",
     working: "Replying…",
     failed: "The request could not be completed. Please try again.",
+    cancelled: "The reply was cancelled.",
     artifacts: "Files and artifacts",
     download: "Download",
     preview: "Preview",
@@ -82,26 +84,38 @@ export function ChatWidget({
   const [busy, setBusy] = useState(false);
   const [toolBusy, setToolBusy] = useState(false);
   const [error, setError] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
   const [artifacts, setArtifacts] = useState<readonly ArtifactDto[]>([]);
   const [preview, setPreview] = useState<{ readonly text: string } | { readonly url: string }>();
   const [downloadUrl, setDownloadUrl] = useState<string>();
   const controller = useRef<AbortController | undefined>(undefined);
+  const artifactController = useRef<AbortController | undefined>(undefined);
+  const artifactRequest = useRef(0);
   const clientTools = useMemo(() => {
     const registered = new ClientTools();
+    const activeCalls = new Set<string>();
     for (const [name, handler] of Object.entries(tools)) {
       registered.register(name, async (argumentsValue, context) => {
+        activeCalls.add(context.callId);
         setToolBusy(true);
         try {
           return await handler(argumentsValue, context);
         } finally {
-          setToolBusy(false);
+          activeCalls.delete(context.callId);
+          setToolBusy(activeCalls.size > 0);
         }
       });
     }
     return registered;
   }, [tools]);
 
-  useEffect(() => () => controller.current?.abort(), []);
+  useEffect(
+    () => () => {
+      controller.current?.abort();
+      artifactController.current?.abort();
+    },
+    [],
+  );
 
   const themeStyle: CSSProperties = {
     ...(theme?.accentColor ? { "--hoox-chat-accent": theme.accentColor } : {}),
@@ -117,6 +131,9 @@ export function ChatWidget({
     if (!input || busy) return;
     setBusy(true);
     setError(false);
+    setCancelled(false);
+    artifactController.current?.abort();
+    artifactRequest.current += 1;
     setPreview(undefined);
     setDownloadUrl(undefined);
     setDraft("");
@@ -160,7 +177,13 @@ export function ChatWidget({
             });
           }
         }
-        if (["succeeded", "failed", "cancelled"].includes(event.data.run.status)) {
+        if (
+          ["succeeded", "failed", "cancelled"].includes(event.data.run.status) ||
+          event.data.run.executionStatus === "recovery_required"
+        ) {
+          if (event.data.run.status === "failed") setError(true);
+          if (event.data.run.status === "cancelled") setCancelled(true);
+          if (event.data.run.executionStatus === "recovery_required") setError(true);
           const result = await client.listArtifacts(activeThreadId, run.id, {
             signal: runController.signal,
           });
@@ -181,23 +204,43 @@ export function ChatWidget({
 
   async function showPreview(artifact: ArtifactDto) {
     if (!threadId) return;
+    artifactController.current?.abort();
+    const currentRequest = ++artifactRequest.current;
+    const requestController = new AbortController();
+    artifactController.current = requestController;
     try {
-      const result = await client.previewArtifact(threadId, artifact.runId, artifact.id);
+      const result = await client.previewArtifact(threadId, artifact.runId, artifact.id, {
+        signal: requestController.signal,
+      });
+      if (currentRequest !== artifactRequest.current) return;
       if ("text" in result) setPreview({ text: result.text });
       else setPreview({ url: safeDeliveryUrl(result.url) });
     } catch {
-      setError(true);
+      if (!requestController.signal.aborted && currentRequest === artifactRequest.current)
+        setError(true);
+    } finally {
+      if (artifactController.current === requestController) artifactController.current = undefined;
     }
   }
 
   async function download(artifact: ArtifactDto) {
     if (!threadId) return;
+    artifactController.current?.abort();
+    const currentRequest = ++artifactRequest.current;
+    const requestController = new AbortController();
+    artifactController.current = requestController;
     try {
-      const result = await client.downloadArtifact(threadId, artifact.runId, artifact.id);
+      const result = await client.downloadArtifact(threadId, artifact.runId, artifact.id, {
+        signal: requestController.signal,
+      });
+      if (currentRequest !== artifactRequest.current) return;
       if ("url" in result) setDownloadUrl(safeDeliveryUrl(result.url));
       else setPreview({ text: result.text });
     } catch {
-      setError(true);
+      if (!requestController.signal.aborted && currentRequest === artifactRequest.current)
+        setError(true);
+    } finally {
+      if (artifactController.current === requestController) artifactController.current = undefined;
     }
   }
 
@@ -230,6 +273,11 @@ export function ChatWidget({
             {labels.failed}
           </p>
         )}
+        {cancelled && (
+          <p className="hoox-chat-status" role="status">
+            {labels.cancelled}
+          </p>
+        )}
       </div>
       {preview && (
         <section className="hoox-chat-preview" aria-label={labels.preview}>
@@ -240,7 +288,14 @@ export function ChatWidget({
               {labels.openFile}
             </a>
           )}
-          <button type="button" onClick={() => setPreview(undefined)}>
+          <button
+            type="button"
+            onClick={() => {
+              artifactController.current?.abort();
+              artifactRequest.current += 1;
+              setPreview(undefined);
+            }}
+          >
             ×
           </button>
         </section>

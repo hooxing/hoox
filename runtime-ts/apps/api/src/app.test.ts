@@ -1213,6 +1213,7 @@ describe("管理员 Playground 受理", () => {
         url: "/internal/evaluation-command",
         headers: { authorization: `Bearer ${bearer}` },
         payload: {
+          batchId: "batch_owner",
           tenantId: "tenant_owner",
           userId: "user_owner",
           generation: "1",

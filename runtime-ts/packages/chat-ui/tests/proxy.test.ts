@@ -46,20 +46,21 @@ describe("示例同源代理", () => {
       expect(new Headers(init.headers).get("x-api-key")).toBeNull();
       return Response.json({ version: "v1", requestId: "request", data: { items: [] } });
     });
-    const proxy = createHooxProxy({
-      apiOrigin: "https://hoox.example.invalid",
-      apiKey: "server-only-key",
-      appOrigin: "http://127.0.0.1:4173",
-      sessionToken: "session-placeholder",
-      endUserId: "Customer:server-session",
-      fetcher,
-    });
+    let proxy: ReturnType<typeof createHooxProxy>;
     server = createServer((request, response) => void proxy(request, response));
     await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("代理测试服务器没有监听地址");
-    const appOrigin = "http://127.0.0.1:4173";
     const target = `http://127.0.0.1:${address.port}`;
+    const appOrigin = target;
+    proxy = createHooxProxy({
+      apiOrigin: "https://hoox.example.invalid",
+      apiKey: "server-only-key",
+      appOrigin,
+      sessionToken: "session-placeholder",
+      endUserId: "Customer:server-session",
+      fetcher,
+    });
     const login = await fetch(`${target}/demo-session`, {
       method: "POST",
       headers: { origin: appOrigin },
@@ -67,8 +68,8 @@ describe("示例同源代理", () => {
     const cookie = login.headers.get("set-cookie")?.split(";", 1)[0];
     const response = await fetch(`${target}/hoox/v1/agents`, {
       headers: {
-        origin: appOrigin,
         cookie: cookie ?? "",
+        "sec-fetch-site": "same-origin",
         authorization: "Bearer browser-injected-key",
         "hoox-end-user": "Customer:forged-user",
         "x-api-key": "browser-key",
@@ -77,6 +78,71 @@ describe("示例同源代理", () => {
     expect(login.status).toBe(204);
     expect(response.status).toBe(200);
     expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("拒绝畸形 Cookie 且不产生未处理异常", async () => {
+    let proxy: ReturnType<typeof createHooxProxy>;
+    server = createServer((request, response) => void proxy(request, response));
+    await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("代理测试服务器没有监听地址");
+    const appOrigin = `http://127.0.0.1:${address.port}`;
+    proxy = createHooxProxy({
+      apiOrigin: "https://hoox.example.invalid",
+      apiKey: "server-only-key",
+      appOrigin,
+      sessionToken: "session-placeholder",
+      endUserId: "Customer:server-session",
+      fetcher: vi.fn(),
+    });
+    const response = await fetch(`${appOrigin}/hoox/v1/agents`, {
+      headers: { origin: appOrigin, cookie: "hoox_demo_session=%E0%A4%A" },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Cookie 格式无效" });
+  });
+
+  it("捕获上游响应头后的流错误，不使代理服务器崩溃", async () => {
+    let proxy: ReturnType<typeof createHooxProxy>;
+    server = createServer((request, response) => void proxy(request, response));
+    await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("代理测试服务器没有监听地址");
+    const appOrigin = `http://127.0.0.1:${address.port}`;
+    let upstreamCalls = 0;
+    proxy = createHooxProxy({
+      apiOrigin: "https://hoox.example.invalid",
+      apiKey: "server-only-key",
+      appOrigin,
+      sessionToken: "session-placeholder",
+      endUserId: "Customer:server-session",
+      fetcher: async () => {
+        upstreamCalls += 1;
+        if (upstreamCalls > 1) return Response.json({ version: "v1", requestId: "req", data: {} });
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1]));
+              queueMicrotask(() => controller.error(new Error("private upstream failure")));
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    const cookie = `hoox_demo_session=${encodeURIComponent("session-placeholder")}`;
+    try {
+      const failed = await fetch(`${appOrigin}/hoox/v1/agents`, {
+        headers: { origin: appOrigin, cookie },
+      });
+      expect([200, 502]).toContain(failed.status);
+    } catch {
+      // 上游在响应体中断开时，代理可关闭不完整的下游连接。
+    }
+    const next = await fetch(`${appOrigin}/hoox/v1/agents`, {
+      headers: { origin: appOrigin, cookie },
+    });
+    expect(next.status).toBe(200);
   });
 
   it("拒绝跨源请求且不会把请求转发到上游", async () => {

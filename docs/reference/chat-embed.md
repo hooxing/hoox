@@ -32,7 +32,7 @@ const client = new HooxClient({ baseUrl: `${location.origin}/hoox` });
 
 **浏览器不得持有 API Key。** `HooxClient` 不传 `apiKey`，`baseUrl` 指向业务方提供的同源代理。业务后端从自身已验证登录态映射 `Hoox-End-User`、注入 API Key，只转发白名单请求头与 SSE 流，不转发浏览器提供的认证或身份声明。代理应拒绝重定向并保留 `Last-Event-ID`。
 
-Cookie 会话的代理必须验证精确 `Origin`，使用 HTTPS、`HttpOnly`、`Secure`、`SameSite` Cookie，并为状态变更按业务认证模型执行 CSRF Token 或等效防护；CORS 不是 CSRF 防护。示例代码见 [`examples/chat-embed`](../../examples/chat-embed/README.md)，示例登录固定为本地演示身份，不能直接部署到生产。
+Cookie 会话的代理必须验证精确 `Origin`，使用 HTTPS、`HttpOnly`、`Secure`、`SameSite` Cookie，并为状态变更按业务认证模型执行 CSRF Token 或等效防护；CORS 不是 CSRF 防护。若浏览器同源 GET 未发送 `Origin`，代理只能在 `Sec-Fetch-Site: same-origin` 且请求 Host 与配置页面源一致时允许读取；状态变更请求仍必须有精确匹配的 `Origin`。示例代码见 [`examples/chat-embed`](../../examples/chat-embed/README.md)，示例登录固定为本地演示身份，不能直接部署到生产。
 
 示例的环境变量只配置示例 Node 代理，不进入浏览器构建：
 

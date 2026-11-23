@@ -817,6 +817,667 @@
     }
   },
   "paths": {
+    "/v1/threads/{threadId}/runs/{runId}/feedback": {
+      "get": {
+        "operationId": "getRunFeedback",
+        "summary": "读取当前终端用户的 Run 反馈",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:read",
+        "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "additionalProperties": false,
+                      "type": "object",
+                      "required": ["feedback"],
+                      "properties": {
+                        "feedback": {
+                          "anyOf": [
+                            {
+                              "additionalProperties": false,
+                              "type": "object",
+                              "required": [
+                                "runId",
+                                "revisionId",
+                                "userId",
+                                "rating",
+                                "createdAt",
+                                "updatedAt"
+                              ],
+                              "properties": {
+                                "runId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "revisionId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "userId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "rating": {
+                                  "anyOf": [
+                                    {
+                                      "const": "up",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "const": "down",
+                                      "type": "string"
+                                    }
+                                  ]
+                                },
+                                "comment": {
+                                  "maxLength": 2000,
+                                  "pattern": "^[^\\u0000]*$",
+                                  "type": "string"
+                                },
+                                "createdAt": {
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                                  "format": "hoox-iso-utc-timestamp-v1",
+                                  "type": "string"
+                                },
+                                "updatedAt": {
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                                  "format": "hoox-iso-utc-timestamp-v1",
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "putRunFeedback",
+        "summary": "幂等保存当前终端用户的 Run 反馈",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:create",
+        "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "type": "object",
+                "required": ["rating"],
+                "properties": {
+                  "rating": {
+                    "anyOf": [
+                      {
+                        "const": "up",
+                        "type": "string"
+                      },
+                      {
+                        "const": "down",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "comment": {
+                    "maxLength": 2000,
+                    "pattern": "^[^\\u0000]*$",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "additionalProperties": false,
+                      "type": "object",
+                      "required": ["feedback"],
+                      "properties": {
+                        "feedback": {
+                          "anyOf": [
+                            {
+                              "additionalProperties": false,
+                              "type": "object",
+                              "required": [
+                                "runId",
+                                "revisionId",
+                                "userId",
+                                "rating",
+                                "createdAt",
+                                "updatedAt"
+                              ],
+                              "properties": {
+                                "runId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "revisionId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "userId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "rating": {
+                                  "anyOf": [
+                                    {
+                                      "const": "up",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "const": "down",
+                                      "type": "string"
+                                    }
+                                  ]
+                                },
+                                "comment": {
+                                  "maxLength": 2000,
+                                  "pattern": "^[^\\u0000]*$",
+                                  "type": "string"
+                                },
+                                "createdAt": {
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                                  "format": "hoox-iso-utc-timestamp-v1",
+                                  "type": "string"
+                                },
+                                "updatedAt": {
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                                  "format": "hoox-iso-utc-timestamp-v1",
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "不支持的媒体类型",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteRunFeedback",
+        "summary": "撤销当前终端用户的 Run 反馈",
+        "tags": ["Public v1"],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-hoox-api-key-scope": "runs:create",
+        "parameters": [
+          {
+            "name": "Hoox-End-User",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}(?![\\s\\S])",
+              "description": "集成身份命名空间内的终端用户 ID；需要 end-users:represent 作用域。",
+              "type": "string"
+            }
+          },
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": ["version", "requestId", "data"],
+                  "properties": {
+                    "version": {
+                      "const": "v1",
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "minLength": 3,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                      "type": "string"
+                    },
+                    "data": {
+                      "additionalProperties": false,
+                      "type": "object",
+                      "required": ["feedback"],
+                      "properties": {
+                        "feedback": {
+                          "anyOf": [
+                            {
+                              "additionalProperties": false,
+                              "type": "object",
+                              "required": [
+                                "runId",
+                                "revisionId",
+                                "userId",
+                                "rating",
+                                "createdAt",
+                                "updatedAt"
+                              ],
+                              "properties": {
+                                "runId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "revisionId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "userId": {
+                                  "minLength": 3,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
+                                  "type": "string"
+                                },
+                                "rating": {
+                                  "anyOf": [
+                                    {
+                                      "const": "up",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "const": "down",
+                                      "type": "string"
+                                    }
+                                  ]
+                                },
+                                "comment": {
+                                  "maxLength": 2000,
+                                  "pattern": "^[^\\u0000]*$",
+                                  "type": "string"
+                                },
+                                "createdAt": {
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                                  "format": "hoox-iso-utc-timestamp-v1",
+                                  "type": "string"
+                                },
+                                "updatedAt": {
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
+                                  "format": "hoox-iso-utc-timestamp-v1",
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/threads/{threadId}/runs/{runId}/tool-results": {
       "post": {
         "operationId": "submitToolResult",

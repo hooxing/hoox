@@ -5,6 +5,7 @@ import type {
   CoreRepositories,
   PgPlaygroundRepository,
   PgClientToolResults,
+  PgRunFeedbackRepository,
   AgentDefinitionRepositoryPort,
   PgApiKeyRepository,
   PersonalizationSettingsPort,
@@ -40,6 +41,7 @@ import type {
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
   readonly clientToolResults?: Pick<PgClientToolResults, "submit">;
+  readonly runFeedback?: Pick<PgRunFeedbackRepository, "execute">;
   readonly playground?: Pick<PgPlaygroundRepository, "accept">;
   readonly apiKeys?: PgApiKeyRepository;
   readonly localAccounts?: LocalAccountAuthService;

@@ -10,6 +10,7 @@ import type {
   RunStreamEvent,
   StreamOptions,
   SubmitToolResult,
+  PutRunFeedbackRequest,
 } from "./types.js";
 
 export type HooxClientOptions = {
@@ -125,6 +126,31 @@ export class HooxClient {
 
   cancelRun(threadId: string, runId: string, options?: RequestOptions): Promise<Data<"cancelRun">> {
     return this.request("cancelRun", { threadId, runId }, undefined, undefined, options);
+  }
+
+  getRunFeedback(
+    threadId: string,
+    runId: string,
+    options?: RequestOptions,
+  ): Promise<Data<"getRunFeedback">> {
+    return this.request("getRunFeedback", { threadId, runId }, undefined, undefined, options);
+  }
+
+  putRunFeedback(
+    threadId: string,
+    runId: string,
+    body: PutRunFeedbackRequest,
+    options?: RequestOptions,
+  ): Promise<Data<"putRunFeedback">> {
+    return this.request("putRunFeedback", { threadId, runId }, body, undefined, options);
+  }
+
+  deleteRunFeedback(
+    threadId: string,
+    runId: string,
+    options?: RequestOptions,
+  ): Promise<Data<"deleteRunFeedback">> {
+    return this.request("deleteRunFeedback", { threadId, runId }, undefined, undefined, options);
   }
 
   listRunEvents(

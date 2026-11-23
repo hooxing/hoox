@@ -3,6 +3,7 @@ import type { Operations, RunDto, RunEventPageDto } from "./openapi.generated.js
 export type CreateThreadRequest = Operations["createThread"]["body"];
 export type CreateRunRequest = Operations["createRun"]["body"];
 export type SubmitToolResult = Operations["submitToolResult"]["body"];
+export type PutRunFeedbackRequest = Operations["putRunFeedback"]["body"];
 export type RequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;

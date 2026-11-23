@@ -18,6 +18,8 @@ import {
   ResourceDownloadPathSchema,
   ResourceDownloadSuccessEnvelopeSchema,
   RunSuccessEnvelopeSchema,
+  PutRunFeedbackRequestSchema,
+  RunFeedbackSuccessEnvelopeSchema,
   ThreadListQuerySchema,
   ThreadPageSuccessEnvelopeSchema,
   ThreadPathSchema,
@@ -30,6 +32,22 @@ import {
 const target = new URL("../docs/reference/openapi/public-v1.json", import.meta.url);
 const json = (schema) => ({ "application/json": { schema: cleanSchema(schema) } });
 const operations = [
+  ...["get", "put", "delete"].map((method) => ({
+    method,
+    path: "/v1/threads/{threadId}/runs/{runId}/feedback",
+    id: `${method === "delete" ? "delete" : method}RunFeedback`,
+    summary:
+      method === "get"
+        ? "读取当前终端用户的 Run 反馈"
+        : method === "put"
+          ? "幂等保存当前终端用户的 Run 反馈"
+          : "撤销当前终端用户的 Run 反馈",
+    scope: method === "get" ? "runs:read" : "runs:create",
+    endUserRequired: true,
+    params: RunPathSchema,
+    ...(method === "put" ? { body: PutRunFeedbackRequestSchema } : {}),
+    response: RunFeedbackSuccessEnvelopeSchema,
+  })),
   {
     method: "post",
     path: "/v1/threads/{threadId}/runs/{runId}/tool-results",
@@ -230,7 +248,7 @@ function operation(item) {
     {
       name: "Hoox-End-User",
       in: "header",
-      required: false,
+      required: item.endUserRequired === true,
       schema: cleanSchema(EndUserHeaderSchema),
     },
     ...schemaParameters(item.params, "path"),
@@ -300,7 +318,11 @@ function operation(item) {
       content: json(ErrorEnvelopeSchema),
     };
   }
-  if (["createThread", "createRun", "uploadResource", "submitToolResult"].includes(item.id)) {
+  if (
+    ["createThread", "createRun", "uploadResource", "submitToolResult", "putRunFeedback"].includes(
+      item.id,
+    )
+  ) {
     responses[415] = { description: "不支持的媒体类型", content: json(ErrorEnvelopeSchema) };
   }
   if (["cancelRun", "previewArtifact", "downloadArtifact"].includes(item.id)) {

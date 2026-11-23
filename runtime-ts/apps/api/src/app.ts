@@ -21,6 +21,7 @@ import {
   registerResourceUploadRoutes,
 } from "./routes/resource-uploads.js";
 import { registerRunEventRoutes } from "./routes/run-events.js";
+import { registerRunFeedbackRoutes } from "./routes/run-feedback.js";
 import { registerSkillRoutes } from "./routes/skills.js";
 import { registerTeamRoutes } from "./routes/teams.js";
 import { registerThreadAndRunRoutes } from "./routes/threads-and-runs.js";
@@ -145,6 +146,7 @@ export function createApiApp(
     authenticateSelectedTenant,
   );
   registerRunEventRoutes(app, normalizedDependencies, service, authenticate);
+  registerRunFeedbackRoutes(app, normalizedDependencies, authenticate);
   registerArtifactRoutes(app, normalizedDependencies, service, authenticate);
   registerModelWireTraceRoutes(app, normalizedDependencies, service, authenticate);
 

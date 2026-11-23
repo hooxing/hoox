@@ -100,6 +100,35 @@ describe("SDK HTTP", () => {
     expect(JSON.stringify(client)).not.toContain("placeholder-api-key");
   });
 
+  it("反馈读写撤销复用 API Key 与 Hoox-End-User 身份", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      ok({ feedback: null }),
+    );
+    const client = new HooxClient({
+      baseUrl: "https://api.example.invalid",
+      apiKey: "placeholder-api-key",
+      endUser: "Customer:42",
+      fetch: fetcher,
+    });
+    await client.getRunFeedback("thread_sdk", "run_sdk");
+    await client.putRunFeedback("thread_sdk", "run_sdk", { rating: "down", comment: "需要改进" });
+    await client.deleteRunFeedback("thread_sdk", "run_sdk");
+    expect(
+      fetcher.mock.calls.map((call) => {
+        const [url, init] = call as unknown as [RequestInfo | URL, RequestInit];
+        return [new URL(String(url)).pathname, init.method];
+      }),
+    ).toEqual([
+      ["/v1/threads/thread_sdk/runs/run_sdk/feedback", "GET"],
+      ["/v1/threads/thread_sdk/runs/run_sdk/feedback", "PUT"],
+      ["/v1/threads/thread_sdk/runs/run_sdk/feedback", "DELETE"],
+    ]);
+    const secondCall = fetcher.mock.calls[1] as unknown as [RequestInfo | URL, RequestInit];
+    const headers = new Headers(secondCall[1].headers);
+    expect(headers.get("Hoox-End-User")).toBe("Customer:42");
+    expect(JSON.parse(String(secondCall[1].body))).toEqual({ rating: "down", comment: "需要改进" });
+  });
+
   it("无 Key 的浏览器代理模式不注入 Authorization；不自动重试创建请求", async () => {
     const fetcher = vi.fn(async () => {
       throw new Error("network detail");

@@ -422,6 +422,69 @@ export class PgAgentDefinitionRepository
 {
   constructor(private readonly pool: Pool) {}
 
+  async validateImport(
+    actorUserId: string,
+    configuration: {
+      readonly id: string;
+      readonly availability: AgentAvailability;
+      readonly content: AgentRevisionContent;
+      readonly definitionId?: string;
+      readonly expectedGeneration?: number;
+    },
+  ): Promise<void> {
+    try {
+      await admin(this.pool, actorUserId, async (client) => {
+        availabilityIds(configuration.availability);
+        if (configuration.definitionId !== undefined) {
+          const definition = await readDefinition(client, configuration.definitionId, true);
+          if (
+            !definition ||
+            definition.id !== configuration.id ||
+            definition.status === "revoked" ||
+            (configuration.expectedGeneration !== undefined &&
+              Number(definition.generation) !== configuration.expectedGeneration)
+          ) {
+            throw new PersistenceError("CONFLICT", "导入目标 Agent 状态或 generation 已变化");
+          }
+          const currentAvailability = mapDefinition(
+            definition,
+            await scopeIds(client, definition.id, true),
+          ).availability;
+          if (canonical(currentAvailability) !== canonical(configuration.availability)) {
+            throw new AgentDefinitionValidationError("文件的可用范围与目标 Agent 不一致");
+          }
+        } else if (await readDefinition(client, configuration.id)) {
+          throw new PersistenceError("CONFLICT", "导入文件中的 Agent ID 已被占用");
+        }
+        await validateDraft(client, configuration.content);
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "校验 Agent 配置导入");
+    }
+  }
+
+  async readRevisionForExport(actorUserId: string, definitionId: string, revisionId: string) {
+    try {
+      return await admin(this.pool, actorUserId, async (client) => {
+        const definition = await readDefinition(client, definitionId);
+        const row = await readRevision(client, revisionId);
+        if (!definition || !row || row.definition_id !== definitionId) return undefined;
+        const revision = mapRevision(row, await revocationExists(client, row.id));
+        const storedDefinition = mapDefinition(
+          definition,
+          await scopeIds(client, definitionId, true),
+        );
+        await client.query(
+          "INSERT INTO agent_definition_audits(actor_user_id,definition_id,revision_id,action,generation,reason) VALUES($1,$2,$3,'exported',$4,'导出 Agent 配置文件')",
+          [actorUserId, definitionId, revisionId, storedDefinition.generation],
+        );
+        return { definition: storedDefinition, revision };
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "导出 Agent 配置");
+    }
+  }
+
   async listDefinitions(actorUserId: string) {
     return adminRead(this.pool, actorUserId, async (client, canManage) => {
       const result = await client.query<
@@ -538,6 +601,7 @@ export class PgAgentDefinitionRepository
     revisionId: string;
     idempotencyKey: string;
     expectedGeneration: number;
+    auditAction?: "created" | "imported";
   }): Promise<{ definition: StoredAgentDefinition; revision: StoredAgentRevision }> {
     try {
       return await admin(this.pool, input.actorUserId, async (client) => {
@@ -574,8 +638,14 @@ export class PgAgentDefinitionRepository
           revision: mapRevision(revision, false),
         };
         await client.query(
-          "INSERT INTO agent_definition_audits(actor_user_id,definition_id,revision_id,action,generation,reason) VALUES($1,$2,$3,'created',0,'创建 Agent 草稿')",
-          [input.actorUserId, input.id, input.revisionId],
+          "INSERT INTO agent_definition_audits(actor_user_id,definition_id,revision_id,action,generation,reason) VALUES($1,$2,$3,$4,0,$5)",
+          [
+            input.actorUserId,
+            input.id,
+            input.revisionId,
+            input.auditAction ?? "created",
+            input.auditAction === "imported" ? "导入 Agent 配置并创建草稿" : "创建 Agent 草稿",
+          ],
         );
         await recordCommand(client, input.idempotencyKey, request, result);
         return result;
@@ -593,6 +663,7 @@ export class PgAgentDefinitionRepository
     content: AgentRevisionContent;
     idempotencyKey: string;
     expectedGeneration: number;
+    auditAction?: "created" | "imported";
   }): Promise<StoredAgentRevision> {
     try {
       return await admin(this.pool, input.actorUserId, async (client) => {
@@ -634,8 +705,17 @@ export class PgAgentDefinitionRepository
         if (!revision || !next) throw new TypeError("Agent 草稿 Revision 写入后缺少记录");
         const result = mapRevision(revision, false);
         await client.query(
-          "INSERT INTO agent_definition_audits(actor_user_id,definition_id,revision_id,action,generation,reason) VALUES($1,$2,$3,'created',$4,'创建 Agent 草稿 Revision')",
-          [input.actorUserId, input.definitionId, input.revisionId, next.generation],
+          "INSERT INTO agent_definition_audits(actor_user_id,definition_id,revision_id,action,generation,reason) VALUES($1,$2,$3,$4,$5,$6)",
+          [
+            input.actorUserId,
+            input.definitionId,
+            input.revisionId,
+            input.auditAction ?? "created",
+            next.generation,
+            input.auditAction === "imported"
+              ? "导入 Agent 配置并创建草稿 Revision"
+              : "创建 Agent 草稿 Revision",
+          ],
         );
         await recordCommand(client, input.idempotencyKey, request, result);
         return result;

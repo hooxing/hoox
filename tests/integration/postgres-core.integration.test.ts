@@ -41,6 +41,10 @@ import type {
 import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { AdminControlApiDependencies } from "../../runtime-ts/apps/admin-control-api/src/app.js";
+import {
+  parseAgentConfiguration,
+  serializeAgentConfiguration,
+} from "../../runtime-ts/packages/protocol/src/agent-configuration.js";
 import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
@@ -2434,6 +2438,13 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expectedGeneration: 0,
     });
     expect(draft.definition.status).toBe("draft");
+    await expect(
+      repository.validateImport(manager.user.id, {
+        id: draft.definition.id,
+        availability: draft.definition.availability,
+        content,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
     const published = await repository.publish({
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
@@ -2442,6 +2453,66 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expectedGeneration: 0,
     });
     expect(published.currentRevisionId).toBe(draft.revision.id);
+    const exportResult = await repository.readRevisionForExport(
+      manager.user.id,
+      draft.definition.id,
+      draft.revision.id,
+    );
+    if (!exportResult) throw new Error("已发布 Revision 未能导出");
+    const exportedYaml = serializeAgentConfiguration({
+      schemaVersion: 1,
+      definition: {
+        id: exportResult.definition.id,
+        availability: exportResult.definition.availability,
+      },
+      revision: { content: exportResult.revision.content },
+    });
+    const importedConfiguration = parseAgentConfiguration(exportedYaml);
+    await repository.validateImport(manager.user.id, {
+      id: importedConfiguration.definition.id,
+      availability: draft.definition.availability,
+      definitionId: draft.definition.id,
+      expectedGeneration: published.generation,
+      content: importedConfiguration.revision.content,
+    });
+    const importedRevision = await repository.createDraftRevision({
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: "agent_scope_imported_revision",
+      content: importedConfiguration.revision.content,
+      idempotencyKey: "agent-import-scope-revision",
+      expectedGeneration: published.generation,
+      auditAction: "imported",
+    });
+    expect(importedRevision.status).toBe("draft");
+    expect(
+      await repository.readCurrentPublished(manager.tenant.id, draft.definition.id),
+    ).toMatchObject({ id: draft.revision.id, status: "published" });
+    const importedExport = await repository.readRevisionForExport(
+      manager.user.id,
+      draft.definition.id,
+      importedRevision.id,
+    );
+    if (!importedExport) throw new Error("导入的草稿 Revision 未能导出");
+    expect(
+      serializeAgentConfiguration({
+        schemaVersion: 1,
+        definition: {
+          id: importedExport.definition.id,
+          availability: importedExport.definition.availability,
+        },
+        revision: { content: importedExport.revision.content },
+      }),
+    ).toBe(exportedYaml);
+    const transferAudits = await administrativePool.query<{ action: string }>(
+      `SELECT action FROM "${schema}".agent_definition_audits WHERE definition_id=$1 AND action IN ('imported','exported') ORDER BY audit_id`,
+      [draft.definition.id],
+    );
+    expect(transferAudits.rows.map(({ action }) => action)).toEqual([
+      "exported",
+      "imported",
+      "exported",
+    ]);
     expect(
       await repository.publish({
         actorUserId: manager.user.id,
@@ -2457,14 +2528,14 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       revisionId: "agent_scope_revision_2",
       content: { ...content, displayName: "测试助手第二版" },
       idempotencyKey: "agent-revision-create-2",
-      expectedGeneration: 1,
+      expectedGeneration: 2,
     });
     const secondPublish = await repository.publish({
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
       revisionId: secondRevision.id,
       idempotencyKey: "agent-publish-scope-2",
-      expectedGeneration: 2,
+      expectedGeneration: 3,
     });
     expect(secondPublish.currentRevisionId).toBe(secondRevision.id);
     expect((await repository.readRevisionById(manager.tenant.id, draft.revision.id))?.status).toBe(
@@ -2516,9 +2587,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         actorUserId: manager.user.id,
         definitionId: published.id,
         idempotencyKey: "agent-disable-scope-1",
-        expectedGeneration: 3,
+        expectedGeneration: 4,
       }),
-    ).resolves.toMatchObject({ status: "disabled", generation: 4 });
+    ).resolves.toMatchObject({ status: "disabled", generation: 5 });
     expect(
       await repository.readVisibleCurrent(manager.tenant.id, "agent_scope_test"),
     ).toBeUndefined();
@@ -2529,9 +2600,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         revisionId: draft.revision.id,
         reason: "测试撤销",
         idempotencyKey: "agent-revoke-old-revision",
-        expectedGeneration: 4,
+        expectedGeneration: 5,
       }),
-    ).resolves.toMatchObject({ status: "disabled", generation: 5 });
+    ).resolves.toMatchObject({ status: "disabled", generation: 6 });
     expect(
       (await repository.listAvailable(manager.tenant.id)).map((item) => item.definition.id),
     ).not.toContain("agent_scope_test");

@@ -432,90 +432,108 @@ export class PgRunRepository implements RunRepository {
   ): Promise<VersionedUpdateResult> {
     if (scope.tenantId !== run.tenantId) return { outcome: "not_found" };
     try {
-      return await withTenantTransaction(this.pool, scope, async (client) => {
-        // 先按 tenant+runId 只读发现数据库中的真实父级；thread_id 对业务不可变。
-        const discovered = await client.query<{ thread_id: string }>(
-          `SELECT r.thread_id FROM runs r
-            WHERE r.tenant_id = $1 AND r.id = $2
-              AND EXISTS (SELECT 1 FROM memberships m
-                WHERE m.tenant_id = r.tenant_id AND m.user_id = $3 AND m.status = 'active')`,
-          [scope.tenantId, run.id, scope.userId],
-        );
-        const actualThreadId = discovered.rows[0]?.thread_id;
-        if (actualThreadId === undefined) return { outcome: "not_found" };
-
-        // 所有父子写固定按数据库真实关系锁 Thread→Run，不能让调用方伪造 threadId 改变锁序。
-        const parent = await client.query(
-          "SELECT 1 FROM threads WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
-          [scope.tenantId, actualThreadId],
-        );
-        if (parent.rowCount !== 1) return { outcome: "not_found" };
-        // V2 终态和 Worker 使用同一线性化锁序：Thread → execution head → Run。
-        await lockThreadExecutionHead(client, scope.tenantId, actualThreadId);
-        const locked = await client.query<{ thread_id: string }>(
-          `SELECT thread_id FROM runs
-            WHERE tenant_id = $1 AND id = $2 AND thread_id = $3
-            FOR UPDATE`,
-          [scope.tenantId, run.id, actualThreadId],
-        );
-        if (locked.rows[0]?.thread_id !== actualThreadId) return { outcome: "conflict" };
-        if (run.threadId !== actualThreadId) return { outcome: "conflict" };
-        const result = await client.query<{ version: string }>(
-          `UPDATE runs r SET status = $5, updated_at = $6, version = version + 1
-            WHERE r.tenant_id = $1 AND r.id = $3 AND r.thread_id = $4 AND r.version = $7
-              AND EXISTS (SELECT 1 FROM memberships m
-                WHERE m.tenant_id = r.tenant_id AND m.user_id = $2 AND m.status = 'active')
-            RETURNING version`,
-          [
-            scope.tenantId,
-            scope.userId,
-            run.id,
-            actualThreadId,
-            run.status,
-            run.updatedAt,
-            expectedVersion.toString(),
-          ],
-        );
-        const version = result.rows[0]?.version;
-        if (version !== undefined) {
-          // API 取消等外部终态在提交 Run 转换的同一事务内入队；版本条件失败时不会到达这里。
-          await enqueueRunStatusWebhook(client, {
-            tenantId: scope.tenantId,
-            runId: run.id,
-            status: run.status,
-            runVersion: version,
-            occurredAt: run.updatedAt,
-          });
-          if (run.status === "cancelled") {
-            await cancelThreadQueuedRun(client, {
-              tenantId: scope.tenantId,
-              threadId: actualThreadId,
-              runId: run.id,
-            });
-          } else if (run.status === "succeeded" || run.status === "failed") {
-            const now = await client.query<{ readonly database_now: Date }>(
-              "SELECT clock_timestamp() AS database_now",
-            );
-            const databaseNow = now.rows[0]?.database_now;
-            if (databaseNow === undefined) throw new TypeError("数据库时钟缺失");
-            await settleActiveThreadRun(client, {
-              tenantId: scope.tenantId,
-              threadId: actualThreadId,
-              runId: run.id,
-              runStatus: run.status,
-              databaseNow: databaseNow.toISOString(),
-            });
-          }
-          return { outcome: "updated", version: BigInt(version) };
-        }
-        return (await findRun(client, scope, run.id)) === undefined
-          ? { outcome: "not_found" }
-          : { outcome: "conflict" };
-      });
+      return await withTenantTransaction(this.pool, scope, (client) =>
+        updateRun(client, scope, run, expectedVersion),
+      );
     } catch (error) {
       throw mapPersistenceError(error, "更新运行");
     }
   }
+}
+
+export function transactionRunRepository(
+  client: PoolClient,
+): Pick<RunRepository, "get" | "update"> {
+  return {
+    get: (scope, id) => findRun(client, scope, id),
+    update: (scope, run, version) => updateRun(client, scope, run, version),
+  };
+}
+
+async function updateRun(
+  client: PoolClient,
+  scope: TenantScope,
+  run: Run,
+  expectedVersion: bigint,
+): Promise<VersionedUpdateResult> {
+  // 先按 tenant+runId 只读发现数据库中的真实父级；thread_id 对业务不可变。
+  const discovered = await client.query<{ thread_id: string }>(
+    `SELECT r.thread_id FROM runs r
+            WHERE r.tenant_id = $1 AND r.id = $2
+              AND EXISTS (SELECT 1 FROM memberships m
+                WHERE m.tenant_id = r.tenant_id AND m.user_id = $3 AND m.status = 'active')`,
+    [scope.tenantId, run.id, scope.userId],
+  );
+  const actualThreadId = discovered.rows[0]?.thread_id;
+  if (actualThreadId === undefined) return { outcome: "not_found" };
+
+  // 所有父子写固定按数据库真实关系锁 Thread→Run，不能让调用方伪造 threadId 改变锁序。
+  const parent = await client.query(
+    "SELECT 1 FROM threads WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+    [scope.tenantId, actualThreadId],
+  );
+  if (parent.rowCount !== 1) return { outcome: "not_found" };
+  // V2 终态和 Worker 使用同一线性化锁序：Thread → execution head → Run。
+  await lockThreadExecutionHead(client, scope.tenantId, actualThreadId);
+  const locked = await client.query<{ thread_id: string }>(
+    `SELECT thread_id FROM runs
+            WHERE tenant_id = $1 AND id = $2 AND thread_id = $3
+            FOR UPDATE`,
+    [scope.tenantId, run.id, actualThreadId],
+  );
+  if (locked.rows[0]?.thread_id !== actualThreadId) return { outcome: "conflict" };
+  if (run.threadId !== actualThreadId) return { outcome: "conflict" };
+  const result = await client.query<{ version: string }>(
+    `UPDATE runs r SET status = $5, updated_at = $6, version = version + 1
+            WHERE r.tenant_id = $1 AND r.id = $3 AND r.thread_id = $4 AND r.version = $7
+              AND EXISTS (SELECT 1 FROM memberships m
+                WHERE m.tenant_id = r.tenant_id AND m.user_id = $2 AND m.status = 'active')
+            RETURNING version`,
+    [
+      scope.tenantId,
+      scope.userId,
+      run.id,
+      actualThreadId,
+      run.status,
+      run.updatedAt,
+      expectedVersion.toString(),
+    ],
+  );
+  const version = result.rows[0]?.version;
+  if (version !== undefined) {
+    // API 取消等外部终态在提交 Run 转换的同一事务内入队；版本条件失败时不会到达这里。
+    await enqueueRunStatusWebhook(client, {
+      tenantId: scope.tenantId,
+      runId: run.id,
+      status: run.status,
+      runVersion: version,
+      occurredAt: run.updatedAt,
+    });
+    if (run.status === "cancelled") {
+      await cancelThreadQueuedRun(client, {
+        tenantId: scope.tenantId,
+        threadId: actualThreadId,
+        runId: run.id,
+      });
+    } else if (run.status === "succeeded" || run.status === "failed") {
+      const now = await client.query<{ readonly database_now: Date }>(
+        "SELECT clock_timestamp() AS database_now",
+      );
+      const databaseNow = now.rows[0]?.database_now;
+      if (databaseNow === undefined) throw new TypeError("数据库时钟缺失");
+      await settleActiveThreadRun(client, {
+        tenantId: scope.tenantId,
+        threadId: actualThreadId,
+        runId: run.id,
+        runStatus: run.status,
+        databaseNow: databaseNow.toISOString(),
+      });
+    }
+    return { outcome: "updated", version: BigInt(version) };
+  }
+  return (await findRun(client, scope, run.id)) === undefined
+    ? { outcome: "not_found" }
+    : { outcome: "conflict" };
 }
 
 interface LockedWorkspaceRow extends QueryResultRow {

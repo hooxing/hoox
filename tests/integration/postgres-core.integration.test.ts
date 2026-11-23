@@ -1,3 +1,8 @@
+import type { EvaluationCase } from "../../runtime-ts/packages/protocol/src/admin-evaluation.js";
+import { PgEvaluationDriver } from "../../runtime-ts/packages/persistence/src/pg-evaluation-driver.js";
+import { PgEvaluationCommand } from "../../runtime-ts/packages/persistence/src/pg-evaluation-command.js";
+import { PgEvaluationRepository } from "../../runtime-ts/packages/persistence/src/pg-evaluation.js";
+import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
 import { createHash, randomBytes } from "node:crypto";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,7 +44,7 @@ import type {
   WorkspaceWriteScope,
 } from "@hoox/persistence/postgres";
 import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { onTestFinished, afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { AdminControlApiDependencies } from "../../runtime-ts/apps/admin-control-api/src/app.js";
 import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
@@ -305,6 +310,53 @@ async function createFixture(
     thread,
     run,
     workspace,
+  };
+}
+
+async function evaluationFixture(suffix: string, globalLimit: number) {
+  const target = await createIsolatedMigrationTarget(`eval_${suffix}`);
+  const schema = target.context.schema;
+  const controlUrl = new URL(target.connectionString);
+  controlUrl.username = target.context.adminControlRole;
+  const adminControlPool = createPostgresPool({ connectionString: controlUrl.toString(), schema }),
+    runtimePool = createPostgresPool({ connectionString: runtimeDatabaseUrl, schema });
+  onTestFinished(async () => {
+    await Promise.all([runtimePool.end(), adminControlPool.end()]);
+    await target.close();
+  });
+  await migrateUp(target.pool, target.context);
+  const repositories = new PgCoreRepositories(runtimePool);
+  const { scope } = await createFixture(`evaluation_${suffix}`, repositories);
+  await administrativePool.query(
+    `INSERT INTO "${schema}".platform_control_operators(user_id,role,status) VALUES($1,'admin','active')`,
+    [scope.userId],
+  );
+  await administrativePool.query(
+    `INSERT INTO "${schema}".user_accounts(user_id,personal_tenant_id,email,normalized_email,display_name,password_algorithm,password_salt,password_hash,created_at,updated_at) VALUES($1,$2,$3,$3,'评测管理员','scrypt-v1',decode(repeat('00',16),'hex'),decode(repeat('00',32),'hex'),now(),now())`,
+    [scope.userId, scope.tenantId, `${suffix}@example.invalid`],
+  );
+  await administrativePool.query(
+    `INSERT INTO "${schema}".agent_revisions(id,definition_id,revision,status,content,content_digest,created_by) SELECT $1,r.definition_id,1000+$2::int,'draft',r.content,r.content_digest,$3 FROM "${schema}".agent_definitions d JOIN "${schema}".agent_revisions r ON r.id=d.current_revision_id WHERE d.id='agent_default'`,
+    [`eval_revision_${suffix}`, suffix === "limits" ? 1 : 2, scope.userId],
+  );
+  const repo = new PgEvaluationRepository(adminControlPool),
+    command = new PgEvaluationCommand(runtimePool),
+    explorer = new PgAdminRunExplorerRepository(adminControlPool);
+  const driver = new PgEvaluationDriver(
+    adminControlPool,
+    (c) => command.execute(c),
+    (a, t, r) => explorer.evaluationEvidence(a, t, r),
+    { globalLimit, leaseMs: 30000, pollMs: 60000 },
+  );
+  return {
+    repo,
+    command,
+    driver,
+    actor: scope.userId,
+    sql: administrativePool,
+    schema,
+    adminControlPool,
+    repositories,
   };
 }
 
@@ -789,6 +841,286 @@ async function seedWebhookRun(
 }
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("评测调度：并发占位、取消和租约换代重放不复制 Run", async () => {
+    const { actor, repo, command, driver, sql, schema, adminControlPool, repositories } =
+      await evaluationFixture("limits", 1);
+    const makeSuite = async (id: string, count: number) =>
+      repo.saveSuite(actor, {
+        id,
+        definitionId: "agent_default",
+        description: "",
+        name: id,
+        cases: Array.from({ length: count }, (_, i) => ({
+          id: `${id}_${i}`,
+          name: "测试",
+          inputText: "输入",
+          attachments: [],
+          assertions: [],
+        })),
+      });
+    await makeSuite("eval_limits", 2);
+    await makeSuite("eval_more", 1);
+    const start = (id: string, suiteId: string) =>
+      repo.startRun(actor, { id, suiteId, revisionId: "eval_revision_limits", maxConcurrency: 1 });
+    await start("eval_batch", "eval_limits");
+    await start("eval_batch2", "eval_more");
+    const claims = await Promise.all([driver.claim(), driver.claim(), driver.claim()]);
+    const leases = claims.filter((l) => l !== undefined);
+    expect(leases).toHaveLength(1);
+    const first = leases[0];
+    if (!first) throw new Error("缺少首个租约");
+    expect(first.batchId).toBe("eval_batch");
+    expect(await command.execute({ ...first, userId: "another_user" })).toBe("stale");
+    expect(await command.execute({ ...first, tenantId: "other_tenant" })).toBe("stale");
+    expect(await command.execute(first)).toBe("active");
+    await sql.query(
+      `UPDATE "${schema}".agent_evaluation_case_jobs SET lease_until=now()-interval '1 second' WHERE claim_token=$1`,
+      [first.token],
+    );
+    const retry = await driver.claim();
+    expect(retry?.plannedRunId).toBe(first.plannedRunId);
+    if (!retry) throw new Error("未重领");
+    expect(retry.token !== first.token).toBe(true);
+    expect(Number(retry.generation)).toBe(Number(first.generation) + 1);
+    expect(await command.execute(first)).toBe("stale");
+    // 模拟旧执行者在失去租约后才收到失败响应，不能结算新一代的任务。
+    const late = new PgEvaluationDriver(
+      adminControlPool,
+      async () => "failed",
+      async () => {
+        throw new Error("不读取正文");
+      },
+      { globalLimit: 1, leaseMs: 30000, pollMs: 60000 },
+    );
+    await late.process(first);
+    expect((await repo.readRun(actor, first.batchId))?.run.failedCases).toBe(0);
+    await driver.process(retry);
+    const snapshot = await sql.query(
+      `SELECT t.is_evaluation,s.revision_id,r.origin FROM "${schema}".runs r JOIN "${schema}".threads t ON t.tenant_id=r.tenant_id AND t.id=r.thread_id JOIN "${schema}".run_agent_snapshots s ON s.run_id=r.id WHERE r.id=$1`,
+      [first.plannedRunId],
+    );
+    expect(snapshot.rows).toEqual([
+      { is_evaluation: true, revision_id: "eval_revision_limits", origin: "evaluation" },
+    ]);
+    expect(
+      (
+        await sql.query(`SELECT 1 FROM "${schema}".run_playground_mocks WHERE run_id=$1`, [
+          first.plannedRunId,
+        ])
+      ).rowCount,
+    ).toBe(0);
+    expect(
+      await repositories.runs.get(
+        { tenantId: tenantId(first.tenantId), userId: userId(actor) },
+        runId(first.plannedRunId),
+      ),
+    ).toBeUndefined();
+    const wider = new PgEvaluationDriver(
+      adminControlPool,
+      (c) => command.execute(c),
+      async () => {
+        throw new Error("不应结算");
+      },
+      { globalLimit: 2, leaseMs: 30000, pollMs: 60000 },
+    );
+    const other = await wider.claim();
+    expect(other?.batchId).toBe("eval_batch2");
+    if (!other) throw new Error("缺少第二批");
+    await wider.process(other);
+    await repo.cancelRun(actor, "eval_batch");
+    await repo.cancelRun(actor, "eval_batch2");
+    while (await wider.tick()) {}
+    const detail = await repo.readRun(actor, "eval_batch");
+    expect(detail?.run).toMatchObject({ status: "cancelled", cancelledCases: 2 });
+    expect(
+      (await sql.query(`SELECT status FROM "${schema}".runs WHERE id=$1`, [first.plannedRunId]))
+        .rows,
+    ).toEqual([{ status: "cancelled" }]);
+  });
+
+  it("评测结算：持久回复、工具和已发布 Artifact 必须经过本人正文审计", async () => {
+    const { actor, repo, driver, sql, schema } = await evaluationFixture("evidence", 8);
+    const assertions: EvaluationCase["assertions"] = [
+      { kind: "text_contains", value: "最终回复" },
+      { kind: "tool_called", toolName: "read" },
+      { kind: "artifact_exists", name: "结果.txt", type: "text/plain" },
+    ];
+    await repo.saveSuite(actor, {
+      id: "eval_evidence",
+      definitionId: "agent_default",
+      name: "取证",
+      description: "",
+      cases: ["pass", "assert_fail", "run_fail", "unknown"].map((id) => ({
+        id: `eval_${id}`,
+        name: id,
+        inputText: "输入",
+        attachments: [],
+        assertions,
+      })),
+    });
+    await repo.startRun(actor, {
+      id: "eval_verdicts",
+      suiteId: "eval_evidence",
+      revisionId: "eval_revision_evidence",
+      maxConcurrency: 4,
+    });
+    for (let i = 0; i < 4; i++) expect(await driver.tick()).toBe(true);
+    const detail = await repo.readRun(actor, "eval_verdicts");
+    expect(detail?.results).toHaveLength(4);
+    expect(detail?.results.every((r) => r.outcome === "running")).toBe(true);
+    for (const item of detail?.results ?? []) {
+      const id = item.runId;
+      if (!id) throw new Error("未创建 Run");
+      await withTransaction(sql, async (c) => {
+        await c.query(`SET LOCAL search_path TO "${schema}"`);
+        await c.query("UPDATE runs SET status=$2 WHERE id=$1", [
+          id,
+          item.caseName === "run_fail" ? "failed" : "succeeded",
+        ]);
+        if (item.caseName === "run_fail" || item.caseName === "unknown") return;
+        await c.query(
+          `INSERT INTO execution_attempts(tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage,finished_at,created_at,updated_at) SELECT tenant_id,$2,run_id,thread_id,workspace_id,root_run_id,'succeeded','finished',now(),now(),now() FROM run_execution_inputs WHERE run_id=$1`,
+          [id, `attempt_${id}`],
+        );
+        const events = [
+          { type: "message.delta", delta: "中间回复" },
+          { type: "message.completed", stopReason: "toolUse" },
+          { type: "tool.started", callId: "call_1", name: "read" },
+          { type: "message.delta", delta: "最终" },
+          { type: "message.delta", delta: "回复" },
+          { type: "message.completed", stopReason: "stop" },
+        ];
+        for (const [i, event] of events.entries())
+          await c.query(
+            `INSERT INTO run_events(tenant_id,attempt_id,sequence,schema_version,kind,payload) VALUES($1,$2,$3,1,'agent_event',$4::jsonb)`,
+            [item.tenantId, `attempt_${id}`, i, JSON.stringify(event)],
+          );
+        if (item.caseName === "pass") {
+          // 此处只验证已发布元数据投影，不构造对象存储生命周期夹具。
+          await c.query("SET LOCAL session_replication_role=replica");
+          await c.query(
+            `INSERT INTO artifact_publications(tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,resource_id,resource_version_id,name,purpose,deliverable_key,blob_reference_id,blob_purpose,blob_lifecycle_id,blob_incarnation_id,physical_object_key,digest,media_type,size) SELECT tenant_id,'artifact_eval',thread_id,run_id,$2,workspace_id,root_run_id,'res','v1','结果.txt','deliverable','result','ref','resource',gen_random_uuid(),gen_random_uuid(),'object',repeat('a',64),'text/plain',1 FROM run_execution_inputs WHERE run_id=$1`,
+            [id, `attempt_${id}`],
+          );
+          await c.query(
+            "INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target) VALUES($1,'artifact_eval','published')",
+            [item.tenantId],
+          );
+        }
+      });
+    }
+    await sql.query(
+      `UPDATE "${schema}".agent_evaluation_case_jobs SET next_poll_at=now() WHERE evaluation_run_id='eval_verdicts'`,
+    );
+    while (await driver.tick()) {}
+    const settled = await repo.readRun(actor, "eval_verdicts");
+    expect(settled?.run).toMatchObject({
+      status: "completed",
+      passRate: 0.25,
+      passedCases: 1,
+      failedCases: 2,
+      unknownCases: 1,
+    });
+    expect(
+      settled?.results
+        .find((c) => c.caseName === "assert_fail")
+        ?.assertionResults.map((a) => a.passed),
+    ).toEqual([true, true, false]);
+    expect(
+      settled?.results.find((c) => c.caseName === "pass")?.assertionResults.map((a) => a.passed),
+    ).toEqual([true, true, true]);
+    const audits = await sql.query(
+      `SELECT actor_user_id,query_summary->>'reason' AS reason FROM "${schema}".admin_run_content_access_audits WHERE actor_user_id=$1`,
+      [actor],
+    );
+    expect(audits.rows).toEqual(Array(2).fill({ actor_user_id: actor, reason: "评测结算" }));
+  });
+
+  it("评测迁移建立 Agent 级资源、后台 RLS，并可单独回滚与重放", async () => {
+    const target = await createIsolatedMigrationTarget("agent_evaluation_schema");
+    try {
+      await migrateUp(target.pool, target.context);
+      const versions = new Map((await loadMigrations()).map((m) => [m.name, m.version]));
+      const versionBefore = (name: string) => {
+        const version = versions.get(name);
+        if (version === undefined) throw new Error(`缺少迁移：${name}`);
+        return version - 1;
+      };
+      const grants = await target.pool.query<{
+        readonly relation_name: string;
+        readonly row_security: boolean;
+        readonly force_row_security: boolean;
+        readonly control_select: boolean;
+        readonly control_insert: boolean;
+        readonly runtime_select: boolean;
+      }>(
+        `SELECT relation.relname AS relation_name,relation.relrowsecurity AS row_security,
+                relation.relforcerowsecurity AS force_row_security,
+                has_table_privilege($1,relation.oid,'SELECT') AS control_select,
+                has_table_privilege($1,relation.oid,'INSERT') AS control_insert,
+                has_table_privilege($2,relation.oid,'SELECT') AS runtime_select
+           FROM pg_class relation
+          WHERE relation.relnamespace=current_schema()::regnamespace
+            AND relation.relname IN ('agent_evaluation_suites','agent_evaluation_cases',
+              'agent_evaluation_runs','agent_evaluation_results')
+          ORDER BY relation.relname`,
+        [target.context.adminControlRole, runtimeRole],
+      );
+      expect(grants.rows).toHaveLength(4);
+      expect(grants.rows.every((row) => row.row_security && row.force_row_security)).toBe(true);
+      expect(grants.rows.every((row) => row.control_select && row.control_insert)).toBe(true);
+      expect(grants.rows.every((row) => !row.runtime_select)).toBe(true);
+      await migrateDown(target.pool, {
+        ...target.context,
+        runtimeRole,
+        targetVersion: versionBefore("hide_evaluation_runs"),
+        allowDestructive: true,
+        environment: "test",
+      });
+      const visibilityColumn = await target.pool.query<{ readonly present: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='threads' AND column_name='is_evaluation') AS present",
+      );
+      expect(visibilityColumn.rows[0]?.present).toBe(false);
+      const executionTables = await target.pool.query<{ readonly table_name: string | null }>(
+        "SELECT to_regclass('agent_evaluation_case_jobs')::text AS table_name",
+      );
+      expect(executionTables.rows[0]?.table_name).toBe("agent_evaluation_case_jobs");
+      await migrateDown(target.pool, {
+        ...target.context,
+        runtimeRole,
+        targetVersion: versionBefore("evaluation_execution"),
+        allowDestructive: true,
+        environment: "test",
+      });
+      const removedExecution = await target.pool.query<{ readonly table_name: string | null }>(
+        "SELECT to_regclass('agent_evaluation_case_jobs')::text AS table_name",
+      );
+      expect(removedExecution.rows[0]?.table_name).toBeNull();
+      const baseTables = await target.pool.query<{ readonly table_name: string | null }>(
+        "SELECT to_regclass('agent_evaluation_suites')::text AS table_name",
+      );
+      expect(baseTables.rows[0]?.table_name).toBe("agent_evaluation_suites");
+      await migrateDown(target.pool, {
+        ...target.context,
+        runtimeRole,
+        targetVersion: versionBefore("agent_evaluations"),
+        allowDestructive: true,
+        environment: "test",
+      });
+      const removed = await target.pool.query<{ readonly table_name: string | null }>(
+        "SELECT to_regclass('agent_evaluation_suites')::text AS table_name",
+      );
+      expect(removed.rows[0]?.table_name).toBeNull();
+      await migrateUp(target.pool, target.context);
+      const restored = await target.pool.query<{ readonly table_name: string | null }>(
+        "SELECT to_regclass('agent_evaluation_suites')::text AS table_name",
+      );
+      expect(restored.rows[0]?.table_name).toBe("agent_evaluation_suites");
+    } finally {
+      await target.close();
+    }
+  });
+
   it("真实 Migrator 跨租户回填客户端工具 Thread 及多级 Fork 后代", async () => {
     const target = await createIsolatedMigrationTarget("client_history_backfill");
     const migrationDir = await mkdtemp(join(tmpdir(), "hoox-client-history-migrations-"));

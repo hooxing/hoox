@@ -4,6 +4,7 @@ import type { BlobStore } from "@hoox/persistence/blob";
 import type {
   CoreRepositories,
   PgPlaygroundRepository,
+  PgEvaluationCommand,
   PgClientToolResults,
   AgentDefinitionRepositoryPort,
   PgApiKeyRepository,
@@ -40,6 +41,7 @@ import type {
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
   readonly clientToolResults?: Pick<PgClientToolResults, "submit">;
+  readonly evaluationCommand?: Pick<PgEvaluationCommand, "execute">;
   readonly playground?: Pick<PgPlaygroundRepository, "accept">;
   readonly apiKeys?: PgApiKeyRepository;
   readonly localAccounts?: LocalAccountAuthService;

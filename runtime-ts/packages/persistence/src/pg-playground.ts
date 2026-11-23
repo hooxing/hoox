@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import {
   createPlaygroundConfigurationSnapshots,
+  createEvaluationConfigurationSnapshots,
   RunAgentUnavailableError,
 } from "./pg-run-agent-snapshot.js";
 import { inputDigest } from "./pg-run-dispatch.js";
 import { enqueueThreadFollowUp } from "./pg-thread-run-queue.js";
-import { type Pool, withTenantTransaction } from "./postgres.js";
+import { type Pool, type PoolClient, withTenantTransaction } from "./postgres.js";
 
 interface PlaygroundRequest {
   readonly scope: { readonly tenantId: string; readonly userId: string };
@@ -62,28 +63,16 @@ export class PgPlaygroundRepository {
           throw new PlaygroundIdempotencyConflictError();
         return { tenantId, threadId: receipt.thread_id, runId: receipt.run_id };
       }
-      const threadId = randomUUID();
-      const runId = randomUUID();
-      const thread = await client.query(
-        `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at,agent_definition_id,is_playground)
-        SELECT $1,$2,$3,'Playground','active',now(),now(),d.id,true FROM agent_definitions d WHERE d.id=$4`,
-        [tenantId, threadId, userId, definitionId],
-      );
-      if (!thread.rowCount) throw new RunAgentUnavailableError();
-      await client.query(
-        `INSERT INTO workspaces(tenant_id,id,thread_id,created_at,updated_at) VALUES($1,$2,$3,now(),now())`,
-        [tenantId, randomUUID(), threadId],
-      );
-      await client.query(
-        `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at,origin) VALUES($1,$2,$3,'queued',now(),now(),'playground')`,
-        [tenantId, runId, threadId],
-      );
-      const snapshot = await createPlaygroundConfigurationSnapshots(client, {
+      const threadId = randomUUID(),
+        runId = randomUUID();
+      const snapshot = await createRevisionRun(client, {
         tenantId,
         userId,
         threadId,
         runId,
+        definitionId,
         revisionId,
+        origin: "playground",
       });
       const allowedMockKeys = new Set(
         snapshot.content.tools.mode === "configured"
@@ -112,4 +101,58 @@ export class PgPlaygroundRepository {
       return { tenantId, threadId, runId };
     });
   }
+}
+
+export async function createRevisionRun(
+  client: PoolClient,
+  {
+    tenantId,
+    userId,
+    threadId,
+    runId,
+    definitionId,
+    revisionId,
+    origin,
+  }: {
+    tenantId: string;
+    userId: string;
+    threadId: string;
+    runId: string;
+    definitionId: string;
+    revisionId: string;
+    origin: "playground" | "evaluation";
+  },
+) {
+  const thread = await client.query(
+    `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at,agent_definition_id,is_playground,is_evaluation)
+        SELECT $1,$2,$3,$5,'active',now(),now(),d.id,$6,$7 FROM agent_definitions d WHERE d.id=$4`,
+    [
+      tenantId,
+      threadId,
+      userId,
+      definitionId,
+      origin === "evaluation" ? "评测" : "Playground",
+      origin === "playground",
+      origin === "evaluation",
+    ],
+  );
+  if (!thread.rowCount) throw new RunAgentUnavailableError();
+  await client.query(
+    `INSERT INTO workspaces(tenant_id,id,thread_id,created_at,updated_at) VALUES($1,$2,$3,now(),now())`,
+    [tenantId, randomUUID(), threadId],
+  );
+  await client.query(
+    `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at,origin) VALUES($1,$2,$3,'queued',now(),now(),$4)`,
+    [tenantId, runId, threadId, origin],
+  );
+  const snapshot = await (origin === "playground"
+    ? createPlaygroundConfigurationSnapshots
+    : createEvaluationConfigurationSnapshots)(client, {
+    tenantId,
+    userId,
+    threadId,
+    runId,
+    revisionId,
+  });
+  return snapshot;
 }

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { controlCapabilities, type EvaluationEvidence } from "@hoox/admin-control";
 import {
   type ControlOperatorRole,
   RUN_EXPLORER_ORIGINS,
@@ -295,30 +297,60 @@ export class PgAdminRunExplorerRepository implements RunExplorerRepository {
   ): Promise<readonly RunExplorerEventRow[]> {
     try {
       return await withTransaction(this.pool, async (client) => {
-        await client.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
-        // 审计与正文读取在同一事务：审计写入被 RLS 拒绝（非有效 admin）时整个读取失败；
-        // 正文视图只认本事务写入、且号码与 app.run_content_audit_id 一致的审计。
-        await client.query(
-          `INSERT INTO admin_run_content_access_audits(
-             audit_id,actor_user_id,tenant_id,run_id,attempt_id
-           ) VALUES($1,$2,$3,$4,$5)`,
-          [input.auditId, input.actorUserId, input.tenantId, input.runId, input.attemptId],
-        );
-        await client.query("SELECT set_config('app.run_content_audit_id',$1,true)", [
-          input.auditId,
-        ]);
-        const result = await client.query<EventRow>(
-          `SELECT attempt_id,sequence::text,kind,occurred_at,payload
-             FROM admin_run_event_content
-            WHERE tenant_id=$1 AND run_id=$2 AND attempt_id=$3
-            ORDER BY sequence`,
-          [input.tenantId, input.runId, input.attemptId],
-        );
-        return Object.freeze(result.rows.map(mapEvent));
+        return auditedEvents(client, input);
       });
     } catch (error) {
       throw mapPersistenceError(error, "读取 Run 正文");
     }
+  }
+
+  async evaluationEvidence(
+    actorUserId: string,
+    tenantId: string,
+    runId: string,
+  ): Promise<EvaluationEvidence> {
+    if (!controlCapabilities(await this.resolveRole(actorUserId)).includes("run_content.read"))
+      throw new Error("无正文权限");
+    const { events, artifacts } = await withTransaction(this.pool, async (client) => {
+      await client.query(
+        "SELECT set_config('app.user_id',$1,true),set_config('app.tenant_id',$2,true)",
+        [actorUserId, tenantId],
+      );
+      const attempt = (
+        await client.query<{ latest_attempt_id: string | null }>(
+          `SELECT latest_attempt_id FROM admin_run_directory WHERE tenant_id=$1 AND run_id=$2 AND origin='evaluation' AND status='succeeded'
+             AND EXISTS(SELECT 1 FROM admin_evaluation_executor_scope e JOIN agent_evaluation_runs b ON b.created_by=e.user_id AND b.tenant_id=e.tenant_id
+               JOIN agent_evaluation_case_jobs j ON j.evaluation_run_id=b.id WHERE e.tenant_id=$1 AND j.planned_run_id=$2)`,
+          [tenantId, runId],
+        )
+      ).rows[0]?.latest_attempt_id;
+      if (!attempt) throw new Error("缺少评测 Attempt");
+      const events = await auditedEvents(
+        client,
+        { actorUserId, tenantId, runId, attemptId: attempt, auditId: randomUUID() },
+        "评测结算",
+      );
+      const artifacts = await client.query<{ name: string; type: string }>(
+        "SELECT name,media_type AS type FROM admin_evaluation_artifact_evidence",
+      );
+      return { events, artifacts: artifacts.rows };
+    });
+    const toolNames: string[] = [];
+    let text = "",
+      finalText: string | undefined;
+    for (const row of events) {
+      if (row.kind !== "agent_event") continue;
+      const event = row.payload as Record<string, unknown>;
+      if (event.type === "tool.started" && typeof event.name === "string")
+        toolNames.push(event.name);
+      if (event.type === "message.delta" && typeof event.delta === "string") text += event.delta;
+      if (event.type === "message.completed") {
+        finalText = event.stopReason === "toolUse" ? undefined : text;
+        text = "";
+      }
+    }
+    if (finalText === undefined) throw new Error("缺少最终回复");
+    return { finalText, toolNames, artifacts };
   }
 
   private async read<T>(
@@ -339,4 +371,36 @@ export class PgAdminRunExplorerRepository implements RunExplorerRepository {
       throw mapPersistenceError(error, action);
     }
   }
+}
+
+async function auditedEvents(
+  client: PoolClient,
+  input: Parameters<RunExplorerRepository["readContent"]>[0],
+  reason?: "评测结算",
+) {
+  await client.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
+  // 审计与正文读取在同一事务：审计写入被 RLS 拒绝（非有效 admin）时整个读取失败；
+  // 正文视图只认本事务写入、且号码与 app.run_content_audit_id 一致的审计。
+  await client.query(
+    `INSERT INTO admin_run_content_access_audits(
+             audit_id,actor_user_id,tenant_id,run_id,attempt_id,query_summary
+           ) VALUES($1,$2,$3,$4,$5,$6::jsonb)`,
+    [
+      input.auditId,
+      input.actorUserId,
+      input.tenantId,
+      input.runId,
+      input.attemptId,
+      reason ? JSON.stringify({ reason }) : null,
+    ],
+  );
+  await client.query("SELECT set_config('app.run_content_audit_id',$1,true)", [input.auditId]);
+  const result = await client.query<EventRow>(
+    `SELECT attempt_id,sequence::text,kind,occurred_at,payload
+             FROM admin_run_event_content
+            WHERE tenant_id=$1 AND run_id=$2 AND attempt_id=$3
+            ORDER BY sequence`,
+    [input.tenantId, input.runId, input.attemptId],
+  );
+  return Object.freeze(result.rows.map(mapEvent));
 }

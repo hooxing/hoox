@@ -559,6 +559,7 @@ function fixture(
     readonly demoAdminUserId?: string;
     readonly agentDefinitions?: ApiDependencies["agentDefinitions"];
     readonly playground?: ApiDependencies["playground"];
+    readonly evaluationCommand?: ApiDependencies["evaluationCommand"];
     readonly scheduledTasks?: ApiDependencies["scheduledTasks"];
   } = {},
 ) {
@@ -634,6 +635,7 @@ function fixture(
     ...(options.installation === undefined ? {} : { installation: options.installation }),
     ...(options.demoAdminUserId === undefined ? {} : { demoAdminUserId: options.demoAdminUserId }),
     repositories: state.repositories,
+    ...(options.evaluationCommand ? { evaluationCommand: options.evaluationCommand } : {}),
     ...(options.playground ? { playground: options.playground } : {}),
     agentDefinitions:
       options.agentDefinitions ??
@@ -1196,6 +1198,30 @@ describe("管理员 Playground 受理", () => {
     headers: { authorization: "Bearer token-a", "idempotency-key": "playground-test-1" },
     payload: { definitionId: "agent_test", revisionId: "revision_draft", message: "你好" },
   };
+  it("内部评测命令拒绝普通会话与过期租约，只返回 Run 状态", async () => {
+    const token = crypto.randomUUID();
+    const execute = vi.fn(async (input: { token: string }) =>
+      input.token === token ? ("active" as const) : ("stale" as const),
+    );
+    const { app } = fixture({ evaluationCommand: { execute } });
+    openApps.push(app);
+    const post = (bearer: string) =>
+      app.inject({
+        method: "POST",
+        url: "/internal/evaluation-command",
+        headers: { authorization: `Bearer ${bearer}` },
+        payload: {
+          tenantId: "tenant_owner",
+          userId: "user_owner",
+          generation: "1",
+          plannedRunId: crypto.randomUUID(),
+        },
+      });
+    expect((await post("token-a")).statusCode).toBe(401);
+    expect(execute).not.toHaveBeenCalled();
+    expect((await post(crypto.randomUUID())).statusCode).toBe(404);
+    expect((await post(token)).json()).toEqual({ status: "active" });
+  });
   it("只传认证得出的个人身份与精确 Revision；不在响应中回显输入和 Mock", async () => {
     const receipt = { tenantId: "tenant_owner_a", threadId: "thread_test", runId: "run_test" };
     const accept = vi.fn(async () => ({ ...receipt, message: "不能返回" }));

@@ -187,6 +187,11 @@ const adminControlTables = new Set([
   "agent_revision_revocations",
   "agent_definition_commands",
   "agent_definition_audits",
+  "agent_evaluation_suites",
+  "agent_evaluation_cases",
+  "agent_evaluation_runs",
+  "agent_evaluation_results",
+  "agent_evaluation_case_jobs",
   "admin_run_content_access_audits",
 ]);
 
@@ -1200,6 +1205,25 @@ async function hasAgentDefinitionState(client: PoolClient, schema: string): Prom
   return result.rows[0]?.present === true;
 }
 
+async function hasAgentEvaluationState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.agent_evaluation_suites',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasAgentEvaluationExecutionState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.agent_evaluation_case_jobs',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasAdminControlState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.platform_control_operators',$1::text)) IS NOT NULL
@@ -1535,6 +1559,19 @@ export async function activeTablePolicy(
   }
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
+  }
+  if (await hasAgentEvaluationState(client, schema)) {
+    for (const table of [
+      "agent_evaluation_suites",
+      "agent_evaluation_cases",
+      "agent_evaluation_runs",
+      "agent_evaluation_results",
+    ]) {
+      policy.set(table, new Set());
+    }
+  }
+  if (await hasAgentEvaluationExecutionState(client, schema)) {
+    policy.set("agent_evaluation_case_jobs", new Set());
   }
   if (await hasRunAgentSnapshotState(client, schema)) {
     policy.set("run_agent_snapshots", new Set(["SELECT", "INSERT"]));
@@ -2620,6 +2657,19 @@ async function assertAdminControlBoundary(
     allowed.set("agent_revision_revocations", new Set(["SELECT", "INSERT"]));
     allowed.set("agent_definition_commands", new Set(["SELECT", "INSERT"]));
     allowed.set("agent_definition_audits", new Set(["SELECT", "INSERT"]));
+  }
+  if (enabled) {
+    for (const table of [
+      "agent_evaluation_suites",
+      "agent_evaluation_cases",
+      "agent_evaluation_runs",
+      "agent_evaluation_results",
+    ]) {
+      allowed.set(table, new Set(["SELECT", "INSERT", "UPDATE", "DELETE"]));
+    }
+  }
+  if (enabled && (await hasAgentEvaluationExecutionState(client, context.schema))) {
+    allowed.set("agent_evaluation_case_jobs", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"]));
   }
   if (sandboxEnabled) {
     for (const table of managedSandboxControlTables)
@@ -3779,6 +3829,21 @@ async function grantAdminControlAccess(
        GRANT UPDATE(status) ON TABLE ${schema}.agent_revisions TO ${control};
        GRANT USAGE ON SEQUENCE ${schema}.agent_definition_audits_audit_id_seq TO ${control}`,
     );
+    if (await hasAgentEvaluationState(client, context.schema)) {
+      await client.query(
+        `GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE
+           ${schema}.agent_evaluation_suites,${schema}.agent_evaluation_cases,
+           ${schema}.agent_evaluation_runs,${schema}.agent_evaluation_results TO ${control}`,
+      );
+    }
+    if (await hasAgentEvaluationExecutionState(client, context.schema)) {
+      await client.query(
+        `GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE ${schema}.agent_evaluation_case_jobs TO ${control}`,
+      );
+      await client.query(
+        `GRANT SELECT ON TABLE ${schema}.admin_evaluation_executor_scope,${schema}.admin_evaluation_artifact_evidence,${schema}.admin_evaluation_queue TO ${control}`,
+      );
+    }
     await client.query(
       `GRANT SELECT ON TABLE ${schema}.skills,${schema}.skill_versions TO ${control}`,
     );
@@ -4268,6 +4333,9 @@ export async function bootstrapRuntimeAccessOnClient(
     `REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA ${schema} FROM ${revokedRoles}`,
   );
   await grantWebhookAccess(client, context);
+  if (await hasAgentEvaluationExecutionState(client, context.schema)) {
+    await client.query(`GRANT SELECT ON ${schema}.evaluation_run_command TO ${role}`);
+  }
   if (await hasApiKeyState(client, context.schema)) {
     await client.query(
       `GRANT SELECT, INSERT ON TABLE ${schema}.api_keys TO ${role};

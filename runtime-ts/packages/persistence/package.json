@@ -55,6 +55,7 @@
     "@hoox/domain": "workspace:*",
     "@hoox/identity": "workspace:*",
     "@hoox/memory": "workspace:*",
+    "@hoox/protocol": "workspace:*",
     "@hoox/resource": "workspace:*",
     "@hoox/run-contracts": "workspace:*",
     "@hoox/skill": "workspace:*",

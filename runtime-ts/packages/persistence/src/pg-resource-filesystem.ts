@@ -504,7 +504,7 @@ const historyFileQuery = `SELECT entry.thread_id,directory.directory_name,
                              AND reference.incarnation_id=version.blob_incarnation_id
                              AND reference.physical_object_key=version.physical_object_key`;
 
-async function findFile(
+export async function findFile(
   client: PoolClient,
   input: Parameters<ResourceFilesystemCatalog["resolve"]>[0],
 ): Promise<ResourceFilesystemFile | undefined> {

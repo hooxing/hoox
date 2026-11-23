@@ -24,3 +24,6 @@ export * from "../pg-playground.js";
 export { RunAgentUnavailableError } from "../pg-run-agent-snapshot.js";
 
 export type { PgClientToolResults } from "../pg-client-tool-calls.js";
+
+export * from "../cancel-run.js";
+export * from "../pg-evaluation-command.js";

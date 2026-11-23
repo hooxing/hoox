@@ -9,6 +9,8 @@ export * from "../skill-publication-object-store.js";
 export * from "../external-tool-credential.js";
 export * from "../pg-external-tools.js";
 export * from "../pg-agent-definition.js";
+export * from "../pg-evaluation.js";
 export * from "../agent-definition-port.js";
 export * from "../pg-external-tool-admin.js";
 export * from "../pg-integration-admin.js";
+export * from "../pg-evaluation-driver.js";

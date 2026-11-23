@@ -1,3 +1,4 @@
+import { PgEvaluationCommand } from "./pg-evaluation-command.js";
 import type { PromotionCapabilityVerifier, ResourceCatalog } from "@hoox/resource";
 import type { BlobStore } from "./blob-store.js";
 import { PersistenceError } from "./errors.js";
@@ -93,6 +94,7 @@ export interface MigrationRuntime {
 export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
   readonly clientToolResults: PgClientToolResults;
+  readonly evaluationCommand: PgEvaluationCommand;
   readonly playground: PgPlaygroundRepository;
   readonly agentDefinitions: PgAgentDefinitionRepository;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -141,6 +143,7 @@ export function createApiPersistenceRuntime(
   return Object.freeze({
     repositories: new PgCoreRepositories(pool),
     clientToolResults: new PgClientToolResults(pool),
+    evaluationCommand: new PgEvaluationCommand(pool),
     playground: new PgPlaygroundRepository(pool),
     agentDefinitions: new PgAgentDefinitionRepository(pool),
     archiveThread: new PgArchiveThreadCommand(pool),

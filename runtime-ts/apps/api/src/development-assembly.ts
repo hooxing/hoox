@@ -186,6 +186,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           agentDefinitions: persistence.agentDefinitions,
           clientToolResults: persistence.clientToolResults,
           playground: persistence.playground,
+          evaluationCommand: persistence.evaluationCommand,
           apiKeys: persistence.apiKeys,
           personalizations: persistence.personalizations,
           scheduledTasks: persistence.scheduledTasks,

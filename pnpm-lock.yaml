@@ -619,6 +619,9 @@ importers:
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52
+      yaml:
+        specifier: 2.9.0
+        version: 2.9.0
 
   runtime-ts/packages/protocol-mapper:
     dependencies:

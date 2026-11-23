@@ -31,6 +31,19 @@ export const ErrorEnvelopeSchema = Type.Object(
       },
       { additionalProperties: false },
     ),
+    validationErrors: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            path: Type.String({ maxLength: 512 }),
+            code: Type.String({ minLength: 1, maxLength: 64 }),
+            message: Type.String({ minLength: 1, maxLength: 500 }),
+          },
+          { additionalProperties: false },
+        ),
+        { maxItems: 100 },
+      ),
+    ),
   },
   { additionalProperties: false, $id: "v1.ErrorEnvelope" },
 );

@@ -71,6 +71,16 @@ Agent 版本在受理 Run 时固定，见 [Agent 定义、版本与 Run 快照](
 - **来源与 Playground**：Run 目录的 `agent_definition_id`、`agent_revision_id` 与 `origin` 来自持久化快照和 Run 来源列。Playground 运行可在实时 Run 浏览器中查看，但不计入业务运行数、会话数及 Token 指标；个人目录与终端用户路径排除 Playground Thread/Run。
 - **耗时与用量口径**：耗时为 Run 创建到最新 Attempt 结束的端到端时间（含排队），未结束时缺省；模型调用次数与 Token 为该 Run 所有 Attempt 的用量账本汇总；工具调用、失败与错误计数只统计最新 Attempt 的持久事件。时间线默认展示最新 Attempt，可切换历史 Attempt。
 
+## Agent 指标与成本
+
+后台「数据运营」通过 `GET /v1/admin/control/agent-metrics` 读取按小时聚合的指标。查询必须提供时间范围且最多 90 天；可按 Agent、Revision、Tenant 与来源筛选，默认排除 `playground` 和 `evaluation`，明确选择来源后可查看这些 Run。聚合视图只返回小时、维度标识、计数、比率、分位数、Token、轮次和成本，不返回 Prompt、用户输入、模型回复、工具参数或事件正文；Admin Control 对应底表保持零 ACL。
+
+- 成功、失败和结果未知率以已结束 Run（成功、失败、取消或结果未知）为分母；取消不计入成功或失败分子。结果未知表示最新 Attempt 进入 `recovery_required` 或 `abandoned`，不能推断业务成功或失败。
+- 工具失败率为最新 Attempt 中失败工具调用数除以工具调用数；没有工具调用时比率为未知。P50/P90/P99 是已结束 Run 的创建至最新 Attempt 结束耗时，包含排队；未结束 Run 不进入延迟分位数。
+- 平均轮次按每个 Run 持久化的模型生成次数计算，包括用量为零的生成；Token 为该 Run 所有 Attempt 的累加值。缓存写入 Token 当前没有持久化维度。
+- 模型配置可为输入、输出和缓存读取分别配置每百万 Token 单价与三位大写币种代码。每个 Run 首次记录模型调用时，将其固定模型配置的单价写入不可变计价快照；后续改价不追溯影响历史成本。任一实际用量维度缺少单价，成本为未知并显示“未配置单价”；不同币种分组展示，不做汇率换算。
+- 视图按小时和 Agent、Revision、Tenant、来源及币种聚合，查询时间上限为 90 天，并由 Run 创建时间、Run 用量索引支撑范围扫描；超过 10,000 个结果桶时拒绝查询，要求缩小范围或增加筛选条件。
+
 ## 修改检查清单
 
 1. 新增配置项必须有类型、默认值、取值范围和明确生效时机（调度时热读，还是首次快照固定）。

@@ -65,6 +65,7 @@ const overview = {
 function fixture(): AdminControlApiContract {
   return {
     overview: vi.fn(async () => overview),
+    agentMetrics: vi.fn(async () => []),
     getIdentityConfiguration: vi.fn(async () => ({
       versionToken: 0,
       emailPasswordEnabled: true,
@@ -1215,6 +1216,37 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("80%");
     expect(container.textContent).toContain("12,500");
     expect(container.textContent).toContain("2,500");
+    expect(container.textContent).toContain("Agent 运营指标");
+    expect(container.textContent).toContain("平均轮次");
+    expect(container.textContent).toContain("结果未知率");
+    expect(api.agentMetrics).toHaveBeenCalled();
+    const metricForm = container.querySelector<HTMLFormElement>(".agent-metrics-filters");
+    if (metricForm === null) throw new Error("Agent 指标筛选表单缺失");
+    const metricInputs = metricForm.querySelectorAll<HTMLInputElement>("input");
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setValue?.call(metricInputs[2], "agent_alpha");
+      const agentInput = metricInputs[2];
+      if (agentInput === undefined) throw new Error("Agent 筛选输入框缺失");
+      agentInput.dispatchEvent(new Event("input", { bubbles: true }));
+      setValue?.call(metricInputs[4], "tenant_alpha");
+      const tenantInput = metricInputs[4];
+      if (tenantInput === undefined) throw new Error("Tenant 筛选输入框缺失");
+      tenantInput.dispatchEvent(new Event("input", { bubbles: true }));
+      const source = metricForm.querySelector("select");
+      if (source === null) throw new Error("来源筛选缺失");
+      source.value = "evaluation";
+      source.dispatchEvent(new Event("change", { bubbles: true }));
+      metricForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(api.agentMetrics).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        agentDefinitionId: "agent_alpha",
+        tenantId: "tenant_alpha",
+        origin: "evaluation",
+      }),
+    );
     expect(container.querySelector(".trajectory-viewer-link")).toBeNull();
     expect(container.querySelector("iframe")).toBeNull();
 

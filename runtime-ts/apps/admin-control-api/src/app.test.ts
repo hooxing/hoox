@@ -40,6 +40,7 @@ function fixture(sandbox?: AdminControlApiDependencies["sandbox"]) {
   };
   const control = {
     overview: vi.fn(),
+    agentMetrics: vi.fn(async () => []),
     listModelProviders: vi.fn(async () => [modelRevision]),
     listMemoryProviders: vi.fn(async () => []),
     listRuntimeSettings: vi.fn(
@@ -186,6 +187,23 @@ function fixture(sandbox?: AdminControlApiDependencies["sandbox"]) {
 }
 
 describe("后台控制 API", () => {
+  it("指标路由需要后台身份并转发窗口与来源筛选", async () => {
+    const { app, control } = fixture();
+    const url =
+      "/v1/admin/control/agent-metrics?from=2026-08-01T00%3A00%3A00.000Z&to=2026-08-02T00%3A00%3A00.000Z&origin=evaluation";
+    expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
+    expect(
+      (await app.inject({ method: "GET", url, headers: { authorization: "Bearer admin" } }))
+        .statusCode,
+    ).toBe(200);
+    expect(control.agentMetrics).toHaveBeenCalledWith("user_admin", {
+      from: "2026-08-01T00:00:00.000Z",
+      to: "2026-08-02T00:00:00.000Z",
+      origin: "evaluation",
+    });
+    await app.close();
+  });
+
   it("沙箱接口保护身份、严格校验策略且不回显写入密钥", async () => {
     const configuration = {
       providerKey: "tencent-ags" as const,

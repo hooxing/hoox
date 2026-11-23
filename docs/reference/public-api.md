@@ -2,6 +2,8 @@
 
 本文面向以服务凭据集成 Hoox 的部署方开发者，是 `/v1` 公开 API 的稳定接口参考。只有本页及[机器可读 OpenAPI](openapi/public-v1.json)列出的接口属于兼容承诺；同前缀的工作台、控制台、WebDAV 和其他内部路由不因此对 API Key 开放。
 
+TypeScript 接入可使用[SDK 使用说明](sdk-typescript.md)，包含流式续连、客户端工具辅助与最小 Node 示例。
+
 ## 认证与空间边界
 
 请求使用平台管理员在后台按空间创建的 API Key，通过 Bearer 认证。Key 的空间由服务端凭据解析，不接受调用方用 `X-Tenant-Id` 切换；跨空间或不存在的资源统一返回 404。每个公开路由还要求对应作用域：

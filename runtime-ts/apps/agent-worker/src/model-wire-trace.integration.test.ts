@@ -169,6 +169,20 @@ describe("模型网络报文真实 Pi transport", () => {
       undefined,
       undefined,
       new ModelWireTraceSession(traces, 1024 * 1024, `http://127.0.0.1:${port}/v1`),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => false,
     );
     const persistence = new FakeExecutionPersistence();
     const scopeA = persistence.addSeed({ ...fakeSeed("wire-concurrent-a"), input: "并发任务甲" });
@@ -240,6 +254,20 @@ async function createWorker(
     undefined,
     undefined,
     new ModelWireTraceSession(traces, 1024 * 1024, `http://127.0.0.1:${port}/v1`),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async () => false,
   );
   return createRunWorker(persistence, sessions, sandboxes);
 }

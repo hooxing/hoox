@@ -1371,11 +1371,10 @@ async function assembleWorkerRuntime(
             }),
         allowPrivateAddresses: configuration.externalToolsAllowPrivateAddresses,
       },
-      async (scope, callIds) =>
-        await clientToolCallHistory.findMatches({
+      async (scope) =>
+        await clientToolCallHistory.hasAnyForThread({
           tenantId: scope.tenantId,
           threadId: scope.threadId,
-          callIds,
         }),
     );
     const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(

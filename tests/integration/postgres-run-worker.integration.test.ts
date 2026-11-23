@@ -28,6 +28,7 @@ import {
 } from "@hoox/domain";
 import type {
   ControlledRolloutProjection,
+  ExecutionFence,
   ExecutionScope,
   RuntimeMutation,
   RuntimeOutboxV1,
@@ -4750,6 +4751,13 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       const f = { ...base, scope };
       const actor = base.tenantScope;
       await subscribeWebhook(f, ["run.waiting", "run.requires_action"]);
+      const clientToolHistory = new PgClientToolCallHistoryReader(runtime);
+      await expect(
+        clientToolHistory.hasAnyForThread({
+          tenantId: scope.tenantId,
+          threadId: scope.threadId,
+        }),
+      ).resolves.toBe(false);
       await new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true }).createQueuedRun({
         scope: actor,
         run,
@@ -4872,13 +4880,111 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       if (typeof data?.callId !== "string") throw new Error("未发布客户端调用");
       const callId = data.callId;
       expect(callId).toMatch(/^client_[a-f0-9]{64}$/u);
+      expect(callId).not.toBe("lookup-1");
       await expect(
-        new PgClientToolCallHistoryReader(runtime).findMatches({
+        clientToolHistory.hasAnyForThread({
           tenantId: scope.tenantId,
           threadId: scope.threadId,
-          callIds: [callId, "service-call-not-client"],
         }),
-      ).resolves.toEqual([callId]);
+      ).resolves.toBe(true);
+      await expect(
+        clientToolHistory.hasAnyForThread({
+          tenantId: scope.tenantId,
+          threadId: threadId(`unrelated-${label}`),
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        clientToolHistory.hasAnyForThread({
+          tenantId: tenantId(`unrelated-${label}`),
+          threadId: scope.threadId,
+        }),
+      ).resolves.toBe(false);
+      if (mode === "submit") {
+        const laterRunId = runId(`run-later-${label}`);
+        const laterScope: ExecutionScope = {
+          ...scope,
+          runId: laterRunId,
+          rootRunId: laterRunId,
+        };
+        const laterFence: ExecutionFence = {
+          scope: laterScope,
+          runClaim: {
+            token: "later-run-claim",
+            epoch: 1,
+            expiresAt: isoTimestamp("2099-07-27T00:00:00.000Z"),
+          },
+          workspaceLease: {
+            rootRunId: laterRunId,
+            epoch: 1,
+            expiresAt: isoTimestamp("2099-07-27T00:00:00.000Z"),
+          },
+        };
+        const suppressContent = vi.fn();
+        const createRawTrace = vi.fn();
+        const laterTrajectory: unknown[] = [];
+        const laterSessions = new PiWorkerSessionFactory(
+          faux.getModel(),
+          models,
+          () => ({
+            recordStarted: async () => "recorded" as const,
+            record: async () => ({
+              outcome: "recorded" as const,
+              observation: "",
+              isTruncated: false,
+            }),
+          }),
+          undefined,
+          undefined,
+          { createAttempt: createRawTrace } as never,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            persist: async (record: unknown) => laterTrajectory.push(record),
+          },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { suppressAttemptContent: suppressContent } as never,
+          undefined,
+          async (laterAttemptScope) =>
+            await clientToolHistory.hasAnyForThread({
+              tenantId: laterAttemptScope.tenantId,
+              threadId: laterAttemptScope.threadId,
+            }),
+        );
+        const laterSession = await laterSessions.create({
+          scope: laterScope,
+          attemptId: `attempt-later-${label}`,
+          fence: laterFence,
+          agentSnapshot: fakeAgentSnapshot(),
+          origin: "normal",
+          playgroundMocks: {},
+          ensureSandboxReady: async () => {
+            throw new Error("后续 Session 不应准备 Sandbox");
+          },
+          rolloutProjection: {
+            schemaVersion: 2,
+            checkpointId: `later-${label}`,
+            items: [],
+          },
+          authorizeToolEffect: async () => {
+            throw new Error("后续 Session 不执行工具");
+          },
+          writeTodo: async () => {
+            throw new Error("后续 Session 不写 Todo");
+          },
+        });
+        expect(suppressContent).toHaveBeenCalledWith(`attempt-later-${label}`);
+        expect(createRawTrace).not.toHaveBeenCalled();
+        laterSession.dispose();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(laterTrajectory).toHaveLength(0);
+      }
       expect(data).toMatchObject({
         threadId: scope.threadId,
         runId: scope.runId,

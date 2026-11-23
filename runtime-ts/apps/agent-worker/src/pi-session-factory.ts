@@ -248,10 +248,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly enabledTools?: readonly RuntimeToolName[],
     private readonly telemetry?: WorkerTelemetry,
     private readonly externalToolConfiguration?: WorkerExternalToolConfiguration,
-    private readonly findClientToolHistoryCallIds?: (
+    private readonly hasClientToolCallsForThread?: (
       scope: Parameters<AgentSessionFactoryPort["create"]>[0]["scope"],
-      callIds: readonly string[],
-    ) => Promise<readonly string[]>,
+    ) => Promise<boolean>,
   ) {
     this.enabledTools = normalizeRuntimeToolSelection(enabledTools);
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
@@ -295,7 +294,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       input.enabledTools ?? this.enabledTools,
       this.telemetry,
       this.externalToolConfiguration,
-      this.findClientToolHistoryCallIds,
+      this.hasClientToolCallsForThread,
     );
   }
 
@@ -323,9 +322,38 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const configuredTools = input.agentSnapshot.content.tools;
     const hasClientTools =
       configuredTools.mode === "configured" && configuredTools.clientTools.length > 0;
-    let attemptWireTraces: ModelWireTraceSession | undefined;
-    let trajectoryRecorder: InternalTrajectoryAttemptRecorder | undefined;
-    const knownExternalSecrets: string[] = [];
+    let threadHasClientToolCalls = true;
+    if (this.hasClientToolCallsForThread !== undefined) {
+      try {
+        threadHasClientToolCalls = await this.hasClientToolCallsForThread(input.scope);
+      } catch {
+        // 无法确认 Thread 是否含客户端调用时关闭诊断，但不影响 Run 执行。
+      }
+    }
+    const protectDiagnosticContent = hasClientTools || threadHasClientToolCalls;
+    // 客户端参数与回执可能出现在任意 Thread 历史切片，包括子 Agent 的用户消息。
+    if (protectDiagnosticContent) this.telemetry?.suppressAttemptContent(input.attemptId);
+    const attemptWireTraces = protectDiagnosticContent
+      ? undefined
+      : this.modelWireTraces?.createAttempt(input.attemptId);
+    const trajectoryRecorder =
+      protectDiagnosticContent || this.internalTrajectoryDiagnostics === undefined
+        ? undefined
+        : new InternalTrajectoryAttemptRecorder(
+            {
+              tenantId: input.scope.tenantId,
+              threadId: input.scope.threadId,
+              runId: input.scope.runId,
+              attemptId: input.attemptId,
+              ...(input.agent?.agentKind === "subagent"
+                ? {
+                    agentThreadId: input.agent.agentThreadId,
+                    agentTurnId: input.agent.agentTurnId,
+                  }
+                : {}),
+            },
+            this.internalTrajectoryDiagnostics,
+          );
     const wireTraceContext = Object.freeze({
       tenantId: input.scope.tenantId,
       threadId: input.scope.threadId,
@@ -779,8 +807,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           return snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_INVALID");
       }
       if (remaining.size) return snapshotFailure("EXTERNAL_TOOL_SNAPSHOT_INVALID");
-      knownExternalSecrets.push(
-        ...snapshots.flatMap(({ credential }) => (credential === undefined ? [] : [credential])),
+      trajectoryRecorder?.addKnownSecrets(
+        snapshots.flatMap(({ credential }) => (credential === undefined ? [] : [credential])),
       );
       return snapshots;
     };
@@ -1073,10 +1101,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           throw new ModelContinuationRejectedError("tool_effect_rejected");
         }
       },
-      withProviderInvocation: <T>(operation: () => T) => {
-        const traces = attemptWireTraces;
-        return traces === undefined ? operation() : traces.run(wireTraceContext, operation);
-      },
+      ...(attemptWireTraces === undefined
+        ? {}
+        : {
+            withProviderInvocation: <T>(operation: () => T) =>
+              attemptWireTraces.run(wireTraceContext, operation),
+          }),
       ...(deliverFileToolRouter === undefined ? {} : { deliverFileToolRouter }),
     };
     // 兼容身份只由实际模型/Prompt/Tool schema 派生；占位 recorder 不执行任何写入。
@@ -1116,60 +1146,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             : await measureStartup("thread_history_read", () =>
                 prepareThreadHistory(input, compatibility),
               )));
-    const historyCallIds = [
-      ...new Set(
-        (recoveredThreadHistory?.messages ?? []).flatMap((message) =>
-          message.role === "toolResult"
-            ? [message.toolCallId]
-            : message.role === "assistant"
-              ? message.content.flatMap((part) => (part.type === "toolCall" ? [part.id] : []))
-              : [],
-        ),
-      ),
-    ];
-    let historyHasClientToolCalls = false;
-    if (historyCallIds.length > 0) {
-      if (this.findClientToolHistoryCallIds === undefined) {
-        historyHasClientToolCalls = true;
-      } else {
-        try {
-          const clientCallIds = await this.findClientToolHistoryCallIds(
-            input.scope,
-            historyCallIds,
-          );
-          const loadedCallIds = new Set(historyCallIds);
-          historyHasClientToolCalls = clientCallIds.some((callId) => loadedCallIds.has(callId));
-        } catch {
-          // 无法确认历史调用类别时关闭正文诊断，但不影响 Run 执行。
-          historyHasClientToolCalls = true;
-        }
-      }
-    }
-    const protectDiagnosticContent = hasClientTools || historyHasClientToolCalls;
-    // 历史调用可能来自已移除工具的旧 Revision；只有读取实际历史后才能放开正文诊断。
-    if (protectDiagnosticContent) this.telemetry?.suppressAttemptContent(input.attemptId);
-    attemptWireTraces = protectDiagnosticContent
-      ? undefined
-      : this.modelWireTraces?.createAttempt(input.attemptId);
-    trajectoryRecorder =
-      protectDiagnosticContent || this.internalTrajectoryDiagnostics === undefined
-        ? undefined
-        : new InternalTrajectoryAttemptRecorder(
-            {
-              tenantId: input.scope.tenantId,
-              threadId: input.scope.threadId,
-              runId: input.scope.runId,
-              attemptId: input.attemptId,
-              ...(input.agent?.agentKind === "subagent"
-                ? {
-                    agentThreadId: input.agent.agentThreadId,
-                    agentTurnId: input.agent.agentTurnId,
-                  }
-                : {}),
-            },
-            this.internalTrajectoryDiagnostics,
-          );
-    trajectoryRecorder?.addKnownSecrets(knownExternalSecrets);
     const initialThreadHistory =
       recoveredThreadHistory === undefined ||
       this.prepareRuntimeCompaction === undefined ||

@@ -109,19 +109,19 @@ async function advanceWait(client: PoolClient, tenantId: string, runId: string, 
 export class PgClientToolCallHistoryReader {
   constructor(private readonly pool: Pool) {}
 
-  async findMatches(input: {
+  async hasAnyForThread(input: {
     readonly tenantId: string;
     readonly threadId: string;
-    readonly callIds: readonly string[];
-  }): Promise<readonly string[]> {
-    if (input.callIds.length === 0) return [];
+  }): Promise<boolean> {
     return await withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
-      const result = await client.query<{ call_id: string }>(
-        `SELECT call_id FROM client_tool_calls
-            WHERE tenant_id=$1 AND thread_id=$2 AND call_id=ANY($3::text[])`,
-        [input.tenantId, input.threadId, [...new Set(input.callIds)]],
+      const result = await client.query<{ present: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM client_tool_calls
+            WHERE tenant_id=$1 AND thread_id=$2
+         ) AS present`,
+        [input.tenantId, input.threadId],
       );
-      return result.rows.map(({ call_id }) => call_id);
+      return result.rows[0]?.present === true;
     });
   }
 }

@@ -22,6 +22,17 @@
 
 ## Production 配置
 
+### 评测角色升级
+
+从已应用 0031 的生产数据库升级时，发布负责人先安排数据库平台管理员（受控 PostgreSQL 超级用户）执行派生角色预置，再由数据库迁移身份执行 Schema 迁移：
+
+1. 将既有 `DATABASE_BOOTSTRAP_URL`（受控超级用户连接）和 `DATABASE_RUNTIME_ROLE` 注入一次性运维任务；不向 API、Worker、Scheduler 或 Migrator 注入该超级用户凭据。
+2. 使用发布版本执行 `pnpm db:evaluation-role:bootstrap`。该命令只创建或校验按数据库角色契约从 `DATABASE_RUNTIME_ROLE` 派生的评测角色，并建立 `INHERIT FALSE, SET TRUE, ADMIN FALSE` 的 Runtime 成员关系；不创建应用登录角色、不改密码，也不运行 Schema 迁移。
+3. 预置成功后撤销/卸载超级用户凭据，再以受限 Migrator 配置 `MIGRATION_DATABASE_URL` 等既有迁移变量执行 `pnpm db:migrate:up`。
+4. 若角色属性、已有成员关系或权限校验失败，预置事务回滚并输出不含凭据的诊断。由数据库管理员检查派生角色与授权，按变更管理流程修复不安全状态，再安全重试预置；预置成功而迁移失败时保留角色，先修复迁移失败原因，再重复 `pnpm db:migrate:up`。两条命令均可安全重试，不要把超级用户凭据交给 Migrator，也不要让 Runtime/Migrator 获得 `CREATEROLE`。
+
+`pnpm db:migrate:up` 在角色缺失时会在 DDL 前终止，并给出以上预置命令提示。不得尝试以 `db:roles:bootstrap` 或 `db:setup` 代替该生产步骤；它们是开发入口并拒绝 production。
+
 `deploy/production.env.example` 是多个服务字段的合集，不是一个可以整包注入所有容器的共享秘密文件。
 
 | 服务 | 应获得 | 不应获得 |

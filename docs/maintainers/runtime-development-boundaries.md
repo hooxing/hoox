@@ -242,6 +242,10 @@ corepack pnpm security:audit:production
 
 开发数据库完成上述一次性边界后，`pnpm db:roles:bootstrap` 使用 `DATABASE_BOOTSTRAP_URL` 和各应用连接中的密码，创建当前数据库缺失的登录角色并授予目标数据库 `CONNECT`，同时补齐派生的评测角色与缺失成员关系，不新增环境变量。命令以数据库级 advisory transaction lock 串行化并验证 Database Admin 同时拥有当前数据库和角色管理能力；它不会修改已存在角色的密码、属性或 ownership，也不会覆盖已有成员关系的授权选项、创建或转移 Schema。已有角色跨库复用或评测角色安全边界不符时，整个补齐事务失败回滚。`pnpm db:setup` 串行执行角色补齐与向上迁移，供两台开发机拉取新增角色契约后各自在本机运行；production 禁止使用该本地补齐命令，Demo 发布预置通过既有运维步骤自动补齐评测角色。
 
+评测角色创建要求受控 PostgreSQL 超级用户，避免 PostgreSQL 17 为仅持有 `CREATEROLE` 的创建者自动授予额外 ADMIN 成员关系；不得给 Runtime 或 Migrator 增加 `CREATEROLE`。生产升级使用独立的 `pnpm db:evaluation-role:bootstrap` 入口预置角色，不运行开发角色补齐命令，执行顺序与失败重试见[生产评测角色升级](../operations/production-readiness.md#评测角色升级)。
+
+迁移角色清单中的派生评测角色缺失时，preflight 优先提示生产环境先以受控超级用户运行 `pnpm db:evaluation-role:bootstrap`；其他应用登录角色缺失仍提示 `pnpm db:roles:bootstrap`。两种诊断均发生在任何 Schema DDL 之前。
+
 `pnpm db:migrate:up` 会在任何 DDL 前同时验证 各应用角色、当前 Migrator、Schema owner 与精确 `search_path`，并通过 `pg_shdepend` 拒绝任一应用角色被当前集群中的其他数据库依赖。角色缺失与真实跨数据库复用使用不同诊断：前者列出缺失角色并指向 `pnpm db:roles:bootstrap`，后者列出发生复用的角色和数据库。它还会拒绝常驻角色的目标 Schema `CREATE`、数据库 `TEMPORARY`、契约外的角色继承/成员关系/ownership、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、角色定向 RLS policy 重绑定、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 从空集合重建常驻角色的精确 ACL：Worker Coordinator 全局读取 assignment 并更新 claim 栅栏列，外部工具快照仅经校验当前双栅栏的受限视图读取，不拥有业务底表权限；Team Coordinator 只供 API 团队协作 Repository 使用，在 Runtime 白名单基础上额外获得团队目录及 Membership 授权列的最小权限；Skill Publisher 和动态 Worker policy 始终重绑定到本次显式配置的角色。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束白名单断言同样共用一个事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
 
 ## HTTP API 开发边界

@@ -43,9 +43,11 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 
 角色属于整个 PostgreSQL 集群；同一集群的开发、预览和生产数据库使用不同角色集合。迁移在任何 DDL 前校验全部角色、Schema owner、`search_path` 与跨数据库依赖，并在同一事务中完成 Schema 迁移、迁移记录、策略重绑定和最小 ACL 重建。readiness 探测的是实际连接身份，而不是配置文件中的声明。
 
-评测角色由 Runtime 角色名派生：不超过 52 字符时追加 `_evaluation`；更长时取前 43 字符、下划线、完整 Runtime 名的 MD5 前 8 位，再追加 `_evaluation`，总长不超过 PostgreSQL 的 63 字符上限。无需新增连接、密码或环境变量。该角色必须为 `NOLOGIN NOINHERIT`，无危险属性、上游角色、对象 ownership、CREATE 或 TEMP 权限；唯一成员是当前 Runtime，成员关系必须为 `INHERIT FALSE, SET TRUE, ADMIN FALSE`。这是常驻服务禁止角色成员关系的唯一例外。迁移与 ACL bootstrap 对角色属性、成员关系、跨库依赖及精确权限白名单失败关闭，不静默修复未知的已有属性。
+评测角色由 Runtime 角色名派生：不超过 52 字符时追加 `_evaluation`；更长时取前 43 字符、下划线、完整 Runtime 名的 MD5 前 8 位，再追加 `_evaluation`，总长不超过 PostgreSQL 的 63 字符上限。无需新增服务连接或环境变量。该角色必须为 `NOLOGIN NOINHERIT`，无危险属性、上游角色、对象 ownership、CREATE 或 TEMP 权限；唯一成员是当前 Runtime，成员关系必须为 `INHERIT FALSE, SET TRUE, ADMIN FALSE`。这是常驻服务禁止角色成员关系的唯一例外。评测角色只能由受控 PostgreSQL 超级用户预置，避免 PostgreSQL 17 为非超级用户创建者自动授予额外 ADMIN 成员关系；不得给 Runtime 或 Migrator 增加 `CREATEROLE`。迁移与 ACL bootstrap 对角色属性、成员关系、跨库依赖及当前数据库所有非系统 Schema 的有效表、列、序列、Routine 权限执行失败关闭的精确白名单检查，不静默修复未知的已有授权。
 
-数据库级预置先于业务迁移：开发的角色 bootstrap、CI 准备脚本及 Demo 发布共用的 `postgres-init.sh` 均补齐缺失评测角色与成员关系；保留数据卷升级也走既有预置步骤，不要求部署方新增变量或另行执行授权。业务迁移不创建集群角色，迁移回退只撤销 Schema 内权限和策略变更，不删除角色。
+数据库级预置先于业务迁移：开发和 CI 角色 bootstrap、Demo 发布共用的 `postgres-init.sh` 均补齐缺失评测角色与成员关系；保留数据卷升级也走既有预置步骤。生产从 0031 升级时，由受控数据库超级用户先运行 `pnpm db:evaluation-role:bootstrap` 创建或校验派生角色及精确成员关系，再由受限 Migrator 运行 `pnpm db:migrate:up`。该入口仅读取既有的 `DATABASE_BOOTSTRAP_URL` 与 `DATABASE_RUNTIME_ROLE`，不新增必填变量；失败后先排查权限或不安全的既有角色状态，修正后可幂等重试预置，再重试迁移。业务迁移不创建集群角色，迁移回退只撤销 Schema 内权限和策略变更，不删除角色。
+
+评测角色的 INSERT 策略使用 `RESTRICTIVE` 限定 Thread、Run 与 Agent 快照，因此不会被 PUBLIC 或其他 permissive 策略的 OR 组合放宽。计划 Thread 必须是评测来源并匹配有效命令的 planned ID；Run 必须为 evaluation 来源且绑定 planned ID；快照的 Definition、Revision ID、digest 和完整内容必须与命令指定 Revision 完全一致。
 
 ## Playground 持久化边界
 

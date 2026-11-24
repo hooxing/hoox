@@ -20,7 +20,9 @@ Admin Control API 在进程内轮询数据库，不使用 Scheduler 或单独的
 
 API 的评测命令受理、对账和取消均在 Tenant 事务内使用 `SET LOCAL ROLE`，快照与队列写入共用该事务；提交或回滚后自动恢复原 Runtime 角色，不能以会话级 `SET ROLE` 污染连接池。控制面的调度、正文审计与结果持久化仍使用 Admin Control，不切换 Runtime 身份。
 
-`evaluation_run_command` 仅向专用评测角色开放，逐语句核对发起人、Tenant、批次、claim token、generation、有效租约和任务状态；身份失效或取消只隐藏用例正文，保留原命令范围内的清理能力。角色切换与批次变量均不能单独授权；planned Run 绑定、评测来源隐藏及快照的 Revision、摘要和完整内容校验均保持不变。命令范围通过非相关的 `ARRAY(SELECT ...)` 转为按需执行的 InitPlan，不跨语句缓存租约或账号状态。
+`evaluation_run_command` 仅向专用评测角色开放，逐语句核对发起人、Tenant、批次、claim token、generation、有效租约和任务状态；身份失效或取消只隐藏用例正文，保留原命令范围内的清理能力。角色切换与批次变量均不能单独授权；planned Run 绑定、评测来源隐藏及快照的 Revision、摘要和完整内容校验均保持不变。所有评测角色可 INSERT 的运行表均有面向该角色的 `RESTRICTIVE` policy，将写入约束到有效命令对应的 planned ID；Thread、Run 和 Agent 快照另强制评测来源，并确保 Revision ID、digest 和完整 content 同时匹配命令租约指定的 Revision。命令范围通过非相关的 `ARRAY(SELECT ...)` 转为按需执行的 InitPlan，不跨语句缓存租约或账号状态。
+
+评测角色为派生的 `NOLOGIN NOINHERIT` 角色，只能由受控 PostgreSQL 超级用户预置；Runtime 通过 `INHERIT FALSE, SET TRUE, ADMIN FALSE` 成员关系显式切换。生产升级先运行 `pnpm db:evaluation-role:bootstrap`，再由受限 Migrator 执行数据库迁移，步骤与失败重试见[生产评测角色升级](../operations/production-readiness.md#评测角色升级)。
 
 ## 取证和质量门槛
 

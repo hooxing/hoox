@@ -22,6 +22,7 @@ describe("评测角色", () => {
   it.each([true, false])("幂等补齐 NOLOGIN 角色和不继承的成员关系，已有=%s", async (exists) => {
     const client = {
       query: vi.fn(async (statement: string) => {
+        if (statement.includes("AS is_superuser")) return { rows: [{ is_superuser: true }] };
         if (statement.includes("AS safe")) return { rows: [{ safe: true }] };
         return { rows: [], rowCount: exists ? 1 : 0 };
       }),
@@ -39,7 +40,11 @@ describe("评测角色", () => {
 
   it("不修复已有不安全身份，校验失败必须由调用事务回滚", async () => {
     const client = {
-      query: vi.fn(async () => ({ rows: [{ safe: false }], rowCount: 1 })),
+      query: vi.fn(async (statement: string) =>
+        statement.includes("AS is_superuser")
+          ? { rows: [{ is_superuser: true }] }
+          : { rows: [{ safe: false }], rowCount: 1 },
+      ),
     } as unknown as PoolClient;
     await expect(bootstrapEvaluationRole(client, "runtime_test")).rejects.toMatchObject({
       code: "CONSTRAINT_VIOLATION",
@@ -47,6 +52,22 @@ describe("评测角色", () => {
     expect(
       vi.mocked(client.query).mock.calls.map(([statement]) => String(statement)),
     ).not.toContainEqual(expect.stringMatching(/CREATE ROLE|ALTER ROLE|GRANT /u));
+  });
+
+  it("拒绝非超级用户执行评测角色预置", async () => {
+    const client = {
+      query: vi.fn(async (statement: string) =>
+        statement.includes("AS is_superuser")
+          ? { rows: [{ is_superuser: false }] }
+          : { rows: [], rowCount: 0 },
+      ),
+    } as unknown as PoolClient;
+    await expect(bootstrapEvaluationRole(client, "runtime_test")).rejects.toThrow(
+      "受控 PostgreSQL 超级用户",
+    );
+    expect(vi.mocked(client.query).mock.calls.map(([statement]) => String(statement))).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/CREATE ROLE/u)]),
+    );
   });
 
   it("只使用事务内 SET LOCAL ROLE，不修改池连接的会话角色", async () => {

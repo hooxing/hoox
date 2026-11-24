@@ -44,7 +44,6 @@ const inserts = [
   "thread_continuity_metric_observations",
   "run_execution_inputs",
   "run_dispatch_outbox",
-  "worker_tenant_assignments",
   "run_workspace_results",
 ] as const;
 const columnReads: Readonly<Record<string, readonly string[]>> = {
@@ -107,6 +106,13 @@ export async function grantEvaluationAccess(
     const column = `"${row.column_name.replaceAll('"', '""')}"`;
     await client.query(`REVOKE ALL PRIVILEGES (${column}) ON ${schema}.${table} FROM ${role}`);
   }
+  if (!enabled) {
+    await client.query(
+      `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema} FROM ${role};
+       REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema} FROM ${role};
+       REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA ${schema} FROM ${role}`,
+    );
+  }
   if (enabled) {
     await client.query(`ALTER POLICY worker_tenant_assignments_runtime_policy
       ON ${schema}.worker_tenant_assignments TO "${context.runtimeRole}",${role}`);
@@ -140,22 +146,25 @@ export async function grantEvaluationAccess(
     }
   }
   const privileges = await client.query<{
+    schema_name: string;
     table_name: string;
     column_name: string;
     privilege: string;
     allowed: boolean;
   }>(
-    `SELECT relation.relname AS table_name,attribute.attname AS column_name,requested.privilege,
+    `SELECT namespace.nspname AS schema_name,relation.relname AS table_name,attribute.attname AS column_name,requested.privilege,
        has_column_privilege($1,relation.oid,attribute.attnum,requested.privilege) AS allowed
        FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
        JOIN pg_attribute attribute ON attribute.attrelid=relation.oid AND attribute.attnum>0 AND NOT attribute.attisdropped
        CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) requested(privilege)
-      WHERE namespace.nspname=$2 AND relation.relkind IN ('r','p','v','m')`,
-    [roleName, context.schema],
+      WHERE namespace.nspname!~'^pg_' AND namespace.nspname<>'information_schema'
+        AND relation.relkind IN ('r','p','v','m','f')`,
+    [roleName],
   );
   for (const row of privileges.rows) {
     const expected =
       enabled &&
+      row.schema_name === context.schema &&
       ((row.privilege === "SELECT" &&
         ((reads as readonly string[]).includes(row.table_name) ||
           columnReads[row.table_name]?.includes(row.column_name) === true)) ||
@@ -165,17 +174,22 @@ export async function grantEvaluationAccess(
     if (row.allowed !== expected) {
       throw new PersistenceError(
         "CONSTRAINT_VIOLATION",
-        `评测权限偏离白名单：${row.table_name}.${row.column_name}.${row.privilege}`,
+        `评测权限偏离白名单：${row.schema_name}.${row.table_name}.${row.column_name}.${row.privilege}`,
       );
     }
   }
   const forbidden = await client.query<{ safe: boolean }>(
-    `SELECT NOT EXISTS (SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
-       WHERE namespace.nspname=$2 AND (
-         (relation.relkind IN ('r','p','v','m') AND has_table_privilege($1,relation.oid,'DELETE,TRUNCATE,TRIGGER'))
+    `SELECT NOT EXISTS (SELECT 1 FROM pg_namespace namespace
+         WHERE namespace.nspname!~'^pg_' AND namespace.nspname<>'information_schema'
+           AND (has_schema_privilege($1,namespace.oid,'CREATE') OR
+             (namespace.nspname<>$2 AND has_schema_privilege($1,namespace.oid,'USAGE'))))
+       AND NOT EXISTS (SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+       WHERE namespace.nspname!~'^pg_' AND namespace.nspname<>'information_schema' AND (
+         (relation.relkind IN ('r','p','v','m','f') AND has_table_privilege($1,relation.oid,'DELETE,TRUNCATE,TRIGGER'))
          OR (relation.relkind='S' AND has_sequence_privilege($1,relation.oid,'USAGE,SELECT,UPDATE'))))
        AND NOT EXISTS (SELECT 1 FROM pg_proc routine JOIN pg_namespace namespace ON namespace.oid=routine.pronamespace
-         WHERE namespace.nspname=$2 AND has_function_privilege($1,routine.oid,'EXECUTE')) AS safe`,
+         WHERE namespace.nspname!~'^pg_' AND namespace.nspname<>'information_schema'
+           AND has_function_privilege($1,routine.oid,'EXECUTE')) AS safe`,
     [roleName, context.schema],
   );
   if (forbidden.rows[0]?.safe !== true) {

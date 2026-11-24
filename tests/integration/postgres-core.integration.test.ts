@@ -1,14 +1,3 @@
-import type { EvaluationCase } from "../../runtime-ts/packages/protocol/src/admin-evaluation.js";
-import { PgEvaluationDriver } from "../../runtime-ts/packages/persistence/src/pg-evaluation-driver.js";
-import { PgEvaluationCommand } from "../../runtime-ts/packages/persistence/src/pg-evaluation-command.js";
-import { PgEvaluationRepository } from "../../runtime-ts/packages/persistence/src/pg-evaluation.js";
-import {
-  assertEvaluationRoleSafe,
-  bootstrapEvaluationRole,
-  evaluationRoleName,
-  setLocalEvaluationRole,
-} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
-import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
 import { createHash, randomBytes } from "node:crypto";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,8 +16,8 @@ import {
   membershipId,
   normalizeExternalToolSchema,
   prepareWorkspaceRevision,
-  rehydrateThread,
   type Run,
+  rehydrateThread,
   releaseWorkspaceLease,
   renewWorkspaceLease,
   runId,
@@ -49,63 +38,59 @@ import type {
   TenantScope,
   WorkspaceWriteScope,
 } from "@hoox/persistence/postgres";
-import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
-import { onTestFinished, afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { ExecutionFence, RuntimeMutation } from "@hoox/run-contracts";
+import { runtimeMutationDigest } from "@hoox/run-contracts/mutation-protocol";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import type { AdminControlApiDependencies } from "../../runtime-ts/apps/admin-control-api/src/app.js";
-import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
+import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
+import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import {
-  buildRuntimeSystemPrompt,
-  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
-} from "../../runtime-ts/packages/prompt-builder/src/index.js";
-import { runtimeMutationDigest } from "@hoox/run-contracts/mutation-protocol";
-import type { ExecutionFence, RuntimeMutation } from "@hoox/run-contracts";
+  assertEvaluationRoleSafe,
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+  setLocalEvaluationRole,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
 import { ExternalToolCredentialCipher } from "../../runtime-ts/packages/persistence/src/external-tool-credential.js";
 import { ExternalToolCredentialDecryptor } from "../../runtime-ts/packages/persistence/src/external-tool-credential-reader.js";
-import { PgExternalToolSnapshotReader } from "../../runtime-ts/packages/persistence/src/pg-external-tool-snapshot-reader.js";
-import { PgExternalToolRegistry } from "../../runtime-ts/packages/persistence/src/pg-external-tools.js";
-import { PgRunDispatchCreation } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
-import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
-import {
-  PgExecutionPersistence,
-  PgRunExecutionSetup,
-} from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
-import { readRunAgentSnapshot } from "../../runtime-ts/packages/persistence/src/pg-run-agent-snapshot.js";
-import { readRunSkillSnapshot } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
-import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import {
   loadMigrations,
   migrateDown,
   migrateUp,
 } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
-import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
 import {
   PgAdminControlRepository,
   PgRuntimeControlConfigurationRepository,
 } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
+import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
+import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
+import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
   PgRenamePersonalThreadCommand,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import { PgEvaluationRepository } from "../../runtime-ts/packages/persistence/src/pg-evaluation.js";
+import { PgEvaluationCommand } from "../../runtime-ts/packages/persistence/src/pg-evaluation-command.js";
+import { PgEvaluationDriver } from "../../runtime-ts/packages/persistence/src/pg-evaluation-driver.js";
+import { PgExternalToolSnapshotReader } from "../../runtime-ts/packages/persistence/src/pg-external-tool-snapshot-reader.js";
+import { PgExternalToolRegistry } from "../../runtime-ts/packages/persistence/src/pg-external-tools.js";
+import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
+import { readRunAgentSnapshot } from "../../runtime-ts/packages/persistence/src/pg-run-agent-snapshot.js";
+import { PgRunDispatchCreation } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
+import {
+  PgExecutionPersistence,
+  PgRunExecutionSetup,
+} from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
 import {
   PgSandboxConfigurationResolver,
   PgSandboxControlRepository,
 } from "../../runtime-ts/packages/persistence/src/pg-sandbox-configuration.js";
-import {
-  createPostgresPool,
-  type Pool,
-  type PoolClient,
-  withTenantTransaction,
-  withTransaction,
-} from "../../runtime-ts/packages/persistence/src/postgres.js";
-import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
-import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
-import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
-import { WebhookSecretCipher } from "../../runtime-ts/packages/persistence/src/webhook-crypto.js";
+import { readRunSkillSnapshot } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
+import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import {
   enqueueRunStatusWebhook,
   enqueueWebhookEvent,
@@ -114,11 +99,29 @@ import {
   runWebhookPayload,
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import {
+  createPostgresPool,
+  type Pool,
+  type PoolClient,
+  withTenantTransaction,
+  withTransaction,
+} from "../../runtime-ts/packages/persistence/src/postgres.js";
+import {
+  bootstrapRuntimeAccess,
+  bootstrapRuntimeAccessOnClient,
+} from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
+import { WebhookSecretCipher } from "../../runtime-ts/packages/persistence/src/webhook-crypto.js";
+import {
+  buildRuntimeSystemPrompt,
+  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
+} from "../../runtime-ts/packages/prompt-builder/src/index.js";
+import type { EvaluationCase } from "../../runtime-ts/packages/protocol/src/admin-evaluation.js";
+import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
+import { apiEndUserTests } from "./postgres-api-end-users.js";
+import { externalToolRegistryTests } from "./postgres-external-tool-registry.js";
+import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
-import { externalToolRegistryTests } from "./postgres-external-tool-registry.js";
-import { apiEndUserTests } from "./postgres-api-end-users.js";
 
 function skillSnapshotBlobRef(sha256: string, size: number, mediaType: string): string {
   const tenantId = "tenant_test_publisher";
@@ -325,7 +328,7 @@ async function evaluationFixture(suffix: string, globalLimit: number) {
   const controlUrl = new URL(target.connectionString);
   controlUrl.username = target.context.adminControlRole;
   const adminControlPool = createPostgresPool({ connectionString: controlUrl.toString(), schema }),
-    runtimePool = createPostgresPool({ connectionString: runtimeDatabaseUrl, schema });
+    runtimePool = createPostgresPool({ connectionString: target.runtimeConnectionString, schema });
   onTestFinished(async () => {
     await Promise.all([runtimePool.end(), adminControlPool.end()]);
     await target.close();
@@ -630,6 +633,7 @@ interface IsolatedMigrationTarget {
     readonly schema: string;
   };
   readonly webhookDispatcherConnectionString: string;
+  readonly runtimeConnectionString: string;
   close(): Promise<void>;
 }
 
@@ -642,7 +646,11 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   const isolatedTeamCoordinatorRole = `it_team_${isolatedSuffix}`;
   const isolatedAdminControlRole = `it_control_${isolatedSuffix}`;
   const isolatedWebhookDispatcherRole = `it_webhook_${isolatedSuffix}`;
+  const isolatedRuntimeRole = `it_runtime_${isolatedSuffix}`;
   const password = randomBytes(24).toString("hex");
+  const isolatedRuntimeUrl = new URL(runtimeDatabaseUrl);
+  isolatedRuntimeUrl.username = isolatedRuntimeRole;
+  isolatedRuntimeUrl.password = password;
   const isolatedWebhookDispatcherUrl = new URL(migrationDatabaseUrl);
   isolatedWebhookDispatcherUrl.username = isolatedWebhookDispatcherRole;
   isolatedWebhookDispatcherUrl.password = password;
@@ -653,6 +661,8 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   await administrativePool.query(
     `CREATE ROLE "${isolatedRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+     CREATE ROLE "${isolatedRuntimeRole}" LOGIN PASSWORD '${password}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedPublisherRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedCoordinatorRole}" LOGIN PASSWORD '${password}'
@@ -663,8 +673,11 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedWebhookDispatcherRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedRuntimeRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
      CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedRole}"`,
+  );
+  await withTransaction(administrativePool, (client) =>
+    bootstrapEvaluationRole(client, isolatedRuntimeRole),
   );
   const pool = createPostgresPool({
     connectionString: url.toString(),
@@ -676,7 +689,7 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
     pool,
     connectionString: url.toString(),
     context: {
-      runtimeRole,
+      runtimeRole: isolatedRuntimeRole,
       migratorRole: isolatedRole,
       skillPublisherRole: isolatedPublisherRole,
       workerCoordinatorRole: isolatedCoordinatorRole,
@@ -686,19 +699,23 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
       schema: isolatedSchema,
     },
     webhookDispatcherConnectionString: isolatedWebhookDispatcherUrl.toString(),
+    runtimeConnectionString: isolatedRuntimeUrl.toString(),
     close: async () => {
       if (closed) return;
       closed = true;
       await pool.end();
       await administrativePool.query(
         `DROP SCHEMA "${isolatedSchema}" CASCADE;
-         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
+         REVOKE "${evaluationRoleName(isolatedRuntimeRole)}" FROM "${isolatedRuntimeRole}";
+         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedRuntimeRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
          DROP ROLE "${isolatedWebhookDispatcherRole}";
          DROP ROLE "${isolatedAdminControlRole}";
          DROP ROLE "${isolatedTeamCoordinatorRole}";
          DROP ROLE "${isolatedCoordinatorRole}";
          DROP ROLE "${isolatedPublisherRole}";
-         DROP ROLE "${isolatedRole}"`,
+         DROP ROLE "${isolatedRole}";
+         DROP ROLE "${evaluationRoleName(isolatedRuntimeRole)}";
+         DROP ROLE "${isolatedRuntimeRole}"`,
       );
     },
   };
@@ -805,7 +822,7 @@ async function webhookIsolatedPools(target: IsolatedMigrationTarget) {
       maxConnections: 2,
     }),
     runtime: createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
       maxConnections: 2,
     }),
@@ -922,10 +939,82 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("拒绝已有评测角色携带同库其他 Schema 的有效对象权限", async () => {
+    const schema = `it_eval_sensitive_${process.pid}`;
+    const target = await createIsolatedMigrationTarget("eval_cross_schema");
+    try {
+      await migrateUp(target.pool, target.context);
+      const evaluation = evaluationRoleName(target.context.runtimeRole);
+      await administrativePool.query(`CREATE SCHEMA "${schema}"; CREATE TABLE "${schema}".secret(value text);
+        GRANT USAGE ON SCHEMA "${schema}" TO "${evaluation}";
+        GRANT SELECT ON "${schema}".secret TO "${evaluation}"`);
+      await expect(
+        withTransaction(target.pool, (client) =>
+          bootstrapRuntimeAccessOnClient(client, target.context),
+        ),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    } finally {
+      await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
+      await target.close();
+    }
+  });
+
+  it("仅允许受控超级用户预置评测角色", async () => {
+    const admin = `it_eval_admin_${process.pid}`;
+    const runtime = `it_eval_runtime_${process.pid}`;
+    const evaluation = evaluationRoleName(runtime);
+    await administrativePool.query(`CREATE ROLE "${admin}" NOLOGIN CREATEROLE NOINHERIT;
+      CREATE ROLE "${runtime}" NOLOGIN NOINHERIT`);
+    try {
+      await withTransaction(administrativePool, async (client) => {
+        await client.query(`SET LOCAL ROLE "${admin}"`);
+        await expect(bootstrapEvaluationRole(client, runtime)).rejects.toThrow(
+          "受控 PostgreSQL 超级用户",
+        );
+      });
+      const role = await administrativePool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [
+        evaluation,
+      ]);
+      expect(role.rowCount).toBe(0);
+    } finally {
+      await administrativePool.query(`DROP ROLE IF EXISTS "${evaluation}";
+        DROP ROLE "${runtime}"; DROP ROLE "${admin}"`);
+    }
+  });
+
+  it("迁移前置检查对缺失评测角色给出生产预置步骤", async () => {
+    await expect(
+      withTransaction(administrativePool, (client) =>
+        assertEvaluationRoleSafe(client, `it_eval_missing_${process.pid}`),
+      ),
+    ).rejects.toThrow("先按生产数据库升级步骤预置评测角色");
+  });
+
+  it("迁移缺少派生评测角色时在任何 DDL 前指向生产预置入口", async () => {
+    const target = await createIsolatedMigrationTarget("missing_evaluation_role");
+    const evaluation = evaluationRoleName(target.context.runtimeRole);
+    await administrativePool.query(`REVOKE "${evaluation}" FROM "${target.context.runtimeRole}";
+      DROP ROLE "${evaluation}"`);
+    try {
+      await expect(migrateUp(target.pool, target.context)).rejects.toThrow(
+        "pnpm db:evaluation-role:bootstrap",
+      );
+      const migrationTable = await target.pool.query<{ readonly exists: boolean }>(
+        "SELECT to_regclass('runtime_schema_migrations') IS NOT NULL AS exists",
+      );
+      expect(migrationTable.rows[0]?.exists).toBe(false);
+    } finally {
+      await withTransaction(administrativePool, (client) =>
+        bootstrapEvaluationRole(client, target.context.runtimeRole),
+      );
+      await target.close();
+    }
+  });
+
   it("评测 SET LOCAL ROLE 在提交、应用异常、SQL 错误与 stale 命令后不泄漏到池中下一事务", async () => {
     const target = await createIsolatedMigrationTarget("eval_pool");
     const pool = createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
       maxConnections: 1,
       preparedStatements: true,
@@ -940,7 +1029,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           ),
         );
       const original = (await identity()).rows;
-      expect(original[0]).toMatchObject({ role: runtimeRole, login: runtimeRole });
+      expect(original[0]).toMatchObject({
+        role: target.context.runtimeRole,
+        login: target.context.runtimeRole,
+      });
       for (const outcome of ["commit", "application_error", "sql_error"] as const) {
         const transaction = withTenantTransaction(pool, fixture.scope, async (client) => {
           await setLocalEvaluationRole(client);
@@ -960,8 +1052,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
               ["role_cache"],
             );
             expect(identity.rows[0]).toMatchObject({
-              role: evaluationRoleName(runtimeRole),
-              login: runtimeRole,
+              role: evaluationRoleName(target.context.runtimeRole),
+              login: target.context.runtimeRole,
             });
           }
           if (outcome === "application_error") throw new Error("测试应用异常");
@@ -996,7 +1088,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   it("评测策略不进入普通 custom/generic 计划，且可回滚重放", async () => {
     const target = await createIsolatedMigrationTarget("eval_plan");
     const pool = createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
     });
     try {
@@ -1227,6 +1319,29 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     await sql.query(`DELETE FROM "${schema}".run_agent_snapshots WHERE run_id=$1`, [
       first.plannedRunId,
     ]);
+    const alternateContent = { alternate: "已发布 B" };
+    const alternateDigest = "b".repeat(64);
+    await sql.query(
+      `INSERT INTO "${schema}".agent_revisions(id,definition_id,revision,status,content,content_digest,created_by)
+       VALUES('eval_revision_rls_published_b',$1,1004,'published',$2,$3,$4)`,
+      [snapshot.definition_id, alternateContent, alternateDigest, actor],
+    );
+    await sql.query(
+      `UPDATE "${schema}".agent_definitions SET status='published',current_revision_id='eval_revision_rls_published_b'
+        WHERE id=$1`,
+      [snapshot.definition_id],
+    );
+    await expect(
+      inCommand((client) =>
+        insertSnapshot(
+          client,
+          first.plannedRunId,
+          "eval_revision_rls_published_b",
+          alternateDigest,
+          alternateContent,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
     await expect(
       inCommand((client) =>
         insertSnapshot(
@@ -1245,6 +1360,17 @@ describe("PostgreSQL 迁移与强权限边界", () => {
        VALUES($1,'forged_evaluation_thread',$2,'伪造评测','active',true,now(),now())`,
           [scope.tenantId, actor],
         ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      inCommand(
+        (client) =>
+          client.query(
+            `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,is_evaluation,agent_definition_id,created_at,updated_at)
+             VALUES($1,$2,$3,'伪装普通 Thread','active',false,$4,now(),now())`,
+            [scope.tenantId, second.plannedRunId, actor, snapshot.definition_id],
+          ),
+        second,
       ),
     ).rejects.toMatchObject({ code: "42501" });
     await expect(
@@ -1675,7 +1801,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
             AND relation.relname IN ('agent_evaluation_suites','agent_evaluation_cases',
               'agent_evaluation_runs','agent_evaluation_results')
           ORDER BY relation.relname`,
-        [target.context.adminControlRole, runtimeRole],
+        [target.context.adminControlRole, target.context.runtimeRole],
       );
       expect(grants.rows).toHaveLength(4);
       expect(grants.rows.every((row) => row.row_security && row.force_row_security)).toBe(true);
@@ -1690,7 +1816,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(grants.rows.every((row) => !row.runtime_select)).toBe(true);
       await migrateDown(target.pool, {
         ...target.context,
-        runtimeRole,
+        runtimeRole: target.context.runtimeRole,
         targetVersion: versionBefore("hide_evaluation_runs"),
         allowDestructive: true,
         environment: "test",
@@ -1705,7 +1831,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(executionTables.rows[0]?.table_name).toBe("agent_evaluation_case_jobs");
       await migrateDown(target.pool, {
         ...target.context,
-        runtimeRole,
+        runtimeRole: target.context.runtimeRole,
         targetVersion: versionBefore("evaluation_execution"),
         allowDestructive: true,
         environment: "test",
@@ -1720,7 +1846,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(baseTables.rows[0]?.table_name).toBe("agent_evaluation_suites");
       await migrateDown(target.pool, {
         ...target.context,
-        runtimeRole,
+        runtimeRole: target.context.runtimeRole,
         targetVersion: versionBefore("agent_evaluations"),
         allowDestructive: true,
         environment: "test",
@@ -1743,7 +1869,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const target = await createIsolatedMigrationTarget("client_history_backfill");
     const migrationDir = await mkdtemp(join(tmpdir(), "hoox-client-history-migrations-"));
     const runtime = createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
       maxConnections: 4,
     });
@@ -1888,7 +2014,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
       await migrateDown(target.pool, {
         ...target.context,
-        runtimeRole,
+        runtimeRole: target.context.runtimeRole,
         targetVersion: 14,
         allowDestructive: true,
         environment: "test",
@@ -1957,7 +2083,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
             AND polname IN ('tenant_webhooks_tenant_policy','webhook_outbox_tenant_policy')`,
         [target.context.schema],
       );
-      expect(managementBindings.rows).toEqual([{ roles: [runtimeRole] }, { roles: [runtimeRole] }]);
+      expect(managementBindings.rows).toEqual([
+        { roles: [target.context.runtimeRole] },
+        { roles: [target.context.runtimeRole] },
+      ]);
       // Dispatcher：只读投递所需列，不能读取订阅名称、业务表或写入 Outbox。
       await expect(
         webhook.dispatcher.query("SELECT id,endpoint_url,secret_ciphertext FROM tenant_webhooks"),
@@ -2584,7 +2713,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       // 旧执行器在新事务保留初始延迟属性；直接执行原迁移复现 UPDATE 后 ALTER 的真实失败。
       await expect(
         withTransaction(target.pool, async (client) => {
-          await client.query("SELECT set_config('app.runtime_role', $1, true)", [runtimeRole]);
+          await client.query("SELECT set_config('app.runtime_role', $1, true)", [
+            target.context.runtimeRole,
+          ]);
           await client.query("SET CONSTRAINTS ALL DEFERRED");
           await client.query(snapshotMigration.upSql);
         }),
@@ -4597,7 +4728,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     // generation 是安装级单例，仅更换 Tenant 或 Run 无法隔离其他用例的配置变更。
     const target = await createIsolatedMigrationTarget("memory_config");
     const isolatedRuntimePool = createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
       maxConnections: 2,
     });
@@ -5797,7 +5928,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       try {
         await migrateDown(target.pool, {
           ...target.context,
-          runtimeRole,
+          runtimeRole: target.context.runtimeRole,
           targetVersion: 14,
           allowDestructive: true,
           environment: "test",
@@ -5986,7 +6117,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
     const downTarget = await createIsolatedMigrationTarget("runtime_database_temp");
     await administrativePool.query(
-      `GRANT TEMPORARY ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
+      `GRANT TEMPORARY ON DATABASE "${databaseName}" TO "${downTarget.context.runtimeRole}"`,
     );
     try {
       await expect(
@@ -6004,7 +6135,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(downObjects.rows[0]?.count).toBe("0");
     } finally {
       await administrativePool.query(
-        `REVOKE TEMPORARY ON DATABASE "${databaseName}" FROM "${runtimeRole}"`,
+        `REVOKE TEMPORARY ON DATABASE "${databaseName}" FROM "${downTarget.context.runtimeRole}"`,
       );
       await downTarget.close();
     }

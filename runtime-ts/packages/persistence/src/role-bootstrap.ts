@@ -2454,6 +2454,13 @@ export async function assertDatabaseRolesCurrentDatabaseScoped(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const inspection = await inspectDatabaseRoleScope(client, databaseRoles(context));
+  const missingEvaluationRole = evaluationRoleName(context.runtimeRole);
+  if (inspection.missingRoles.includes(missingEvaluationRole)) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `评测角色缺失：${missingEvaluationRole}；生产升级请先以受控超级用户运行 pnpm db:evaluation-role:bootstrap`,
+    );
+  }
   if (inspection.missingRoles.length > 0) {
     throw new PersistenceError(
       "CONSTRAINT_VIOLATION",

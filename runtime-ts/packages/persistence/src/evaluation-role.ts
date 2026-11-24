@@ -22,6 +22,15 @@ export async function bootstrapEvaluationRole(
     "SELECT pg_advisory_xact_lock(hashtextextended('hoox:evaluation-role:' || $1,0))",
     [runtimeRole],
   );
+  const authority = await client.query<{ is_superuser: boolean }>(
+    "SELECT rolsuper AS is_superuser FROM pg_roles WHERE rolname=current_user",
+  );
+  if (authority.rows[0]?.is_superuser !== true) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      "评测角色预置必须由受控 PostgreSQL 超级用户执行；请使用生产评测角色预置步骤",
+    );
+  }
   const existing = await client.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [role]);
   if (!existing.rowCount) {
     await client.query(
@@ -66,6 +75,12 @@ export async function assertEvaluationRoleSafe(
        FROM pg_roles role WHERE role.rolname=$1`,
     [evaluationRoleName(runtimeRole), runtimeRole, repairSchema ?? null],
   );
+  if (result.rows.length === 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      "评测角色缺失；请先按生产数据库升级步骤预置评测角色，再运行迁移",
+    );
+  }
   if (result.rows[0]?.safe !== true) {
     throw new PersistenceError("CONSTRAINT_VIOLATION", "评测数据库角色或成员关系边界不安全");
   }

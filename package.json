@@ -65,6 +65,7 @@
     "test:pi-cube:real": "corepack pnpm build && tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts",
     "test:pi-e2b:real": "corepack pnpm --filter @hoox/pi-adapter... build && node --env-file-if-exists=.env --import tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts --e2b",
     "test:integration:pg": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
+    "storage:conformance": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts tests/integration/object-storage-conformance.integration.test.ts",
     "build:m4-runtime-dependencies": "corepack pnpm --filter \"@hoox/api^...\" --filter \"@hoox/agent-worker^...\" --filter \"@hoox/scheduler^...\" build",
     "test:integration:m4": "corepack pnpm build:m4-runtime-dependencies && vitest run --config vitest.integration.config.ts tests/integration/postgres-run-worker.integration.test.ts",
     "test:integration:m4:clean": "node scripts/remove-workspace-dist.mjs && corepack pnpm test:integration:m4",

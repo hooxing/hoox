@@ -209,7 +209,8 @@ export class ManagedResourceFilesystemSnapshotMaterializer
     budget: { bytes: number },
   ): Promise<void> {
     let lastError: unknown;
-    let previousPartBytes = 0;
+    // 初值不能为 0：零字节文件的首档分块也是 0，否则会被当作重复档位全部跳过而误报写入失败。
+    let previousPartBytes = -1;
     for (const level of chunkLevels(Math.min(budget.bytes, this.chunkBytes))) {
       const partBytes = Math.min(level, body.byteLength);
       // 降级后的档位仍然切出同样大小的请求体时跳过，避免重复一次注定相同的等待。

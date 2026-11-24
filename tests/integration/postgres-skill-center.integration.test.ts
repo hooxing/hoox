@@ -9,7 +9,11 @@ import { createLocalAccountAuthService } from "../../runtime-ts/apps/api/src/loc
 import { registerInstallationRoutes } from "../../runtime-ts/apps/api/src/routes/installation.js";
 import { registerSkillAdminApiRoutes } from "../../runtime-ts/apps/skill-admin-api/src/app.js";
 import { publishDevelopmentCsvPdfSkill } from "../../runtime-ts/packages/persistence/src/development-csv-pdf-publisher.js";
-import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import {
+  loadMigrations,
+  migrateDown,
+  migrateUp,
+} from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgInstallationRepository } from "../../runtime-ts/packages/persistence/src/pg-installation.js";
 import { PgLocalAccountRepository } from "../../runtime-ts/packages/persistence/src/pg-local-account.js";
 import { PgSkillCenterRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-center.js";
@@ -716,20 +720,26 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         adminControlRole,
         schema,
       } as const;
+      // 按名称定位命名空间迁移；其后追加的迁移不应改变本用例的回退与重放目标。
+      const migrations = await loadMigrations();
+      const namespaceVersion = migrations.find((item) => item.name === "skill_namespaces")?.version;
+      const latestVersion = migrations.at(-1)?.version;
+      if (namespaceVersion === undefined || latestVersion === undefined)
+        throw new Error("缺少 Skill 命名空间迁移");
       const rolledBack = await migrateDown(migrator, {
         ...migrationSecurity,
-        targetVersion: 35,
+        targetVersion: namespaceVersion - 1,
         allowDestructive: true,
         environment: "test",
       });
-      expect(rolledBack.at(-1)?.version).toBe(35);
+      expect(rolledBack.at(-1)?.version).toBe(namespaceVersion - 1);
       expect(
         await admin.query("SELECT to_regclass($1) IS NULL AS absent", [
           `${schema}.skill_namespace_publishers`,
         ]),
       ).toMatchObject({ rows: [{ absent: true }] });
       const replayed = await migrateUp(migrator, migrationSecurity);
-      expect(replayed.at(-1)?.version).toBe(36);
+      expect(replayed.at(-1)?.version).toBe(latestVersion);
       const sessionAcl = await admin.query<{
         user_id: boolean;
         revoked_at: boolean;

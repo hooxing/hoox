@@ -148,6 +148,78 @@ describe("技能发布管理界面", () => {
     );
   });
 
+  it("发布者只看到自助 Skill 入口及其授权命名空间", async () => {
+    const container = mount(
+      apiFixture(submission(), {
+        getPublicationAccess: vi.fn(async () => ({
+          role: "publisher",
+          namespaces: ["team-tools"],
+        })),
+      }),
+    );
+    await settle();
+    expect(container.querySelector("h1")?.textContent).toBe("Skill 自助发布");
+    expect(container.querySelector(".platform-menu")?.textContent).toContain("Skill 发布");
+    expect(container.querySelector(".platform-menu")?.textContent).not.toContain("身份与登录");
+    expect(container.textContent).toContain("team-tools");
+  });
+
+  it("平台 Skill 管理员可以创建命名空间、授予并撤销发布者", async () => {
+    const createNamespace = vi.fn(async () => ({ namespace: "new-team" }));
+    const grantNamespace = vi.fn(async () => ({ granted: true }));
+    const revokeNamespace = vi.fn(async () => ({ revoked: true }));
+    const api = apiFixture(submission(), {
+      getPublicationAccess: vi.fn(async () => ({ role: "admin", namespaces: ["team-tools"] })),
+      listNamespaces: vi.fn(async () => [
+        {
+          namespace: "team-tools",
+          createdBy: "user_admin",
+          createdAt: "2026-11-24T00:00:00.000Z",
+          publishers: [
+            {
+              userId: "user_publisher",
+              grantedBy: "user_admin",
+              grantedAt: "2026-11-24T00:00:00.000Z",
+            },
+          ],
+        },
+      ]),
+      createNamespace,
+      grantNamespace,
+      revokeNamespace,
+    });
+    const container = mount(api);
+    await settle();
+    expect(container.textContent).toContain("命名空间与发布者");
+    expect(container.textContent).toContain("team-tools");
+
+    const nameInput = [...container.querySelectorAll<HTMLInputElement>("input")].find((input) =>
+      input.closest("label")?.textContent?.includes("新建命名空间"),
+    );
+    if (nameInput === undefined) throw new Error("未找到命名空间名称输入框");
+    act(() => changeControl(nameInput, "new-team"));
+    const forms = container.querySelectorAll<HTMLFormElement>(".create-form");
+    await act(async () =>
+      forms[0]?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await settle();
+    expect(createNamespace).toHaveBeenCalledWith("new-team");
+
+    const publisherInput = [...container.querySelectorAll<HTMLInputElement>("input")].find(
+      (input) => input.closest("label")?.textContent?.includes("发布者用户 ID"),
+    );
+    if (publisherInput === undefined) throw new Error("未找到发布者用户 ID 输入框");
+    act(() => changeControl(publisherInput, "user_new_publisher"));
+    const grantForm = container.querySelectorAll<HTMLFormElement>(".create-form")[1];
+    await act(async () =>
+      grantForm?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await settle();
+    expect(grantNamespace).toHaveBeenCalledWith("team-tools", "user_new_publisher");
+    await act(async () => button(container, "撤销授权").click());
+    expect(revokeNamespace).toHaveBeenCalledWith("team-tools", "user_publisher");
+  });
+
   it("展示申请列表、摘要、SKILL.md、文件清单和驳回原因", async () => {
     const item = submission("rejected");
     const api = apiFixture(item);

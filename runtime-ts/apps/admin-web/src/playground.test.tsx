@@ -2,6 +2,7 @@
 
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
 import { AdminControlApi } from "./control-api.js";
 import { startPlaygroundRun } from "./playground-api.js";
@@ -71,7 +72,12 @@ function mount({
     throw Error("意外请求");
   });
   vi.stubGlobal("fetch", fetcher);
-  const page = render(<App controlApi={new AdminControlApi()} initialPath="/playground" />);
+  const apiClient = {
+    getPublicationAccess: async () => ({ role: "admin", namespaces: [] }),
+  } as unknown as SkillAdminApiContract;
+  const page = render(
+    <App apiClient={apiClient} controlApi={new AdminControlApi()} initialPath="/playground" />,
+  );
   return { page, fetcher };
 }
 

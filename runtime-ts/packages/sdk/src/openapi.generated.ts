@@ -18,6 +18,7 @@ export type ErrorEnvelope = {
     message: string;
     retryable: boolean;
   };
+  validationErrors?: Array<{ path: string; code: string; message: string }>;
 };
 export type AvailableAgentList = { items: Array<AvailableAgentDto> };
 export type AvailableAgentDto = {

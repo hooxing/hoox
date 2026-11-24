@@ -29,6 +29,7 @@ export interface CreateAgentDefinitionDraftInput {
   readonly revisionId: string;
   readonly idempotencyKey: string;
   readonly expectedGeneration: number;
+  readonly auditAction?: "created" | "imported";
 }
 export interface CreateAgentRevisionDraftInput {
   readonly versionNotes?: string;
@@ -38,6 +39,8 @@ export interface CreateAgentRevisionDraftInput {
   readonly content: AgentRevisionContent;
   readonly idempotencyKey: string;
   readonly expectedGeneration: number;
+  readonly auditAction?: "created" | "imported";
+  readonly importDefinition?: { readonly id: string; readonly availability: AgentAvailability };
 }
 export interface AgentDefinitionCommandInput {
   readonly actorUserId: string;
@@ -103,6 +106,27 @@ export interface AgentDefinitionAdminRepositoryPort
     AgentDefinitionRepositoryPort,
     "createDraft" | "createDraftRevision" | "publish" | "deactivate" | "revoke"
   > {
+  validateImport(
+    actorUserId: string,
+    configuration: {
+      readonly id: string;
+      readonly availability: AgentAvailability;
+      readonly content: AgentRevisionContent;
+      readonly definitionId?: string;
+      readonly expectedGeneration?: number;
+    },
+  ): Promise<void>;
+  readRevisionForExport(
+    actorUserId: string,
+    definitionId: string,
+    revisionId: string,
+  ): Promise<
+    | {
+        readonly definition: StoredAgentDefinition;
+        readonly revision: StoredAgentRevision;
+      }
+    | undefined
+  >;
   listDefinitions(actorUserId: string): Promise<{
     readonly canManage: boolean;
     readonly builtinToolLimit: readonly string[];

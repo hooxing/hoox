@@ -115,6 +115,10 @@ import {
   DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
 } from "../../runtime-ts/packages/prompt-builder/src/index.js";
 import type { EvaluationCase } from "../../runtime-ts/packages/protocol/src/admin-evaluation.js";
+import {
+  parseAgentConfiguration,
+  serializeAgentConfiguration,
+} from "../../runtime-ts/packages/protocol/src/agent-configuration.js";
 import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
 import { apiEndUserTests } from "./postgres-api-end-users.js";
 import { externalToolRegistryTests } from "./postgres-external-tool-registry.js";
@@ -3695,6 +3699,37 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expectedGeneration: 0,
     });
     expect(draft.definition.status).toBe("draft");
+    const orderedScopeDraft = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_scope_order_test",
+      availability: {
+        mode: "selected_tenants",
+        tenantIds: [other.tenant.id, manager.tenant.id],
+      },
+      content,
+      revisionId: "agent_scope_order_revision",
+      idempotencyKey: "agent-scope-order-create",
+      expectedGeneration: 0,
+    });
+    await expect(
+      repository.validateImport(manager.user.id, {
+        id: orderedScopeDraft.definition.id,
+        availability: {
+          mode: "selected_tenants",
+          tenantIds: [manager.tenant.id, other.tenant.id],
+        },
+        definitionId: orderedScopeDraft.definition.id,
+        expectedGeneration: orderedScopeDraft.definition.generation,
+        content,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      repository.validateImport(manager.user.id, {
+        id: draft.definition.id,
+        availability: draft.definition.availability,
+        content,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
     const published = await repository.publish({
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
@@ -3703,6 +3738,74 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expectedGeneration: 0,
     });
     expect(published.currentRevisionId).toBe(draft.revision.id);
+    const exportResult = await repository.readRevisionForExport(
+      manager.user.id,
+      draft.definition.id,
+      draft.revision.id,
+    );
+    if (!exportResult) throw new Error("已发布 Revision 未能导出");
+    const exportedYaml = serializeAgentConfiguration({
+      schemaVersion: 1,
+      definition: {
+        id: exportResult.definition.id,
+        availability: exportResult.definition.availability,
+      },
+      revision: { content: exportResult.revision.content },
+    });
+    const importedConfiguration = parseAgentConfiguration(exportedYaml);
+    await repository.validateImport(manager.user.id, {
+      id: importedConfiguration.definition.id,
+      availability: draft.definition.availability,
+      definitionId: draft.definition.id,
+      expectedGeneration: published.generation,
+      content: importedConfiguration.revision.content,
+    });
+    const importedRevisionInput = {
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: "agent_scope_imported_revision",
+      content: importedConfiguration.revision.content,
+      idempotencyKey: "agent-import-scope-revision",
+      expectedGeneration: published.generation,
+      auditAction: "imported",
+      importDefinition: {
+        id: importedConfiguration.definition.id,
+        availability: draft.definition.availability,
+      },
+    } as const;
+    const importedRevision = await repository.createDraftRevision(importedRevisionInput);
+    await expect(repository.createDraftRevision(importedRevisionInput)).resolves.toEqual(
+      importedRevision,
+    );
+    expect(importedRevision.status).toBe("draft");
+    expect(
+      await repository.readCurrentPublished(manager.tenant.id, draft.definition.id),
+    ).toMatchObject({ id: draft.revision.id, status: "published" });
+    const importedExport = await repository.readRevisionForExport(
+      manager.user.id,
+      draft.definition.id,
+      importedRevision.id,
+    );
+    if (!importedExport) throw new Error("导入的草稿 Revision 未能导出");
+    expect(
+      serializeAgentConfiguration({
+        schemaVersion: 1,
+        definition: {
+          id: importedExport.definition.id,
+          availability: importedExport.definition.availability,
+        },
+        revision: { content: importedExport.revision.content },
+      }),
+    ).toBe(exportedYaml);
+    const transferAudits = await administrativePool.query<{ action: string }>(
+      `SELECT action FROM "${schema}".agent_definition_audits WHERE definition_id=$1 AND action IN ('imported','exported') ORDER BY audit_id`,
+      [draft.definition.id],
+    );
+    expect(transferAudits.rows.map(({ action }) => action)).toEqual([
+      "exported",
+      "imported",
+      "exported",
+    ]);
     expect(
       await repository.publish({
         actorUserId: manager.user.id,
@@ -3718,14 +3821,14 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       revisionId: "agent_scope_revision_2",
       content: { ...content, displayName: "测试助手第二版" },
       idempotencyKey: "agent-revision-create-2",
-      expectedGeneration: 1,
+      expectedGeneration: 2,
     });
     const secondPublish = await repository.publish({
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
       revisionId: secondRevision.id,
       idempotencyKey: "agent-publish-scope-2",
-      expectedGeneration: 2,
+      expectedGeneration: 3,
     });
     expect(secondPublish.currentRevisionId).toBe(secondRevision.id);
     expect((await repository.readRevisionById(manager.tenant.id, draft.revision.id))?.status).toBe(
@@ -3777,9 +3880,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         actorUserId: manager.user.id,
         definitionId: published.id,
         idempotencyKey: "agent-disable-scope-1",
-        expectedGeneration: 3,
+        expectedGeneration: 4,
       }),
-    ).resolves.toMatchObject({ status: "disabled", generation: 4 });
+    ).resolves.toMatchObject({ status: "disabled", generation: 5 });
     expect(
       await repository.readVisibleCurrent(manager.tenant.id, "agent_scope_test"),
     ).toBeUndefined();
@@ -3790,9 +3893,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         revisionId: draft.revision.id,
         reason: "测试撤销",
         idempotencyKey: "agent-revoke-old-revision",
-        expectedGeneration: 4,
+        expectedGeneration: 5,
       }),
-    ).resolves.toMatchObject({ status: "disabled", generation: 5 });
+    ).resolves.toMatchObject({ status: "disabled", generation: 6 });
     expect(
       (await repository.listAvailable(manager.tenant.id)).map((item) => item.definition.id),
     ).not.toContain("agent_scope_test");
@@ -4236,8 +4339,20 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         [skillId],
       );
       await client.query(
+        `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
+             entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
+         VALUES ($1,'1.0.0','Agent 固定版本','runtime >= 1',repeat('c',64),
+                 'SKILL.md',repeat('d',64),'test/agent-skill-package','verified','available')`,
+        [skillId],
+      );
+      await client.query(
         `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
          VALUES ($1,'2.0.0','SKILL.md','text/markdown',20,repeat('b',64),'test/tenant-fallback-entrypoint')`,
+        [skillId],
+      );
+      await client.query(
+        `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
+         VALUES ($1,'1.0.0','SKILL.md','text/markdown',20,repeat('d',64),'test/agent-skill-entrypoint')`,
         [skillId],
       );
     });
@@ -4249,15 +4364,100 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ),
     );
     const agents = new PgAgentDefinitionRepository(adminControlPool);
+    const skillContent = {
+      ...defaults.content,
+      skillVersions: [{ skillId, version: "1.0.0" }],
+    };
+    await expect(
+      agents.validateImport(owner.user.id, {
+        id: "agent_skill_missing_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: { ...defaults.content, skillVersions: [{ skillId, version: "3.0.0" }] },
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_missing_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: { ...defaults.content, skillVersions: [{ skillId, version: "3.0.0" }] },
+        revisionId: "agent_skill_missing_revision",
+        idempotencyKey: "agent-skill-missing-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_duplicate_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: {
+          ...defaults.content,
+          skillVersions: [...skillContent.skillVersions, ...skillContent.skillVersions],
+        },
+        revisionId: "agent_skill_duplicate_revision",
+        idempotencyKey: "agent-skill-duplicate-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query("UPDATE skills SET status='revoked' WHERE id=$1", [skillId]);
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_revoked_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: skillContent,
+        revisionId: "agent_skill_revoked_revision",
+        idempotencyKey: "agent-skill-revoked-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query("UPDATE skills SET status='active' WHERE id=$1", [skillId]);
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='revoked' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_revoked_version",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: skillContent,
+        revisionId: "agent_skill_revoked_version_revision",
+        idempotencyKey: "agent-skill-revoked-version",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='available' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
     const draft = await agents.createDraft({
       actorUserId: owner.user.id,
       id: "agent_skill_unavailable",
       availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
-      content: { ...defaults.content, skillVersions: [{ skillId, version: "1.0.0" }] },
+      content: skillContent,
       revisionId: "agent_skill_unavailable_v1",
       idempotencyKey: "agent-skill-unavailable-draft",
       expectedGeneration: 0,
     });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='revoked' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
+    await expect(
+      agents.publish({
+        actorUserId: owner.user.id,
+        definitionId: draft.definition.id,
+        revisionId: draft.revision.id,
+        idempotencyKey: "agent-skill-unavailable-publish",
+        expectedGeneration: draft.definition.generation,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='available' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
     await agents.publish({
       actorUserId: owner.user.id,
       definitionId: draft.definition.id,
@@ -4344,17 +4544,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await app.close();
     }
     await migratorPool.query(
-      `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
-           entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
-       SELECT skill_id,'1.0.0','Agent 固定版本',compatibility,package_digest,
-              entrypoint_path,entrypoint_digest,$2,security_status,'revoked'
-         FROM skill_versions WHERE skill_id=$1 AND version='2.0.0'`,
+      "UPDATE skill_versions SET status='revoked',package_blob_ref=$2 WHERE skill_id=$1 AND version='1.0.0'",
       [skillId, skillSnapshotBlobRef("a".repeat(64), 250, "application/json")],
-    );
-    await migratorPool.query(
-      `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
-       VALUES ($1,'1.0.0','SKILL.md','text/markdown',20,repeat('b',64),$2)`,
-      [skillId, skillSnapshotBlobRef("b".repeat(64), 20, "text/markdown")],
     );
     await expectRejected("revoked");
     await migratorPool.query(
@@ -6000,18 +6191,20 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("down 的 DDL 与 ACL 收敛失败时整体回滚", async () => {
-    await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${runtimeRole}"`,
-    );
+    const target = await createIsolatedMigrationTarget("down_acl_failure");
     try {
+      await migrateUp(target.pool, target.context);
+      await administrativePool.query(
+        `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${target.context.runtimeRole}"`,
+      );
       await expect(
-        migrateDown(migratorPool, {
+        migrateDown(target.pool, {
           allowDestructive: true,
           environment: "test",
-          ...migrationSecurity,
+          ...target.context,
         }),
       ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
-      const state = await migratorPool.query<{ threads: string | null; migration_count: string }>(
+      const state = await target.pool.query<{ threads: string | null; migration_count: string }>(
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
@@ -6021,8 +6214,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
     } finally {
       await administrativePool.query(
-        `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
+        `GRANT CONNECT ON DATABASE "${databaseName}" TO "${target.context.runtimeRole}"`,
       );
+      await target.close();
     }
   });
 
@@ -6079,46 +6273,96 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("down 只有显式 test 授权可执行并能再次向前", async () => {
-    await expect(
-      migrateDown(migratorPool, {
-        allowDestructive: false as true,
-        environment: "test",
-        ...migrationSecurity,
-      }),
-    ).rejects.toThrow("禁止破坏性");
-    expect(
-      await migrateDown(migratorPool, {
-        allowDestructive: true,
-        environment: "test",
-        ...migrationSecurity,
-      }),
-    ).toEqual([]);
-    const usageAfterDown = await migratorPool.query<{ allowed: boolean }>(
-      "SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS allowed",
-      [runtimeRole],
-    );
-    expect(usageAfterDown.rows[0]?.allowed).toBe(false);
-    const downPrivileges = await migratorPool.query<{ privilege: string; allowed: boolean }>(
-      `SELECT requested.privilege,
-              has_table_privilege($1, 'runtime_schema_migrations', requested.privilege) AS allowed
-         FROM unnest($2::text[]) AS requested(privilege)`,
-      [runtimeRole, ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]],
-    );
-    expect(downPrivileges.rows.every((entry) => !entry.allowed)).toBe(true);
-    const routineState = await migratorPool.query<{
-      routine_count: string;
-      default_acl_count: string;
-    }>(
-      `SELECT (SELECT count(*)::text FROM pg_proc
-                WHERE pronamespace = current_schema()::regnamespace) AS routine_count,
-              (SELECT count(*)::text
-                 FROM pg_default_acl defaults
-                WHERE defaults.defaclrole = $1::regrole
-                  AND defaults.defaclobjtype = 'f') AS default_acl_count`,
-      [migratorRole],
-    );
-    expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(migrationContract.count);
+    const target = await createIsolatedMigrationTarget("authorized_down");
+    try {
+      await migrateUp(target.pool, target.context);
+      await expect(
+        migrateDown(target.pool, {
+          allowDestructive: false as true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).rejects.toThrow("禁止破坏性");
+      expect(
+        await migrateDown(target.pool, {
+          allowDestructive: true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).toEqual([]);
+      const usageAfterDown = await target.pool.query<{ allowed: boolean }>(
+        "SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS allowed",
+        [runtimeRole],
+      );
+      expect(usageAfterDown.rows[0]?.allowed).toBe(false);
+      const downPrivileges = await target.pool.query<{ privilege: string; allowed: boolean }>(
+        `SELECT requested.privilege,
+                has_table_privilege($1, 'runtime_schema_migrations', requested.privilege) AS allowed
+           FROM unnest($2::text[]) AS requested(privilege)`,
+        [
+          runtimeRole,
+          ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
+        ],
+      );
+      expect(downPrivileges.rows.every((entry) => !entry.allowed)).toBe(true);
+      const routineState = await target.pool.query<{
+        routine_count: string;
+        default_acl_count: string;
+      }>(
+        `SELECT (SELECT count(*)::text FROM pg_proc
+                  WHERE pronamespace = current_schema()::regnamespace) AS routine_count,
+                (SELECT count(*)::text
+                   FROM pg_default_acl defaults
+                  WHERE defaults.defaclrole = $1::regrole
+                    AND defaults.defaclobjtype = 'f') AS default_acl_count`,
+        [target.context.migratorRole],
+      );
+      expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
+      expect(await migrateUp(target.pool, target.context)).toHaveLength(migrationContract.count);
+    } finally {
+      await target.close();
+    }
+  });
+
+  it("导入导出审计在迁移角色受 RLS 限制时仍以 P0001 阻止回退", async () => {
+    const target = await createIsolatedMigrationTarget("transfer_down_guard");
+    try {
+      await migrateUp(target.pool, target.context);
+      await administrativePool.query(
+        `BEGIN;
+         SET LOCAL search_path TO "${target.context.schema}";
+         SET LOCAL session_replication_role = replica;
+         INSERT INTO agent_definition_audits(definition_id,action,generation,actor_user_id,reason)
+           VALUES('definition_hidden','imported',0,'actor_hidden','test rollback guard');
+         COMMIT;`,
+      );
+      await expect(
+        migrateDown(target.pool, {
+          targetVersion: migrationContract.latestVersion - 1,
+          allowDestructive: true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).rejects.toMatchObject({ code: "UNEXPECTED", cause: { code: "P0001" } });
+      const state = await target.pool.query<{
+        readonly version: number;
+        readonly row_security: boolean;
+        readonly force_row_security: boolean;
+      }>(
+        `SELECT (SELECT max(version)::int FROM runtime_schema_migrations) AS version,
+                relation.relrowsecurity AS row_security,
+                relation.relforcerowsecurity AS force_row_security
+           FROM pg_class relation
+          WHERE relation.oid='agent_definition_audits'::regclass`,
+      );
+      expect(state.rows[0]).toEqual({
+        version: migrationContract.latestVersion,
+        row_security: true,
+        force_row_security: true,
+      });
+    } finally {
+      await target.close();
+    }
   });
 
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {

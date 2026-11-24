@@ -460,6 +460,52 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       });
       await expect(
         withTransaction(publisherPool, async (client) => {
+          await client.query("SELECT set_config('app.user_id',$1,true)", [reviewerId]);
+          await client.query(
+            `INSERT INTO skill_publication_files(
+               submission_id,normalized_path,media_type,size_bytes,content_digest,blob_ref
+             ) VALUES($1,'reviewer-injected.md','text/markdown',1,$2,'forbidden/reviewer-file')`,
+            [reviewSubmission.submissionId, "b".repeat(64)],
+          );
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(
+        withTransaction(publisherPool, async (client) => {
+          await client.query("SELECT set_config('app.user_id',$1,true)", [reviewerId]);
+          await client.query(
+            `INSERT INTO skill_publication_commands(
+               actor_user_id,idempotency_key,operation,request_digest,submission_id,
+               result_version_token
+             ) VALUES($1,$2,'publish',$3,$4,2)`,
+            [
+              reviewerId,
+              `review-forged-command-${unique}`,
+              "c".repeat(64),
+              reviewSubmission.submissionId,
+            ],
+          );
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(
+        withTransaction(publisherPool, async (client) => {
+          await client.query("SELECT set_config('app.user_id',$1,true)", [reviewerId]);
+          await client.query(
+            `INSERT INTO skill_publication_audits(
+               event_id,submission_id,actor_user_id,operation,before_status,after_status,
+               version_token,namespace,skill_version
+             ) VALUES($1,$2,$3,'publish','submitted','published',2,$4,$5)`,
+            [
+              `review-forged-audit-${unique}`,
+              reviewSubmission.submissionId,
+              reviewerId,
+              namespace,
+              reviewSubmission.version,
+            ],
+          );
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(
+        withTransaction(publisherPool, async (client) => {
           await client.query("SELECT set_config('app.user_id',$1,true)", [scopeB.userId]);
           await client.query(
             `UPDATE skill_publication_submissions

@@ -1,16 +1,16 @@
 import {
-  type EvaluationComparison,
-  EvaluationComparisonSchema,
-  type EvaluationRunDetail,
-  EvaluationRunDetailSchema,
-  type EvaluationRunRequest,
-  EvaluationRunRequestSchema,
-  type EvaluationRunSummary,
-  EvaluationRunSummarySchema,
-  type EvaluationSuite,
   EvaluationSuiteSchema,
+  EvaluationComparisonSchema,
+  EvaluationRunDetailSchema,
+  EvaluationRunRequestSchema,
+  EvaluationRunSummarySchema,
   IdSchema,
   successEnvelopeSchema,
+  type EvaluationComparison,
+  type EvaluationRunDetail,
+  type EvaluationRunRequest,
+  type EvaluationRunSummary,
+  type EvaluationSuite,
 } from "@hoox/protocol";
 import type { TSchema } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";

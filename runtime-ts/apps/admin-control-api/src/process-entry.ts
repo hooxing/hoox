@@ -1,6 +1,6 @@
 import {
-  type ProductionJwtVerificationKey,
   parseProductionJwtSigningKeys,
+  type ProductionJwtVerificationKey,
 } from "@hoox/identity/auth";
 import {
   assertProductionInheritedEnvironment,
@@ -8,16 +8,16 @@ import {
   EnvironmentConfigurationError,
   integerEnvironmentField,
   normalizeDevelopmentLoopbackHost,
-  type ProcessSignalSource,
-  type ProductionApiTransport,
   parseProductionApiTransport,
   parseProductionPostgresTransport,
+  type ProductionApiTransport,
   parseStrictEnvironment,
+  readRequiredEnvironmentValue,
+  type ProcessSignalSource,
   type RunningServiceProcess,
   type RuntimeEnvironment,
-  readRequiredEnvironmentValue,
-  type ServiceAssemblyFactory,
   selectDeclaredEnvironment,
+  type ServiceAssemblyFactory,
   startServiceProcess,
   stringEnvironmentField,
   urlEnvironmentField,

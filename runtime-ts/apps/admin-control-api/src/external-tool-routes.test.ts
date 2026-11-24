@@ -1,7 +1,7 @@
 import {
   ExternalToolAdminError,
-  type ExternalToolAdminRepositoryPort,
   ExternalToolAdminService,
+  type ExternalToolAdminRepositoryPort,
 } from "@hoox/admin-control";
 import { userId } from "@hoox/domain";
 import { describe, expect, it, vi } from "vitest";

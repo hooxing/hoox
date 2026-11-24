@@ -1,13 +1,10 @@
-import { type ApiKeyRecord, isoTimestamp } from "@hoox/domain";
+import { isoTimestamp, type ApiKeyRecord } from "@hoox/domain";
 import type { PgIntegrationAdminRepository } from "@hoox/persistence/admin";
 import {
   ApiKeyCreatedSuccessEnvelopeSchema,
-  type ApiKeyDto,
   ApiKeyListSuccessEnvelopeSchema,
   ApiKeySuccessEnvelopeSchema,
-  type CreateApiKeyRequest,
   CreateApiKeyRequestSchema,
-  type CreateWebhookRequest,
   CreateWebhookRequestSchema,
   IdSchema,
   WebhookCreatedSuccessEnvelopeSchema,
@@ -15,6 +12,9 @@ import {
   WebhookListSuccessEnvelopeSchema,
   WebhookSecretSuccessEnvelopeSchema,
   WebhookSuccessEnvelopeSchema,
+  type ApiKeyDto,
+  type CreateApiKeyRequest,
+  type CreateWebhookRequest,
 } from "@hoox/protocol";
 import { validateExternalHttpsTarget } from "@hoox/tool-router";
 import { Type } from "@sinclair/typebox";

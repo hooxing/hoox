@@ -1,5 +1,5 @@
-import type { EvaluationRunSummary, EvaluationSuite } from "@hoox/protocol";
 import Fastify from "fastify";
+import type { EvaluationRunSummary, EvaluationSuite } from "@hoox/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { registerEvaluationRoutes } from "./evaluation-routes.js";
 

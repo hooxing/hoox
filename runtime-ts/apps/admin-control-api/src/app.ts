@@ -1,33 +1,26 @@
 import { randomUUID } from "node:crypto";
+import { BrandingError, type BrandingAdminPort } from "@hoox/admin-control";
+import { SaveBrandingRequestSchema, type SaveBrandingRequest } from "@hoox/protocol";
+import { DomainError } from "@hoox/domain";
 import {
   type AdminControlService,
   AdminControlServiceError,
-  type BrandingAdminPort,
-  BrandingError,
   type ControlMutationContext,
   digestControlRequest,
-  ExternalToolAdminError,
-  type ExternalToolAdminService,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
+  ExternalToolAdminError,
+  type ExternalToolAdminService,
   RunExplorerError,
   type SandboxControlServicePort,
 } from "@hoox/admin-control";
-import { DomainError } from "@hoox/domain";
 import type { AuthContextResolver } from "@hoox/identity/auth";
 import {
-  AgentDefinitionAccessError,
-  type AgentDefinitionAdminRepositoryPort,
-  AgentDefinitionValidationError,
-  IntegrationAdminError,
-} from "@hoox/persistence/admin";
-import { PersistenceError } from "@hoox/persistence/postgres";
-import {
-  AdminControlOverviewSuccessEnvelopeSchema,
   AgentConfigurationError,
-  type AgentMetricsQueryDto,
+  AdminControlOverviewSuccessEnvelopeSchema,
   AgentMetricsQueryDtoSchema,
   AgentMetricsSuccessEnvelopeSchema,
+  type AgentMetricsQueryDto,
   ControlAuditListSuccessEnvelopeSchema,
   type ControlRevisionPath,
   ControlRevisionPathSchema,
@@ -36,6 +29,7 @@ import {
   type CreateModelProviderDraftRequest,
   CreateModelProviderDraftRequestSchema,
   createErrorEnvelope,
+  normalizeRuntimeToolSelection,
   ErrorEnvelopeSchema,
   IdentityAdminConfigurationSuccessEnvelopeSchema,
   MemoryProviderRevisionListSuccessEnvelopeSchema,
@@ -44,7 +38,6 @@ import {
   ModelProviderControlRevisionRequestSchema,
   ModelProviderRevisionListSuccessEnvelopeSchema,
   ModelProviderRevisionSuccessEnvelopeSchema,
-  normalizeRuntimeToolSelection,
   PiModelCatalogModelListSuccessEnvelopeSchema,
   PiModelCatalogProviderListSuccessEnvelopeSchema,
   PlatformUserPageSuccessEnvelopeSchema,
@@ -65,8 +58,6 @@ import {
   type SandboxProfilePath,
   SandboxProfilePathSchema,
   SandboxProfileSuccessSchema,
-  type SaveBrandingRequest,
-  SaveBrandingRequestSchema,
   type SaveMemoryProviderConfigurationRequest,
   SaveMemoryProviderConfigurationRequestSchema,
   type SaveModelProviderConfigurationRequest,
@@ -84,15 +75,22 @@ import {
   registerSkillAdminApiRoutes,
   type SkillAdminApiRouteDependencies,
 } from "@hoox/skill-admin-api";
+import {
+  AgentDefinitionAccessError,
+  type AgentDefinitionAdminRepositoryPort,
+  AgentDefinitionValidationError,
+  IntegrationAdminError,
+} from "@hoox/persistence/admin";
+import { PersistenceError } from "@hoox/persistence/postgres";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
-import { registerAgentDefinitionRoutes } from "./agent-definition-routes.js";
-import { type EvaluationAdminPort, registerEvaluationRoutes } from "./evaluation-routes.js";
 import { EXTERNAL_TOOL_ROUTE_PREFIX, registerExternalToolRoutes } from "./external-tool-routes.js";
+import { registerAgentDefinitionRoutes } from "./agent-definition-routes.js";
 import type { IdentityAdminService } from "./identity-configuration.js";
-import { type IntegrationAdminPort, registerIntegrationRoutes } from "./integration-routes.js";
 import type { PiModelCatalogPort } from "./pi-model-catalog.js";
-import { type RunExplorerRouteService, registerRunExplorerRoutes } from "./run-explorer-routes.js";
+import { registerIntegrationRoutes, type IntegrationAdminPort } from "./integration-routes.js";
+import { registerRunExplorerRoutes, type RunExplorerRouteService } from "./run-explorer-routes.js";
+import { registerEvaluationRoutes, type EvaluationAdminPort } from "./evaluation-routes.js";
 
 const strict = { additionalProperties: false } as const;
 const AuditQuerySchema = Type.Object(

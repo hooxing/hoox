@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import { tenantId, validateAgentRevisionContent } from "@hoox/domain";
+import { createHash } from "node:crypto";
 import {
   AgentDefinitionAccessError,
   type AgentDefinitionAdminRepositoryPort,
@@ -10,25 +10,25 @@ import {
   AdminAgentDefinitionListSchema,
   type AdminAgentGeneration,
   AdminAgentGenerationSchema,
+  type AdminPublishAgentRevision,
+  AdminPublishAgentRevisionSchema,
   AdminAgentRevisionHistorySchema,
   type AdminCreateAgentDefinition,
   AdminCreateAgentDefinitionSchema,
-  type AdminPublishAgentRevision,
-  AdminPublishAgentRevisionSchema,
   type AdminRevokeAgentRevision,
   AdminRevokeAgentRevisionSchema,
   type AdminSaveAgentRevision,
   AdminSaveAgentRevisionSchema,
   type AdminSetAgentAvailability,
   AdminSetAgentAvailabilitySchema,
-  AgentConfigurationError,
-  AgentConfigurationImportRequestSchema,
   AgentDefinitionDtoSchema,
   AgentDefinitionResponseSchema,
   AgentRevisionDtoSchema,
-  IdSchema,
+  AgentConfigurationError,
+  AgentConfigurationImportRequestSchema,
   parseAgentConfiguration,
   serializeAgentConfiguration,
+  IdSchema,
   successEnvelopeSchema,
 } from "@hoox/protocol";
 import { type TSchema, Type } from "@sinclair/typebox";

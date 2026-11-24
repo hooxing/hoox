@@ -1,6 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isoTimestamp, type UserId, userId } from "@hoox/domain";
 import type {
+  SkillNamespace,
   SkillPublicationAuthorizationPort,
   SkillPublicationCommandResult,
   SkillPublicationCreateResult,
@@ -104,6 +105,50 @@ export class PgSkillPublicationAuthorization implements SkillPublicationAuthoriz
       throw mapPublicationError(error, "读取 Skill 发布角色");
     }
   }
+
+  async hasNamespaceAccess(actorUserId: UserId, namespace: string): Promise<boolean> {
+    const actor = snapshotActor(actorUserId);
+    try {
+      return await withActorTransaction(
+        this.pool,
+        actor,
+        async (client) => {
+          const role = await readActiveRole(client, actor);
+          if (role === "admin") return true;
+          const result = await client.query(
+            `SELECT 1 FROM skill_namespace_publishers
+              WHERE namespace=$1 AND user_id=$2 AND revoked_at IS NULL`,
+            [namespace, actor],
+          );
+          return result.rowCount === 1;
+        },
+        true,
+      );
+    } catch (error) {
+      if (error instanceof TypeError) throw error;
+      throw mapPublicationError(error, "读取 Skill 命名空间授权");
+    }
+  }
+
+  async listAccessibleNamespaces(actorUserId: UserId): Promise<readonly string[]> {
+    const actor = snapshotActor(actorUserId);
+    try {
+      return await withActorTransaction(
+        this.pool,
+        actor,
+        async (client) => {
+          await requireRole(client, actor, ["publisher", "reviewer", "admin"]);
+          const result = await client.query<{ namespace: string }>(
+            "SELECT namespace FROM skill_namespaces ORDER BY namespace",
+          );
+          return result.rows.map((row) => row.namespace);
+        },
+        true,
+      );
+    } catch (error) {
+      throw mapPublicationError(error, "读取 Skill 发布命名空间");
+    }
+  }
 }
 
 /**
@@ -115,6 +160,154 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
     private readonly pool: Pool,
     private readonly objects: StableSkillPublicationObjectStore,
   ) {}
+
+  async listNamespaces(actorUserId: UserId): Promise<readonly SkillNamespace[]> {
+    const actor = snapshotActor(actorUserId);
+    try {
+      return await withActorTransaction(
+        this.pool,
+        actor,
+        async (client) => {
+          await requireRole(client, actor, ["admin"]);
+          const result = await client.query<{
+            namespace: string;
+            created_by: string;
+            created_at: Date | string;
+            user_id: string | null;
+            granted_by: string | null;
+            granted_at: Date | string | null;
+          }>(
+            `SELECT namespace.namespace,namespace.created_by,namespace.created_at,
+                  grant_row.user_id,grant_row.granted_by,grant_row.granted_at
+             FROM skill_namespaces namespace
+             LEFT JOIN skill_namespace_publishers grant_row
+               ON grant_row.namespace=namespace.namespace AND grant_row.revoked_at IS NULL
+            ORDER BY namespace.namespace,grant_row.user_id`,
+          );
+          const namespaces = new Map<
+            string,
+            SkillNamespace & { publishers: SkillNamespace["publishers"][number][] }
+          >();
+          for (const row of result.rows) {
+            let current = namespaces.get(row.namespace);
+            if (current === undefined) {
+              current = {
+                namespace: row.namespace,
+                createdBy: userId(row.created_by),
+                createdAt: databaseTimestamp(row.created_at),
+                publishers: [],
+              };
+              namespaces.set(row.namespace, current);
+            }
+            if (row.user_id !== null && row.granted_by !== null && row.granted_at !== null) {
+              current.publishers.push({
+                userId: userId(row.user_id),
+                grantedBy: userId(row.granted_by),
+                grantedAt: databaseTimestamp(row.granted_at),
+              });
+            }
+          }
+          return [...namespaces.values()];
+        },
+        true,
+      );
+    } catch (error) {
+      throw mapPublicationError(error, "查询 Skill 命名空间");
+    }
+  }
+
+  async createNamespace(actorUserId: UserId, namespace: string): Promise<void> {
+    const actor = snapshotActor(actorUserId);
+    try {
+      await withActorTransaction(
+        this.pool,
+        actor,
+        async (client) => {
+          await requireRole(client, actor, ["admin"]);
+          await lockKey(client, namespaceNameLock(namespace));
+          const collision = await client.query(
+            `SELECT 1 FROM skills WHERE position('.' in canonical_key)>0 AND split_part(canonical_key,'.',1)=$1
+             UNION ALL
+             SELECT 1 FROM skill_publication_submissions WHERE position('.' in canonical_key)>0 AND split_part(canonical_key,'.',1)=$1
+             LIMIT 1`,
+            [namespace],
+          );
+          if (collision.rowCount === 1) {
+            throw new PersistenceError("CONFLICT", "命名空间前缀已被既有 Skill 使用");
+          }
+          await client.query("INSERT INTO skill_namespaces(namespace,created_by) VALUES($1,$2)", [
+            namespace,
+            actor,
+          ]);
+          await recordNamespaceAudit(client, namespace, actor, null, "create");
+        },
+        false,
+      );
+    } catch (error) {
+      throw mapPublicationError(error, "创建 Skill 命名空间");
+    }
+  }
+
+  async grantNamespace(
+    actorUserId: UserId,
+    namespace: string,
+    publisherUserId: UserId,
+  ): Promise<void> {
+    const actor = snapshotActor(actorUserId);
+    const publisher = snapshotActor(publisherUserId);
+    try {
+      await withActorTransaction(
+        this.pool,
+        actor,
+        async (client) => {
+          await requireRole(client, actor, ["admin"]);
+          await lockKey(client, namespacePublisherLock(namespace, publisher));
+          const grant = await client.query(
+            `INSERT INTO skill_namespace_publishers(namespace,user_id,granted_by,granted_at,revoked_by,revoked_at)
+           VALUES($1,$2,$3,clock_timestamp(),NULL,NULL)
+           ON CONFLICT(namespace,user_id) DO UPDATE SET granted_by=EXCLUDED.granted_by,
+             granted_at=clock_timestamp(),revoked_by=NULL,revoked_at=NULL
+           WHERE skill_namespace_publishers.revoked_at IS NOT NULL`,
+            [namespace, publisher, actor],
+          );
+          if (grant.rowCount === 1)
+            await recordNamespaceAudit(client, namespace, actor, publisher, "grant");
+        },
+        false,
+      );
+    } catch (error) {
+      throw mapPublicationError(error, "授予 Skill 命名空间");
+    }
+  }
+
+  async revokeNamespace(
+    actorUserId: UserId,
+    namespace: string,
+    publisherUserId: UserId,
+  ): Promise<void> {
+    const actor = snapshotActor(actorUserId);
+    const publisher = snapshotActor(publisherUserId);
+    try {
+      await withActorTransaction(
+        this.pool,
+        actor,
+        async (client) => {
+          await requireRole(client, actor, ["admin"]);
+          await lockKey(client, namespacePublisherLock(namespace, publisher));
+          const result = await client.query(
+            `UPDATE skill_namespace_publishers SET revoked_by=$3,revoked_at=clock_timestamp()
+            WHERE namespace=$1 AND user_id=$2 AND revoked_at IS NULL`,
+            [namespace, publisher, actor],
+          );
+          if (result.rowCount !== 1) throw new PersistenceError("CONFLICT", "Skill 授权不存在");
+          await recordNamespaceAudit(client, namespace, actor, publisher, "revoke");
+        },
+        false,
+      );
+    } catch (error) {
+      throw mapPublicationError(error, "撤销 Skill 命名空间授权");
+    }
+  }
 
   async list(input: Parameters<SkillPublicationPort["list"]>[0]): Promise<SkillPublicationPage> {
     const query = snapshotListInput(input);
@@ -191,6 +384,15 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
         command.actorUserId,
         async (client) => {
           await requireRole(client, command.actorUserId, ["publisher", "admin"]);
+          if ((await readActiveRole(client, command.actorUserId)) === "publisher") {
+            const namespace = namespaceFromCanonicalKey(command.package.metadata.canonicalKey);
+            await lockKey(client, namespacePublisherLock(namespace, command.actorUserId));
+            if (!(await hasPublisherNamespace(client, command.actorUserId, namespace))) {
+              return { outcome: "key_conflict" as const };
+            }
+          }
+          const keyNamespace = namespaceFromCanonicalKey(command.package.metadata.canonicalKey);
+          if (keyNamespace !== "") await lockKey(client, namespaceNameLock(keyNamespace));
           await lockCommand(client, command.actorUserId, command.idempotencyKey);
           await lockKey(client, `submission|${command.submissionId}`);
           await lockKey(
@@ -224,6 +426,8 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
           await recordAudit(client, {
             submissionId: command.submissionId,
             actorUserId: command.actorUserId,
+            namespace: auditNamespaceFromCanonicalKey(command.package.metadata.canonicalKey),
+            skillVersion: command.package.metadata.version,
             key: command.idempotencyKey,
             operation: "create",
             afterStatus: "draft",
@@ -289,7 +493,7 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
     const command = snapshotPublishInput(input);
     return this.transition(command, {
       operation: "publish",
-      roles: ["admin"],
+      roles: ["publisher", "admin"],
       // 管理员发布已通过包校验的内容；兼容历史待审和已批准数据，不制造审核事实。
       allowedStatuses: ["draft", "submitted", "approved"],
       afterStatus: "published",
@@ -303,7 +507,7 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
     const command = snapshotRevokeInput(input);
     return this.transition(command, {
       operation: "revoke",
-      roles: ["admin"],
+      roles: ["publisher", "admin"],
       allowedStatuses: ["published"],
       afterStatus: "revoked",
       ...(command.reason === undefined ? {} : { revokeReason: command.reason }),
@@ -336,6 +540,13 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
           }
           const current = await readSnapshot(client, command.submissionId, true);
           if (current === undefined) return { outcome: "not_found" as const };
+          if (role === "publisher") {
+            const namespace = namespaceFromCanonicalKey(current.row.canonical_key);
+            await lockKey(client, namespacePublisherLock(namespace, command.actorUserId));
+            if (!(await hasPublisherNamespace(client, command.actorUserId, namespace))) {
+              return { outcome: "not_found" as const };
+            }
+          }
           const versionToken = Number(current.row.version_token);
           if (versionToken !== command.expectedVersionToken) {
             return { outcome: "version_conflict" as const };
@@ -394,6 +605,8 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
           await recordAudit(client, {
             submissionId: command.submissionId,
             actorUserId: command.actorUserId,
+            namespace: auditNamespaceFromCanonicalKey(current.row.canonical_key),
+            skillVersion: current.row.skill_version,
             key: command.idempotencyKey,
             operation: plan.operation,
             beforeStatus: current.row.status,
@@ -503,7 +716,32 @@ async function readActiveRole(
     [actorUserId],
   );
   const role = result.rows[0]?.role;
-  return role === "publisher" || role === "reviewer" || role === "admin" ? role : undefined;
+  if (role === "admin" || role === "reviewer") return role;
+  const namespaceGrant = await client.query(
+    "SELECT 1 FROM skill_namespace_publishers WHERE user_id=$1 AND revoked_at IS NULL LIMIT 1",
+    [actorUserId],
+  );
+  return namespaceGrant.rowCount === 1 ? "publisher" : undefined;
+}
+
+async function hasPublisherNamespace(
+  client: PoolClient,
+  actorUserId: string,
+  namespace: string,
+): Promise<boolean> {
+  const result = await client.query(
+    "SELECT 1 FROM skill_namespace_publishers WHERE namespace=$1 AND user_id=$2 AND revoked_at IS NULL",
+    [namespace, actorUserId],
+  );
+  return result.rowCount === 1;
+}
+
+function namespacePublisherLock(namespace: string, actorUserId: string): string {
+  return `skill-namespace-publisher|${namespace}|${actorUserId}`;
+}
+
+function namespaceNameLock(namespace: string): string {
+  return `skill-namespace-name|${namespace}`;
 }
 
 async function requireRole(
@@ -725,6 +963,8 @@ async function recordAudit(
   input: {
     readonly submissionId: string;
     readonly actorUserId: string;
+    readonly namespace: string;
+    readonly skillVersion: string;
     readonly key: string;
     readonly operation: PublicationOperation;
     readonly beforeStatus?: SkillPublicationStatus;
@@ -736,8 +976,8 @@ async function recordAudit(
   await client.query(
     `INSERT INTO skill_publication_audits(
        event_id,submission_id,actor_user_id,operation,before_status,after_status,reason,
-       version_token,created_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp())`,
+       version_token,namespace,skill_version,created_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp())`,
     [
       `${input.operation}:${input.actorUserId}:${input.key}`,
       input.submissionId,
@@ -747,8 +987,33 @@ async function recordAudit(
       input.afterStatus,
       input.reason ?? null,
       input.versionToken,
+      input.namespace,
+      input.skillVersion,
     ],
   );
+}
+
+async function recordNamespaceAudit(
+  client: PoolClient,
+  namespace: string,
+  actorUserId: string,
+  subjectUserId: string | null,
+  operation: "create" | "grant" | "revoke",
+): Promise<void> {
+  await client.query(
+    `INSERT INTO skill_namespace_audits(event_id,namespace,actor_user_id,subject_user_id,operation)
+     VALUES($1,$2,$3,$4,$5)`,
+    [`${operation}:${randomUUID()}`, namespace, actorUserId, subjectUserId, operation],
+  );
+}
+
+function namespaceFromCanonicalKey(canonicalKey: string): string {
+  const separator = canonicalKey.indexOf(".");
+  return separator < 1 ? "" : canonicalKey.slice(0, separator);
+}
+
+function auditNamespaceFromCanonicalKey(canonicalKey: string): string {
+  return namespaceFromCanonicalKey(canonicalKey) || "legacy";
 }
 
 async function publishCatalog(

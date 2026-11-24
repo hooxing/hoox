@@ -233,8 +233,8 @@ describe("PostgreSQL 管理 Skill 发布持久化", () => {
     },
   );
 
-  it("绕过领域层调用发布也拒绝普通发布者", async () => {
-    const { repository, statements } = directPublicationFixture("draft", "publisher");
+  it("绕过领域层调用发布也拒绝普通审核者", async () => {
+    const { repository, statements } = directPublicationFixture("draft", "reviewer");
     await expect(
       repository.publish({
         actorUserId: userId("user_admin"),

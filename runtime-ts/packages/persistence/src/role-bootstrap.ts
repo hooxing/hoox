@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
+import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { assertEvaluationRoleSafe, evaluationRoleName } from "./evaluation-role.js";
 import { grantEvaluationAccess } from "./evaluation-role-access.js";
-import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { assertSafeSchemaName, withTransaction } from "./postgres.js";
 
 export { bootstrapEvaluationRole } from "./evaluation-role.js";
@@ -171,6 +171,11 @@ const skillPublicationTables = new Set([
   "skill_publication_files",
   "skill_publication_commands",
   "skill_publication_audits",
+]);
+const skillNamespaceTables = new Set([
+  "skill_namespaces",
+  "skill_namespace_publishers",
+  "skill_namespace_audits",
 ]);
 const adminControlTables = new Set([
   "platform_control_operators",
@@ -897,6 +902,16 @@ async function hasSkillPublicationState(client: PoolClient, schema: string): Pro
   return result.rows[0]?.present === true;
 }
 
+async function hasSkillNamespaceState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.skill_namespaces', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_namespace_publishers', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_namespace_audits', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.run_execution_inputs', current_schema())) IS NOT NULL AS present",
@@ -1594,6 +1609,9 @@ export async function activeTablePolicy(
   }
   if (!(await hasSkillPublicationState(client, schema))) {
     for (const table of skillPublicationTables) policy.delete(table);
+  }
+  if (await hasSkillNamespaceState(client, schema)) {
+    for (const table of skillNamespaceTables) policy.set(table, new Set());
   }
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
@@ -3064,6 +3082,9 @@ async function assertSkillPublisherBoundary(
     enabled
       ? [
           ["platform_skill_operators", new Set(["SELECT"])],
+          ["skill_namespaces", new Set(["SELECT", "INSERT"])],
+          ["skill_namespace_publishers", new Set(["SELECT", "INSERT"])],
+          ["skill_namespace_audits", new Set(["SELECT", "INSERT"])],
           ["skill_publication_submissions", new Set(["SELECT", "INSERT"])],
           ["skill_publication_files", new Set(["SELECT", "INSERT"])],
           ["skill_publication_commands", new Set(["SELECT", "INSERT"])],
@@ -3104,6 +3125,10 @@ async function assertSkillPublisherBoundary(
   const updateColumns = new Map<string, ReadonlySet<string>>(
     enabled
       ? [
+          [
+            "skill_namespace_publishers",
+            new Set(["granted_by", "granted_at", "revoked_by", "revoked_at"]),
+          ],
           [
             "skill_publication_submissions",
             new Set([
@@ -3467,6 +3492,12 @@ async function assertRuntimeAccessRemoved(
 }
 
 const skillPublisherPolicyBindings = Object.freeze([
+  ["skill_namespaces", "skill_namespaces_migrator_policy", "migrator"],
+  ["skill_namespace_publishers", "skill_namespace_publishers_migrator_policy", "migrator"],
+  ["skill_namespace_audits", "skill_namespace_audits_migrator_policy", "migrator"],
+  ["skill_namespaces", "skill_namespaces_publisher_policy", "publisher"],
+  ["skill_namespace_publishers", "skill_namespace_publishers_publisher_policy", "publisher"],
+  ["skill_namespace_audits", "skill_namespace_audits_publisher_policy", "publisher"],
   ["platform_skill_operators", "platform_skill_operators_migrator_policy", "migrator"],
   ["skill_publication_submissions", "skill_publication_submissions_migrator_policy", "migrator"],
   ["skill_publication_files", "skill_publication_files_migrator_policy", "migrator"],
@@ -3474,9 +3505,16 @@ const skillPublisherPolicyBindings = Object.freeze([
   ["skill_publication_audits", "skill_publication_audits_migrator_policy", "migrator"],
   ["platform_skill_operators", "platform_skill_operators_publisher_read_policy", "publisher"],
   ["skill_publication_submissions", "skill_publication_submissions_publisher_policy", "publisher"],
+  [
+    "skill_publication_submissions",
+    "skill_publication_submissions_reviewer_read_policy",
+    "publisher",
+  ],
   ["skill_publication_files", "skill_publication_files_publisher_policy", "publisher"],
+  ["skill_publication_files", "skill_publication_files_reviewer_read_policy", "publisher"],
   ["skill_publication_commands", "skill_publication_commands_publisher_policy", "publisher"],
   ["skill_publication_audits", "skill_publication_audits_publisher_policy", "publisher"],
+  ["skill_publication_audits", "skill_publication_audits_reviewer_read_policy", "publisher"],
   ["skills", "skills_admin_publisher_policy", "publisher"],
   ["skill_versions", "skill_versions_admin_publisher_policy", "publisher"],
   ["skill_version_files", "skill_version_files_admin_publisher_policy", "publisher"],
@@ -3508,6 +3546,9 @@ const externalToolAdminTables = Object.freeze([
 ] as const);
 
 const adminControlPolicyBindings = Object.freeze([
+  ["skills", "skills_agent_admin_read_policy", "control"],
+  ["skill_versions", "skill_versions_agent_admin_read_policy", "control"],
+  ["skill_version_files", "skill_version_files_agent_admin_read_policy", "control"],
   ["platform_control_operators", "platform_control_operators_migrator_policy", "migrator"],
   ["admin_control_config_revisions", "admin_control_config_revisions_migrator_policy", "migrator"],
   ["admin_control_provider_probes", "admin_control_provider_probes_migrator_policy", "migrator"],
@@ -3690,7 +3731,19 @@ async function rebindRoleScopedPolicies(
     }
   }
   if (await hasSkillPublicationState(client, context.schema)) {
+    const namespaceState = await client.query<{ present: boolean }>(
+      "SELECT to_regclass(format('%I.skill_namespaces',$1::text)) IS NOT NULL AS present",
+      [context.schema],
+    );
     for (const [table, policy, target] of skillPublisherPolicyBindings) {
+      if (
+        !namespaceState.rows[0]?.present &&
+        (table === "skill_namespaces" ||
+          table === "skill_namespace_publishers" ||
+          table === "skill_namespace_audits" ||
+          policy.endsWith("_reviewer_read_policy"))
+      )
+        continue;
       const role = target === "migrator" ? context.migratorRole : context.skillPublisherRole;
       await client.query(
         `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
@@ -3722,6 +3775,13 @@ async function rebindRoleScopedPolicies(
   }
   if (await hasAdminControlState(client, context.schema)) {
     for (const [table, policy, target] of adminControlPolicyBindings) {
+      if (
+        (policy === "skills_agent_admin_read_policy" ||
+          policy === "skill_versions_agent_admin_read_policy" ||
+          policy === "skill_version_files_agent_admin_read_policy") &&
+        !(await hasSkillNamespaceState(client, context.schema))
+      )
+        continue;
       const role =
         target === "migrator"
           ? context.migratorRole
@@ -3843,6 +3903,19 @@ async function grantSkillPublisherAccess(
        ON TABLE ${schema}.skills TO ${publisher};
      GRANT UPDATE(status) ON TABLE ${schema}.skill_versions TO ${publisher}`,
   );
+  if (await hasSkillPublicationState(client, context.schema)) {
+    const namespaceState = await client.query<{ present: boolean }>(
+      "SELECT to_regclass(format('%I.skill_namespaces',$1::text)) IS NOT NULL AS present",
+      [context.schema],
+    );
+    if (namespaceState.rows[0]?.present) {
+      await client.query(`GRANT SELECT,INSERT ON TABLE ${schema}.skill_namespaces TO ${publisher};
+      GRANT SELECT,INSERT ON TABLE ${schema}.skill_namespace_publishers TO ${publisher};
+      GRANT UPDATE(granted_by,granted_at,revoked_by,revoked_at)
+        ON TABLE ${schema}.skill_namespace_publishers TO ${publisher};
+      GRANT SELECT,INSERT ON TABLE ${schema}.skill_namespace_audits TO ${publisher}`);
+    }
+  }
 }
 
 async function grantAdminControlAccess(
@@ -4976,6 +5049,17 @@ export async function bootstrapRuntimeAccessOnClient(
     );
   }
   if (await hasSkillCenterState(client, context.schema)) {
+    const skillNamespaceState = await client.query<{ present: boolean }>(
+      "SELECT to_regclass(format('%I.skill_namespaces',$1::text)) IS NOT NULL AS present",
+      [context.schema],
+    );
+    if (skillNamespaceState.rows[0]?.present) {
+      const runtime = quoteIdentifier(context.runtimeRole);
+      await client.query(`
+        ALTER POLICY skills_authenticated_read_policy ON ${schema}.skills TO ${runtime};
+        ALTER POLICY skill_versions_authenticated_read_policy ON ${schema}.skill_versions TO ${runtime};
+        ALTER POLICY skill_version_files_authenticated_read_policy ON ${schema}.skill_version_files TO ${runtime}`);
+    }
     // Skill 内容由受信发布流程写入；安装事实由当前 Schema 版本决定是旧用户级还是 Tenant 级。
     await client.query(
       `GRANT SELECT ON TABLE

@@ -6327,6 +6327,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   it("导入导出审计在迁移角色受 RLS 限制时仍以 P0001 阻止回退", async () => {
     const target = await createIsolatedMigrationTarget("transfer_down_guard");
     try {
+      const transferMigration = (await loadMigrations()).find(
+        (migration) => migration.name === "agent_configuration_transfer",
+      );
+      if (transferMigration === undefined) throw new Error("Agent 配置迁移缺失");
       await migrateUp(target.pool, target.context);
       await administrativePool.query(
         `BEGIN;
@@ -6338,7 +6342,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       );
       await expect(
         migrateDown(target.pool, {
-          targetVersion: migrationContract.latestVersion - 1,
+          targetVersion: transferMigration.version - 1,
           allowDestructive: true,
           environment: "test",
           ...target.context,

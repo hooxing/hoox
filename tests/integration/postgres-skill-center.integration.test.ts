@@ -4,7 +4,7 @@ import { tenantId, userId } from "@hoox/domain";
 import { SkillPublicationService } from "../../runtime-ts/packages/skill/src/publishing-service.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { publishDevelopmentCsvPdfSkill } from "../../runtime-ts/packages/persistence/src/development-csv-pdf-publisher.js";
-import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { loadMigrations, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgSkillCenterRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-skill-filesystem.js";
 import {
@@ -229,6 +229,158 @@ afterAll(async () => {
 });
 
 describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
+  it("Skill 命名空间发布者只能发布授权目录，撤销立即生效并保留审计", async () => {
+    await admin.query(
+      `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status) VALUES
+        ($1,'admin','active')
+       ON CONFLICT(user_id) DO UPDATE SET role=EXCLUDED.role,status=EXCLUDED.status`,
+      [scopeA.userId],
+    );
+    const publisherUrl = new URL(runtimeDatabaseUrl);
+    publisherUrl.username = skillPublisherRole;
+    publisherUrl.password = skillPublisherPassword;
+    const publisherPool = createPostgresPool({
+      connectionString: publisherUrl.toString(),
+      schema,
+      maxConnections: 2,
+    });
+    const objects = new S3StableSkillPublisher(csvPdfObjectStorage);
+    const authorization = new PgSkillPublicationAuthorization(publisherPool);
+    const repository = new PgSkillPublicationRepository(publisherPool, objects);
+    const adminPublications = new SkillPublicationService(authorization, repository);
+    const publisherPublications = new SkillPublicationService(authorization, repository);
+    const namespace = `wp-${unique.replaceAll("_", "-")}`;
+    try {
+      await adminPublications.createNamespace(scopeA.userId, namespace);
+      await adminPublications.grantNamespace(scopeA.userId, namespace, scopeB.userId);
+      await adminPublications.grantNamespace(scopeA.userId, namespace, scopeB.userId);
+      await expect(publisherPublications.publicationAccess(scopeB.userId)).resolves.toEqual({
+        role: "publisher",
+        namespaces: [namespace],
+      });
+
+      const create = {
+        userId: scopeB.userId,
+        submissionId: `namespace_${unique}`,
+        metadata: {
+          canonicalKey: `${namespace}.automation-helper`,
+          displayName: "命名空间测试技能",
+          publisher: "Hoox",
+          description: "验证命名空间发布权限",
+          compatibility: "Agent Skills 标准格式",
+          sourceUrl: "",
+          sourceRevision: "",
+          licenseSpdx: "MIT",
+        },
+        files: [
+          {
+            path: "SKILL.md",
+            mediaType: "text/markdown",
+            contentBase64: Buffer.from("# Namespace\n").toString("base64"),
+          },
+        ],
+        idempotencyKey: `namespace-create-${unique}`,
+      } as const;
+      const submission = await publisherPublications.create(create);
+      await expect(
+        publisherPublications.create({
+          ...create,
+          submissionId: `namespace_other_${unique}`,
+          metadata: { ...create.metadata, canonicalKey: `${namespace}-other.automation-helper` },
+          idempotencyKey: `namespace-cross-${unique}`,
+        }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(
+        (await publisherPublications.list({ userId: scopeB.userId })).items.map(
+          (item) => item.submissionId,
+        ),
+      ).toEqual([submission.submissionId]);
+
+      await publisherPublications.publish({
+        userId: scopeB.userId,
+        submissionId: submission.submissionId,
+        expectedVersionToken: 0,
+        recommended: true,
+        idempotencyKey: `namespace-publish-${unique}`,
+      });
+      const rlsVisible = await withTransaction(
+        publisherPool,
+        async (client) => {
+          await client.query("SELECT set_config('app.user_id',$1,true)", [scopeB.userId]);
+          const submissions = await client.query<{ canonical_key: string }>(
+            "SELECT canonical_key FROM skill_publication_submissions ORDER BY canonical_key",
+          );
+          const catalog = await client.query<{ canonical_key: string }>(
+            "SELECT canonical_key FROM skills ORDER BY canonical_key",
+          );
+          return { submissions: submissions.rows, catalog: catalog.rows };
+        },
+        { readOnly: true },
+      );
+      expect(rlsVisible.submissions).toEqual([{ canonical_key: `${namespace}.automation-helper` }]);
+      expect(rlsVisible.catalog).toEqual([{ canonical_key: `${namespace}.automation-helper` }]);
+      await publisherPublications.revoke({
+        userId: scopeB.userId,
+        submissionId: submission.submissionId,
+        expectedVersionToken: 1,
+        idempotencyKey: `namespace-revoke-${unique}`,
+      });
+      const audit = await admin.query(
+        `SELECT operation,namespace,skill_version FROM "${schema}".skill_publication_audits
+          WHERE submission_id=$1 ORDER BY version_token`,
+        [submission.submissionId],
+      );
+      expect(audit.rows.map((row) => row.operation)).toEqual(["create", "publish", "revoke"]);
+      expect(
+        audit.rows.every(
+          (row) => row.namespace === namespace && row.skill_version === submission.version,
+        ),
+      ).toBe(true);
+      await adminPublications.revokeNamespace(scopeA.userId, namespace, scopeB.userId);
+      await expect(
+        publisherPublications.get(scopeB.userId, submission.submissionId),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(publisherPublications.create(create)).rejects.toMatchObject({
+        code: "NOT_FOUND",
+      });
+      await expect(
+        publisherPublications.createNamespace(scopeB.userId, `${namespace}-blocked`),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      const namespaceAudits = await admin.query(
+        `SELECT operation,subject_user_id FROM "${schema}".skill_namespace_audits WHERE namespace=$1 ORDER BY created_at`,
+        [namespace],
+      );
+      expect(namespaceAudits.rows.map((row) => row.operation)).toEqual([
+        "create",
+        "grant",
+        "revoke",
+      ]);
+
+      const migrations = await loadMigrations();
+      const migration = migrations.find((item) => item.name === "skill_namespaces");
+      expect(migration).toBeDefined();
+      const client = await migrator.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(migration?.downSql ?? "");
+        await client.query(migration?.upSql ?? "");
+        const restored = await client.query("SELECT to_regclass($1) IS NOT NULL AS present", [
+          `${schema}.skill_namespaces`,
+        ]);
+        expect(restored.rows[0]?.present).toBe(true);
+        await client.query("ROLLBACK");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    } finally {
+      objects.close();
+      await publisherPool.end();
+    }
+  });
+
   it("固定 CSV 转 PDF publisher 将旧品牌目录迁移到 Hoox，并保持新版本幂等", async () => {
     await migrator.query("UPDATE skills SET publisher='AISay' WHERE id='skill_cube_csv_to_pdf'");
 

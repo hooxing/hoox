@@ -1612,7 +1612,7 @@ export async function activeTablePolicy(
   }
   if (await hasSkillNamespaceState(client, schema)) {
     for (const table of skillNamespaceTables) policy.set(table, new Set());
-    policy.set("skill_namespace_publishers", new Set(["SELECT"]));
+    policy.set("skill_namespace_publishers", new Set());
   }
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
@@ -3366,6 +3366,34 @@ async function assertActiveRuntimeWhitelist(
     }
   }
 
+  if (tablePolicy.has("skill_namespace_publishers")) {
+    const namespaceSelect = await client.query<{
+      column_name: string;
+      allowed: boolean;
+    }>(
+      `SELECT column_state.column_name,
+              has_column_privilege(
+                $1,
+                format('%I.%I',$2::text,column_state.table_name),
+                column_state.column_name,
+                'SELECT'
+              ) AS allowed
+         FROM information_schema.columns column_state
+        WHERE column_state.table_schema=$2
+          AND column_state.table_name='skill_namespace_publishers'
+        ORDER BY column_state.ordinal_position`,
+      [context.runtimeRole, context.schema],
+    );
+    for (const row of namespaceSelect.rows) {
+      if (row.allowed !== ["user_id", "revoked_at"].includes(row.column_name)) {
+        throw new PersistenceError(
+          "CONSTRAINT_VIOLATION",
+          `Runtime 命名空间授权列权限偏离白名单：${row.column_name}`,
+        );
+      }
+    }
+  }
+
   const columnUpdates = await client.query<{
     table_name: string;
     column_name: string;
@@ -4027,14 +4055,19 @@ async function grantAdminControlAccess(
         GRANT SELECT,INSERT ON ${schema}.platform_skill_operators TO ${runtime}`);
     }
     const namespaceState = await client.query<{ present: boolean }>(
-      "SELECT to_regclass(format('%I.skill_namespace_publishers',$1::text)) IS NOT NULL AS present",
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_policies
+          WHERE schemaname=$1 AND tablename='skill_namespace_publishers'
+            AND policyname='skill_namespace_publishers_runtime_session_read_policy'
+       ) AS present`,
       [context.schema],
     );
     if (namespaceState.rows[0]?.present) {
       await client.query(`
         ALTER POLICY skill_namespace_publishers_runtime_session_read_policy
           ON ${schema}.skill_namespace_publishers TO ${runtime};
-        GRANT SELECT ON ${schema}.skill_namespace_publishers TO ${runtime}`);
+        GRANT SELECT(user_id,revoked_at)
+          ON ${schema}.skill_namespace_publishers TO ${runtime}`);
     }
   }
   const titleReference = await client.query<{ present: boolean }>(

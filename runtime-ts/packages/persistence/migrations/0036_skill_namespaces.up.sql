@@ -35,6 +35,13 @@ CREATE POLICY skill_namespaces_migrator_policy ON skill_namespaces FOR ALL USING
 CREATE POLICY skill_namespace_publishers_migrator_policy ON skill_namespace_publishers FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY skill_namespace_audits_migrator_policy ON skill_namespace_audits FOR ALL USING (true) WITH CHECK (true);
 
+CREATE POLICY skill_namespace_publishers_runtime_session_read_policy
+  ON skill_namespace_publishers FOR SELECT
+  USING (
+    user_id=NULLIF(current_setting('app.user_id',true),'')
+    AND revoked_at IS NULL
+  );
+
 CREATE POLICY skill_namespaces_publisher_policy ON skill_namespaces FOR ALL
   USING (
     EXISTS (SELECT 1 FROM platform_skill_operators operator
@@ -74,16 +81,43 @@ DROP POLICY skill_publication_submissions_publisher_policy ON skill_publication_
 CREATE POLICY skill_publication_submissions_publisher_policy ON skill_publication_submissions FOR ALL
   USING (
     EXISTS (SELECT 1 FROM platform_skill_operators operator WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'') AND operator.status='active' AND operator.role='admin')
-    OR EXISTS (SELECT 1 FROM skill_namespace_publishers grant_row WHERE position('.' in canonical_key)>0 AND grant_row.namespace=split_part(canonical_key,'.',1) AND grant_row.user_id=NULLIF(current_setting('app.user_id',true),'') AND grant_row.revoked_at IS NULL)
+    OR EXISTS (
+      SELECT 1 FROM skill_namespace_publishers grant_row
+       WHERE position('.' in canonical_key)>0
+         AND grant_row.namespace=split_part(canonical_key,'.',1)
+         AND grant_row.user_id=NULLIF(current_setting('app.user_id',true),'')
+         AND grant_row.revoked_at IS NULL
+    )
   )
   WITH CHECK (
     EXISTS (SELECT 1 FROM platform_skill_operators operator WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'') AND operator.status='active' AND operator.role='admin')
-    OR EXISTS (SELECT 1 FROM skill_namespace_publishers grant_row WHERE position('.' in canonical_key)>0 AND grant_row.namespace=split_part(canonical_key,'.',1) AND grant_row.user_id=NULLIF(current_setting('app.user_id',true),'') AND grant_row.revoked_at IS NULL)
+    OR (status NOT IN ('approved','rejected') AND EXISTS (
+      SELECT 1 FROM skill_namespace_publishers grant_row
+       WHERE position('.' in canonical_key)>0
+         AND grant_row.namespace=split_part(canonical_key,'.',1)
+         AND grant_row.user_id=NULLIF(current_setting('app.user_id',true),'')
+         AND grant_row.revoked_at IS NULL
+    ))
   );
 CREATE POLICY skill_publication_submissions_reviewer_read_policy ON skill_publication_submissions FOR SELECT
   USING (EXISTS (SELECT 1 FROM platform_skill_operators operator
     WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'')
       AND operator.status='active' AND operator.role='reviewer'));
+CREATE POLICY skill_publication_submissions_reviewer_update_policy ON skill_publication_submissions FOR UPDATE
+  USING (
+    status='submitted'
+    AND EXISTS (SELECT 1 FROM platform_skill_operators operator
+      WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'')
+        AND operator.status='active' AND operator.role='reviewer')
+  )
+  WITH CHECK (
+    status IN ('approved','rejected')
+    AND reviewed_by=NULLIF(current_setting('app.user_id',true),'')
+    AND published_skill_id IS NULL
+    AND EXISTS (SELECT 1 FROM platform_skill_operators operator
+      WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'')
+        AND operator.status='active' AND operator.role='reviewer')
+  );
 DROP POLICY skill_publication_files_publisher_policy ON skill_publication_files;
 CREATE POLICY skill_publication_files_publisher_policy ON skill_publication_files FOR ALL
   USING (EXISTS (SELECT 1 FROM skill_publication_submissions submission WHERE submission.submission_id=skill_publication_files.submission_id))

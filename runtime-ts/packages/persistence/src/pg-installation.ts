@@ -22,7 +22,10 @@ export class PgInstallationRepository {
       const result = await client.query<{ allowed: boolean }>(
         `SELECT EXISTS (
            SELECT 1 FROM platform_control_operators
-            WHERE user_id=$1 AND status='active' AND role='admin'
+            WHERE user_id=$1 AND status='active'
+         ) OR EXISTS (
+           SELECT 1 FROM platform_skill_operators
+            WHERE user_id=$1 AND status='active'
          ) OR EXISTS (
            SELECT 1 FROM skill_namespace_publishers
             WHERE user_id=$1 AND revoked_at IS NULL

@@ -2,23 +2,21 @@ import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { isoTimestamp, tenantId, userId } from "@hoox/domain";
-import { registerInstallationRoutes } from "../../runtime-ts/apps/api/src/routes/installation.js";
-import { createLocalAccountAuthService } from "../../runtime-ts/apps/api/src/local-account-auth.js";
-import { createAdminSessionAuthResolver } from "../../runtime-ts/apps/admin-control-api/src/session-auth.js";
-import { registerSkillAdminApiRoutes } from "../../runtime-ts/apps/skill-admin-api/src/app.js";
-import { PgLocalAccountRepository } from "../../runtime-ts/packages/persistence/src/pg-local-account.js";
-import { SkillPublicationService } from "../../runtime-ts/packages/skill/src/publishing-service.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createAdminSessionAuthResolver } from "../../runtime-ts/apps/admin-control-api/src/session-auth.js";
+import { createLocalAccountAuthService } from "../../runtime-ts/apps/api/src/local-account-auth.js";
+import { registerInstallationRoutes } from "../../runtime-ts/apps/api/src/routes/installation.js";
+import { registerSkillAdminApiRoutes } from "../../runtime-ts/apps/skill-admin-api/src/app.js";
 import { publishDevelopmentCsvPdfSkill } from "../../runtime-ts/packages/persistence/src/development-csv-pdf-publisher.js";
-import { loadMigrations, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { PgInstallationRepository } from "../../runtime-ts/packages/persistence/src/pg-installation.js";
+import { PgLocalAccountRepository } from "../../runtime-ts/packages/persistence/src/pg-local-account.js";
 import { PgSkillCenterRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-skill-filesystem.js";
-import { PgInstallationRepository } from "../../runtime-ts/packages/persistence/src/pg-installation.js";
 import {
   PgSkillPublicationAuthorization,
   PgSkillPublicationRepository,
 } from "../../runtime-ts/packages/persistence/src/pg-skill-publication.js";
-import { S3StableSkillPublisher } from "../../runtime-ts/packages/persistence/src/skill-publication-object-store.js";
 import {
   createRunSkillSnapshot,
   readRunSkillSnapshot,
@@ -29,6 +27,8 @@ import {
   withTenantTransaction,
   withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { S3StableSkillPublisher } from "../../runtime-ts/packages/persistence/src/skill-publication-object-store.js";
+import { SkillPublicationService } from "../../runtime-ts/packages/skill/src/publishing-service.js";
 import { loadPostgreSqlMigrationContract } from "./postgres-migration-contract.js";
 
 function requiredEnvironment(name: string): string {
@@ -239,6 +239,32 @@ afterAll(async () => {
 });
 
 describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
+  it("既有后台角色仍可建立后台会话", async () => {
+    const roles = [
+      { table: "platform_control_operators", role: "admin" },
+      { table: "platform_control_operators", role: "operator" },
+      { table: "platform_control_operators", role: "viewer" },
+      { table: "platform_skill_operators", role: "admin" },
+      { table: "platform_skill_operators", role: "reviewer" },
+      { table: "platform_skill_operators", role: "publisher" },
+    ] as const;
+    const installation = new PgInstallationRepository(runtime);
+    for (const [index, entry] of roles.entries()) {
+      const actor = userId(`legacy_admin_session_${unique}_${index}`);
+      await admin.query("INSERT INTO app_users(id,created_at) VALUES($1,clock_timestamp())", [
+        actor,
+      ]);
+      await admin.query(
+        `INSERT INTO "${schema}".${entry.table}(user_id,role,status)
+         VALUES($1,$2,'active')`,
+        [actor, entry.role],
+      );
+      expect(await installation.canStartAdminSession(actor), `${entry.table}:${entry.role}`).toBe(
+        true,
+      );
+    }
+  });
+
   it("Skill 命名空间发布者只能发布授权目录，撤销立即生效并保留审计", async () => {
     await admin.query(
       `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status) VALUES
@@ -412,6 +438,54 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         idempotencyKey: `namespace-create-${unique}`,
       } as const;
       const submission = await publisherPublications.create(create);
+      const reviewerId = userId(`skill_reviewer_${unique}`);
+      await admin.query("INSERT INTO app_users(id,created_at) VALUES($1,clock_timestamp())", [
+        reviewerId,
+      ]);
+      await admin.query(
+        `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status)
+         VALUES($1,'reviewer','active')`,
+        [reviewerId],
+      );
+      const reviewSubmission = await publisherPublications.create({
+        ...create,
+        submissionId: `review_${unique}`,
+        idempotencyKey: `review-create-${unique}`,
+      });
+      await publisherPublications.submit({
+        userId: scopeB.userId,
+        submissionId: reviewSubmission.submissionId,
+        expectedVersionToken: 0,
+        idempotencyKey: `review-submit-${unique}`,
+      });
+      await expect(
+        withTransaction(publisherPool, async (client) => {
+          await client.query("SELECT set_config('app.user_id',$1,true)", [scopeB.userId]);
+          await client.query(
+            `UPDATE skill_publication_submissions
+                SET status='approved',reviewed_by=$2,version_token=version_token+1
+              WHERE submission_id=$1`,
+            [reviewSubmission.submissionId, scopeB.userId],
+          );
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      const reviewed = await publisherPublications.review({
+        userId: reviewerId,
+        submissionId: reviewSubmission.submissionId,
+        expectedVersionToken: 1,
+        decision: "approve",
+        idempotencyKey: `review-approve-${unique}`,
+      });
+      expect(reviewed.status).toBe("approved");
+      await expect(
+        publisherPublications.publish({
+          userId: reviewerId,
+          submissionId: reviewSubmission.submissionId,
+          expectedVersionToken: 2,
+          recommended: false,
+          idempotencyKey: `reviewer-publish-${unique}`,
+        }),
+      ).rejects.toThrow();
       await expect(
         publisherPublications.create({
           ...create,
@@ -424,7 +498,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         (await publisherPublications.list({ userId: scopeB.userId })).items.map(
           (item) => item.submissionId,
         ),
-      ).toEqual([submission.submissionId]);
+      ).toEqual(expect.arrayContaining([submission.submissionId, reviewSubmission.submissionId]));
 
       await publisherPublications.publish({
         userId: scopeB.userId,
@@ -447,7 +521,12 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         },
         { readOnly: true },
       );
-      expect(rlsVisible.submissions).toEqual([{ canonical_key: `${namespace}.automation-helper` }]);
+      expect(rlsVisible.submissions).toHaveLength(2);
+      expect(
+        rlsVisible.submissions.every(
+          (item) => item.canonical_key === `${namespace}.automation-helper`,
+        ),
+      ).toBe(true);
       expect(rlsVisible.catalog).toEqual([{ canonical_key: `${namespace}.automation-helper` }]);
       await publisherPublications.revoke({
         userId: scopeB.userId,
@@ -487,55 +566,41 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         "revoke",
       ]);
 
-      const migrations = await loadMigrations();
-      const sessionMigration = migrations.find(
-        (item) => item.name === "skill_publisher_session_access",
+      const migrationSecurity = {
+        runtimeRole,
+        migratorRole,
+        skillPublisherRole,
+        workerCoordinatorRole,
+        teamCoordinatorRole,
+        adminControlRole,
+        schema,
+      } as const;
+      const rolledBack = await migrateDown(migrator, {
+        ...migrationSecurity,
+        targetVersion: 35,
+        allowDestructive: true,
+        environment: "test",
+      });
+      expect(rolledBack.at(-1)?.version).toBe(35);
+      expect(
+        await admin.query("SELECT to_regclass($1) IS NULL AS absent", [
+          `${schema}.skill_namespace_publishers`,
+        ]),
+      ).toMatchObject({ rows: [{ absent: true }] });
+      const replayed = await migrateUp(migrator, migrationSecurity);
+      expect(replayed.at(-1)?.version).toBe(36);
+      const sessionAcl = await admin.query<{
+        user_id: boolean;
+        revoked_at: boolean;
+        granted_by: boolean;
+      }>(
+        `SELECT has_column_privilege($1,$2,'user_id','SELECT') AS user_id,
+                has_column_privilege($1,$2,'revoked_at','SELECT') AS revoked_at,
+                has_column_privilege($1,$2,'granted_by','SELECT') AS granted_by`,
+        [runtimeRole, `${schema}.skill_namespace_publishers`],
       );
-      expect(sessionMigration).toBeDefined();
-      const sessionClient = await migrator.connect();
-      try {
-        await sessionClient.query("BEGIN");
-        await sessionClient.query(sessionMigration?.downSql ?? "");
-        const removed = await sessionClient.query<{ present: boolean }>(
-          `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1
-            AND tablename='skill_namespace_publishers'
-            AND policyname='skill_namespace_publishers_runtime_session_read_policy') AS present`,
-          [schema],
-        );
-        expect(removed.rows[0]?.present).toBe(false);
-        await sessionClient.query(sessionMigration?.upSql ?? "");
-        const restored = await sessionClient.query<{ present: boolean }>(
-          `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1
-            AND tablename='skill_namespace_publishers'
-            AND policyname='skill_namespace_publishers_runtime_session_read_policy') AS present`,
-          [schema],
-        );
-        expect(restored.rows[0]?.present).toBe(true);
-        await sessionClient.query("ROLLBACK");
-      } catch (error) {
-        await sessionClient.query("ROLLBACK");
-        throw error;
-      } finally {
-        sessionClient.release();
-      }
-      const migration = migrations.find((item) => item.name === "skill_namespaces");
-      expect(migration).toBeDefined();
-      const client = await migrator.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query(migration?.downSql ?? "");
-        await client.query(migration?.upSql ?? "");
-        const restored = await client.query("SELECT to_regclass($1) IS NOT NULL AS present", [
-          `${schema}.skill_namespaces`,
-        ]);
-        expect(restored.rows[0]?.present).toBe(true);
-        await client.query("ROLLBACK");
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
-      }
+      expect(sessionAcl.rows[0]).toEqual({ user_id: true, revoked_at: true, granted_by: false });
+      expect(await installation.canStartAdminSession(scopeB.userId)).toBe(false);
     } finally {
       objects.close();
       await publisherPool.end();
@@ -562,7 +627,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
     const authorization = new PgSkillPublicationAuthorization(publisherPool);
     const repository = new PgSkillPublicationRepository(publisherPool, objects);
     const publications = new SkillPublicationService(authorization, repository);
-    const cases = ["publish", "revoke", "replay"] as const;
+    const cases = ["publish", "revoke", "replay", "create"] as const;
     try {
       for (const action of cases) {
         const namespace = `race-${action}-${unique.replaceAll("_", "-")}`;
@@ -601,14 +666,20 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         if (action !== "publish") await publications.publish(publishCommand);
         if (action === "replay") await publications.publish(publishCommand);
         const operation = () =>
-          action === "publish" || action === "replay"
-            ? publications.publish(publishCommand)
-            : publications.revoke({
-                userId: scopeB.userId,
-                submissionId: submission.submissionId,
-                expectedVersionToken: 1,
-                idempotencyKey: `race-revoke-${action}-${unique}`,
-              });
+          action === "create"
+            ? publications.create({
+                ...create,
+                submissionId: `race_after_revoke_${unique}`,
+                idempotencyKey: `race-create-after-revoke-${unique}`,
+              })
+            : action === "publish" || action === "replay"
+              ? publications.publish(publishCommand)
+              : publications.revoke({
+                  userId: scopeB.userId,
+                  submissionId: submission.submissionId,
+                  expectedVersionToken: 1,
+                  idempotencyKey: `race-revoke-${action}-${unique}`,
+                });
         const client = await admin.connect();
         let outcome!: Promise<{ value: unknown } | { error: unknown }>;
         try {

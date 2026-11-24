@@ -383,15 +383,16 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
         this.pool,
         command.actorUserId,
         async (client) => {
+          const keyNamespace = namespaceFromCanonicalKey(command.package.metadata.canonicalKey);
+          if (keyNamespace !== "") {
+            await lockKey(client, namespacePublisherLock(keyNamespace, command.actorUserId));
+          }
           await requireRole(client, command.actorUserId, ["publisher", "admin"]);
           if ((await readActiveRole(client, command.actorUserId)) === "publisher") {
-            const namespace = namespaceFromCanonicalKey(command.package.metadata.canonicalKey);
-            await lockKey(client, namespacePublisherLock(namespace, command.actorUserId));
-            if (!(await hasPublisherNamespace(client, command.actorUserId, namespace))) {
+            if (!(await hasPublisherNamespace(client, command.actorUserId, keyNamespace))) {
               return { outcome: "key_conflict" as const };
             }
           }
-          const keyNamespace = namespaceFromCanonicalKey(command.package.metadata.canonicalKey);
           if (keyNamespace !== "") await lockKey(client, namespaceNameLock(keyNamespace));
           await lockCommand(client, command.actorUserId, command.idempotencyKey);
           await lockKey(client, `submission|${command.submissionId}`);
@@ -446,7 +447,6 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
           return { outcome: "created" as const, snapshot };
         },
         false,
-        "SERIALIZABLE",
       );
       if (result.outcome === "key_conflict" || result.outcome === "version_conflict") {
         return result;

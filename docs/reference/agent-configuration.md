@@ -2,6 +2,8 @@
 
 本文面向通过管理页面或后台接口迁移 Agent 的平台管理员和自动化客户端，定义当前 YAML 文件字段、引用边界和导入导出行为。当前 Revision 字段以共享协议 `AgentRevisionContentSchema` 为准。
 
+终端与 CI 调用方式见 [`hoox` 命令行参考](cli.md)：支持离线或远程校验、推送草稿和拉取 YAML，使用后台凭据，不使用公开 API Key。
+
 ## 文件格式
 
 文件使用 UTF-8 YAML 1.2，恰好包含一个文档，最大 1 MiB。自定义 Tag、别名、重复键和超过 64 层或 100,000 个节点的结构会被拒绝。未知字段、字段值越界、非法引用和未知 `schemaVersion` 均返回带 JSON Pointer 风格路径的校验错误。

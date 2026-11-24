@@ -61,6 +61,7 @@ describe("CI 工作流效率契约", () => {
     expect(step).toBeGreaterThan(gate.indexOf("postgres-core.integration.test.ts"));
     expect(step).toBeLessThan(gate.indexOf("pnpm test:integration:m4:clean"));
     expect(gate).toContain("tests/integration/postgres-admin-run-explorer.integration.test.ts");
+    expect(gate).toContain("tests/integration/postgres-cli.integration.test.ts");
   });
 
   it("工程基线校验只在工程检查成功时通过，失败或跳过不能绕过合并门禁", () => {

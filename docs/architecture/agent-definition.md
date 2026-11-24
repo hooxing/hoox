@@ -14,6 +14,8 @@
 
 ## 配置文件导入与导出
 
+`@hoox/cli` 通过既有后台控制面执行 `validate --remote`、`push`、`pull`，不新增发布入口或绕过领域授权。非浏览器认证复用独立 audience 的后台 JWT 后备，不将公开 API Key 升格为管理凭据。离线 `validate` 与后台导入使用 protocol 的同一结构校验器；远程 dry-run 和实际导入继续拥有引用与当前权限的最终判定权。CLI 的显式本地配置、令牌和输出文件读写集中在 Tool Router 的 `cli-files` 子入口，不注册为模型工具，不读写 Agent Workspace。可执行发布物内联这些边界与解析器，不依赖私有 workspace 包；命令输出、退出码和重试范围见 [CLI 参考](../reference/cli.md)。
+
 后台以 `schemaVersion: 1` 的 YAML 交换 Definition 元数据和单个 Revision 的可发布配置。格式字段与接口见 [Agent 配置文件参考](../reference/agent-configuration.md)。导出只读取配置正文和引用，不读取凭据密文或明文；导入和 dry-run 都使用管理权限，并重新校验已保存的模型凭据引用、外部工具版本与 Tenant 范围。新增 Definition 或追加 Revision 均只创建草稿，不会发布；导入和导出分别写入独立审计动作。追加到现有 Definition 时，配置文件 ID 与可用范围必须匹配目标，并提供预期 generation。
 
 ## 评测集与发布门槛

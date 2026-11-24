@@ -83,6 +83,24 @@ function messageFor(status: number): string {
 }
 
 export class AdminControlApi {
+  listAccessTokens(input: {
+    readonly status: AdminAccessTokenStatus;
+    readonly cursor?: string;
+  }): Promise<AdminAccessTokenPageDto> {
+    const query = new URLSearchParams({ status: input.status });
+    if (input.cursor !== undefined) query.set("cursor", input.cursor);
+    return this.request(`/access-tokens?${query.toString()}`);
+  }
+  createAccessToken(input: {
+    readonly name: string;
+    readonly scopes: readonly ("agent-config:read" | "agent-config:write")[];
+    readonly expiresAt: string;
+  }): Promise<{ readonly token: string; readonly accessToken: AdminAccessTokenDto }> {
+    return this.request("/access-tokens", { method: "POST", body: JSON.stringify(input) });
+  }
+  revokeAccessToken(id: string): Promise<{ readonly revoked: boolean }> {
+    return this.request(`/access-tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
   getBranding(): Promise<AdminBranding> {
     return this.request("/branding");
   }
@@ -581,6 +599,29 @@ export class AdminControlApi {
     );
   }
 }
+
+export interface AdminAccessTokenDto {
+  readonly id: string;
+  readonly name: string;
+  readonly scopes: readonly ("agent-config:read" | "agent-config:write")[];
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly lastUsedAt: string | null;
+  readonly expiresAt: string;
+  readonly revokedAt: string | null;
+}
+
+export type AdminAccessTokenStatus = "active" | "expired" | "revoked";
+
+export interface AdminAccessTokenPageDto {
+  readonly items: readonly AdminAccessTokenDto[];
+  readonly nextCursor: string | null;
+}
+
+export type AdminAccessTokenApiContract = Pick<
+  AdminControlApi,
+  "listAccessTokens" | "createAccessToken" | "revokeAccessToken"
+>;
 
 async function fingerprintWriteRequest(
   method: string,

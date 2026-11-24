@@ -82,6 +82,11 @@ import {
   IntegrationAdminError,
 } from "@hoox/persistence/admin";
 import { PersistenceError } from "@hoox/persistence/postgres";
+import {
+  AdminAccessTokenQuotaError,
+  type AdminAccessTokenScope,
+  type PgAdminAccessTokenRepository,
+} from "@hoox/persistence/admin";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { EXTERNAL_TOOL_ROUTE_PREFIX, registerExternalToolRoutes } from "./external-tool-routes.js";
@@ -95,6 +100,7 @@ import { registerSkillNamespaceRoutes } from "./skill-namespace-routes.js";
 import type { SkillPublicationService } from "@hoox/skill";
 
 const strict = { additionalProperties: false } as const;
+const agentDefinitionBase = "/v1/admin/control/agent-definitions";
 const AuditQuerySchema = Type.Object(
   { limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, default: 100 })) },
   strict,
@@ -140,6 +146,7 @@ export interface AdminControlApiDependencies {
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
   readonly controlAccess?: { resolveRole(userId: string): Promise<string | undefined> };
+  readonly accessTokens?: PgAdminAccessTokenRepository;
   readonly identity: IdentityAdminService;
   readonly modelCatalog: PiModelCatalogPort;
   readonly skills: Omit<SkillAdminApiRouteDependencies, "auth">;
@@ -197,6 +204,10 @@ export function createAdminControlApiApp(
     serializerOpts: { ajv: { formats: { "hoox-iso-utc-timestamp-v1": true } } },
   });
   const now = dependencies.now ?? (() => new Date());
+  const tokenPrincipals = new WeakMap<
+    FastifyRequest,
+    Awaited<ReturnType<AuthContextResolver["resolve"]>>
+  >();
 
   app.addHook("onSend", async (_request, reply) => {
     void reply
@@ -205,7 +216,12 @@ export function createAdminControlApiApp(
       .header("x-content-type-options", "nosniff")
       .header("referrer-policy", "no-referrer");
   });
-
+  app.addHook("preHandler", async (request) => {
+    if (!singleHeader(request, "authorization")?.startsWith("Bearer hoox_at_")) return;
+    const principal = await resolveAdminPrincipal(request, dependencies);
+    if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
+    tokenPrincipals.set(request, principal);
+  });
   app.setErrorHandler(async (error, request, reply) => {
     const failure = failureKind(error, request);
     request.log.warn({ failure, requestId: request.id }, "后台控制面请求失败");
@@ -646,14 +662,97 @@ export function createAdminControlApiApp(
       });
     });
   }
+  if (dependencies.accessTokens !== undefined) {
+    app.get<{
+      Querystring: {
+        status?: "active" | "expired" | "revoked";
+        cursor?: string;
+        limit?: number;
+      };
+    }>(
+      "/v1/admin/control/access-tokens",
+      {
+        schema: {
+          querystring: Type.Object(
+            {
+              status: Type.Optional(
+                Type.Union([
+                  Type.Literal("active"),
+                  Type.Literal("expired"),
+                  Type.Literal("revoked"),
+                ]),
+              ),
+              cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+              limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+            },
+            strict,
+          ),
+        },
+      },
+      async (request) => {
+        await requireTokenAdministrator(request);
+        return success(request, await dependencies.accessTokens?.list(request.query));
+      },
+    );
+    app.post<{ Body: { name: string; scopes: AdminAccessTokenScope[]; expiresAt?: string } }>(
+      "/v1/admin/control/access-tokens",
+      {
+        preValidation: async (request) => requireJson(request),
+        schema: {
+          body: Type.Object(
+            {
+              name: Type.String({ minLength: 1, maxLength: 120 }),
+              scopes: Type.Array(
+                Type.Union([Type.Literal("agent-config:read"), Type.Literal("agent-config:write")]),
+                { minItems: 1, maxItems: 2, uniqueItems: true },
+              ),
+              expiresAt: Type.Optional(Type.String({ maxLength: 64 })),
+            },
+            strict,
+          ),
+        },
+      },
+      async (request, reply) => {
+        const creator = await requireTokenAdministrator(request);
+        try {
+          const created = await dependencies.accessTokens?.create(creator, request.body);
+          return reply.code(201).send(success(request, created));
+        } catch (error) {
+          if (error instanceof AdminAccessTokenQuotaError)
+            throw new AdminControlApiFailure("conflict");
+          throw error;
+        }
+      },
+    );
+    app.delete<{ Params: { tokenId: string } }>(
+      "/v1/admin/control/access-tokens/:tokenId",
+      { schema: { params: Type.Object({ tokenId: Type.String({ format: "uuid" }) }, strict) } },
+      async (request) => {
+        await requireTokenAdministrator(request);
+        const revoked = await dependencies.accessTokens?.revoke(request.params.tokenId);
+        if (!revoked) throw new AdminControlApiFailure("not_found");
+        return success(request, { revoked: true });
+      },
+    );
+  }
 
   async function actor(request: FastifyRequest): Promise<string> {
-    const principal = await dependencies.auth.resolve({
-      authorization: singleHeader(request, "authorization"),
-      requestId: String(request.id),
-    });
+    const principal = await resolvePrincipal(request);
     if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
     return principal.userId;
+  }
+
+  async function requireTokenAdministrator(request: FastifyRequest): Promise<string> {
+    const principal = await resolvePrincipal(request);
+    if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
+    const role = await dependencies.controlAccess?.resolveRole(principal.userId);
+    if (role !== "admin") throw new AdminControlApiFailure("forbidden");
+    return principal.userId;
+  }
+
+  async function resolvePrincipal(request: FastifyRequest) {
+    if (tokenPrincipals.has(request)) return tokenPrincipals.get(request);
+    return resolveAdminPrincipal(request, dependencies);
   }
 
   return app;
@@ -686,10 +785,7 @@ function registerProviderActions(
     },
     async (request) => {
       requireJson(request);
-      const principal = await dependencies.auth.resolve({
-        authorization: singleHeader(request, "authorization"),
-        requestId: String(request.id),
-      });
+      const principal = await resolveAdminPrincipal(request, dependencies);
       if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
       const revisions =
         kind === "model_provider"
@@ -735,10 +831,7 @@ function registerProviderActions(
     },
     async (request) => {
       requireJson(request);
-      const principal = await dependencies.auth.resolve({
-        authorization: singleHeader(request, "authorization"),
-        requestId: String(request.id),
-      });
+      const principal = await resolveAdminPrincipal(request, dependencies);
       if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
       return success(
         request,
@@ -797,6 +890,7 @@ type FailureKind =
   | "bad_request"
   | "unsupported_media_type"
   | "unauthorized"
+  | "forbidden"
   | "not_found"
   | "conflict"
   | "dependency_unavailable"
@@ -911,6 +1005,7 @@ function failureResponse(requestId: string, kind: FailureKind, message?: string)
     bad_request: 400,
     unsupported_media_type: 415,
     unauthorized: 401,
+    forbidden: 403,
     not_found: 404,
     conflict: 409,
     dependency_unavailable: 503,
@@ -932,12 +1027,74 @@ function responseSchemas(successSchema: object) {
     201: successSchema,
     400: ErrorEnvelopeSchema,
     401: ErrorEnvelopeSchema,
+    403: ErrorEnvelopeSchema,
     404: ErrorEnvelopeSchema,
     409: ErrorEnvelopeSchema,
     415: ErrorEnvelopeSchema,
     500: ErrorEnvelopeSchema,
     503: ErrorEnvelopeSchema,
   };
+}
+
+async function resolveAdminPrincipal(
+  request: FastifyRequest,
+  dependencies: AdminControlApiDependencies,
+) {
+  const path = request.routeOptions.url ?? "";
+  const body = request.body;
+  const principal = await dependencies.auth.resolve({
+    authorization: singleHeader(request, "authorization"),
+    requestId: String(request.id),
+    route: {
+      method: request.method,
+      path,
+      dryRun: typeof body === "object" && body !== null && "dryRun" in body && body.dryRun === true,
+    },
+  });
+  if (principal?.adminAccessToken === undefined) return principal;
+  const token = principal.adminAccessToken;
+  const role = await dependencies.controlAccess?.resolveRole(principal.userId);
+  const scope = requiredAgentConfigurationScope(request.method, path, body);
+  const scopeAllowed =
+    role !== undefined &&
+    scope !== undefined &&
+    token.scopes.includes(scope) &&
+    (scope !== "agent-config:write" || role === "admin" || role === "operator");
+  await dependencies.accessTokens?.finishUse(
+    {
+      id: token.id,
+      creatorUserId: principal.userId,
+      scopes: token.scopes,
+      auditId: token.auditId,
+      route: token.route,
+    },
+    scopeAllowed,
+  );
+  if (!scopeAllowed) throw new AdminControlApiFailure("forbidden");
+  return principal;
+}
+
+function requiredAgentConfigurationScope(
+  method: string,
+  route: string,
+  body: unknown,
+): AdminAccessTokenScope | undefined {
+  const routeKey = `${method} ${route}`;
+  const readRoutes = new Set([
+    `GET ${agentDefinitionBase}`,
+    `GET ${agentDefinitionBase}/:definitionId/revisions`,
+    `GET ${agentDefinitionBase}/:definitionId/revisions/:revisionId`,
+    `GET ${agentDefinitionBase}/:definitionId/revisions/:revisionId/export`,
+  ]);
+  if (readRoutes.has(routeKey)) return "agent-config:read";
+  const importRoutes = new Set([
+    `POST ${agentDefinitionBase}/import`,
+    `POST ${agentDefinitionBase}/:definitionId/import`,
+  ]);
+  if (!importRoutes.has(routeKey)) return undefined;
+  return typeof body === "object" && body !== null && "dryRun" in body && body.dryRun === true
+    ? "agent-config:read"
+    : "agent-config:write";
 }
 
 function success(request: FastifyRequest, data: unknown) {

@@ -34,6 +34,7 @@ import {
   useParams,
 } from "react-router-dom";
 import { BrandingSettings } from "./branding-settings.js";
+import { AdminAccessTokensPage } from "./admin-access-tokens.js";
 import { BrandLogo, brandForeground, brandingTokens, useBranding } from "@hoox/ui-theme/branding";
 import { readAdminAccessToken } from "./admin-session.js";
 import { AgentDefinitionsPage } from "./agent-definitions.js";
@@ -1093,6 +1094,7 @@ const navigation: NonNullable<MenuProps["items"]> = [
     label: "系统",
     children: [
       { key: "/identity", icon: <SafetyCertificateOutlined />, label: "身份与登录" },
+      { key: "/access-tokens", icon: <SafetyCertificateOutlined />, label: "后台访问令牌" },
       { key: "/settings", icon: <SettingOutlined />, label: "运行设置" },
       { key: "/branding", icon: <SettingOutlined />, label: "品牌设置" },
       { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
@@ -1423,6 +1425,10 @@ function AdminPlatform({
             {controlAccess && (
               <>
                 <Route path="/branding" element={<BrandingSettings />} />
+                <Route
+                  path="/access-tokens"
+                  element={<AdminAccessTokensPage api={defaultManagementApi} />}
+                />
                 <Route path="/integration-api-keys" element={<IntegrationApiKeysPage />} />
                 <Route path="/integration-webhooks" element={<IntegrationWebhooksPage />} />
                 <Route

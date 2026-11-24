@@ -1,5 +1,8 @@
 import { evaluationCommandClient, startEvaluationLoop } from "./evaluation-loop.js";
-import { createAdminSessionAuthResolver } from "./session-auth.js";
+import {
+  createAdminAccessTokenAuthResolver,
+  createAdminSessionAuthResolver,
+} from "./session-auth.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   AdminControlService,
@@ -18,6 +21,7 @@ import {
   ExternalToolDraftCredentialCipher,
   PgExternalToolAdminRepository,
   PgAdminControlRepository,
+  PgAdminAccessTokenRepository,
   PgBrandingRepository,
   PgIntegrationAdminRepository,
   PgAdminRunExplorerRepository,
@@ -160,6 +164,7 @@ async function assembleRealService(
       new ModelProviderCredentialCipher(configuration.providerSecrets.modelCredentialEncryptionKey),
       configuration.providerSecrets.modelApiKey,
     );
+    const accessTokens = new PgAdminAccessTokenRepository(controlPool);
     const trajectoryBlobs = createS3BlobStore(
       {
         ...configuration.trajectoryObjectStorage,
@@ -231,8 +236,9 @@ async function assembleRealService(
         () => `run_content_${randomUUID().replaceAll("-", "")}`,
         trajectoryStore,
       ),
-      auth: input.auth,
+      auth: createAdminAccessTokenAuthResolver(accessTokens, input.auth),
       controlAccess: repository,
+      accessTokens,
       identity: createIdentityAdminService({
         repository: new PgIdentityConfigurationRepository(controlPool),
         roles: repository,

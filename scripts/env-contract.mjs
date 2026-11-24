@@ -98,6 +98,8 @@ export const expectedEnvironmentKeys = Object.freeze([
 ]);
 
 export const optionalEnvironmentKeys = Object.freeze([
+  "HOOX_URL",
+  "HOOX_TOKEN",
   "OTEL_EXPORT_ENABLED",
   "OTEL_EXPORT_ENDPOINT",
   "OTEL_EXPORT_HEADERS",
@@ -164,6 +166,7 @@ export const optionalEnvironmentKeys = Object.freeze([
 ]);
 
 const placeholderOnlyKeys = new Set([
+  "HOOX_TOKEN",
   "POSTGRES_BOOTSTRAP_PASSWORD",
   "DATABASE_URL",
   "DATABASE_WORKER_COORDINATOR_URL",
@@ -204,6 +207,7 @@ const placeholderOnlyKeys = new Set([
   "INSTALLATION_SETUP_TOKEN",
 ]);
 const nullablePlaceholderKeys = new Set([
+  "HOOX_TOKEN",
   "CUBESANDBOX_API_KEY",
   "E2B_DOMAIN",
   "MODEL_BASE_URL",

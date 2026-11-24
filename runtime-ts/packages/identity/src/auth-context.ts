@@ -10,6 +10,12 @@ export interface AuthPrincipal {
    */
   readonly tenantId?: TenantId;
   readonly apiKey?: Readonly<{ readonly id: string; readonly scopes: readonly ApiKeyScope[] }>;
+  readonly adminAccessToken?: Readonly<{
+    readonly id: string;
+    readonly scopes: readonly ("agent-config:read" | "agent-config:write")[];
+    readonly auditId: string;
+    readonly route: string;
+  }>;
 }
 
 /**
@@ -20,5 +26,10 @@ export interface AuthContextResolver {
   resolve(input: {
     readonly authorization: string | undefined;
     readonly requestId: string;
+    readonly route?: Readonly<{
+      readonly method: string;
+      readonly path: string;
+      readonly dryRun: boolean;
+    }>;
   }): Promise<AuthPrincipal | undefined>;
 }

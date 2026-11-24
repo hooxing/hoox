@@ -1,5 +1,40 @@
 import type { AuthContextResolver } from "@hoox/identity/auth";
 import { userId } from "@hoox/domain";
+import { isAdminAccessToken, type PgAdminAccessTokenRepository } from "@hoox/persistence/admin";
+
+export function createAdminAccessTokenAuthResolver(
+  tokens: PgAdminAccessTokenRepository,
+  fallback: AuthContextResolver,
+): AuthContextResolver {
+  return {
+    async resolve(request) {
+      const authorization = request.authorization;
+      if (!authorization?.startsWith("Bearer hoox_at_")) return fallback.resolve(request);
+      const token = authorization.slice("Bearer ".length);
+      if (!isAdminAccessToken(token)) return undefined;
+      const credential = await tokens.authenticate(
+        token,
+        `${request.route?.method ?? "UNKNOWN"} ${request.route?.path ?? "UNKNOWN"}`,
+      );
+      if (request.route === undefined) {
+        if (credential !== undefined) await tokens.finishUse(credential, false);
+        return undefined;
+      }
+      return credential === undefined
+        ? undefined
+        : {
+            userId: userId(credential.creatorUserId),
+            kind: "human",
+            adminAccessToken: {
+              id: credential.id,
+              scopes: credential.scopes,
+              auditId: credential.auditId,
+              route: credential.route,
+            },
+          };
+    },
+  };
+}
 
 export function createAdminSessionAuthResolver(
   apiOrigin: string,

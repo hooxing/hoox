@@ -489,6 +489,19 @@ importers:
         specifier: 19.1.1
         version: 19.1.1(react@19.1.1)
 
+  runtime-ts/packages/cli:
+    dependencies:
+      '@hoox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@hoox/tool-router':
+        specifier: workspace:*
+        version: link:../tool-router
+      esbuild:
+        specifier: 0.27.7
+        version: 0.27.7
+    publishDirectory: dist
+
   runtime-ts/packages/context-policy:
     dependencies:
       '@hoox/domain':

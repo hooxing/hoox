@@ -51,7 +51,7 @@ corepack pnpm storage:conformance
 | --- | --- | --- |
 | SeaweedFS 4.53 | 2026-11-24 | `http://127.0.0.1:19000`，Bucket `agent-runtime-dev`，region `us-east-1`，path style，公网与内部端点相同；16 项测试全部通过，包括清理验证 |
 | MinIO RELEASE.2025-04-22T22-12-26Z（源码编译，与 Demo 同版本） | 2026-11-24 | `http://127.0.0.1:19100`，path style，公网与内部端点相同；16 项全部通过 |
-| adobe/s3mock 3.12.0 | CI 每次运行 | 由 CI 的 M4 作业启动，覆盖本套件与 Skill Center 套件；仅为测试替身，不代表生产存储兼容 |
+| SeaweedFS 4.53 官方镜像（按摘要固定） | CI 每次运行 | 由 CI 的 M4 作业启动，覆盖本套件与 Skill Center 套件。曾试用 adobe/s3mock，但它不实现条件写入、预签名过期与签名校验，不能作为兼容性验收端点 |
 | 阿里云 OSS（S3 兼容接口） | 未验证 | 计划中的线上存储。须使用虚拟主机风格（`S3_FORCE_PATH_STYLE=false`）、目标 region、Bucket、仅授权该 Bucket 的 RAM 子账号凭据与公网下载拓扑实际运行，不能由本地结果推断兼容 |
 
 SeaweedFS 接受 SDK 默认 `WHEN_SUPPORTED` 下缓冲请求的 CRC32，也接受流式请求的 `aws-chunked` 和 CRC32 trailer；`WHEN_REQUIRED` 下不自动添加这些可选校验和，两种上传和读取均通过。生产 Blob 与 Skill 客户端均未显式配置 `requestChecksumCalculation` / `responseChecksumValidation`；本套件不修改生产默认值。

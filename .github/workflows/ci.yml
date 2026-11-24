@@ -205,14 +205,26 @@ jobs:
         run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-resource.integration.test.ts
 
       - name: 启动 Skill Center 对象存储
-        # MinIO 开源版已归档、社区镜像与二进制均不再提供；CI 仅需 S3 兼容接口，使用固定版本的测试用 S3 模拟服务。
+        # MinIO 开源版已归档；使用与本地验证一致的 SeaweedFS 4.53（按镜像摘要固定）提供真实 S3 语义
+        # （条件写入、预签名过期、签名校验），凭据仅为 CI 占位值。
         run: |
-          docker run -d --name ci-s3 -p 19000:9090 -e initialBuckets=agent-runtime-ci adobe/s3mock:3.12.0
+          mkdir -p "$RUNNER_TEMP/seaweedfs"
+          cat > "$RUNNER_TEMP/seaweedfs/s3.json" <<'JSON'
+          {"identities":[{"name":"ci","credentials":[{"accessKey":"ci-s3-placeholder","secretKey":"ci-s3-placeholder-secret"}],"actions":["Admin","Read","List","Tagging","Write"]}]}
+          JSON
+          docker run -d --name ci-s3 -p 19000:8333 -v "$RUNNER_TEMP/seaweedfs:/etc/seaweedfs-ci:ro" \
+            chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0 \
+            server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs-ci/s3.json
           for attempt in $(seq 1 60); do
-            curl -fsS http://127.0.0.1:19000/agent-runtime-ci >/dev/null && break
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19000/ || true)
+            [ "$code" != "000" ] && break
             sleep 2
           done
-          curl -fsS http://127.0.0.1:19000/agent-runtime-ci >/dev/null
+          for attempt in $(seq 1 30); do
+            docker exec ci-s3 sh -c 'echo "s3.bucket.create -name agent-runtime-ci" | weed shell -master=localhost:9333' && break
+            sleep 2
+          done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19000/agent-runtime-ci)" = "403"
 
       - name: 验证 Skill Center 命名空间发布、审核与回退
         env:

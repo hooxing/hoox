@@ -1,10 +1,12 @@
-import type { AuthContextResolver } from "@hoox/identity/auth";
+import { BrandingError } from "@hoox/admin-control";
 import { userId } from "@hoox/domain";
-import { PersistenceError } from "@hoox/persistence/postgres";
+import type { AuthContextResolver } from "@hoox/identity/auth";
 import {
   AgentDefinitionAccessError,
   AgentDefinitionValidationError,
 } from "@hoox/persistence/admin";
+import { PersistenceError } from "@hoox/persistence/postgres";
+import { DEFAULT_BRANDING } from "@hoox/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { type AdminControlApiDependencies, createAdminControlApiApp } from "./app.js";
 
@@ -40,6 +42,7 @@ const modelRevision = {
 function fixture(
   sandbox?: AdminControlApiDependencies["sandbox"],
   agents?: AdminControlApiDependencies["agents"],
+  branding?: AdminControlApiDependencies["branding"],
 ) {
   const auth: AuthContextResolver = {
     resolve: vi.fn(async (input) =>
@@ -183,6 +186,7 @@ function fixture(
     identity,
     publications,
     app: createAdminControlApiApp({
+      ...(branding === undefined ? {} : { branding }),
       ...(sandbox === undefined ? {} : { sandbox }),
       ...(agents === undefined ? {} : { agents }),
       auth,
@@ -196,6 +200,56 @@ function fixture(
 }
 
 describe("后台控制 API", () => {
+  it("品牌配置要求管理身份，严格校验字段并转发保存；拒绝权限与冲突映射", async () => {
+    const branding = {
+      read: vi.fn(async () => ({ generation: 0, configuration: DEFAULT_BRANDING })),
+      save: vi.fn(async () => ({ generation: 1, configuration: DEFAULT_BRANDING })),
+    };
+    const { app } = fixture(undefined, undefined, branding);
+    const url = "/v1/admin/control/branding";
+    const headers = { authorization: "Bearer admin" };
+    const input = {
+      expectedGeneration: 0,
+      requestId: "branding_route_1",
+      configuration: DEFAULT_BRANDING,
+    };
+    try {
+      expect((await app.inject({ url })).statusCode).toBe(401);
+      expect(branding.read).not.toHaveBeenCalled();
+      expect((await app.inject({ url, headers })).json().data).toEqual({
+        generation: 0,
+        configuration: DEFAULT_BRANDING,
+      });
+      expect((await app.inject({ url, headers, method: "PUT", payload: input })).statusCode).toBe(
+        200,
+      );
+      expect(branding.save).toHaveBeenCalledWith("user_admin", input);
+      expect(
+        (
+          await app.inject({
+            url,
+            headers,
+            method: "PUT",
+            payload: {
+              ...input,
+              configuration: { ...DEFAULT_BRANDING, internalSecret: "placeholder" },
+            },
+          })
+        ).statusCode,
+      ).toBe(400);
+      branding.save.mockRejectedValueOnce(new BrandingError("forbidden"));
+      expect((await app.inject({ url, headers, method: "PUT", payload: input })).statusCode).toBe(
+        401,
+      );
+      branding.save.mockRejectedValueOnce(new BrandingError("conflict"));
+      expect((await app.inject({ url, headers, method: "PUT", payload: input })).statusCode).toBe(
+        409,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it("保护配置导出和导入权限、写入审计并返回格式路径错误", async () => {
     const content = {
       displayName: "导入示例",

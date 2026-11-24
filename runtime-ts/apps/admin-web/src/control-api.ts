@@ -55,6 +55,7 @@ import type {
 } from "@hoox/protocol";
 import { adminAuthorizationHeader } from "./admin-session.js";
 import { AdminApiError } from "./api.js";
+import type { AdminBranding, SaveBrandingRequest } from "@hoox/protocol";
 import {
   findLocalPiModelCatalogModels,
   listLocalPiModelCatalogProviders,
@@ -82,6 +83,12 @@ function messageFor(status: number): string {
 }
 
 export class AdminControlApi {
+  getBranding(): Promise<AdminBranding> {
+    return this.request("/branding");
+  }
+  saveBranding(input: SaveBrandingRequest): Promise<AdminBranding> {
+    return this.request("/branding", { method: "PUT", body: JSON.stringify(input) });
+  }
   sandboxOverview(): Promise<SandboxControlDto> {
     return this.request("/sandbox");
   }

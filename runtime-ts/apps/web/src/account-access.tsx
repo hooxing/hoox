@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type RefObject } from "react";
 import { HOOX_APP_ICON_PATH } from "./brand.js";
+import { BrandLogo, BrandingFooter, useBranding } from "@hoox/ui-theme/branding";
 
 const SESSION_STORAGE_KEY = "hoox.auth-session.v2";
 export type AccountProfile = {
@@ -178,6 +179,7 @@ export function AccountAccess({
   readonly onAuthenticated: (session: AccountSession) => void;
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
+  const { configuration: branding } = useBranding();
   const [method, setMethod] = useState<"email" | "phone">("email");
   const [configuration, setConfiguration] = useState<IdentityAuthConfiguration>({
     emailPasswordEnabled: true,
@@ -401,9 +403,19 @@ export function AccountAccess({
   return (
     <main className="account-access-shell">
       <section className="account-access-card" aria-labelledby="account-access-title">
-        <img className="account-access-brand" src={HOOX_APP_ICON_PATH} alt="" aria-hidden="true" />
+        <BrandLogo
+          showName={false}
+          className="account-access-brand"
+          src={HOOX_APP_ICON_PATH}
+          alt=""
+          aria-hidden="true"
+        />
         <div className="account-access-heading">
-          <span>HOOX WORKSPACE</span>
+          <span>
+            {branding.productName === "Hoox"
+              ? "HOOX WORKSPACE"
+              : `${branding.productName} WORKSPACE`}
+          </span>
           <h1 id="account-access-title">{mode === "login" ? "欢迎回来" : "创建你的账号"}</h1>
           <p>{mode === "login" ? "登录后继续处理你的任务。" : "注册后会创建独立的个人空间。"}</p>
         </div>
@@ -624,7 +636,11 @@ export function AccountAccess({
             使用本地开发身份继续
           </button>
         )}
-        <small>认证由 Hoox 内嵌身份模块处理；浏览器只保存 Hoox 会话令牌。</small>
+        <small>
+          认证由 {branding.productName} 内嵌身份模块处理；浏览器只保存 {branding.productName}{" "}
+          会话令牌。
+        </small>
+        <BrandingFooter />
       </section>
     </main>
   );

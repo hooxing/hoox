@@ -5,7 +5,11 @@ import {
   DurableResourceBlobWriter,
   RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@hoox/persistence/blob";
-import { createApiPersistenceRuntime, PgInstallationRepository } from "@hoox/persistence/postgres";
+import {
+  createApiPersistenceRuntime,
+  PgInstallationRepository,
+  PgPublicBrandingRepository,
+} from "@hoox/persistence/postgres";
 import { BlobSkillContentStore, DurableResourceUploadBlobAdapter } from "@hoox/persistence/thread";
 import type { ServiceAssemblyFactory } from "@hoox/process-runtime";
 import {
@@ -165,6 +169,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
                   fallback: localAccounts,
                 }),
           localAccounts,
+          publicBranding: new PgPublicBrandingRepository(persistence.identityDatabase),
           installation: {
             repository: new PgInstallationRepository(persistence.identityDatabase),
             administratorAccounts: createLocalAccountAuthService({

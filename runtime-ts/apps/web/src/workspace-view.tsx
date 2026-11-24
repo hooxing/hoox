@@ -44,6 +44,7 @@ import {
   type ThreadContinuityStatus,
 } from "./api.js";
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
+import { BrandLogo, useBranding } from "@hoox/ui-theme/branding";
 import {
   buildConversationBlocks,
   buildConversationSections,
@@ -433,6 +434,7 @@ export function RunTranscript({
   readonly run: Run;
   readonly events: readonly RunEvent[];
 }) {
+  const { configuration } = useBranding();
   const progress = buildRunProgress(events);
   const projectedBlocks = useConversationBlocks(events);
   const fallback = terminalFallbackAnswer(run, events, projectedBlocks);
@@ -445,7 +447,7 @@ export function RunTranscript({
   )
     return null;
   return (
-    <section className="assistant-transcript" aria-label="Hoox 正文">
+    <section className="assistant-transcript" aria-label={`${configuration.productName} 正文`}>
       {blocks.length > 0 && <AgentTurn run={run} blocks={blocks} />}
       {progress.waitingQuestion !== undefined && (
         <AssistantMessage label="需要你的输入" text={progress.waitingQuestion} />
@@ -588,6 +590,7 @@ function AgentTurn({
   readonly processLoading?: boolean;
   readonly processLoadFailed?: boolean;
 }) {
+  const { configuration } = useBranding();
   const markerIndex = blocks.findLastIndex((block) => block.type === "finalization");
   const marker = markerIndex < 0 ? undefined : blocks[markerIndex];
   const runIsLive = run.status === "running" && run.executionStatus !== "recovery_required";
@@ -616,12 +619,15 @@ function AgentTurn({
       ),
     );
   return (
-    <article className="message assistant-message agent-turn" aria-label="Hoox">
+    <article
+      className="message assistant-message agent-turn"
+      aria-label={configuration.productName}
+    >
       <span className="message-avatar" aria-hidden="true">
         H
       </span>
       <div className="message-card">
-        <span className="message-label">Hoox</span>
+        <span className="message-label">{configuration.productName}</span>
         <div className="agent-turn-blocks">
           {finalizationActive && processBlocks.length > 0 && (
             <details
@@ -1503,12 +1509,20 @@ export function NewThreadAgentWelcome({
 }
 
 export function EmptyConversation() {
+  const { configuration } = useBranding();
   return (
     <div className="conversation-empty welcome-empty">
-      <img className="welcome-logo compact" src={HOOX_HORIZONTAL_PATH} alt="" aria-hidden="true" />
+      <BrandLogo
+        className="welcome-logo compact"
+        src={HOOX_HORIZONTAL_PATH}
+        alt=""
+        aria-hidden="true"
+      />
       <div>
         <h2>从一个明确的目标开始</h2>
-        <p>描述希望 Hoox 完成的任务。执行过程和可交付产物会在这里持续更新。</p>
+        <p>
+          描述希望 {configuration.productName} 完成的任务。执行过程和可交付产物会在这里持续更新。
+        </p>
       </div>
     </div>
   );
@@ -1658,6 +1672,7 @@ export function ConversationComposer({
   readonly onHistoryFilesChange?: (files: readonly HistoryFile[]) => void;
   readonly historyFileApi?: ComposerHistoryFileApi;
 }) {
+  const { configuration } = useBranding();
   const [mentionFiles, setMentionFiles] = useState<readonly HistoryFile[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
@@ -1821,7 +1836,7 @@ export function ConversationComposer({
           </div>
         )}
       <label className="sr-only" htmlFor="agent-request">
-        发送给 Hoox 的任务
+        发送给 {configuration.productName} 的任务
       </label>
       <textarea
         id="agent-request"
@@ -2016,7 +2031,7 @@ export function NavigationSidebar({
     >
       <div className="brand-row">
         <div className="brand">
-          <img className="brand-logo" src={HOOX_HORIZONTAL_PATH} alt="Hoox" />
+          <BrandLogo className="brand-logo" src={HOOX_HORIZONTAL_PATH} alt="Hoox" />
         </div>
         <button
           className="mobile-only icon-button"

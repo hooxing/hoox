@@ -71,6 +71,8 @@ Maskable 前景必须位于中心 80% 安全圆内。当前 PWA 512px 与 Maskab
 
 ## 更新规则
 
+部署方在线白标使用[品牌设置](branding.md)，不修改这里的默认素材真源。上传仅允许限大小位图；本页用于默认素材审阅的 SVG 不属于在线上传支持范围。
+
 更换品牌资产时应一次性检查四个源文件、十二个衍生文件、两个 Vite 构建、Web 与 Admin
 favicon、Apple Touch、PWA manifest、Web 透明横版侧栏与空状态，以及账号和 Admin App 图标引用。资产文件名
 属于当前静态接口；如需改名，必须同步修改 HTML、manifest、组件、测试和本文。设计过程文件、

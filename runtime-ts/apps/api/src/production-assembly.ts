@@ -7,7 +7,11 @@ import {
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@hoox/persistence/blob";
-import { createApiPersistenceRuntime, PgInstallationRepository } from "@hoox/persistence/postgres";
+import {
+  createApiPersistenceRuntime,
+  PgInstallationRepository,
+  PgPublicBrandingRepository,
+} from "@hoox/persistence/postgres";
 import { BlobSkillContentStore, DurableResourceUploadBlobAdapter } from "@hoox/persistence/thread";
 import { type ServiceAssemblyFactory, startServiceProcess } from "@hoox/process-runtime";
 import {
@@ -137,6 +141,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         {
           auth,
           localAccounts,
+          publicBranding: new PgPublicBrandingRepository(persistence.identityDatabase),
           installation: {
             repository: new PgInstallationRepository(persistence.identityDatabase),
             administratorAccounts: createLocalAccountAuthService({

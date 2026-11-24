@@ -9,6 +9,7 @@ export * from "./api-key.js";
 export * from "./auth.js";
 export * from "./automation.js";
 export * from "./available-agent.js";
+export * from "./branding.js";
 export * from "./dto.js";
 export * from "./envelopes.js";
 export * from "./external-tool.js";

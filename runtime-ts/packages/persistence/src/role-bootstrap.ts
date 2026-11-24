@@ -1649,6 +1649,17 @@ export async function activeTablePolicy(
       policy.set("platform_skill_operators", new Set(["SELECT", "INSERT"]));
     policy.set("platform_control_operators", new Set(["SELECT", "INSERT"]));
   }
+  if (
+    (
+      await client.query(
+        "SELECT to_regclass(format('%I.platform_branding',$1::text)) IS NOT NULL AS present",
+        [schema],
+      )
+    ).rows[0]?.present
+  ) {
+    policy.set("platform_branding", new Set());
+    policy.set("platform_branding_audits", new Set());
+  }
   return policy;
 }
 
@@ -2742,6 +2753,18 @@ async function assertAdminControlBoundary(
     allowed.set("identity_auth_audits", new Set(["SELECT", "INSERT"]));
     allowed.set("identity_auth_commands", new Set(["SELECT", "INSERT"]));
     allowed.set("better_auth_sessions", new Set(["DELETE"]));
+  }
+  if (
+    enabled &&
+    (
+      await client.query(
+        "SELECT to_regclass(format('%I.platform_branding',$1::text)) IS NOT NULL AS present",
+        [context.schema],
+      )
+    ).rows[0]?.present
+  ) {
+    allowed.set("platform_branding", new Set(["SELECT", "UPDATE"]));
+    allowed.set("platform_branding_audits", new Set(["SELECT", "INSERT"]));
   }
   const relations = await client.query<{ readonly table_name: string }>(
     `SELECT relname AS table_name FROM pg_class
@@ -3852,6 +3875,24 @@ async function grantAdminControlAccess(
   if (!(await hasAdminControlState(client, context.schema))) return;
   const schema = quoteIdentifier(context.schema);
   const control = quoteIdentifier(context.adminControlRole);
+  if (
+    (
+      await client.query(
+        "SELECT to_regclass(format('%I.platform_branding',$1::text)) IS NOT NULL AS present",
+        [context.schema],
+      )
+    ).rows[0]?.present
+  ) {
+    const migrator = quoteIdentifier(context.migratorRole);
+    await client.query(`ALTER POLICY branding_owner ON ${schema}.platform_branding TO ${migrator};
+      ALTER POLICY branding_audit_owner ON ${schema}.platform_branding_audits TO ${migrator};
+      ALTER POLICY branding_admin ON ${schema}.platform_branding TO ${control};
+      ALTER POLICY branding_audit_admin ON ${schema}.platform_branding_audits TO ${control};
+      ALTER VIEW ${schema}.public_branding OWNER TO ${migrator};
+      GRANT SELECT ON ${schema}.public_branding TO ${quoteIdentifier(context.runtimeRole)};
+      GRANT SELECT,UPDATE ON ${schema}.platform_branding TO ${control};
+      GRANT SELECT,INSERT ON ${schema}.platform_branding_audits TO ${control}`);
+  }
   if (await hasIntegrationAdminState(client, context.schema)) {
     const isolatedUsers = await client.query<{ present: boolean }>(
       "SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1 AND tablename='app_users' AND policyname='integration_admin_users_manage') AS present",

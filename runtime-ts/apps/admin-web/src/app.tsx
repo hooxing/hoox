@@ -34,6 +34,8 @@ import {
   useParams,
 } from "react-router-dom";
 import { AgentDefinitionsPage } from "./agent-definitions.js";
+import { BrandingSettings } from "./branding-settings.js";
+import { BrandLogo, brandForeground, brandingTokens, useBranding } from "@hoox/ui-theme/branding";
 import { EvaluationsPage } from "./evaluations.js";
 import { readAdminAccessToken } from "./admin-session.js";
 import {
@@ -751,6 +753,7 @@ export function SkillConsole({
 }: {
   readonly apiClient?: SkillAdminApiContract;
 }) {
+  const { configuration: branding } = useBranding();
   const [submissions, setSubmissions] = useState<readonly SkillSubmissionDto[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
   const [selected, setSelected] = useState<SkillSubmissionDto>();
@@ -844,7 +847,7 @@ export function SkillConsole({
     <main className="admin-shell">
       <header className="topbar">
         <div>
-          <span className="eyebrow">Hoox</span>
+          <span className="eyebrow">{branding.productName}</span>
           <h1>技能发布管理台</h1>
         </div>
         <button
@@ -984,6 +987,7 @@ const navigation: NonNullable<MenuProps["items"]> = [
     children: [
       { key: "/identity", icon: <SafetyCertificateOutlined />, label: "身份与登录" },
       { key: "/settings", icon: <SettingOutlined />, label: "运行设置" },
+      { key: "/branding", icon: <SettingOutlined />, label: "品牌设置" },
       { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
     ],
   },
@@ -1047,6 +1051,7 @@ const pageMetadata: Readonly<
     description: "查看不可变的控制面变更记录",
   },
   "/settings": { title: "运行设置", description: "在线调整任务并发与上下文压缩" },
+  "/branding": { title: "品牌设置", description: "定制产品名、Logo、主题主色与工作台模块" },
 };
 
 const defaultPageMetadata = {
@@ -1130,6 +1135,7 @@ function AdminPlatform({
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const activeKey = navigationKey(location.pathname);
+  const { configuration: branding } = useBranding();
   const metadata = pageMetadata[activeKey] ?? defaultPageMetadata;
 
   return (
@@ -1149,10 +1155,16 @@ function AdminPlatform({
           aria-label="返回工作台"
           onClick={() => navigate("/overview")}
         >
-          <img className="platform-logo-mark" src={HOOX_APP_ICON_PATH} alt="" aria-hidden="true" />
+          <BrandLogo
+            showName={false}
+            className="platform-logo-mark"
+            src={HOOX_APP_ICON_PATH}
+            alt=""
+            aria-hidden="true"
+          />
           {!collapsed && (
             <span className="platform-logo-copy">
-              <strong>Hoox</strong>
+              <strong>{branding.productName}</strong>
               <small>Runtime Console</small>
             </span>
           )}
@@ -1211,6 +1223,7 @@ function AdminPlatform({
         </Header>
         <Content className="platform-content">
           <Routes>
+            <Route path="/branding" element={<BrandingSettings />} />
             <Route path="/integration-api-keys" element={<IntegrationApiKeysPage />} />
             <Route path="/integration-webhooks" element={<IntegrationWebhooksPage />} />
             <Route
@@ -1343,6 +1356,7 @@ export function App({
   /** 仅用于注入客户端的内存路由（测试与嵌入）；真实管理台以浏览器地址为准。 */
   readonly initialPath?: string;
 }) {
+  const { configuration: branding } = useBranding();
   const queryClient = useMemo(
     () =>
       new QueryClient({
@@ -1379,6 +1393,16 @@ export function App({
         token: {
           // 取值与 @hoox/ui-theme 的语义令牌保持一致，antd 组件才能与自写样式同色。
           colorPrimary: "#176b4d",
+          ...(branding.primaryColor === null
+            ? {}
+            : {
+                colorPrimary: branding.primaryColor,
+                colorTextLightSolid: brandForeground(branding.primaryColor),
+                colorPrimaryHover: brandingTokens(branding.primaryColor)["--action-primary-hover"],
+                colorPrimaryActive: brandingTokens(branding.primaryColor)[
+                  "--action-primary-active"
+                ],
+              }),
           colorInfo: "#2d5fc4",
           colorSuccess: "#21875f",
           colorWarning: "#b57a1a",
@@ -1439,9 +1463,12 @@ export function App({
     return (
       <main className="admin-login-required" aria-label="后台登录提示">
         <section>
-          <p className="eyebrow">Hoox Admin</p>
-          <h1>请先登录 Hoox 工作台</h1>
-          <p>后台不再使用浏览器 Basic 密码框；仅 Demo 管理员的有效 Hoox 会话可以调用后台接口。</p>
+          <p className="eyebrow">{branding.productName} Admin</p>
+          <h1>请先登录 {branding.productName} 工作台</h1>
+          <p>
+            后台不再使用浏览器 Basic 密码框；仅 Demo 管理员的有效 {branding.productName}{" "}
+            会话可以调用后台接口。
+          </p>
           <a href="/">前往工作台登录</a>
         </section>
       </main>

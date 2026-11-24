@@ -36,6 +36,17 @@ SELECT format('CREATE ROLE %I LOGIN NOINHERIT PASSWORD %L', wanted.role_name, wa
   ) AS wanted(role_name, role_password)
  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = wanted.role_name)
 \gexec
+SELECT CASE WHEN length(:'runtime_role')<=52 THEN :'runtime_role'
+  ELSE left(:'runtime_role',43)||'_'||left(md5(:'runtime_role'),8) END || '_evaluation' AS evaluation_role
+\gset
+SELECT format('CREATE ROLE %I NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', :'evaluation_role')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=:'evaluation_role')
+\gexec
+SELECT format('GRANT %I TO %I WITH INHERIT FALSE, SET TRUE, ADMIN FALSE', :'evaluation_role', :'runtime_role')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_auth_members
+   WHERE roleid=(SELECT oid FROM pg_roles WHERE rolname=:'evaluation_role')
+     AND member=(SELECT oid FROM pg_roles WHERE rolname=:'runtime_role'))
+\gexec
 GRANT CONNECT ON DATABASE :"database_name" TO :"directory_role", :"runtime_role", :"migrator_role", :"skill_role", :"worker_role", :"team_role", :"admin_role", :"webhook_role";
 CREATE SCHEMA IF NOT EXISTS :"runtime_schema" AUTHORIZATION :"migrator_role";
 REVOKE ALL ON SCHEMA public FROM PUBLIC;

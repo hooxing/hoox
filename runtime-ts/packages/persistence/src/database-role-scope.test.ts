@@ -27,9 +27,10 @@ function clientWith(rows: readonly object[]): PoolClient {
 }
 
 describe("PostgreSQL 应用角色数据库作用域", () => {
-  it("六个角色只依赖当前数据库时通过，并查询集群级依赖目录", async () => {
+  it("登录角色与评测角色只依赖当前数据库时通过，并查询集群级依赖目录", async () => {
     const client = clientWith([
       row(context.runtimeRole),
+      row("runtime_local_evaluation"),
       row(context.migratorRole),
       row(context.skillPublisherRole),
       row(context.workerCoordinatorRole),
@@ -44,6 +45,7 @@ describe("PostgreSQL 应用角色数据库作用域", () => {
     expect(client.query).toHaveBeenCalledWith(expect.stringContaining("pg_shdepend"), [
       [
         context.runtimeRole,
+        "runtime_local_evaluation",
         context.migratorRole,
         context.skillPublisherRole,
         context.workerCoordinatorRole,
@@ -56,6 +58,7 @@ describe("PostgreSQL 应用角色数据库作用域", () => {
   it("任一角色被其他数据库依赖时报告角色和数据库", async () => {
     const client = clientWith([
       row(context.runtimeRole, ["other_dev"]),
+      row("runtime_local_evaluation"),
       row(context.migratorRole),
       row(context.skillPublisherRole),
       row(context.workerCoordinatorRole),
@@ -71,6 +74,7 @@ describe("PostgreSQL 应用角色数据库作用域", () => {
   it("角色缺失时报告缺失角色和可执行修复命令", async () => {
     const client = clientWith([
       row(context.runtimeRole),
+      row("runtime_local_evaluation"),
       row(context.migratorRole),
       row(context.skillPublisherRole),
       row(context.workerCoordinatorRole),

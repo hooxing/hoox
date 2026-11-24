@@ -2,6 +2,12 @@ import type { EvaluationCase } from "../../runtime-ts/packages/protocol/src/admi
 import { PgEvaluationDriver } from "../../runtime-ts/packages/persistence/src/pg-evaluation-driver.js";
 import { PgEvaluationCommand } from "../../runtime-ts/packages/persistence/src/pg-evaluation-command.js";
 import { PgEvaluationRepository } from "../../runtime-ts/packages/persistence/src/pg-evaluation.js";
+import {
+  assertEvaluationRoleSafe,
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+  setLocalEvaluationRole,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
 import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
 import { createHash, randomBytes } from "node:crypto";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -857,7 +863,137 @@ async function seedWebhookRun(
 }
 
 describe("PostgreSQL 迁移与强权限边界", () => {
-  it("评测策略在普通 custom/generic 计划中不执行评测子计划，且可回滚重放", async () => {
+  it("评测角色只允许 Runtime 显式切换，并拒绝危险属性、越权成员与权限继承", async () => {
+    const runtime = `it_eval_${process.pid}_`.padEnd(63, "x");
+    const evaluation = evaluationRoleName(runtime);
+    const stranger = `it_eval_stranger_${process.pid}`;
+    await administrativePool.query(`CREATE ROLE "${runtime}" NOLOGIN NOINHERIT;
+      CREATE ROLE "${stranger}" NOLOGIN NOINHERIT`);
+    try {
+      await withTransaction(administrativePool, (client) =>
+        bootstrapEvaluationRole(client, runtime),
+      );
+      await withTransaction(administrativePool, (client) =>
+        bootstrapEvaluationRole(client, runtime),
+      );
+      const privileges = await administrativePool.query<{
+        can_set: boolean;
+        inherits: boolean;
+        name: string;
+      }>(
+        `SELECT pg_has_role($1,$2,'SET') AS can_set,pg_has_role($1,$2,'USAGE') AS inherits,
+          (CASE WHEN length($1::text)<=52 THEN $1::text ELSE left($1::text,43)||'_'||left(md5($1::text),8) END || '_evaluation') AS name`,
+        [runtime, evaluation],
+      );
+      expect(privileges.rows).toEqual([{ can_set: true, inherits: false, name: evaluation }]);
+      for (const [unsafe, restore] of [
+        [`ALTER ROLE "${evaluation}" LOGIN`, `ALTER ROLE "${evaluation}" NOLOGIN`],
+        [`ALTER ROLE "${evaluation}" INHERIT`, `ALTER ROLE "${evaluation}" NOINHERIT`],
+        [`ALTER ROLE "${evaluation}" BYPASSRLS`, `ALTER ROLE "${evaluation}" NOBYPASSRLS`],
+        [
+          `GRANT "${evaluation}" TO "${runtime}" WITH INHERIT TRUE`,
+          `GRANT "${evaluation}" TO "${runtime}" WITH INHERIT FALSE`,
+        ],
+        [
+          `GRANT "${evaluation}" TO "${runtime}" WITH ADMIN TRUE`,
+          `GRANT "${evaluation}" TO "${runtime}" WITH ADMIN FALSE`,
+        ],
+        [
+          `GRANT "${evaluation}" TO "${runtime}" WITH SET FALSE`,
+          `GRANT "${evaluation}" TO "${runtime}" WITH SET TRUE`,
+        ],
+        [`GRANT "${evaluation}" TO "${stranger}"`, `REVOKE "${evaluation}" FROM "${stranger}"`],
+        [`GRANT "${stranger}" TO "${evaluation}"`, `REVOKE "${stranger}" FROM "${evaluation}"`],
+      ] as const) {
+        await administrativePool.query(unsafe);
+        try {
+          await expect(
+            withTransaction(administrativePool, (client) =>
+              assertEvaluationRoleSafe(client, runtime),
+            ),
+          ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+        } finally {
+          await administrativePool.query(restore);
+        }
+      }
+    } finally {
+      await administrativePool.query(`DROP ROLE IF EXISTS "${evaluation}";
+        DROP ROLE "${runtime}"; DROP ROLE "${stranger}"`);
+    }
+  });
+
+  it("评测 SET LOCAL ROLE 在提交、应用异常、SQL 错误与 stale 命令后不泄漏到池中下一事务", async () => {
+    const target = await createIsolatedMigrationTarget("eval_pool");
+    const pool = createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema: target.context.schema,
+      maxConnections: 1,
+      preparedStatements: true,
+    });
+    try {
+      await migrateUp(target.pool, target.context);
+      const fixture = await createFixture("eval_pool", new PgCoreRepositories(pool));
+      const identity = () =>
+        withTransaction(pool, (client) =>
+          client.query<{ pid: number; role: string; login: string }>(
+            "SELECT pg_backend_pid() AS pid,current_user AS role,session_user AS login",
+          ),
+        );
+      const original = (await identity()).rows;
+      expect(original[0]).toMatchObject({ role: runtimeRole, login: runtimeRole });
+      for (const outcome of ["commit", "application_error", "sql_error"] as const) {
+        const transaction = withTenantTransaction(pool, fixture.scope, async (client) => {
+          await setLocalEvaluationRole(client);
+          const privileges = await client.query<{ safe: boolean }>(
+            `SELECT NOT has_table_privilege(current_user,'external_tool_credentials','SELECT')
+              AND NOT has_table_privilege(current_user,'agent_evaluation_cases','SELECT')
+              AND NOT has_table_privilege(current_user,'runs','DELETE')
+              AND NOT has_column_privilege(current_user,'run_agent_snapshots','content','UPDATE')
+              AND NOT has_column_privilege(current_user,'threads','status','UPDATE')
+              AND NOT has_column_privilege(current_user,'workspaces','current_revision_id','UPDATE')
+              AND NOT has_column_privilege(current_user,'memberships','status','UPDATE') AS safe`,
+          );
+          expect(privileges.rows).toEqual([{ safe: true }]);
+          for (let iteration = 0; iteration < 7; iteration++) {
+            const identity = await client.query<{ role: string; login: string }>(
+              "SELECT current_user AS role,session_user AS login,$1::text AS marker",
+              ["role_cache"],
+            );
+            expect(identity.rows[0]).toMatchObject({
+              role: evaluationRoleName(runtimeRole),
+              login: runtimeRole,
+            });
+          }
+          if (outcome === "application_error") throw new Error("测试应用异常");
+          if (outcome === "sql_error") await client.query("SELECT 1/0");
+        });
+        if (outcome === "commit") await transaction;
+        else await expect(transaction).rejects.toThrow();
+        expect((await identity()).rows).toEqual(original);
+      }
+      await expect(
+        new PgEvaluationCommand(pool).execute({
+          ...fixture.scope,
+          batchId: "missing_batch",
+          token: "00000000-0000-0000-0000-000000000000",
+          generation: "1",
+          plannedRunId: "missing_run",
+        }),
+      ).resolves.toBe("stale");
+      expect((await identity()).rows).toEqual(original);
+      await expect(
+        withTenantTransaction(pool, fixture.scope, (client) =>
+          client.query("SELECT * FROM evaluation_run_command"),
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+      expect((await identity()).rows).toEqual(original);
+    } finally {
+      await pool.end();
+      await target.close();
+    }
+  });
+
+  it("评测策略不进入普通 custom/generic 计划，且可回滚重放", async () => {
     const target = await createIsolatedMigrationTarget("eval_plan");
     const pool = createPostgresPool({
       connectionString: runtimeDatabaseUrl,
@@ -873,33 +1009,37 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         readonly "Actual Rows": number;
         readonly Plans?: readonly PlanNode[];
       }
-      const evaluationNodes = (node: PlanNode, initPlan = false): readonly PlanNode[] => {
-        const withinInitPlan = initPlan || node["Parent Relationship"] === "InitPlan";
+      const evaluationNodes = (node: PlanNode): readonly PlanNode[] => {
         if (node["Relation Name"]?.startsWith("agent_evaluation_")) {
-          expect(withinInitPlan).toBe(true);
           return [node];
         }
-        return (node.Plans ?? []).flatMap((child) => evaluationNodes(child, withinInitPlan));
+        return (node.Plans ?? []).flatMap((child) => evaluationNodes(child));
       };
-      const assertFastPath = async () => {
-        for (const mode of ["force_custom_plan", "force_generic_plan"]) {
-          await withTenantTransaction(pool, fixture.scope, async (client) => {
-            await client.query("SELECT set_config('plan_cache_mode',$1,true)", [mode]);
-            for (const batch of [undefined, ""]) {
-              if (batch !== undefined) {
-                await client.query("SELECT set_config('app.evaluation_batch',$1,true)", [batch]);
-              }
-              const statements = [
-                ["threads", "SELECT id FROM threads WHERE tenant_id=$1 AND id=$2"],
-                ["runs", "SELECT id FROM runs WHERE tenant_id=$1 AND thread_id=$2"],
-                [
-                  "revisions",
-                  "SELECT id FROM agent_revisions WHERE definition_id=$1 AND status=$2",
-                ],
-                ["definitions", "SELECT id FROM agent_definitions WHERE id=$1 AND status=$2"],
-                [
-                  "snapshot",
-                  `INSERT INTO run_agent_snapshots(tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content)
+      const planningTimes = { isolated: [] as number[], runtime: [] as number[] };
+      const assertFastPath = async (isolated = true) => {
+        for (const scope of [fixture.scope, { tenantId: fixture.scope.tenantId }]) {
+          for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+            await withTenantTransaction(pool, scope, async (client) => {
+              await client.query("SELECT set_config('plan_cache_mode',$1,true)", [mode]);
+              for (const batch of [undefined, "", "forged_batch"]) {
+                if (batch !== undefined) {
+                  await client.query("SELECT set_config('app.evaluation_batch',$1,true)", [batch]);
+                }
+                const statements = [
+                  ["threads", "SELECT id FROM threads WHERE tenant_id=$1 AND id=$2"],
+                  ["runs", "SELECT id FROM runs WHERE tenant_id=$1 AND thread_id=$2"],
+                  [
+                    "revisions",
+                    "SELECT id FROM agent_revisions WHERE definition_id=$1 AND status=$2",
+                  ],
+                  ["definitions", "SELECT id FROM agent_definitions WHERE id=$1 AND status=$2"],
+                  [
+                    "snapshot_read",
+                    "SELECT run_id FROM run_agent_snapshots WHERE tenant_id=$1 AND thread_id=$2",
+                  ],
+                  [
+                    "snapshot",
+                    `INSERT INTO run_agent_snapshots(tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content)
                   SELECT t.tenant_id,t.id,t.id,d.id,r.id,r.content_digest,r.content FROM threads t
                   JOIN agent_definitions d ON d.id=t.agent_definition_id AND d.status='published'
                   JOIN agent_revisions r ON r.definition_id=d.id AND r.id=d.current_revision_id AND r.status='published'
@@ -907,39 +1047,52 @@ describe("PostgreSQL 迁移与强权限边界", () => {
                     SELECT 1 FROM agent_definition_tenants scope
                      WHERE scope.definition_id=d.id AND scope.tenant_id=t.tenant_id AND scope.available
                   )) RETURNING run_id`,
-                ],
-              ] as const;
-              for (const [name, statement] of statements) {
-                const values =
-                  name === "revisions" || name === "definitions"
-                    ? "'agent_default','published'"
-                    : `'${fixture.scope.tenantId}','${fixture.thread.id}'`;
-                await client.query(`PREPARE eval_plan_${name}(text,text) AS ${statement}`);
-                try {
-                  await client.query("SAVEPOINT evaluation_plan");
-                  const plan = await client.query<{ "QUERY PLAN": readonly { Plan: PlanNode }[] }>(
-                    `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE eval_plan_${name}(${values})`,
-                  );
-                  const root = plan.rows[0]?.["QUERY PLAN"][0]?.Plan;
-                  expect(root).toBeDefined();
-                  if (!root) throw new Error("缺少执行计划");
-                  expect(root["Actual Rows"]).toBeGreaterThan(0);
-                  for (const node of evaluationNodes(root)) {
-                    expect(node["Actual Loops"], `${mode}/${name}/${batch ?? "unset"}`).toBe(0);
+                  ],
+                ] as const;
+                for (const [name, statement] of statements) {
+                  const values =
+                    name === "revisions" || name === "definitions"
+                      ? "'agent_default','published'"
+                      : `'${fixture.scope.tenantId}','${fixture.thread.id}'`;
+                  await client.query(`PREPARE eval_plan_${name}(text,text) AS ${statement}`);
+                  try {
+                    await client.query("SAVEPOINT evaluation_plan");
+                    const plan = await client.query<{
+                      "QUERY PLAN": readonly { Plan: PlanNode; "Planning Time": number }[];
+                    }>(
+                      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE eval_plan_${name}(${values})`,
+                    );
+                    const root = plan.rows[0]?.["QUERY PLAN"][0]?.Plan;
+                    expect(root).toBeDefined();
+                    if (!root) throw new Error("缺少执行计划");
+                    expect(root["Actual Rows"]).toBeGreaterThan(0);
+                    if (isolated)
+                      expect(evaluationNodes(root), `${mode}/${name}/${batch ?? "unset"}`).toEqual(
+                        [],
+                      );
+                    if (isolated)
+                      expect(JSON.stringify(root)).not.toMatch(
+                        /agent_evaluation_|evaluation_run_command|app\.evaluation_/u,
+                      );
+                    if (mode === "force_custom_plan" && name === "snapshot") {
+                      const planning = plan.rows[0]?.["QUERY PLAN"][0]?.["Planning Time"];
+                      if (planning !== undefined)
+                        planningTimes[isolated ? "isolated" : "runtime"].push(planning);
+                    }
+                    await client.query("ROLLBACK TO SAVEPOINT evaluation_plan");
+                    await client.query("RELEASE SAVEPOINT evaluation_plan");
+                  } finally {
+                    await client.query(`DEALLOCATE eval_plan_${name}`);
                   }
-                  await client.query("ROLLBACK TO SAVEPOINT evaluation_plan");
-                  await client.query("RELEASE SAVEPOINT evaluation_plan");
-                } finally {
-                  await client.query(`DEALLOCATE eval_plan_${name}`);
                 }
               }
-            }
-          });
+            });
+          }
         }
       };
       await assertFastPath();
       const migration = (await loadMigrations()).find(
-        (migration) => migration.name === "evaluation_policy_fast_path",
+        (migration) => migration.name === "evaluation_role",
       );
       if (!migration) throw new Error("缺少评测策略迁移");
       await migrateDown(target.pool, {
@@ -952,11 +1105,16 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         `SELECT pg_get_expr(polqual,polrelid) AS predicate FROM pg_policy
           WHERE polrelid='agent_revisions'::regclass AND polname='evaluation_revision_read'`,
       );
-      expect(restored.rows[0]?.predicate).toContain("EXISTS");
-      expect(restored.rows[0]?.predicate).not.toContain("CASE");
+      expect(restored.rows[0]?.predicate).toContain("CASE");
       await expect(assertFastPath()).rejects.toThrow();
+      await assertFastPath(false);
       await migrateUp(target.pool, target.context);
       await assertFastPath();
+      const median = (values: readonly number[]) =>
+        [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
+      console.info(
+        `快照 INSERT Planning Time 中位数(ms)：Runtime 策略=${median(planningTimes.runtime)} (n=${planningTimes.runtime.length})，专用评测角色=${median(planningTimes.isolated)} (n=${planningTimes.isolated.length})`,
+      );
     } finally {
       await pool.end();
       await target.close();
@@ -1002,6 +1160,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const scope = { tenantId: tenantId(first.tenantId), userId: userId(actor) };
     const inCommand = <Result>(action: (client: PoolClient) => Promise<Result>, lease = first) =>
       withTenantTransaction(runtimePool, scope, async (client) => {
+        await setLocalEvaluationRole(client);
         await client.query(
           "SELECT set_config('app.evaluation_batch',$1,true),set_config('app.evaluation_token',$2,true),set_config('app.evaluation_generation',$3,true)",
           [lease.batchId, lease.token, lease.generation],

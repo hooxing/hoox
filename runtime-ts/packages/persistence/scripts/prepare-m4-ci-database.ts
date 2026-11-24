@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { bootstrapEvaluationRole } from "../src/role-bootstrap.js";
 
 const identifierPattern = /^[a-z][a-z0-9_]{0,62}$/u;
 
@@ -104,6 +105,7 @@ try {
          TO "${trajectoryDirectoryRole}", "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}", "${webhookDispatcherRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
     );
+    await bootstrapEvaluationRole(client, runtimeRole);
     const safety = await client.query<{
       readonly runtime_safe: boolean;
       readonly migrator_safe: boolean;

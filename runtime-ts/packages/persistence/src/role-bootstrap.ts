@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from "pg";
+import { assertEvaluationRoleSafe, evaluationRoleName } from "./evaluation-role.js";
+import { grantEvaluationAccess } from "./evaluation-role-access.js";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { assertSafeSchemaName, withTransaction } from "./postgres.js";
+
+export { bootstrapEvaluationRole } from "./evaluation-role.js";
 
 const rolePattern = /^[a-z_][a-z0-9_]{0,62}$/;
 const tablePrivileges = [
@@ -2064,7 +2068,7 @@ interface MigrationContextSafetyRow {
 }
 
 /**
- * Runtime 禁止任何上游成员关系，包括 NOINHERIT 但仍可 SET ROLE 的成员关系。
+ * Runtime 只允许不可继承、不可转授权的专用评测角色切换关系，其余上游成员关系全部拒绝。
  * Migrator 必须是当前专用 Schema 的直接 owner，且不能借成员关系或数据库权限扩大边界。
  */
 async function inspectMigrationContext(
@@ -2084,7 +2088,9 @@ async function inspectMigrationContext(
      )
      SELECT
        NOT EXISTS (SELECT 1 FROM runtime) AS runtime_missing,
-       EXISTS (SELECT 1 FROM pg_auth_members WHERE member = (SELECT oid FROM runtime))
+       EXISTS (SELECT 1 FROM pg_auth_members edge WHERE member = (SELECT oid FROM runtime)
+         AND NOT (edge.roleid=(SELECT oid FROM pg_roles WHERE rolname=$5)
+           AND NOT edge.inherit_option AND edge.set_option AND NOT edge.admin_option))
          AS runtime_has_parent,
        EXISTS (
          SELECT 1 FROM runtime
@@ -2268,7 +2274,13 @@ async function inspectMigrationContext(
        ) AS migrator_is_not_schema_owner,
        current_schema() IS DISTINCT FROM $3 AS current_schema_mismatch,
        current_setting('search_path') IS DISTINCT FROM $3 AS search_path_mismatch`,
-    [context.runtimeRole, context.migratorRole, context.schema, context.skillPublisherRole],
+    [
+      context.runtimeRole,
+      context.migratorRole,
+      context.schema,
+      context.skillPublisherRole,
+      evaluationRoleName(context.runtimeRole),
+    ],
   );
   return result.rows[0];
 }
@@ -2293,6 +2305,7 @@ export async function assertMigrationContextSafe(
   context: MigrationSecurityContext,
 ): Promise<void> {
   await assertDatabaseRolesCurrentDatabaseScoped(client, context);
+  await assertEvaluationRoleSafe(client, context.runtimeRole);
   assertInspectedContextSafe(await inspectMigrationContext(client, context), false);
   await assertWorkerCoordinatorContextSafe(client, context);
   await assertWorkerCoordinatorContextSafe(client, {
@@ -2320,6 +2333,7 @@ async function assertBootstrapContextSafe(
   context: MigrationSecurityContext,
 ): Promise<void> {
   await assertDatabaseRolesCurrentDatabaseScoped(client, context);
+  await assertEvaluationRoleSafe(client, context.runtimeRole, context.schema);
   // 独立修复 ACL 时允许先清理来自 PUBLIC/直接授权的目标 Schema CREATE；其余边界不放宽。
   assertInspectedContextSafe(await inspectMigrationContext(client, context), true);
   await assertWorkerCoordinatorContextSafe(client, context, true);
@@ -2370,6 +2384,7 @@ export interface DatabaseRoleScopeInspection {
 export function databaseRoles(context: MigrationSecurityContext): readonly string[] {
   return [
     context.runtimeRole,
+    evaluationRoleName(context.runtimeRole),
     context.migratorRole,
     context.skillPublisherRole,
     context.workerCoordinatorRole,
@@ -4431,6 +4446,7 @@ export async function bootstrapRuntimeAccessOnClient(
     "PUBLIC",
     ...[
       context.runtimeRole,
+      evaluationRoleName(context.runtimeRole),
       context.skillPublisherRole,
       context.workerCoordinatorRole,
       context.teamCoordinatorRole,
@@ -4467,7 +4483,8 @@ export async function bootstrapRuntimeAccessOnClient(
     `REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA ${schema} FROM ${revokedRoles}`,
   );
   await grantWebhookAccess(client, context);
-  if (await hasAgentEvaluationExecutionState(client, context.schema)) {
+  const evaluationEnabled = await grantEvaluationAccess(client, context);
+  if (!evaluationEnabled && (await hasAgentEvaluationExecutionState(client, context.schema))) {
     await client.query(`GRANT SELECT ON ${schema}.evaluation_run_command TO ${role}`);
   }
   if (await hasApiKeyState(client, context.schema)) {
@@ -5091,6 +5108,7 @@ export async function bootstrapRuntimeAccessOnClient(
   await grantAdminControlAccess(client, context);
   await assertActiveRuntimeWhitelist(client, context);
   await assertWebhookBoundary(client, context, staleSchedulerRoles);
+  await assertEvaluationRoleSafe(client, context.runtimeRole);
 }
 
 /** 独立、可重复的 ACL bootstrap；角色与 Schema preflight 始终先于任何 ACL 变更。 */

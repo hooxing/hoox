@@ -17,6 +17,10 @@ import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabil
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
 import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import {
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
 import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
 import { PgClientToolResults } from "../../runtime-ts/packages/persistence/src/pg-client-tool-calls.js";
 import {
@@ -29,6 +33,7 @@ import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-t
 import {
   createPostgresPool,
   type Pool,
+  withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { ClientTools, HooxClient } from "../../runtime-ts/packages/sdk/src/index.js";
@@ -77,6 +82,7 @@ beforeAll(async () => {
   const migrator = pools[1];
   if (!migrator || !pools[0]) throw new Error("隔离数据库角色未初始化");
   runtime = pools[0];
+  await withTransaction(admin, (client) => bootstrapEvaluationRole(client, roles.runtimeRole));
   await migrateUp(migrator, { ...roles, schema });
   const repositories = new PgCoreRepositories(runtime);
   const now = isoTimestamp(new Date().toISOString());
@@ -153,6 +159,7 @@ afterAll(async () => {
   if (!admin) return;
   if (!schema.startsWith(`it_sdk_${process.pid}_`)) throw new Error("拒绝清理非本测试的资源");
   if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+  await admin.query(`DROP ROLE IF EXISTS "${evaluationRoleName(roles.runtimeRole)}"`);
   for (const role of createdRoles.reverse()) {
     await admin.query(`DROP OWNED BY "${role}"; DROP ROLE "${role}"`);
   }

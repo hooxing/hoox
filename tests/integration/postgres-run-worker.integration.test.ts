@@ -136,6 +136,11 @@ import {
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
 
+import {
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
+
 const enabled = process.env.RUN_PG_RUN_WORKER_INTEGRATION === "true";
 const bootstrapUrl = process.env.DATABASE_BOOTSTRAP_URL ?? "";
 const preprovisionedDatabase = process.env.M4_PREPROVISIONED_DATABASE === "true";
@@ -618,6 +623,9 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
       );
     }
+    if (!preprovisionedDatabase) {
+      await withTransaction(admin, (client) => bootstrapEvaluationRole(client, runtimeRole));
+    }
     const migratorUrl = new URL(bootstrapUrl);
     const runtimeUrl = new URL(preprovisionedDatabase ? configuredRuntimeUrl : bootstrapUrl);
     const workerCoordinatorUrl = new URL(
@@ -732,6 +740,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       )
         throw new Error("拒绝清理非本测试角色");
       await admin?.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+        DROP ROLE IF EXISTS "${evaluationRoleName(runtimeRole)}";
         REVOKE CONNECT ON DATABASE "${databaseName}" FROM ${roles.map((role) => `"${role}"`).join(",")};
         DROP ROLE ${roles.map((role) => `"${role}"`).join(",")}`);
     }

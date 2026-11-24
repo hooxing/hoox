@@ -9,6 +9,7 @@ import {
 } from "../../runtime-ts/apps/admin-control-api/src/app.js";
 import { createAdminSessionAuthResolver } from "../../runtime-ts/apps/admin-control-api/src/session-auth.js";
 import { createAdminAccessTokenAuthResolver } from "../../runtime-ts/apps/admin-control-api/src/session-auth.js";
+import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import { runCli } from "../../runtime-ts/packages/cli/src/cli.js";
 import { createProductionJwtAuthResolver } from "../../runtime-ts/packages/identity/src/production-jwt-auth.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
@@ -18,6 +19,7 @@ import {
 } from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
 import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
 import { PgAdminAccessTokenRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-access-tokens.js";
+import { PgAdminControlRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
 import {
   createPostgresPool,
   withTransaction,
@@ -50,6 +52,7 @@ let migrator: Pool;
 let control: Pool;
 let repository: PgAgentDefinitionRepository;
 let accessTokens: PgAdminAccessTokenRepository;
+let controlRepository: PgAdminControlRepository;
 let app: ReturnType<typeof createAdminControlApiApp>;
 let origin: string;
 let directory: string;
@@ -139,6 +142,7 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
     await bootstrapRuntimeAccess(migrator, security);
     for (const [actor, role, status] of [
       ["cli_admin", "admin", "active"],
+      ["cli_admin2", "admin", "active"],
       ["cli_viewer", "viewer", "active"],
       ["cli_disabled", "admin", "disabled"],
     ]) {
@@ -151,8 +155,25 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
         [actor, role, status],
       );
     }
+    for (const actor of ["cli_admin", "cli_admin2"]) {
+      const tenant = `tenant_${actor}`;
+      await administrator.query(
+        `INSERT INTO "${schema}".tenants(id,kind,owner_user_id,display_name,created_by_user_id,created_at)
+         VALUES($1,'personal',$2,NULL,NULL,now())`,
+        [tenant, actor],
+      );
+      await administrator.query(
+        `INSERT INTO "${schema}".user_accounts(
+           user_id,personal_tenant_id,email,normalized_email,display_name,
+           password_algorithm,password_salt,password_hash,created_at,updated_at
+         ) VALUES($1,$2,$3,$3,$4,'scrypt-v1',decode(repeat('11',16),'hex'),
+                  decode(repeat('22',32),'hex'),now(),now())`,
+        [actor, tenant, `${actor}@example.invalid`, `${actor} 管理员`],
+      );
+    }
     repository = new PgAgentDefinitionRepository(control);
     accessTokens = new PgAdminAccessTokenRepository(control);
+    controlRepository = new PgAdminControlRepository(control, {} as never);
     const initial = await repository.readAdminRevision(
       "cli_admin",
       "agent_default",
@@ -172,6 +193,11 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
     await writeFile(source, yaml);
     app = createAdminControlApiApp({
       agents: repository,
+      evaluations: {
+        async listSuites() {
+          return [];
+        },
+      } as never,
       auth: createAdminAccessTokenAuthResolver(
         accessTokens,
         createAdminSessionAuthResolver(
@@ -186,21 +212,16 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
         ),
       ),
       accessTokens,
-      controlAccess: {
-        async resolveRole(actor) {
-          const role = await administrator.query<{ role: string; status: string }>(
-            `SELECT role,status FROM "${schema}".platform_control_operators WHERE user_id=$1`,
-            [actor],
-          );
-          return role.rows[0]?.status === "active" ? role.rows[0].role : undefined;
-        },
-      },
-      control: {} as AdminControlApiDependencies["control"],
+      controlAccess: controlRepository,
+      control: new AdminControlService(controlRepository, {} as never, {} as never, []),
       identity: {} as AdminControlApiDependencies["identity"],
       modelCatalog: {} as AdminControlApiDependencies["modelCatalog"],
       skills: {} as AdminControlApiDependencies["skills"],
       readiness: { async probe() {} },
     });
+    app.get("/v1/admin/control/agent-definitions/:definitionId/future-read-route", async () => ({
+      ok: true,
+    }));
     origin = await app.listen({ host: "127.0.0.1", port: 0 });
   });
 
@@ -383,7 +404,7 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
       [created.data.accessToken.id],
     );
     expect(audits.rows).toHaveLength(2);
-    expect(audits.rows.every((row) => row.result === "allowed")).toBe(true);
+    expect(audits.rows.every((row) => row.result === "scope_allowed")).toBe(true);
     expect(
       audits.rows.some((row) =>
         row.route.startsWith("POST /v1/admin/control/agent-definitions/import"),
@@ -422,6 +443,42 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
     expect((await cliWithToken(["validate", source, "--remote"], created.token)).code).toBe(0);
     expect((await cliWithToken(["pull", "agent_default"], created.token)).code).toBe(0);
     expect((await cliWithToken(["push", source], created.token)).code).toBe(3);
+    const encodedEvaluation = await fetch(
+      `${origin}/v1/admin/control/agent-definitions/agent_default/%65valuations`,
+      { headers: { authorization: `Bearer ${created.token}` } },
+    );
+    expect(encodedEvaluation.status).toBe(403);
+    const futureRoute = await fetch(
+      `${origin}/v1/admin/control/agent-definitions/agent_default/future-read-route`,
+      { headers: { authorization: `Bearer ${created.token}` } },
+    );
+    expect(futureRoute.status).toBe(403);
+    const evaluationsPrefixSource = join(directory, "evaluations-prefix-agent.yaml");
+    const evaluationsPrefixYaml = yaml.replaceAll(
+      "agent_cli_roundtrip",
+      "evaluations_prefix_agent",
+    );
+    await writeFile(evaluationsPrefixSource, evaluationsPrefixYaml);
+    const evaluationsPrefixPush = await cli(["push", evaluationsPrefixSource]);
+    expect(evaluationsPrefixPush.code).toBe(0);
+    const evaluationsPrefixRevision = String(evaluationsPrefixPush.data.revisionId);
+    const evaluationsPrefixOutput = join(directory, "evaluations-prefix-export.yaml");
+    expect(
+      (
+        await cliWithToken(
+          [
+            "pull",
+            "evaluations_prefix_agent",
+            "--revision",
+            evaluationsPrefixRevision,
+            "-o",
+            evaluationsPrefixOutput,
+          ],
+          created.token,
+        )
+      ).code,
+    ).toBe(0);
+    expect(await readFile(evaluationsPrefixOutput, "utf8")).toBe(evaluationsPrefixYaml);
     const denied = await fetch(`${origin}/v1/admin/control/access`, {
       headers: { authorization: `Bearer ${created.token}` },
     });
@@ -441,9 +498,96 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
       `SELECT result FROM "${schema}".admin_access_token_audits WHERE token_id=$1 ORDER BY audit_id`,
       [created.accessToken.id],
     );
-    expect(records.rows).toHaveLength(6);
-    expect(records.rows.filter((row) => row.result === "allowed")).toHaveLength(3);
-    expect(records.rows.filter((row) => row.result === "denied")).toHaveLength(3);
+    expect(records.rows).toHaveLength(9);
+    expect(records.rows.filter((row) => row.result === "scope_allowed")).toHaveLength(4);
+    expect(records.rows.filter((row) => row.result === "scope_denied")).toHaveLength(5);
+  });
+
+  it("真实停用用户入口撤销其令牌并立即使账号身份失效", async () => {
+    const token = await accessTokens.create("cli_admin", {
+      name: "CI 停用用户令牌",
+      scopes: ["agent-config:read"],
+    });
+    const disabled = await fetch(`${origin}/v1/admin/control/users/cli_admin/status`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credential("cli_admin2")}`,
+        "content-type": "application/json",
+        "idempotency-key": "disable-cli-admin-token-001",
+      },
+      body: JSON.stringify({ status: "disabled", reason: "访问令牌停用回归测试" }),
+    });
+    expect(disabled.status).toBe(200);
+    expect(await controlRepository.resolveRole("cli_admin")).toBeUndefined();
+    const stored = await administrator.query<{ revoked_at: Date | null }>(
+      `SELECT revoked_at FROM "${schema}".admin_access_tokens WHERE id=$1`,
+      [token.accessToken.id],
+    );
+    expect(stored.rows[0]?.revoked_at).toBeInstanceOf(Date);
+    expect(
+      (
+        await fetch(`${origin}/v1/admin/control/agent-definitions`, {
+          headers: { authorization: `Bearer ${token.token}` },
+        })
+      ).status,
+    ).toBe(401);
+    const reenabled = await fetch(`${origin}/v1/admin/control/users/cli_admin/status`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credential("cli_admin2")}`,
+        "content-type": "application/json",
+        "idempotency-key": "reenable-cli-admin-token-001",
+      },
+      body: JSON.stringify({ status: "active", reason: "恢复后续隔离集成测试" }),
+    });
+    expect(reenabled.status).toBe(200);
+    expect(await controlRepository.resolveRole("cli_admin")).toBe("admin");
+  });
+
+  it("审计明确表示作用域通过，不把领域授权拒绝记作请求获准", async () => {
+    const token = await accessTokens.create("cli_viewer", {
+      name: "CI 查看作用域令牌",
+      scopes: ["agent-config:read"],
+    });
+    const response = await fetch(
+      `${origin}/v1/admin/control/agent-definitions/agent_default/revisions/agent_default_revision_1/export`,
+      { headers: { authorization: `Bearer ${token.token}` } },
+    );
+    expect(response.status).toBe(401);
+    const audit = await administrator.query<{ result: string }>(
+      `SELECT result FROM "${schema}".admin_access_token_audits WHERE token_id=$1`,
+      [token.accessToken.id],
+    );
+    expect(audit.rows).toEqual([{ result: "scope_allowed" }]);
+  });
+
+  it("并发创建受创建者与全局配额限制，列表最多返回配置数量", async () => {
+    const baseline = await administrator.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM "${schema}".admin_access_tokens
+        WHERE revoked_at IS NULL AND expires_at>now()`,
+    );
+    const quotaRepository = new PgAdminAccessTokenRepository(control, undefined, {
+      perCreator: 2,
+      global: Number(baseline.rows[0]?.count ?? 0) + 3,
+      listLimit: 2,
+    });
+    const create = (creator: string, index: number) =>
+      quotaRepository.create(creator, {
+        name: `配额测试 ${creator} ${index}`,
+        scopes: ["agent-config:read"],
+      });
+    const concurrent = await Promise.allSettled([
+      create("quota_creator", 1),
+      create("quota_creator", 2),
+      create("quota_creator", 3),
+    ]);
+    expect(concurrent.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+    expect(concurrent.filter((result) => result.status === "rejected")).toHaveLength(1);
+    await create("quota_other_creator", 1);
+    await expect(create("quota_global_limit", 1)).rejects.toThrow(
+      "ADMIN_ACCESS_TOKEN_QUOTA_EXCEEDED",
+    );
+    expect(await quotaRepository.list()).toHaveLength(2);
   });
 
   it("过期令牌被拒绝，并节流 last-used 更新但逐请求审计", async () => {
@@ -479,11 +623,11 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
       `SELECT result FROM "${schema}".admin_access_token_audits WHERE token_id=$1 ORDER BY audit_id`,
       [active.accessToken.id],
     );
-    expect(audits.rows.map((row) => row.result)).toEqual(["allowed", "allowed"]);
+    expect(audits.rows.map((row) => row.result)).toEqual(["scope_allowed", "scope_allowed"]);
     const expiredAudits = await administrator.query<{ result: string }>(
       `SELECT result FROM "${schema}".admin_access_token_audits WHERE token_id=$1`,
       [expired.accessToken.id],
     );
-    expect(expiredAudits.rows).toEqual([{ result: "denied" }]);
+    expect(expiredAudits.rows).toEqual([{ result: "credential_rejected" }]);
   });
 });

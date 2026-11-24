@@ -2787,6 +2787,7 @@ async function assertAdminControlBoundary(
   if (userOperationsEnabled) {
     allowed.set("admin_user_account_audits", new Set(["SELECT", "INSERT"]));
     allowed.set("user_sessions", new Set(["DELETE"]));
+    if (identityEnabled) allowed.set("better_auth_sessions", new Set(["DELETE"]));
   }
   if (runExplorerEnabled) {
     allowed.set("admin_run_content_access_audits", new Set(["SELECT", "INSERT"]));
@@ -2935,9 +2936,12 @@ async function assertAdminControlBoundary(
   if (userOperationsEnabled) {
     selectPolicy.set(
       "user_accounts",
-      new Set(identityEnabled ? ["user_id", "better_auth_user_id"] : ["user_id"]),
+      new Set(
+        identityEnabled ? ["user_id", "status", "better_auth_user_id"] : ["user_id", "status"],
+      ),
     );
     selectPolicy.set("user_sessions", new Set(["user_id"]));
+    if (identityEnabled) selectPolicy.set("better_auth_sessions", new Set(["user_id"]));
   }
   if (enabled && (await hasAgentEvaluationState(client, context.schema))) {
     selectPolicy.set(
@@ -3704,6 +3708,7 @@ const adminUserOperationsPolicyBindings = Object.freeze([
   ["admin_user_account_audits", "admin_user_account_audits_migrator_policy", "migrator"],
   ["admin_user_account_audits", "admin_user_account_audits_control_policy", "control"],
   ["user_accounts", "user_accounts_admin_control_update_policy", "control"],
+  ["user_accounts", "user_accounts_admin_control_read_policy", "control"],
   ["user_sessions", "user_sessions_admin_control_delete_policy", "control"],
 ] as const);
 
@@ -3899,6 +3904,13 @@ async function rebindRoleScopedPolicies(
     }
     if (await hasAdminUserOperationsState(client, context.schema)) {
       for (const [table, policy, target] of adminUserOperationsPolicyBindings) {
+        if (policy === "user_accounts_admin_control_read_policy") {
+          const exists = await client.query<{ present: boolean }>(
+            "SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1 AND tablename=$2 AND policyname=$3) AS present",
+            [context.schema, table, policy],
+          );
+          if (!exists.rows[0]?.present) continue;
+        }
         const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
         await client.query(
           `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
@@ -4209,12 +4221,17 @@ async function grantAdminControlAccess(
     const identityEnabled = await hasEmbeddedIdentityState(client, context.schema);
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_user_account_audits TO ${control};
-       GRANT SELECT(user_id${identityEnabled ? ",better_auth_user_id" : ""}) ON TABLE ${schema}.user_accounts TO ${control};
+       GRANT SELECT(user_id,status${identityEnabled ? ",better_auth_user_id" : ""}) ON TABLE ${schema}.user_accounts TO ${control};
        GRANT SELECT(user_id) ON TABLE ${schema}.user_sessions TO ${control};
        GRANT UPDATE(status,updated_at) ON TABLE ${schema}.user_accounts TO ${control};
        GRANT DELETE ON TABLE ${schema}.user_sessions TO ${control};
        GRANT SELECT ON TABLE ${schema}.admin_user_directory TO ${control}`,
     );
+    if (identityEnabled) {
+      await client.query(
+        `GRANT SELECT(user_id),DELETE ON TABLE ${schema}.better_auth_sessions TO ${control}`,
+      );
+    }
   }
   if (await hasAdminRunExplorerState(client, context.schema)) {
     // 只授予视图读取与审计写入；Run、Attempt、事件与指标底表仍对 Admin Control 零 ACL。
@@ -4271,7 +4288,7 @@ async function grantAdminControlAccess(
       `GRANT SELECT,INSERT,UPDATE ON TABLE ${schema}.identity_auth_configuration TO ${control};
        GRANT SELECT,INSERT ON TABLE
          ${schema}.identity_auth_audits,${schema}.identity_auth_commands TO ${control};
-       GRANT DELETE ON TABLE ${schema}.better_auth_sessions TO ${control}`,
+       GRANT SELECT(user_id),DELETE ON TABLE ${schema}.better_auth_sessions TO ${control}`,
     );
   }
   const accessTokenState = await client.query<{ present: boolean }>(

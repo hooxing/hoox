@@ -83,6 +83,7 @@ import {
 } from "@hoox/persistence/admin";
 import { PersistenceError } from "@hoox/persistence/postgres";
 import {
+  AdminAccessTokenQuotaError,
   type AdminAccessTokenScope,
   type PgAdminAccessTokenRepository,
 } from "@hoox/persistence/admin";
@@ -99,6 +100,7 @@ import { registerSkillNamespaceRoutes } from "./skill-namespace-routes.js";
 import type { SkillPublicationService } from "@hoox/skill";
 
 const strict = { additionalProperties: false } as const;
+const agentDefinitionBase = "/v1/admin/control/agent-definitions";
 const AuditQuerySchema = Type.Object(
   { limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, default: 100 })) },
   strict,
@@ -202,6 +204,10 @@ export function createAdminControlApiApp(
     serializerOpts: { ajv: { formats: { "hoox-iso-utc-timestamp-v1": true } } },
   });
   const now = dependencies.now ?? (() => new Date());
+  const tokenPrincipals = new WeakMap<
+    FastifyRequest,
+    Awaited<ReturnType<AuthContextResolver["resolve"]>>
+  >();
 
   app.addHook("onSend", async (_request, reply) => {
     void reply
@@ -209,6 +215,12 @@ export function createAdminControlApiApp(
       .header("pragma", "no-cache")
       .header("x-content-type-options", "nosniff")
       .header("referrer-policy", "no-referrer");
+  });
+  app.addHook("preHandler", async (request) => {
+    if (!singleHeader(request, "authorization")?.startsWith("Bearer hoox_at_")) return;
+    const principal = await resolveAdminPrincipal(request, dependencies);
+    if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
+    tokenPrincipals.set(request, principal);
   });
   app.setErrorHandler(async (error, request, reply) => {
     const failure = failureKind(error, request);
@@ -675,8 +687,14 @@ export function createAdminControlApiApp(
       },
       async (request, reply) => {
         const creator = await requireTokenAdministrator(request);
-        const created = await dependencies.accessTokens?.create(creator, request.body);
-        return reply.code(201).send(success(request, created));
+        try {
+          const created = await dependencies.accessTokens?.create(creator, request.body);
+          return reply.code(201).send(success(request, created));
+        } catch (error) {
+          if (error instanceof AdminAccessTokenQuotaError)
+            throw new AdminControlApiFailure("conflict");
+          throw error;
+        }
       },
     );
     app.delete<{ Params: { tokenId: string } }>(
@@ -706,6 +724,7 @@ export function createAdminControlApiApp(
   }
 
   async function resolvePrincipal(request: FastifyRequest) {
+    if (tokenPrincipals.has(request)) return tokenPrincipals.get(request);
     return resolveAdminPrincipal(request, dependencies);
   }
 
@@ -994,7 +1013,7 @@ async function resolveAdminPrincipal(
   request: FastifyRequest,
   dependencies: AdminControlApiDependencies,
 ) {
-  const path = request.url.split("?", 1)[0] ?? request.url;
+  const path = request.routeOptions.url ?? "";
   const body = request.body;
   const principal = await dependencies.auth.resolve({
     authorization: singleHeader(request, "authorization"),
@@ -1009,7 +1028,7 @@ async function resolveAdminPrincipal(
   const token = principal.adminAccessToken;
   const role = await dependencies.controlAccess?.resolveRole(principal.userId);
   const scope = requiredAgentConfigurationScope(request.method, path, body);
-  const allowed =
+  const scopeAllowed =
     role !== undefined &&
     scope !== undefined &&
     token.scopes.includes(scope) &&
@@ -1022,25 +1041,30 @@ async function resolveAdminPrincipal(
       auditId: token.auditId,
       route: token.route,
     },
-    allowed,
+    scopeAllowed,
   );
-  if (!allowed) throw new AdminControlApiFailure("forbidden");
+  if (!scopeAllowed) throw new AdminControlApiFailure("forbidden");
   return principal;
 }
 
 function requiredAgentConfigurationScope(
   method: string,
-  path: string,
+  route: string,
   body: unknown,
 ): AdminAccessTokenScope | undefined {
-  const base = "/v1/admin/control/agent-definitions";
-  if (!path.startsWith(`${base}/`) && path !== base) return undefined;
-  if (path.includes("/evaluations")) return undefined;
-  if (method === "GET") return "agent-config:read";
-  const isImport =
-    method === "POST" &&
-    /^\/v1\/admin\/control\/agent-definitions(?:\/[^/]+)?\/import$/u.test(path);
-  if (!isImport) return undefined;
+  const routeKey = `${method} ${route}`;
+  const readRoutes = new Set([
+    `GET ${agentDefinitionBase}`,
+    `GET ${agentDefinitionBase}/:definitionId/revisions`,
+    `GET ${agentDefinitionBase}/:definitionId/revisions/:revisionId`,
+    `GET ${agentDefinitionBase}/:definitionId/revisions/:revisionId/export`,
+  ]);
+  if (readRoutes.has(routeKey)) return "agent-config:read";
+  const importRoutes = new Set([
+    `POST ${agentDefinitionBase}/import`,
+    `POST ${agentDefinitionBase}/:definitionId/import`,
+  ]);
+  if (!importRoutes.has(routeKey)) return undefined;
   return typeof body === "object" && body !== null && "dryRun" in body && body.dryRun === true
     ? "agent-config:read"
     : "agent-config:write";

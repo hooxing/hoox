@@ -394,8 +394,10 @@ export class PgAdminControlRepository
         userId,
         async (client) => {
           const result = await client.query<{ readonly role: ControlOperatorRole }>(
-            `SELECT role FROM platform_control_operators
-              WHERE user_id=$1 AND status='active'`,
+            `SELECT operator.role FROM platform_control_operators operator
+               LEFT JOIN user_accounts account ON account.user_id=operator.user_id
+              WHERE operator.user_id=$1 AND operator.status='active'
+                AND (account.user_id IS NULL OR account.status='active')`,
             [userId],
           );
           return result.rows[0]?.role;
@@ -993,6 +995,13 @@ export class PgAdminControlRepository
                 : "UPDATE user_accounts SET status=$2,updated_at=clock_timestamp() WHERE user_id=$1",
               [input.targetUserId, input.status],
             );
+            if (input.status === "disabled") {
+              await client.query(
+                `UPDATE admin_access_tokens SET revoked_at=clock_timestamp()
+                  WHERE created_by=$1 AND revoked_at IS NULL`,
+                [input.targetUserId],
+              );
+            }
             if (input.status === "disabled" && current.source !== "api_mapping") {
               await client.query("DELETE FROM user_sessions WHERE user_id=$1", [
                 input.targetUserId,

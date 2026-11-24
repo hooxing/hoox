@@ -37,11 +37,25 @@ interface TokenRow extends QueryResultRow {
 const prefix = "hoox_at_";
 const tokenPattern = /^hoox_at_[A-Za-z0-9_-]{43}$/u;
 const day = 86_400_000;
+export class AdminAccessTokenQuotaError extends Error {
+  constructor() {
+    super("ADMIN_ACCESS_TOKEN_QUOTA_EXCEEDED");
+  }
+}
+
+export interface AdminAccessTokenQuotas {
+  readonly perCreator: number;
+  readonly global: number;
+  readonly listLimit: number;
+}
+
+const defaultQuotas: AdminAccessTokenQuotas = { perCreator: 20, global: 1_000, listLimit: 200 };
 
 export class PgAdminAccessTokenRepository {
   constructor(
     private readonly pool: Pool,
     private readonly now: () => Date = () => new Date(),
+    private readonly quotas: AdminAccessTokenQuotas = defaultQuotas,
   ) {}
 
   async create(
@@ -75,23 +89,43 @@ export class PgAdminAccessTokenRepository {
     const token = `${prefix}${randomBytes(32).toString("base64url")}`;
     const salt = randomBytes(16);
     const id = randomUUID();
-    const result = await this.pool.query<TokenRow>(
-      `INSERT INTO admin_access_tokens
-         (id,name,scopes,created_by,token_prefix,token_salt,token_hash,created_at,expires_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING id,name,scopes,created_by,created_at,expires_at,revoked_at,last_used_at`,
-      [
-        id,
-        name,
-        scopes,
-        creatorUserId,
-        token.slice(0, 16),
-        salt,
-        hashToken(salt, token),
-        now,
-        expiresAt,
-      ],
-    );
+    const result = await withTransaction(this.pool, async (client) => {
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('hoox_admin_access_token_quota',0))",
+      );
+      const counts = await client.query<{
+        readonly creator_count: string;
+        readonly global_count: string;
+      }>(
+        `SELECT count(*) FILTER (WHERE created_by=$1)::text AS creator_count,
+                count(*)::text AS global_count
+           FROM admin_access_tokens
+          WHERE revoked_at IS NULL AND expires_at > $2`,
+        [creatorUserId, now],
+      );
+      const creatorCount = Number(counts.rows[0]?.creator_count ?? 0);
+      const globalCount = Number(counts.rows[0]?.global_count ?? 0);
+      if (creatorCount >= this.quotas.perCreator || globalCount >= this.quotas.global) {
+        throw new AdminAccessTokenQuotaError();
+      }
+      return await client.query<TokenRow>(
+        `INSERT INTO admin_access_tokens
+           (id,name,scopes,created_by,token_prefix,token_salt,token_hash,created_at,expires_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING id,name,scopes,created_by,created_at,expires_at,revoked_at,last_used_at`,
+        [
+          id,
+          name,
+          scopes,
+          creatorUserId,
+          token.slice(0, 16),
+          salt,
+          hashToken(salt, token),
+          now,
+          expiresAt,
+        ],
+      );
+    });
     const row = result.rows[0];
     if (!row) throw new Error("ADMIN_ACCESS_TOKEN_CREATE_FAILED");
     return { token, accessToken: summarize(row) };
@@ -100,7 +134,8 @@ export class PgAdminAccessTokenRepository {
   async list(): Promise<readonly AdminAccessTokenSummary[]> {
     const result = await this.pool.query<TokenRow>(
       `SELECT id,name,scopes,created_by,created_at,expires_at,revoked_at,last_used_at
-         FROM admin_access_tokens ORDER BY created_at DESC,id`,
+         FROM admin_access_tokens ORDER BY created_at DESC,id LIMIT $1`,
+      [this.quotas.listLimit],
     );
     return result.rows.map(summarize);
   }
@@ -138,7 +173,7 @@ export class PgAdminAccessTokenRepository {
       if (!usable) {
         await client.query(
           `INSERT INTO admin_access_token_audits(audit_id,token_id,creator_user_id,route,result)
-           VALUES($1,$2,$3,$4,'denied')`,
+           VALUES($1,$2,$3,$4,'credential_rejected')`,
           [auditId, row.id, row.created_by, route.slice(0, 512)],
         );
       }
@@ -162,7 +197,7 @@ export class PgAdminAccessTokenRepository {
     });
   }
 
-  async finishUse(credential: AdminAccessTokenCredential, allowed: boolean): Promise<void> {
+  async finishUse(credential: AdminAccessTokenCredential, scopeAllowed: boolean): Promise<void> {
     await this.pool.query(
       `INSERT INTO admin_access_token_audits(audit_id,token_id,creator_user_id,route,result)
        VALUES($1,$2,$3,$4,$5)`,
@@ -171,7 +206,7 @@ export class PgAdminAccessTokenRepository {
         credential.id,
         credential.creatorUserId,
         credential.route,
-        allowed ? "allowed" : "denied",
+        scopeAllowed ? "scope_allowed" : "scope_denied",
       ],
     );
   }

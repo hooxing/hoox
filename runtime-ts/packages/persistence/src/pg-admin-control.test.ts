@@ -43,7 +43,7 @@ describe("PostgreSQL 后台控制面读取投影", () => {
     const client = {
       query: async (sql: string) => {
         statements.push(sql);
-        if (sql.includes("SELECT role FROM platform_control_operators")) {
+        if (sql.includes("SELECT operator.role FROM platform_control_operators")) {
           return { rows: [{ role: "viewer" }] };
         }
         if (sql.includes("FROM admin_control_config_revisions revision")) {

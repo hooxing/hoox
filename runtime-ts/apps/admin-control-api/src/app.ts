@@ -663,10 +663,37 @@ export function createAdminControlApiApp(
     });
   }
   if (dependencies.accessTokens !== undefined) {
-    app.get("/v1/admin/control/access-tokens", async (request) => {
-      await requireTokenAdministrator(request);
-      return success(request, await dependencies.accessTokens?.list());
-    });
+    app.get<{
+      Querystring: {
+        status?: "active" | "expired" | "revoked";
+        cursor?: string;
+        limit?: number;
+      };
+    }>(
+      "/v1/admin/control/access-tokens",
+      {
+        schema: {
+          querystring: Type.Object(
+            {
+              status: Type.Optional(
+                Type.Union([
+                  Type.Literal("active"),
+                  Type.Literal("expired"),
+                  Type.Literal("revoked"),
+                ]),
+              ),
+              cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+              limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+            },
+            strict,
+          ),
+        },
+      },
+      async (request) => {
+        await requireTokenAdministrator(request);
+        return success(request, await dependencies.accessTokens?.list(request.query));
+      },
+    );
     app.post<{ Body: { name: string; scopes: AdminAccessTokenScope[]; expiresAt?: string } }>(
       "/v1/admin/control/access-tokens",
       {

@@ -12,7 +12,7 @@ import { createAdminAccessTokenAuthResolver } from "../../runtime-ts/apps/admin-
 import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import { runCli } from "../../runtime-ts/packages/cli/src/cli.js";
 import { createProductionJwtAuthResolver } from "../../runtime-ts/packages/identity/src/production-jwt-auth.js";
-import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
   bootstrapEvaluationRole,
   evaluationRoleName,
@@ -503,6 +503,27 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
     expect(records.rows.filter((row) => row.result === "scope_denied")).toHaveLength(5);
   });
 
+  it("令牌认证对路由变体默认拒绝", async () => {
+    const created = await accessTokens.create("cli_admin", {
+      name: "CI 路由变体令牌",
+      scopes: ["agent-config:read"],
+    });
+    const base = "/v1/admin/control/agent-definitions";
+    const headers = { authorization: `Bearer ${created.token}` };
+    for (const path of [
+      `${base}/`,
+      base.replace("agent-definitions", "Agent-definitions"),
+      `${base}//`,
+    ]) {
+      const response = await fetch(`${origin}${path}`, { headers });
+      expect(response.status, path).not.toBe(200);
+    }
+    for (const method of ["HEAD", "OPTIONS"]) {
+      const response = await fetch(`${origin}${base}`, { method, headers });
+      expect(response.status, method).not.toBe(200);
+    }
+  });
+
   it("真实停用用户入口撤销其令牌并立即使账号身份失效", async () => {
     const token = await accessTokens.create("cli_admin", {
       name: "CI 停用用户令牌",
@@ -587,7 +608,121 @@ describe("PostgreSQL hoox CLI 与既有后台 JWT", () => {
     await expect(create("quota_global_limit", 1)).rejects.toThrow(
       "ADMIN_ACCESS_TOKEN_QUOTA_EXCEEDED",
     );
-    expect(await quotaRepository.list()).toHaveLength(2);
+    expect((await quotaRepository.list()).items).toHaveLength(2);
+  });
+
+  it("超过单页的有效令牌可遍历并逐一撤销", async () => {
+    const seeded = await administrator.query<{ id: string }>(
+      `INSERT INTO "${schema}".admin_access_tokens
+         (id,name,scopes,created_by,token_prefix,token_salt,token_hash,created_at,expires_at)
+       SELECT gen_random_uuid(),'分页覆盖 ' || item,
+              ARRAY['agent-config:read']::text[],'cli_admin2',
+              substr(md5(random()::text),1,16),decode(repeat('11',16),'hex'),
+              decode(repeat('22',32),'hex'),now()-item*interval '1 millisecond',
+              now()+interval '90 days'
+         FROM generate_series(1,205) item
+       RETURNING id`,
+    );
+    const ids = new Set(seeded.rows.map((row) => row.id));
+    const headers = { authorization: `Bearer ${credential("cli_admin")}` };
+    const found = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const query = new URLSearchParams({ status: "active", limit: "200" });
+      if (cursor !== null) query.set("cursor", cursor);
+      const response = await fetch(`${origin}/v1/admin/control/access-tokens?${query}`, {
+        headers,
+      });
+      expect(response.status).toBe(200);
+      const envelope = (await response.json()) as {
+        readonly data: {
+          readonly items: readonly { id: string; name: string }[];
+          readonly nextCursor: string | null;
+        };
+      };
+      for (const token of envelope.data.items) {
+        if (ids.has(token.id)) found.add(token.id);
+      }
+      cursor = envelope.data.nextCursor;
+    } while (cursor !== null);
+    expect(found).toEqual(ids);
+    const results: Response[] = [];
+    for (const id of ids) {
+      const response = await fetch(`${origin}/v1/admin/control/access-tokens/${id}`, {
+        method: "DELETE",
+        headers,
+      });
+      results.push(response);
+    }
+    expect(results.every((response) => response.status === 200)).toBe(true);
+  });
+
+  it("大量历史记录不会隐藏较早的有效令牌，状态筛选可访问历史页", async () => {
+    const oldActive = await accessTokens.create("old_history_user", {
+      name: "历史记录中的有效令牌",
+      scopes: ["agent-config:read"],
+    });
+    await administrator.query(
+      `UPDATE "${schema}".admin_access_tokens SET created_at=now()-interval '2 years' WHERE id=$1`,
+      [oldActive.accessToken.id],
+    );
+    await administrator.query(
+      `INSERT INTO "${schema}".admin_access_tokens
+         (id,name,scopes,created_by,token_prefix,token_salt,token_hash,created_at,expires_at,revoked_at)
+       SELECT gen_random_uuid(),'历史撤销 ' || item,ARRAY['agent-config:read']::text[],
+              'cli_admin2',substr(md5(random()::text),1,16),decode(repeat('11',16),'hex'),
+              decode(repeat('22',32),'hex'),now()-item*interval '1 millisecond',
+              now()+interval '90 days',now()
+         FROM generate_series(1,205) item`,
+    );
+    const active = await accessTokens.list();
+    let cursor = active.nextCursor;
+    const activeIds = new Set(active.items.map((token) => token.id));
+    while (cursor !== null) {
+      const page = await accessTokens.list({ cursor });
+      for (const token of page.items) activeIds.add(token.id);
+      cursor = page.nextCursor;
+    }
+    expect(activeIds.has(oldActive.accessToken.id)).toBe(true);
+    const revoked = await accessTokens.list({ status: "revoked" });
+    expect(revoked.items).toHaveLength(200);
+    expect(revoked.nextCursor).not.toBeNull();
+  });
+
+  it("0038 迁移通过正式入口执行 up、down、up", async () => {
+    const applied = await migrateUp(migrator, security);
+    const migration = applied.find(
+      (record) => record.name === "admin_access_token_scope_and_account_policy",
+    );
+    expect(migration).toBeDefined();
+    if (!migration) throw new Error("缺少后台访问令牌账户策略迁移");
+    const down = await migrateDown(migrator, {
+      ...security,
+      targetVersion: migration.version - 1,
+      allowDestructive: true,
+      environment: "test",
+    });
+    expect(down.some((record) => record.version === migration.version)).toBe(false);
+    expect(
+      (
+        await administrator.query(
+          `SELECT 1 FROM pg_policies WHERE schemaname=$1 AND policyname='user_accounts_admin_control_read_policy'`,
+          [schema],
+        )
+      ).rowCount,
+    ).toBe(0);
+    const replayed = await migrateUp(migrator, security);
+    expect(replayed.find((record) => record.version === migration.version)?.checksum).toBe(
+      migration.checksum,
+    );
+    expect(
+      (
+        await administrator.query(
+          `SELECT 1 FROM pg_policies WHERE schemaname=$1 AND policyname='user_accounts_admin_control_read_policy'`,
+          [schema],
+        )
+      ).rowCount,
+    ).toBe(1);
   });
 
   it("过期令牌被拒绝，并节流 last-used 更新但逐请求审计", async () => {

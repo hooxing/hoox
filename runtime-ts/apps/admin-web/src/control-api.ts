@@ -83,8 +83,13 @@ function messageFor(status: number): string {
 }
 
 export class AdminControlApi {
-  listAccessTokens(): Promise<readonly AdminAccessTokenDto[]> {
-    return this.request("/access-tokens");
+  listAccessTokens(input: {
+    readonly status: AdminAccessTokenStatus;
+    readonly cursor?: string;
+  }): Promise<AdminAccessTokenPageDto> {
+    const query = new URLSearchParams({ status: input.status });
+    if (input.cursor !== undefined) query.set("cursor", input.cursor);
+    return this.request(`/access-tokens?${query.toString()}`);
   }
   createAccessToken(input: {
     readonly name: string;
@@ -604,6 +609,13 @@ export interface AdminAccessTokenDto {
   readonly lastUsedAt: string | null;
   readonly expiresAt: string;
   readonly revokedAt: string | null;
+}
+
+export type AdminAccessTokenStatus = "active" | "expired" | "revoked";
+
+export interface AdminAccessTokenPageDto {
+  readonly items: readonly AdminAccessTokenDto[];
+  readonly nextCursor: string | null;
 }
 
 export type AdminAccessTokenApiContract = Pick<

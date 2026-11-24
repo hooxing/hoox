@@ -15,6 +15,19 @@ export interface AdminAccessTokenSummary {
   readonly revokedAt: string | null;
 }
 
+export type AdminAccessTokenStatus = "active" | "expired" | "revoked";
+
+export interface AdminAccessTokenPage {
+  readonly items: readonly AdminAccessTokenSummary[];
+  readonly nextCursor: string | null;
+}
+
+export interface AdminAccessTokenListOptions {
+  readonly status?: AdminAccessTokenStatus;
+  readonly cursor?: string;
+  readonly limit?: number;
+}
+
 export interface AdminAccessTokenCredential {
   readonly id: string;
   readonly creatorUserId: string;
@@ -131,13 +144,39 @@ export class PgAdminAccessTokenRepository {
     return { token, accessToken: summarize(row) };
   }
 
-  async list(): Promise<readonly AdminAccessTokenSummary[]> {
+  async list(options: AdminAccessTokenListOptions = {}): Promise<AdminAccessTokenPage> {
+    const status = options.status ?? "active";
+    if (status !== "active" && status !== "expired" && status !== "revoked")
+      throw new TypeError("INVALID_TOKEN_STATUS");
+    const limit = Math.min(
+      Math.max(1, options.limit ?? this.quotas.listLimit),
+      this.quotas.listLimit,
+      200,
+    );
+    const cursor = options.cursor === undefined ? undefined : decodeCursor(options.cursor);
+    const cursorFilter =
+      cursor === undefined ? "" : "AND (created_at,id) < ($4::timestamptz,$5::uuid)";
+    const parameters: unknown[] = [status, this.now(), limit + 1];
+    if (cursor !== undefined) parameters.push(cursor.createdAt, cursor.id);
     const result = await this.pool.query<TokenRow>(
       `SELECT id,name,scopes,created_by,created_at,expires_at,revoked_at,last_used_at
-         FROM admin_access_tokens ORDER BY created_at DESC,id LIMIT $1`,
-      [this.quotas.listLimit],
+         FROM admin_access_tokens
+        WHERE CASE $1::text
+          WHEN 'active' THEN revoked_at IS NULL AND expires_at > $2
+          WHEN 'expired' THEN revoked_at IS NULL AND expires_at <= $2
+          WHEN 'revoked' THEN revoked_at IS NOT NULL
+        END
+        ${cursorFilter}
+        ORDER BY created_at DESC,id DESC LIMIT $3`,
+      parameters,
     );
-    return result.rows.map(summarize);
+    const hasMore = result.rows.length > limit;
+    const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+    const last = rows.at(-1);
+    return {
+      items: rows.map(summarize),
+      nextCursor: hasMore && last ? encodeCursor(last) : null,
+    };
   }
 
   async revoke(id: string): Promise<boolean> {
@@ -235,4 +274,31 @@ function summarize(row: TokenRow): AdminAccessTokenSummary {
     expiresAt: new Date(row.expires_at).toISOString(),
     revokedAt: row.revoked_at === null ? null : new Date(row.revoked_at).toISOString(),
   };
+}
+
+function encodeCursor(row: Pick<TokenRow, "created_at" | "id">): string {
+  return Buffer.from(
+    JSON.stringify({ createdAt: new Date(row.created_at).toISOString(), id: row.id }),
+  ).toString("base64url");
+}
+
+function decodeCursor(value: string): { readonly createdAt: string; readonly id: string } {
+  try {
+    const decoded: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (
+      typeof decoded === "object" &&
+      decoded !== null &&
+      "createdAt" in decoded &&
+      typeof decoded.createdAt === "string" &&
+      Number.isFinite(Date.parse(decoded.createdAt)) &&
+      "id" in decoded &&
+      typeof decoded.id === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(decoded.id)
+    ) {
+      return { createdAt: new Date(decoded.createdAt).toISOString(), id: decoded.id };
+    }
+  } catch {
+    throw new TypeError("INVALID_TOKEN_CURSOR");
+  }
+  throw new TypeError("INVALID_TOKEN_CURSOR");
 }

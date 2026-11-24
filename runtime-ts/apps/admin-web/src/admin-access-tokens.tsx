@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AdminAccessTokenApiContract, AdminAccessTokenDto } from "./control-api.js";
+import type {
+  AdminAccessTokenApiContract,
+  AdminAccessTokenDto,
+  AdminAccessTokenStatus,
+} from "./control-api.js";
 
 function date(value: string | null): string {
   if (value === null) return "从未使用";
@@ -9,6 +13,10 @@ function date(value: string | null): string {
 
 export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenApiContract }) {
   const [tokens, setTokens] = useState<readonly AdminAccessTokenDto[]>([]);
+  const [status, setStatus] = useState<AdminAccessTokenStatus>("active");
+  const [cursors, setCursors] = useState<readonly (string | null)[]>([null]);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [name, setName] = useState("");
   const [read, setRead] = useState(true);
@@ -18,17 +26,25 @@ export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenA
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const reload = useCallback(async () => {
-    try {
-      setTokens(await api.listAccessTokens());
-    } catch {
-      setError("无法读取后台访问令牌。");
-    }
-  }, [api]);
+  const reload = useCallback(
+    async (filter: AdminAccessTokenStatus, cursor: string | null) => {
+      try {
+        const page = await api.listAccessTokens({
+          status: filter,
+          ...(cursor === null ? {} : { cursor }),
+        });
+        setTokens(page.items);
+        setNextCursor(page.nextCursor);
+      } catch {
+        setError("无法读取后台访问令牌。");
+      }
+    },
+    [api],
+  );
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(status, cursors[pageIndex] ?? null);
+  }, [cursors, pageIndex, reload, status]);
 
   useEffect(() => {
     const expirations = tokens
@@ -61,7 +77,10 @@ export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenA
       });
       setOneTimeToken(result.token);
       setName("");
-      await reload();
+      setStatus("active");
+      setCursors([null]);
+      setPageIndex(0);
+      await reload("active", null);
     } catch {
       setError("令牌创建失败，请检查名称和权限后重试。");
     } finally {
@@ -75,12 +94,24 @@ export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenA
     setError("");
     try {
       await api.revokeAccessToken(token.id);
-      await reload();
+      await reload(status, cursors[pageIndex] ?? null);
     } catch {
       setError("令牌撤销失败，请刷新后重试。");
     } finally {
       setBusy(false);
     }
+  };
+
+  const selectStatus = (nextStatus: AdminAccessTokenStatus) => {
+    setStatus(nextStatus);
+    setCursors([null]);
+    setPageIndex(0);
+  };
+
+  const nextPage = () => {
+    if (nextCursor === null) return;
+    setCursors((current) => [...current.slice(0, pageIndex + 1), nextCursor]);
+    setPageIndex((current) => current + 1);
   };
 
   return (
@@ -143,6 +174,18 @@ export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenA
           </button>
         </section>
       )}
+      <label>
+        状态筛选
+        <select
+          aria-label="令牌状态筛选"
+          value={status}
+          onChange={(event) => selectStatus(event.target.value as AdminAccessTokenStatus)}
+        >
+          <option value="active">有效</option>
+          <option value="expired">已过期</option>
+          <option value="revoked">已撤销</option>
+        </select>
+      </label>
       <div className="admin-access-token-table">
         <table>
           <thead>
@@ -189,6 +232,19 @@ export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenA
           </tbody>
         </table>
       </div>
+      <nav aria-label="令牌分页">
+        <button
+          type="button"
+          disabled={busy || pageIndex === 0}
+          onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
+        >
+          上一页
+        </button>
+        <span>第 {pageIndex + 1} 页</span>
+        <button type="button" disabled={busy || nextCursor === null} onClick={nextPage}>
+          下一页
+        </button>
+      </nav>
     </main>
   );
 }

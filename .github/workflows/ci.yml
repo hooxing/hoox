@@ -177,6 +177,7 @@ jobs:
         run: |
           pnpm --filter "@hoox/persistence..." build
           pnpm --filter "@hoox/api..." build
+          pnpm --filter "@hoox/admin-control-api^..." build
           suites=(
             tests/integration/postgres-admin-run-explorer.integration.test.ts
             tests/integration/postgres-cli.integration.test.ts

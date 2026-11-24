@@ -229,6 +229,17 @@ jobs:
           SKILL_PUBLISHER_S3_FORCE_PATH_STYLE: "true"
         run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-skill-center.integration.test.ts
 
+      - name: 验证对象存储兼容性（Blob、条件写入、预签名、Worker 物化与 WebDAV）
+        env:
+          S3_ENDPOINT: http://127.0.0.1:19000
+          S3_PUBLIC_ENDPOINT: http://127.0.0.1:19000
+          S3_REGION: us-east-1
+          S3_BUCKET: agent-runtime-ci
+          S3_ACCESS_KEY_ID: ci-s3-placeholder
+          S3_SECRET_ACCESS_KEY: ci-s3-placeholder-secret
+          S3_FORCE_PATH_STYLE: "true"
+        run: pnpm storage:conformance
+
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:
           RUN_PG_RUN_WORKER_INTEGRATION: "true"

@@ -89,6 +89,8 @@ import type { PiModelCatalogPort } from "./pi-model-catalog.js";
 import { registerIntegrationRoutes, type IntegrationAdminPort } from "./integration-routes.js";
 import { registerRunExplorerRoutes, type RunExplorerRouteService } from "./run-explorer-routes.js";
 import { registerEvaluationRoutes, type EvaluationAdminPort } from "./evaluation-routes.js";
+import { registerSkillNamespaceRoutes } from "./skill-namespace-routes.js";
+import type { SkillPublicationService } from "@hoox/skill";
 
 const strict = { additionalProperties: false } as const;
 const AuditQuerySchema = Type.Object(
@@ -137,6 +139,14 @@ export interface AdminControlApiDependencies {
   readonly identity: IdentityAdminService;
   readonly modelCatalog: PiModelCatalogPort;
   readonly skills: Omit<SkillAdminApiRouteDependencies, "auth">;
+  readonly skillNamespaces?: Pick<
+    SkillPublicationService,
+    | "publicationAccess"
+    | "listNamespaces"
+    | "createNamespace"
+    | "grantNamespace"
+    | "revokeNamespace"
+  >;
   readonly readiness: { probe(): Promise<void> };
   readonly now?: () => Date;
 }
@@ -604,6 +614,12 @@ export function createAdminControlApiApp(
   registerProviderActions(app, dependencies, "model_provider", "model-providers");
   registerProviderActions(app, dependencies, "memory_provider", "memory-providers");
   registerSkillAdminApiRoutes(app, { auth: dependencies.auth, ...dependencies.skills });
+  if (dependencies.skillNamespaces !== undefined) {
+    registerSkillNamespaceRoutes(app, {
+      auth: dependencies.auth,
+      publications: dependencies.skillNamespaces,
+    });
+  }
 
   async function actor(request: FastifyRequest): Promise<string> {
     const principal = await dependencies.auth.resolve({

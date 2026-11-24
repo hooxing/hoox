@@ -79,8 +79,23 @@ export interface SkillPublicationPage {
   readonly nextSubmissionId?: string;
 }
 
+export interface SkillNamespacePublisher {
+  readonly userId: UserId;
+  readonly grantedBy: UserId;
+  readonly grantedAt: IsoTimestamp;
+}
+
+export interface SkillNamespace {
+  readonly namespace: string;
+  readonly createdBy: UserId;
+  readonly createdAt: IsoTimestamp;
+  readonly publishers: readonly SkillNamespacePublisher[];
+}
+
 export interface SkillPublicationAuthorizationPort {
   resolveRole(userId: UserId): Promise<SkillPublicationRole | undefined>;
+  hasNamespaceAccess(userId: UserId, namespace: string): Promise<boolean>;
+  listAccessibleNamespaces(userId: UserId): Promise<readonly string[]>;
 }
 
 export type SkillPublicationCreateResult =
@@ -98,6 +113,10 @@ export type SkillPublicationCommandResult =
   | { readonly outcome: "not_found" | "version_conflict" | "state_conflict" };
 
 export interface SkillPublicationPort {
+  listNamespaces(actorUserId: UserId): Promise<readonly SkillNamespace[]>;
+  createNamespace(actorUserId: UserId, namespace: string): Promise<void>;
+  grantNamespace(actorUserId: UserId, namespace: string, userId: UserId): Promise<void>;
+  revokeNamespace(actorUserId: UserId, namespace: string, userId: UserId): Promise<void>;
   list(input: {
     readonly actorUserId: UserId;
     readonly limit: number;

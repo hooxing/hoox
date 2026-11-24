@@ -3,13 +3,13 @@
 import type { AgentDefinitionDto, AgentRevisionDto } from "@hoox/protocol";
 import { act } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, settle, button, field, enter, select } from "./testing/admin-component.js";
 import { AgentDefinitionEditor } from "./agent-definition-editor.js";
-import { AgentSkillSelector } from "./agent-skill-selector.js";
 import { AgentDefinitionsPage } from "./agent-definitions.js";
+import { AgentSkillSelector } from "./agent-skill-selector.js";
 import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
 import { AdminControlApi, type AgentDefinitionApiContract } from "./control-api.js";
+import { button, enter, field, render, select, settle } from "./testing/admin-component.js";
 
 const timestamp = "2026-11-20T00:00:00.000Z";
 const definition: AgentDefinitionDto = {
@@ -93,10 +93,78 @@ function fixture(canManage: boolean) {
     deactivateAgentDefinition: vi.fn(async () => definition),
     revokeAgentRevision: vi.fn(async () => definition),
     setAgentAvailability: vi.fn(async () => definition),
+    exportAgentConfiguration: vi.fn(async () => "schemaVersion: 1\n"),
+    validateAgentConfiguration: vi.fn(async () => ({ valid: true })),
+    importAgentConfiguration: vi.fn(async () => ({ definition, revision: current })),
   } satisfies AgentDefinitionApiContract;
 }
 
 describe("后台 Agent 管理", () => {
+  it("导入页先校验 YAML，再确认生成未发布草稿", async () => {
+    const api = fixture(true);
+    const view = render(
+      <AgentDefinitionsPage
+        api={api}
+        destination={{ kind: "list" }}
+        onOpen={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    await settle();
+    act(() => button(view, "导入 YAML").click());
+    const textarea = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Agent YAML 配置"]',
+    );
+    if (!textarea) throw new Error("未呈现 Agent YAML 配置输入框");
+    enter(textarea, "schemaVersion: 1");
+    act(() => button(document.body, "校验配置").click());
+    await settle();
+    expect(api.validateAgentConfiguration).toHaveBeenCalledWith(
+      "schemaVersion: 1",
+      undefined,
+      undefined,
+    );
+    expect(button(document.body, "确认导入为草稿").disabled).toBe(false);
+    act(() => button(document.body, "确认导入为草稿").click());
+    await settle();
+    expect(api.importAgentConfiguration).toHaveBeenCalledWith(
+      "schemaVersion: 1",
+      undefined,
+      undefined,
+    );
+    expect(view.textContent).toContain("已导入新的 Agent 草稿，未发布。");
+  });
+
+  it("校验期间修改 YAML 后丢弃迟到的校验结果", async () => {
+    const api = fixture(true);
+    let resolveValidation!: (value: { valid: boolean }) => void;
+    api.validateAgentConfiguration.mockImplementationOnce(
+      () =>
+        new Promise<{ valid: boolean }>((resolve) => {
+          resolveValidation = resolve;
+        }),
+    );
+    render(
+      <AgentDefinitionsPage
+        api={api}
+        destination={{ kind: "list" }}
+        onOpen={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    await settle();
+    act(() => button(document.body, "导入 YAML").click());
+    const textarea = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Agent YAML 配置"]',
+    );
+    if (!textarea) throw new Error("未呈现 Agent YAML 配置输入框");
+    enter(textarea, "schemaVersion: 1");
+    act(() => button(document.body, "校验配置").click());
+    enter(textarea, "schemaVersion: 1\nchanged: true");
+    await act(async () => resolveValidation({ valid: true }));
+    await settle();
+    expect(button(document.body, "确认导入为草稿").disabled).toBe(true);
+  });
   it("增删客户端工具并保存编辑后的 Schema 与等待时限", async () => {
     const onSave = vi.fn(async () => undefined);
     const view = render(

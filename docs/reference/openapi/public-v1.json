@@ -96,6 +96,31 @@
                 "type": "boolean"
               }
             }
+          },
+          "validationErrors": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": ["path", "code", "message"],
+              "properties": {
+                "path": {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                "code": {
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "message": {
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       },

@@ -16,9 +16,13 @@ Admin Control API 在进程内轮询数据库，不使用 Scheduler 或单独的
 
 ### 命令授权与普通路径成本
 
-评测 RLS 使用 `CASE` 检查事务级 `app.evaluation_batch`；普通会话未设置批次或批次为空时，不执行评测授权子查询。命令范围通过非相关的 `ARRAY(SELECT ...)` 转为按需执行的 InitPlan，避免将评测命令连接变成随外层 Thread、Run、Revision、Definition 或快照候选逐行执行的相关子计划。执行计划仍包含尚未执行的评测 InitPlan，不能将此保证解读为完全消除规划成本；回归测试检查 custom/generic 预备计划中的评测表实际执行次数为零，不依赖墙钟时间。
+评测授权策略只绑定[专用评测数据库角色](persistence-and-database.md#数据库角色)，不绑定 Runtime。Runtime 只能显式切换，不能继承该角色的权限或 RLS 策略；普通会话即使设置评测批次变量，Thread、Run、Revision、Definition 和快照的 custom/generic 执行计划也不包含评测授权子计划。普通 Thread/Run INSERT 另有不带授权子查询的来源约束，不能伪造评测来源。
 
-`evaluation_run_command` 仍是授权事实源，逐语句核对发起人、Tenant、批次、claim token、generation、有效租约和任务状态；身份失效或取消只隐藏用例正文，保留原命令范围内的清理能力。批次变量只负责短路，不能单独授权；planned Run 绑定、评测来源隐藏及快照的 Revision、摘要和完整内容校验均保持不变。命令查询复用批次主键和用例任务的批次前缀索引，不新增索引、角色、会话配置或业务 Routine；InitPlan 不跨语句缓存租约或账号状态。
+API 的评测命令受理、对账和取消均在 Tenant 事务内使用 `SET LOCAL ROLE`，快照与队列写入共用该事务；提交或回滚后自动恢复原 Runtime 角色，不能以会话级 `SET ROLE` 污染连接池。控制面的调度、正文审计与结果持久化仍使用 Admin Control，不切换 Runtime 身份。
+
+`evaluation_run_command` 仅向专用评测角色开放，逐语句核对发起人、Tenant、批次、claim token、generation、有效租约和任务状态；身份失效或取消只隐藏用例正文，保留原命令范围内的清理能力。角色切换与批次变量均不能单独授权；planned Run 绑定、评测来源隐藏及快照的 Revision、摘要和完整内容校验均保持不变。所有评测角色可 INSERT 的运行表均有面向该角色的 `RESTRICTIVE` policy，将写入约束到有效命令对应的 planned ID；Thread、Run 和 Agent 快照另强制评测来源，并确保 Revision ID、digest 和完整 content 同时匹配命令租约指定的 Revision。命令范围通过非相关的 `ARRAY(SELECT ...)` 转为按需执行的 InitPlan，不跨语句缓存租约或账号状态。
+
+评测角色为派生的 `NOLOGIN NOINHERIT` 角色，只能由受控 PostgreSQL 超级用户预置；Runtime 通过 `INHERIT FALSE, SET TRUE, ADMIN FALSE` 成员关系显式切换。生产升级先运行 `pnpm db:evaluation-role:bootstrap`，再由受限 Migrator 执行数据库迁移，步骤与失败重试见[生产评测角色升级](../operations/production-readiness.md#评测角色升级)。
 
 ## 取证和质量门槛
 

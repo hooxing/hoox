@@ -19,7 +19,8 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@sinclair/typebox": "0.34.52"
+    "@sinclair/typebox": "0.34.52",
+    "yaml": "2.9.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

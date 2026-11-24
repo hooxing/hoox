@@ -39,6 +39,7 @@
     "check:clean-workspace": "node scripts/remove-workspace-dist.mjs && corepack pnpm check",
     "check:clean-vendor": "corepack pnpm check:clean-workspace",
     "db:roles:bootstrap": "corepack pnpm --filter @hoox/persistence build && node runtime-ts/packages/persistence/dist/database-role-bootstrap-cli.js",
+    "db:evaluation-role:bootstrap": "corepack pnpm --filter @hoox/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/evaluation-role-bootstrap-cli.js",
     "db:setup": "corepack pnpm db:roles:bootstrap && corepack pnpm db:migrate:up",
     "db:migrate:up": "corepack pnpm --filter @hoox/persistence build && node runtime-ts/packages/persistence/dist/cli.js up",
     "db:migrate:down": "corepack pnpm --filter @hoox/persistence build && node runtime-ts/packages/persistence/dist/cli.js down --allow-destructive",

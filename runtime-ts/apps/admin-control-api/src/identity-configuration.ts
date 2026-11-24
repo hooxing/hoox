@@ -1,8 +1,8 @@
 import {
-  emptyIdentityConfiguration,
-  normalizeEditableIdentityConfiguration,
   type EditableIdentityConfiguration,
+  emptyIdentityConfiguration,
   type IdentityConfiguration,
+  normalizeEditableIdentityConfiguration,
 } from "@hoox/identity";
 import type {
   IdentityConfigurationRepository,

@@ -1,8 +1,3 @@
-import type { EvaluationCase } from "../../runtime-ts/packages/protocol/src/admin-evaluation.js";
-import { PgEvaluationDriver } from "../../runtime-ts/packages/persistence/src/pg-evaluation-driver.js";
-import { PgEvaluationCommand } from "../../runtime-ts/packages/persistence/src/pg-evaluation-command.js";
-import { PgEvaluationRepository } from "../../runtime-ts/packages/persistence/src/pg-evaluation.js";
-import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
 import { createHash, randomBytes } from "node:crypto";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,8 +16,8 @@ import {
   membershipId,
   normalizeExternalToolSchema,
   prepareWorkspaceRevision,
-  rehydrateThread,
   type Run,
+  rehydrateThread,
   releaseWorkspaceLease,
   renewWorkspaceLease,
   runId,
@@ -43,63 +38,59 @@ import type {
   TenantScope,
   WorkspaceWriteScope,
 } from "@hoox/persistence/postgres";
-import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
-import { onTestFinished, afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { ExecutionFence, RuntimeMutation } from "@hoox/run-contracts";
+import { runtimeMutationDigest } from "@hoox/run-contracts/mutation-protocol";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import type { AdminControlApiDependencies } from "../../runtime-ts/apps/admin-control-api/src/app.js";
-import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
+import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
+import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import {
-  buildRuntimeSystemPrompt,
-  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
-} from "../../runtime-ts/packages/prompt-builder/src/index.js";
-import { runtimeMutationDigest } from "@hoox/run-contracts/mutation-protocol";
-import type { ExecutionFence, RuntimeMutation } from "@hoox/run-contracts";
+  assertEvaluationRoleSafe,
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+  setLocalEvaluationRole,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
 import { ExternalToolCredentialCipher } from "../../runtime-ts/packages/persistence/src/external-tool-credential.js";
 import { ExternalToolCredentialDecryptor } from "../../runtime-ts/packages/persistence/src/external-tool-credential-reader.js";
-import { PgExternalToolSnapshotReader } from "../../runtime-ts/packages/persistence/src/pg-external-tool-snapshot-reader.js";
-import { PgExternalToolRegistry } from "../../runtime-ts/packages/persistence/src/pg-external-tools.js";
-import { PgRunDispatchCreation } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
-import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
-import {
-  PgExecutionPersistence,
-  PgRunExecutionSetup,
-} from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
-import { readRunAgentSnapshot } from "../../runtime-ts/packages/persistence/src/pg-run-agent-snapshot.js";
-import { readRunSkillSnapshot } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
-import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import {
   loadMigrations,
   migrateDown,
   migrateUp,
 } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
-import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
 import {
   PgAdminControlRepository,
   PgRuntimeControlConfigurationRepository,
 } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
+import { PgAdminRunExplorerRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-run-explorer.js";
+import { PgAgentDefinitionRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-definition.js";
+import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
   PgRenamePersonalThreadCommand,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import { PgEvaluationRepository } from "../../runtime-ts/packages/persistence/src/pg-evaluation.js";
+import { PgEvaluationCommand } from "../../runtime-ts/packages/persistence/src/pg-evaluation-command.js";
+import { PgEvaluationDriver } from "../../runtime-ts/packages/persistence/src/pg-evaluation-driver.js";
+import { PgExternalToolSnapshotReader } from "../../runtime-ts/packages/persistence/src/pg-external-tool-snapshot-reader.js";
+import { PgExternalToolRegistry } from "../../runtime-ts/packages/persistence/src/pg-external-tools.js";
+import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
+import { readRunAgentSnapshot } from "../../runtime-ts/packages/persistence/src/pg-run-agent-snapshot.js";
+import { PgRunDispatchCreation } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
+import {
+  PgExecutionPersistence,
+  PgRunExecutionSetup,
+} from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
 import {
   PgSandboxConfigurationResolver,
   PgSandboxControlRepository,
 } from "../../runtime-ts/packages/persistence/src/pg-sandbox-configuration.js";
-import {
-  createPostgresPool,
-  type Pool,
-  type PoolClient,
-  withTenantTransaction,
-  withTransaction,
-} from "../../runtime-ts/packages/persistence/src/postgres.js";
-import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
-import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
-import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
-import { WebhookSecretCipher } from "../../runtime-ts/packages/persistence/src/webhook-crypto.js";
+import { readRunSkillSnapshot } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
+import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import {
   enqueueRunStatusWebhook,
   enqueueWebhookEvent,
@@ -108,11 +99,33 @@ import {
   runWebhookPayload,
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import {
+  createPostgresPool,
+  type Pool,
+  type PoolClient,
+  withTenantTransaction,
+  withTransaction,
+} from "../../runtime-ts/packages/persistence/src/postgres.js";
+import {
+  bootstrapRuntimeAccess,
+  bootstrapRuntimeAccessOnClient,
+} from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
+import { WebhookSecretCipher } from "../../runtime-ts/packages/persistence/src/webhook-crypto.js";
+import {
+  buildRuntimeSystemPrompt,
+  DEFAULT_AGENT_OPERATOR_INSTRUCTIONS,
+} from "../../runtime-ts/packages/prompt-builder/src/index.js";
+import type { EvaluationCase } from "../../runtime-ts/packages/protocol/src/admin-evaluation.js";
+import {
+  parseAgentConfiguration,
+  serializeAgentConfiguration,
+} from "../../runtime-ts/packages/protocol/src/agent-configuration.js";
+import { assertRunSkillSnapshot } from "../../runtime-ts/packages/skill/src/runtime.js";
+import { apiEndUserTests } from "./postgres-api-end-users.js";
+import { externalToolRegistryTests } from "./postgres-external-tool-registry.js";
+import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
-import { externalToolRegistryTests } from "./postgres-external-tool-registry.js";
-import { apiEndUserTests } from "./postgres-api-end-users.js";
 
 function skillSnapshotBlobRef(sha256: string, size: number, mediaType: string): string {
   const tenantId = "tenant_test_publisher";
@@ -319,7 +332,7 @@ async function evaluationFixture(suffix: string, globalLimit: number) {
   const controlUrl = new URL(target.connectionString);
   controlUrl.username = target.context.adminControlRole;
   const adminControlPool = createPostgresPool({ connectionString: controlUrl.toString(), schema }),
-    runtimePool = createPostgresPool({ connectionString: runtimeDatabaseUrl, schema });
+    runtimePool = createPostgresPool({ connectionString: target.runtimeConnectionString, schema });
   onTestFinished(async () => {
     await Promise.all([runtimePool.end(), adminControlPool.end()]);
     await target.close();
@@ -624,6 +637,7 @@ interface IsolatedMigrationTarget {
     readonly schema: string;
   };
   readonly webhookDispatcherConnectionString: string;
+  readonly runtimeConnectionString: string;
   close(): Promise<void>;
 }
 
@@ -636,7 +650,11 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   const isolatedTeamCoordinatorRole = `it_team_${isolatedSuffix}`;
   const isolatedAdminControlRole = `it_control_${isolatedSuffix}`;
   const isolatedWebhookDispatcherRole = `it_webhook_${isolatedSuffix}`;
+  const isolatedRuntimeRole = `it_runtime_${isolatedSuffix}`;
   const password = randomBytes(24).toString("hex");
+  const isolatedRuntimeUrl = new URL(runtimeDatabaseUrl);
+  isolatedRuntimeUrl.username = isolatedRuntimeRole;
+  isolatedRuntimeUrl.password = password;
   const isolatedWebhookDispatcherUrl = new URL(migrationDatabaseUrl);
   isolatedWebhookDispatcherUrl.username = isolatedWebhookDispatcherRole;
   isolatedWebhookDispatcherUrl.password = password;
@@ -647,6 +665,8 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   await administrativePool.query(
     `CREATE ROLE "${isolatedRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+     CREATE ROLE "${isolatedRuntimeRole}" LOGIN PASSWORD '${password}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedPublisherRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedCoordinatorRole}" LOGIN PASSWORD '${password}'
@@ -657,8 +677,11 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedWebhookDispatcherRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedRuntimeRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
      CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedRole}"`,
+  );
+  await withTransaction(administrativePool, (client) =>
+    bootstrapEvaluationRole(client, isolatedRuntimeRole),
   );
   const pool = createPostgresPool({
     connectionString: url.toString(),
@@ -670,7 +693,7 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
     pool,
     connectionString: url.toString(),
     context: {
-      runtimeRole,
+      runtimeRole: isolatedRuntimeRole,
       migratorRole: isolatedRole,
       skillPublisherRole: isolatedPublisherRole,
       workerCoordinatorRole: isolatedCoordinatorRole,
@@ -680,19 +703,23 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
       schema: isolatedSchema,
     },
     webhookDispatcherConnectionString: isolatedWebhookDispatcherUrl.toString(),
+    runtimeConnectionString: isolatedRuntimeUrl.toString(),
     close: async () => {
       if (closed) return;
       closed = true;
       await pool.end();
       await administrativePool.query(
         `DROP SCHEMA "${isolatedSchema}" CASCADE;
-         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
+         REVOKE "${evaluationRoleName(isolatedRuntimeRole)}" FROM "${isolatedRuntimeRole}";
+         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedRuntimeRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}", "${isolatedAdminControlRole}", "${isolatedWebhookDispatcherRole}";
          DROP ROLE "${isolatedWebhookDispatcherRole}";
          DROP ROLE "${isolatedAdminControlRole}";
          DROP ROLE "${isolatedTeamCoordinatorRole}";
          DROP ROLE "${isolatedCoordinatorRole}";
          DROP ROLE "${isolatedPublisherRole}";
-         DROP ROLE "${isolatedRole}"`,
+         DROP ROLE "${isolatedRole}";
+         DROP ROLE "${evaluationRoleName(isolatedRuntimeRole)}";
+         DROP ROLE "${isolatedRuntimeRole}"`,
       );
     },
   };
@@ -799,7 +826,7 @@ async function webhookIsolatedPools(target: IsolatedMigrationTarget) {
       maxConnections: 2,
     }),
     runtime: createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
       maxConnections: 2,
     }),
@@ -857,10 +884,318 @@ async function seedWebhookRun(
 }
 
 describe("PostgreSQL 迁移与强权限边界", () => {
-  it("评测策略在普通 custom/generic 计划中不执行评测子计划，且可回滚重放", async () => {
+  it("评测角色只允许 Runtime 显式切换，并拒绝危险属性、越权成员与权限继承", async () => {
+    const runtime = `it_eval_${process.pid}_`.padEnd(63, "x");
+    const evaluation = evaluationRoleName(runtime);
+    const stranger = `it_eval_stranger_${process.pid}`;
+    await administrativePool.query(`CREATE ROLE "${runtime}" NOLOGIN NOINHERIT;
+      CREATE ROLE "${stranger}" NOLOGIN NOINHERIT`);
+    try {
+      await withTransaction(administrativePool, (client) =>
+        bootstrapEvaluationRole(client, runtime),
+      );
+      await withTransaction(administrativePool, (client) =>
+        bootstrapEvaluationRole(client, runtime),
+      );
+      const privileges = await administrativePool.query<{
+        can_set: boolean;
+        inherits: boolean;
+        name: string;
+      }>(
+        `SELECT pg_has_role($1,$2,'SET') AS can_set,pg_has_role($1,$2,'USAGE') AS inherits,
+          (CASE WHEN length($1::text)<=52 THEN $1::text ELSE left($1::text,43)||'_'||left(md5($1::text),8) END || '_evaluation') AS name`,
+        [runtime, evaluation],
+      );
+      expect(privileges.rows).toEqual([{ can_set: true, inherits: false, name: evaluation }]);
+      for (const [unsafe, restore] of [
+        [`ALTER ROLE "${evaluation}" LOGIN`, `ALTER ROLE "${evaluation}" NOLOGIN`],
+        [`ALTER ROLE "${evaluation}" INHERIT`, `ALTER ROLE "${evaluation}" NOINHERIT`],
+        [`ALTER ROLE "${evaluation}" BYPASSRLS`, `ALTER ROLE "${evaluation}" NOBYPASSRLS`],
+        [
+          `GRANT "${evaluation}" TO "${runtime}" WITH INHERIT TRUE`,
+          `GRANT "${evaluation}" TO "${runtime}" WITH INHERIT FALSE`,
+        ],
+        [
+          `GRANT "${evaluation}" TO "${runtime}" WITH ADMIN TRUE`,
+          `GRANT "${evaluation}" TO "${runtime}" WITH ADMIN FALSE`,
+        ],
+        [
+          `GRANT "${evaluation}" TO "${runtime}" WITH SET FALSE`,
+          `GRANT "${evaluation}" TO "${runtime}" WITH SET TRUE`,
+        ],
+        [`GRANT "${evaluation}" TO "${stranger}"`, `REVOKE "${evaluation}" FROM "${stranger}"`],
+        [`GRANT "${stranger}" TO "${evaluation}"`, `REVOKE "${stranger}" FROM "${evaluation}"`],
+      ] as const) {
+        await administrativePool.query(unsafe);
+        try {
+          await expect(
+            withTransaction(administrativePool, (client) =>
+              assertEvaluationRoleSafe(client, runtime),
+            ),
+          ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+        } finally {
+          await administrativePool.query(restore);
+        }
+      }
+    } finally {
+      await administrativePool.query(`DROP ROLE IF EXISTS "${evaluation}";
+        DROP ROLE "${runtime}"; DROP ROLE "${stranger}"`);
+    }
+  });
+
+  it("拒绝已有评测角色携带同库其他 Schema 的有效对象权限", async () => {
+    const schema = `it_eval_sensitive_${process.pid}`;
+    const target = await createIsolatedMigrationTarget("eval_cross_schema");
+    try {
+      await migrateUp(target.pool, target.context);
+      const evaluation = evaluationRoleName(target.context.runtimeRole);
+      await administrativePool.query(`CREATE SCHEMA "${schema}"; CREATE TABLE "${schema}".secret(value text);
+        GRANT USAGE ON SCHEMA "${schema}" TO "${evaluation}";
+        GRANT SELECT ON "${schema}".secret TO "${evaluation}"`);
+      await expect(
+        withTransaction(target.pool, (client) =>
+          bootstrapRuntimeAccessOnClient(client, target.context),
+        ),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    } finally {
+      await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
+      await target.close();
+    }
+  });
+
+  it("拒绝评测角色及 PUBLIC 的大对象 SELECT 与 UPDATE 权限", async () => {
+    const target = await createIsolatedMigrationTarget("eval_large_object");
+    let largeObjectId: string | undefined;
+    try {
+      await migrateUp(target.pool, target.context);
+      const evaluation = evaluationRoleName(target.context.runtimeRole);
+      const created = await administrativePool.query<{ oid: string }>(
+        "SELECT lo_create(0)::text AS oid",
+      );
+      largeObjectId = created.rows[0]?.oid;
+      if (!largeObjectId) throw new Error("未创建测试大对象");
+      for (const [privilege, grantee] of [
+        ["SELECT", `"${evaluation}"`],
+        ["UPDATE", `"${evaluation}"`],
+        ["SELECT", "PUBLIC"],
+        ["UPDATE", "PUBLIC"],
+      ] as const) {
+        await administrativePool.query(
+          `GRANT ${privilege} ON LARGE OBJECT ${largeObjectId} TO ${grantee}`,
+        );
+        await expect(
+          withTransaction(administrativePool, (client) =>
+            assertEvaluationRoleSafe(client, target.context.runtimeRole),
+          ),
+        ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+        await administrativePool.query(
+          `REVOKE ${privilege} ON LARGE OBJECT ${largeObjectId} FROM ${grantee}`,
+        );
+      }
+    } finally {
+      if (largeObjectId)
+        await administrativePool.query("SELECT lo_unlink($1::oid)", [largeObjectId]);
+      await target.close();
+    }
+  });
+
+  it("在对象创建前拒绝全局及 Schema 局部默认 ACL", async () => {
+    const target = await createIsolatedMigrationTarget("eval_default_acl");
+    const futureSchema = `it_eval_future_${process.pid}_${isolatedMigrationCounter}`;
+    let evaluation: string | undefined;
+    try {
+      await migrateUp(target.pool, target.context);
+      evaluation = evaluationRoleName(target.context.runtimeRole);
+      await administrativePool.query(
+        `CREATE SCHEMA "${futureSchema}" AUTHORIZATION "${target.context.migratorRole}"`,
+      );
+      await expect(
+        withTransaction(administrativePool, (client) =>
+          assertEvaluationRoleSafe(client, target.context.runtimeRole),
+        ),
+      ).resolves.toBeUndefined();
+
+      await administrativePool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           GRANT SELECT ON TABLES TO "${evaluation}"`,
+      );
+      await expect(
+        withTransaction(administrativePool, (client) =>
+          assertEvaluationRoleSafe(client, target.context.runtimeRole),
+        ),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      await target.pool.query(`CREATE TABLE "${futureSchema}".future_global(value integer)`);
+      await expect(
+        target.pool.query<{ allowed: boolean }>(
+          "SELECT has_table_privilege($1,$2,'SELECT') AS allowed",
+          [evaluation, `${futureSchema}.future_global`],
+        ),
+      ).resolves.toMatchObject({ rows: [{ allowed: true }] });
+      await administrativePool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           REVOKE SELECT ON TABLES FROM "${evaluation}"`,
+      );
+
+      await administrativePool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           IN SCHEMA "${futureSchema}" GRANT SELECT ON TABLES TO PUBLIC`,
+      );
+      await expect(
+        withTransaction(administrativePool, (client) =>
+          assertEvaluationRoleSafe(client, target.context.runtimeRole),
+        ),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      await target.pool.query(`CREATE TABLE "${futureSchema}".future_public(value integer)`);
+      await expect(
+        target.pool.query<{ allowed: boolean }>(
+          "SELECT has_table_privilege($1,$2,'SELECT') AS allowed",
+          [evaluation, `${futureSchema}.future_public`],
+        ),
+      ).resolves.toMatchObject({ rows: [{ allowed: true }] });
+    } finally {
+      await administrativePool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           REVOKE SELECT ON TABLES FROM "${evaluation}";
+         ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           REVOKE SELECT ON TABLES FROM PUBLIC;
+         ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           IN SCHEMA "${futureSchema}" REVOKE SELECT ON TABLES FROM PUBLIC;
+         DROP SCHEMA IF EXISTS "${futureSchema}" CASCADE`,
+      );
+      await target.close();
+    }
+  });
+
+  it("仅允许受控超级用户预置评测角色", async () => {
+    const admin = `it_eval_admin_${process.pid}`;
+    const runtime = `it_eval_runtime_${process.pid}`;
+    const evaluation = evaluationRoleName(runtime);
+    await administrativePool.query(`CREATE ROLE "${admin}" NOLOGIN CREATEROLE NOINHERIT;
+      CREATE ROLE "${runtime}" NOLOGIN NOINHERIT`);
+    try {
+      await withTransaction(administrativePool, async (client) => {
+        await client.query(`SET LOCAL ROLE "${admin}"`);
+        await expect(bootstrapEvaluationRole(client, runtime)).rejects.toThrow(
+          "受控 PostgreSQL 超级用户",
+        );
+      });
+      const role = await administrativePool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [
+        evaluation,
+      ]);
+      expect(role.rowCount).toBe(0);
+    } finally {
+      await administrativePool.query(`DROP ROLE IF EXISTS "${evaluation}";
+        DROP ROLE "${runtime}"; DROP ROLE "${admin}"`);
+    }
+  });
+
+  it("迁移前置检查对缺失评测角色给出生产预置步骤", async () => {
+    await expect(
+      withTransaction(administrativePool, (client) =>
+        assertEvaluationRoleSafe(client, `it_eval_missing_${process.pid}`),
+      ),
+    ).rejects.toThrow("先按生产数据库升级步骤预置评测角色");
+  });
+
+  it("迁移缺少派生评测角色时在任何 DDL 前指向生产预置入口", async () => {
+    const target = await createIsolatedMigrationTarget("missing_evaluation_role");
+    const evaluation = evaluationRoleName(target.context.runtimeRole);
+    await administrativePool.query(`REVOKE "${evaluation}" FROM "${target.context.runtimeRole}";
+      DROP ROLE "${evaluation}"`);
+    try {
+      await expect(migrateUp(target.pool, target.context)).rejects.toThrow(
+        "pnpm db:evaluation-role:bootstrap",
+      );
+      const migrationTable = await target.pool.query<{ readonly exists: boolean }>(
+        "SELECT to_regclass('runtime_schema_migrations') IS NOT NULL AS exists",
+      );
+      expect(migrationTable.rows[0]?.exists).toBe(false);
+    } finally {
+      await withTransaction(administrativePool, (client) =>
+        bootstrapEvaluationRole(client, target.context.runtimeRole),
+      );
+      await target.close();
+    }
+  });
+
+  it("评测 SET LOCAL ROLE 在提交、应用异常、SQL 错误与 stale 命令后不泄漏到池中下一事务", async () => {
+    const target = await createIsolatedMigrationTarget("eval_pool");
+    const pool = createPostgresPool({
+      connectionString: target.runtimeConnectionString,
+      schema: target.context.schema,
+      maxConnections: 1,
+      preparedStatements: true,
+    });
+    try {
+      await migrateUp(target.pool, target.context);
+      const fixture = await createFixture("eval_pool", new PgCoreRepositories(pool));
+      const identity = () =>
+        withTransaction(pool, (client) =>
+          client.query<{ pid: number; role: string; login: string }>(
+            "SELECT pg_backend_pid() AS pid,current_user AS role,session_user AS login",
+          ),
+        );
+      const original = (await identity()).rows;
+      expect(original[0]).toMatchObject({
+        role: target.context.runtimeRole,
+        login: target.context.runtimeRole,
+      });
+      for (const outcome of ["commit", "application_error", "sql_error"] as const) {
+        const transaction = withTenantTransaction(pool, fixture.scope, async (client) => {
+          await setLocalEvaluationRole(client);
+          const privileges = await client.query<{ safe: boolean }>(
+            `SELECT NOT has_table_privilege(current_user,'external_tool_credentials','SELECT')
+              AND NOT has_table_privilege(current_user,'agent_evaluation_cases','SELECT')
+              AND NOT has_table_privilege(current_user,'runs','DELETE')
+              AND NOT has_column_privilege(current_user,'run_agent_snapshots','content','UPDATE')
+              AND NOT has_column_privilege(current_user,'threads','status','UPDATE')
+              AND NOT has_column_privilege(current_user,'workspaces','current_revision_id','UPDATE')
+              AND NOT has_column_privilege(current_user,'memberships','status','UPDATE') AS safe`,
+          );
+          expect(privileges.rows).toEqual([{ safe: true }]);
+          for (let iteration = 0; iteration < 7; iteration++) {
+            const identity = await client.query<{ role: string; login: string }>(
+              "SELECT current_user AS role,session_user AS login,$1::text AS marker",
+              ["role_cache"],
+            );
+            expect(identity.rows[0]).toMatchObject({
+              role: evaluationRoleName(target.context.runtimeRole),
+              login: target.context.runtimeRole,
+            });
+          }
+          if (outcome === "application_error") throw new Error("测试应用异常");
+          if (outcome === "sql_error") await client.query("SELECT 1/0");
+        });
+        if (outcome === "commit") await transaction;
+        else await expect(transaction).rejects.toThrow();
+        expect((await identity()).rows).toEqual(original);
+      }
+      await expect(
+        new PgEvaluationCommand(pool).execute({
+          ...fixture.scope,
+          batchId: "missing_batch",
+          token: "00000000-0000-0000-0000-000000000000",
+          generation: "1",
+          plannedRunId: "missing_run",
+        }),
+      ).resolves.toBe("stale");
+      expect((await identity()).rows).toEqual(original);
+      await expect(
+        withTenantTransaction(pool, fixture.scope, (client) =>
+          client.query("SELECT * FROM evaluation_run_command"),
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+      expect((await identity()).rows).toEqual(original);
+    } finally {
+      await pool.end();
+      await target.close();
+    }
+  });
+
+  it("评测策略不进入普通 custom/generic 计划，且可回滚重放", async () => {
     const target = await createIsolatedMigrationTarget("eval_plan");
     const pool = createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
     });
     try {
@@ -873,33 +1208,37 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         readonly "Actual Rows": number;
         readonly Plans?: readonly PlanNode[];
       }
-      const evaluationNodes = (node: PlanNode, initPlan = false): readonly PlanNode[] => {
-        const withinInitPlan = initPlan || node["Parent Relationship"] === "InitPlan";
+      const evaluationNodes = (node: PlanNode): readonly PlanNode[] => {
         if (node["Relation Name"]?.startsWith("agent_evaluation_")) {
-          expect(withinInitPlan).toBe(true);
           return [node];
         }
-        return (node.Plans ?? []).flatMap((child) => evaluationNodes(child, withinInitPlan));
+        return (node.Plans ?? []).flatMap((child) => evaluationNodes(child));
       };
-      const assertFastPath = async () => {
-        for (const mode of ["force_custom_plan", "force_generic_plan"]) {
-          await withTenantTransaction(pool, fixture.scope, async (client) => {
-            await client.query("SELECT set_config('plan_cache_mode',$1,true)", [mode]);
-            for (const batch of [undefined, ""]) {
-              if (batch !== undefined) {
-                await client.query("SELECT set_config('app.evaluation_batch',$1,true)", [batch]);
-              }
-              const statements = [
-                ["threads", "SELECT id FROM threads WHERE tenant_id=$1 AND id=$2"],
-                ["runs", "SELECT id FROM runs WHERE tenant_id=$1 AND thread_id=$2"],
-                [
-                  "revisions",
-                  "SELECT id FROM agent_revisions WHERE definition_id=$1 AND status=$2",
-                ],
-                ["definitions", "SELECT id FROM agent_definitions WHERE id=$1 AND status=$2"],
-                [
-                  "snapshot",
-                  `INSERT INTO run_agent_snapshots(tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content)
+      const planningTimes = { isolated: [] as number[], runtime: [] as number[] };
+      const assertFastPath = async (isolated = true) => {
+        for (const scope of [fixture.scope, { tenantId: fixture.scope.tenantId }]) {
+          for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+            await withTenantTransaction(pool, scope, async (client) => {
+              await client.query("SELECT set_config('plan_cache_mode',$1,true)", [mode]);
+              for (const batch of [undefined, "", "forged_batch"]) {
+                if (batch !== undefined) {
+                  await client.query("SELECT set_config('app.evaluation_batch',$1,true)", [batch]);
+                }
+                const statements = [
+                  ["threads", "SELECT id FROM threads WHERE tenant_id=$1 AND id=$2"],
+                  ["runs", "SELECT id FROM runs WHERE tenant_id=$1 AND thread_id=$2"],
+                  [
+                    "revisions",
+                    "SELECT id FROM agent_revisions WHERE definition_id=$1 AND status=$2",
+                  ],
+                  ["definitions", "SELECT id FROM agent_definitions WHERE id=$1 AND status=$2"],
+                  [
+                    "snapshot_read",
+                    "SELECT run_id FROM run_agent_snapshots WHERE tenant_id=$1 AND thread_id=$2",
+                  ],
+                  [
+                    "snapshot",
+                    `INSERT INTO run_agent_snapshots(tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content)
                   SELECT t.tenant_id,t.id,t.id,d.id,r.id,r.content_digest,r.content FROM threads t
                   JOIN agent_definitions d ON d.id=t.agent_definition_id AND d.status='published'
                   JOIN agent_revisions r ON r.definition_id=d.id AND r.id=d.current_revision_id AND r.status='published'
@@ -907,39 +1246,52 @@ describe("PostgreSQL 迁移与强权限边界", () => {
                     SELECT 1 FROM agent_definition_tenants scope
                      WHERE scope.definition_id=d.id AND scope.tenant_id=t.tenant_id AND scope.available
                   )) RETURNING run_id`,
-                ],
-              ] as const;
-              for (const [name, statement] of statements) {
-                const values =
-                  name === "revisions" || name === "definitions"
-                    ? "'agent_default','published'"
-                    : `'${fixture.scope.tenantId}','${fixture.thread.id}'`;
-                await client.query(`PREPARE eval_plan_${name}(text,text) AS ${statement}`);
-                try {
-                  await client.query("SAVEPOINT evaluation_plan");
-                  const plan = await client.query<{ "QUERY PLAN": readonly { Plan: PlanNode }[] }>(
-                    `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE eval_plan_${name}(${values})`,
-                  );
-                  const root = plan.rows[0]?.["QUERY PLAN"][0]?.Plan;
-                  expect(root).toBeDefined();
-                  if (!root) throw new Error("缺少执行计划");
-                  expect(root["Actual Rows"]).toBeGreaterThan(0);
-                  for (const node of evaluationNodes(root)) {
-                    expect(node["Actual Loops"], `${mode}/${name}/${batch ?? "unset"}`).toBe(0);
+                  ],
+                ] as const;
+                for (const [name, statement] of statements) {
+                  const values =
+                    name === "revisions" || name === "definitions"
+                      ? "'agent_default','published'"
+                      : `'${fixture.scope.tenantId}','${fixture.thread.id}'`;
+                  await client.query(`PREPARE eval_plan_${name}(text,text) AS ${statement}`);
+                  try {
+                    await client.query("SAVEPOINT evaluation_plan");
+                    const plan = await client.query<{
+                      "QUERY PLAN": readonly { Plan: PlanNode; "Planning Time": number }[];
+                    }>(
+                      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE eval_plan_${name}(${values})`,
+                    );
+                    const root = plan.rows[0]?.["QUERY PLAN"][0]?.Plan;
+                    expect(root).toBeDefined();
+                    if (!root) throw new Error("缺少执行计划");
+                    expect(root["Actual Rows"]).toBeGreaterThan(0);
+                    if (isolated)
+                      expect(evaluationNodes(root), `${mode}/${name}/${batch ?? "unset"}`).toEqual(
+                        [],
+                      );
+                    if (isolated)
+                      expect(JSON.stringify(root)).not.toMatch(
+                        /agent_evaluation_|evaluation_run_command|app\.evaluation_/u,
+                      );
+                    if (mode === "force_custom_plan" && name === "snapshot") {
+                      const planning = plan.rows[0]?.["QUERY PLAN"][0]?.["Planning Time"];
+                      if (planning !== undefined)
+                        planningTimes[isolated ? "isolated" : "runtime"].push(planning);
+                    }
+                    await client.query("ROLLBACK TO SAVEPOINT evaluation_plan");
+                    await client.query("RELEASE SAVEPOINT evaluation_plan");
+                  } finally {
+                    await client.query(`DEALLOCATE eval_plan_${name}`);
                   }
-                  await client.query("ROLLBACK TO SAVEPOINT evaluation_plan");
-                  await client.query("RELEASE SAVEPOINT evaluation_plan");
-                } finally {
-                  await client.query(`DEALLOCATE eval_plan_${name}`);
                 }
               }
-            }
-          });
+            });
+          }
         }
       };
       await assertFastPath();
       const migration = (await loadMigrations()).find(
-        (migration) => migration.name === "evaluation_policy_fast_path",
+        (migration) => migration.name === "evaluation_role",
       );
       if (!migration) throw new Error("缺少评测策略迁移");
       await migrateDown(target.pool, {
@@ -952,11 +1304,16 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         `SELECT pg_get_expr(polqual,polrelid) AS predicate FROM pg_policy
           WHERE polrelid='agent_revisions'::regclass AND polname='evaluation_revision_read'`,
       );
-      expect(restored.rows[0]?.predicate).toContain("EXISTS");
-      expect(restored.rows[0]?.predicate).not.toContain("CASE");
+      expect(restored.rows[0]?.predicate).toContain("CASE");
       await expect(assertFastPath()).rejects.toThrow();
+      await assertFastPath(false);
       await migrateUp(target.pool, target.context);
       await assertFastPath();
+      const median = (values: readonly number[]) =>
+        [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
+      console.info(
+        `快照 INSERT Planning Time 中位数(ms)：Runtime 策略=${median(planningTimes.runtime)} (n=${planningTimes.runtime.length})，专用评测角色=${median(planningTimes.isolated)} (n=${planningTimes.isolated.length})`,
+      );
     } finally {
       await pool.end();
       await target.close();
@@ -1002,12 +1359,31 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const scope = { tenantId: tenantId(first.tenantId), userId: userId(actor) };
     const inCommand = <Result>(action: (client: PoolClient) => Promise<Result>, lease = first) =>
       withTenantTransaction(runtimePool, scope, async (client) => {
+        await setLocalEvaluationRole(client);
         await client.query(
           "SELECT set_config('app.evaluation_batch',$1,true),set_config('app.evaluation_token',$2,true),set_config('app.evaluation_generation',$3,true)",
           [lease.batchId, lease.token, lease.generation],
         );
         return action(client);
       });
+    await expect(
+      withTenantTransaction(runtimePool, scope, async (client) => {
+        await setLocalEvaluationRole(client);
+        return client.query(
+          `INSERT INTO worker_tenant_assignments(tenant_id,state,next_attempt_at)
+           VALUES($1,'ready',clock_timestamp())`,
+          [scope.tenantId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      inCommand((client) =>
+        client.query(
+          `INSERT INTO worker_tenant_assignments(tenant_id,state,next_attempt_at)
+           VALUES('other_tenant','ready',clock_timestamp())`,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
     for (const table of ["threads", "runs"] as const) {
       const statement = `SELECT id FROM ${table} WHERE id=ANY($1::text[]) ORDER BY id`;
       const ids = [first.plannedRunId, second.plannedRunId];
@@ -1068,6 +1444,29 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     await sql.query(`DELETE FROM "${schema}".run_agent_snapshots WHERE run_id=$1`, [
       first.plannedRunId,
     ]);
+    const alternateContent = { alternate: "已发布 B" };
+    const alternateDigest = "b".repeat(64);
+    await sql.query(
+      `INSERT INTO "${schema}".agent_revisions(id,definition_id,revision,status,content,content_digest,created_by)
+       VALUES('eval_revision_rls_published_b',$1,1004,'published',$2,$3,$4)`,
+      [snapshot.definition_id, alternateContent, alternateDigest, actor],
+    );
+    await sql.query(
+      `UPDATE "${schema}".agent_definitions SET status='published',current_revision_id='eval_revision_rls_published_b'
+        WHERE id=$1`,
+      [snapshot.definition_id],
+    );
+    await expect(
+      inCommand((client) =>
+        insertSnapshot(
+          client,
+          first.plannedRunId,
+          "eval_revision_rls_published_b",
+          alternateDigest,
+          alternateContent,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
     await expect(
       inCommand((client) =>
         insertSnapshot(
@@ -1086,6 +1485,17 @@ describe("PostgreSQL 迁移与强权限边界", () => {
        VALUES($1,'forged_evaluation_thread',$2,'伪造评测','active',true,now(),now())`,
           [scope.tenantId, actor],
         ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      inCommand(
+        (client) =>
+          client.query(
+            `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,is_evaluation,agent_definition_id,created_at,updated_at)
+             VALUES($1,$2,$3,'伪装普通 Thread','active',false,$4,now(),now())`,
+            [scope.tenantId, second.plannedRunId, actor, snapshot.definition_id],
+          ),
+        second,
       ),
     ).rejects.toMatchObject({ code: "42501" });
     await expect(
@@ -1516,7 +1926,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
             AND relation.relname IN ('agent_evaluation_suites','agent_evaluation_cases',
               'agent_evaluation_runs','agent_evaluation_results')
           ORDER BY relation.relname`,
-        [target.context.adminControlRole, runtimeRole],
+        [target.context.adminControlRole, target.context.runtimeRole],
       );
       expect(grants.rows).toHaveLength(4);
       expect(grants.rows.every((row) => row.row_security && row.force_row_security)).toBe(true);
@@ -1531,7 +1941,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(grants.rows.every((row) => !row.runtime_select)).toBe(true);
       await migrateDown(target.pool, {
         ...target.context,
-        runtimeRole,
+        runtimeRole: target.context.runtimeRole,
         targetVersion: versionBefore("hide_evaluation_runs"),
         allowDestructive: true,
         environment: "test",
@@ -1546,7 +1956,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(executionTables.rows[0]?.table_name).toBe("agent_evaluation_case_jobs");
       await migrateDown(target.pool, {
         ...target.context,
-        runtimeRole,
+        runtimeRole: target.context.runtimeRole,
         targetVersion: versionBefore("evaluation_execution"),
         allowDestructive: true,
         environment: "test",
@@ -1561,7 +1971,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(baseTables.rows[0]?.table_name).toBe("agent_evaluation_suites");
       await migrateDown(target.pool, {
         ...target.context,
-        runtimeRole,
+        runtimeRole: target.context.runtimeRole,
         targetVersion: versionBefore("agent_evaluations"),
         allowDestructive: true,
         environment: "test",
@@ -1584,7 +1994,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const target = await createIsolatedMigrationTarget("client_history_backfill");
     const migrationDir = await mkdtemp(join(tmpdir(), "hoox-client-history-migrations-"));
     const runtime = createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
       maxConnections: 4,
     });
@@ -1729,7 +2139,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
       await migrateDown(target.pool, {
         ...target.context,
-        runtimeRole,
+        runtimeRole: target.context.runtimeRole,
         targetVersion: 14,
         allowDestructive: true,
         environment: "test",
@@ -1798,7 +2208,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
             AND polname IN ('tenant_webhooks_tenant_policy','webhook_outbox_tenant_policy')`,
         [target.context.schema],
       );
-      expect(managementBindings.rows).toEqual([{ roles: [runtimeRole] }, { roles: [runtimeRole] }]);
+      expect(managementBindings.rows).toEqual([
+        { roles: [target.context.runtimeRole] },
+        { roles: [target.context.runtimeRole] },
+      ]);
       // Dispatcher：只读投递所需列，不能读取订阅名称、业务表或写入 Outbox。
       await expect(
         webhook.dispatcher.query("SELECT id,endpoint_url,secret_ciphertext FROM tenant_webhooks"),
@@ -2425,7 +2838,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       // 旧执行器在新事务保留初始延迟属性；直接执行原迁移复现 UPDATE 后 ALTER 的真实失败。
       await expect(
         withTransaction(target.pool, async (client) => {
-          await client.query("SELECT set_config('app.runtime_role', $1, true)", [runtimeRole]);
+          await client.query("SELECT set_config('app.runtime_role', $1, true)", [
+            target.context.runtimeRole,
+          ]);
           await client.query("SET CONSTRAINTS ALL DEFERRED");
           await client.query(snapshotMigration.upSql);
         }),
@@ -3284,6 +3699,37 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expectedGeneration: 0,
     });
     expect(draft.definition.status).toBe("draft");
+    const orderedScopeDraft = await repository.createDraft({
+      actorUserId: manager.user.id,
+      id: "agent_scope_order_test",
+      availability: {
+        mode: "selected_tenants",
+        tenantIds: [other.tenant.id, manager.tenant.id],
+      },
+      content,
+      revisionId: "agent_scope_order_revision",
+      idempotencyKey: "agent-scope-order-create",
+      expectedGeneration: 0,
+    });
+    await expect(
+      repository.validateImport(manager.user.id, {
+        id: orderedScopeDraft.definition.id,
+        availability: {
+          mode: "selected_tenants",
+          tenantIds: [manager.tenant.id, other.tenant.id],
+        },
+        definitionId: orderedScopeDraft.definition.id,
+        expectedGeneration: orderedScopeDraft.definition.generation,
+        content,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      repository.validateImport(manager.user.id, {
+        id: draft.definition.id,
+        availability: draft.definition.availability,
+        content,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
     const published = await repository.publish({
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
@@ -3292,6 +3738,74 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expectedGeneration: 0,
     });
     expect(published.currentRevisionId).toBe(draft.revision.id);
+    const exportResult = await repository.readRevisionForExport(
+      manager.user.id,
+      draft.definition.id,
+      draft.revision.id,
+    );
+    if (!exportResult) throw new Error("已发布 Revision 未能导出");
+    const exportedYaml = serializeAgentConfiguration({
+      schemaVersion: 1,
+      definition: {
+        id: exportResult.definition.id,
+        availability: exportResult.definition.availability,
+      },
+      revision: { content: exportResult.revision.content },
+    });
+    const importedConfiguration = parseAgentConfiguration(exportedYaml);
+    await repository.validateImport(manager.user.id, {
+      id: importedConfiguration.definition.id,
+      availability: draft.definition.availability,
+      definitionId: draft.definition.id,
+      expectedGeneration: published.generation,
+      content: importedConfiguration.revision.content,
+    });
+    const importedRevisionInput = {
+      actorUserId: manager.user.id,
+      definitionId: draft.definition.id,
+      revisionId: "agent_scope_imported_revision",
+      content: importedConfiguration.revision.content,
+      idempotencyKey: "agent-import-scope-revision",
+      expectedGeneration: published.generation,
+      auditAction: "imported",
+      importDefinition: {
+        id: importedConfiguration.definition.id,
+        availability: draft.definition.availability,
+      },
+    } as const;
+    const importedRevision = await repository.createDraftRevision(importedRevisionInput);
+    await expect(repository.createDraftRevision(importedRevisionInput)).resolves.toEqual(
+      importedRevision,
+    );
+    expect(importedRevision.status).toBe("draft");
+    expect(
+      await repository.readCurrentPublished(manager.tenant.id, draft.definition.id),
+    ).toMatchObject({ id: draft.revision.id, status: "published" });
+    const importedExport = await repository.readRevisionForExport(
+      manager.user.id,
+      draft.definition.id,
+      importedRevision.id,
+    );
+    if (!importedExport) throw new Error("导入的草稿 Revision 未能导出");
+    expect(
+      serializeAgentConfiguration({
+        schemaVersion: 1,
+        definition: {
+          id: importedExport.definition.id,
+          availability: importedExport.definition.availability,
+        },
+        revision: { content: importedExport.revision.content },
+      }),
+    ).toBe(exportedYaml);
+    const transferAudits = await administrativePool.query<{ action: string }>(
+      `SELECT action FROM "${schema}".agent_definition_audits WHERE definition_id=$1 AND action IN ('imported','exported') ORDER BY audit_id`,
+      [draft.definition.id],
+    );
+    expect(transferAudits.rows.map(({ action }) => action)).toEqual([
+      "exported",
+      "imported",
+      "exported",
+    ]);
     expect(
       await repository.publish({
         actorUserId: manager.user.id,
@@ -3307,14 +3821,14 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       revisionId: "agent_scope_revision_2",
       content: { ...content, displayName: "测试助手第二版" },
       idempotencyKey: "agent-revision-create-2",
-      expectedGeneration: 1,
+      expectedGeneration: 2,
     });
     const secondPublish = await repository.publish({
       actorUserId: manager.user.id,
       definitionId: draft.definition.id,
       revisionId: secondRevision.id,
       idempotencyKey: "agent-publish-scope-2",
-      expectedGeneration: 2,
+      expectedGeneration: 3,
     });
     expect(secondPublish.currentRevisionId).toBe(secondRevision.id);
     expect((await repository.readRevisionById(manager.tenant.id, draft.revision.id))?.status).toBe(
@@ -3366,9 +3880,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         actorUserId: manager.user.id,
         definitionId: published.id,
         idempotencyKey: "agent-disable-scope-1",
-        expectedGeneration: 3,
+        expectedGeneration: 4,
       }),
-    ).resolves.toMatchObject({ status: "disabled", generation: 4 });
+    ).resolves.toMatchObject({ status: "disabled", generation: 5 });
     expect(
       await repository.readVisibleCurrent(manager.tenant.id, "agent_scope_test"),
     ).toBeUndefined();
@@ -3379,9 +3893,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         revisionId: draft.revision.id,
         reason: "测试撤销",
         idempotencyKey: "agent-revoke-old-revision",
-        expectedGeneration: 4,
+        expectedGeneration: 5,
       }),
-    ).resolves.toMatchObject({ status: "disabled", generation: 5 });
+    ).resolves.toMatchObject({ status: "disabled", generation: 6 });
     expect(
       (await repository.listAvailable(manager.tenant.id)).map((item) => item.definition.id),
     ).not.toContain("agent_scope_test");
@@ -3825,8 +4339,20 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         [skillId],
       );
       await client.query(
+        `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
+             entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
+         VALUES ($1,'1.0.0','Agent 固定版本','runtime >= 1',repeat('c',64),
+                 'SKILL.md',repeat('d',64),'test/agent-skill-package','verified','available')`,
+        [skillId],
+      );
+      await client.query(
         `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
          VALUES ($1,'2.0.0','SKILL.md','text/markdown',20,repeat('b',64),'test/tenant-fallback-entrypoint')`,
+        [skillId],
+      );
+      await client.query(
+        `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
+         VALUES ($1,'1.0.0','SKILL.md','text/markdown',20,repeat('d',64),'test/agent-skill-entrypoint')`,
         [skillId],
       );
     });
@@ -3838,15 +4364,100 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ),
     );
     const agents = new PgAgentDefinitionRepository(adminControlPool);
+    const skillContent = {
+      ...defaults.content,
+      skillVersions: [{ skillId, version: "1.0.0" }],
+    };
+    await expect(
+      agents.validateImport(owner.user.id, {
+        id: "agent_skill_missing_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: { ...defaults.content, skillVersions: [{ skillId, version: "3.0.0" }] },
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_missing_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: { ...defaults.content, skillVersions: [{ skillId, version: "3.0.0" }] },
+        revisionId: "agent_skill_missing_revision",
+        idempotencyKey: "agent-skill-missing-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_duplicate_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: {
+          ...defaults.content,
+          skillVersions: [...skillContent.skillVersions, ...skillContent.skillVersions],
+        },
+        revisionId: "agent_skill_duplicate_revision",
+        idempotencyKey: "agent-skill-duplicate-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query("UPDATE skills SET status='revoked' WHERE id=$1", [skillId]);
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_revoked_reference",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: skillContent,
+        revisionId: "agent_skill_revoked_revision",
+        idempotencyKey: "agent-skill-revoked-reference",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query("UPDATE skills SET status='active' WHERE id=$1", [skillId]);
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='revoked' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
+    await expect(
+      agents.createDraft({
+        actorUserId: owner.user.id,
+        id: "agent_skill_revoked_version",
+        availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
+        content: skillContent,
+        revisionId: "agent_skill_revoked_version_revision",
+        idempotencyKey: "agent-skill-revoked-version",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='available' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
     const draft = await agents.createDraft({
       actorUserId: owner.user.id,
       id: "agent_skill_unavailable",
       availability: { mode: "selected_tenants", tenantIds: [owner.tenant.id] },
-      content: { ...defaults.content, skillVersions: [{ skillId, version: "1.0.0" }] },
+      content: skillContent,
       revisionId: "agent_skill_unavailable_v1",
       idempotencyKey: "agent-skill-unavailable-draft",
       expectedGeneration: 0,
     });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='revoked' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
+    await expect(
+      agents.publish({
+        actorUserId: owner.user.id,
+        definitionId: draft.definition.id,
+        revisionId: draft.revision.id,
+        idempotencyKey: "agent-skill-unavailable-publish",
+        expectedGeneration: draft.definition.generation,
+      }),
+    ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    await migratorPool.query(
+      "UPDATE skill_versions SET status='available' WHERE skill_id=$1 AND version='1.0.0'",
+      [skillId],
+    );
     await agents.publish({
       actorUserId: owner.user.id,
       definitionId: draft.definition.id,
@@ -3933,17 +4544,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       await app.close();
     }
     await migratorPool.query(
-      `INSERT INTO skill_versions(skill_id,version,description,compatibility,package_digest,
-           entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status)
-       SELECT skill_id,'1.0.0','Agent 固定版本',compatibility,package_digest,
-              entrypoint_path,entrypoint_digest,$2,security_status,'revoked'
-         FROM skill_versions WHERE skill_id=$1 AND version='2.0.0'`,
+      "UPDATE skill_versions SET status='revoked',package_blob_ref=$2 WHERE skill_id=$1 AND version='1.0.0'",
       [skillId, skillSnapshotBlobRef("a".repeat(64), 250, "application/json")],
-    );
-    await migratorPool.query(
-      `INSERT INTO skill_version_files(skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref)
-       VALUES ($1,'1.0.0','SKILL.md','text/markdown',20,repeat('b',64),$2)`,
-      [skillId, skillSnapshotBlobRef("b".repeat(64), 20, "text/markdown")],
     );
     await expectRejected("revoked");
     await migratorPool.query(
@@ -4438,7 +5040,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     // generation 是安装级单例，仅更换 Tenant 或 Run 无法隔离其他用例的配置变更。
     const target = await createIsolatedMigrationTarget("memory_config");
     const isolatedRuntimePool = createPostgresPool({
-      connectionString: runtimeDatabaseUrl,
+      connectionString: target.runtimeConnectionString,
       schema: target.context.schema,
       maxConnections: 2,
     });
@@ -5589,18 +6191,20 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("down 的 DDL 与 ACL 收敛失败时整体回滚", async () => {
-    await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${runtimeRole}"`,
-    );
+    const target = await createIsolatedMigrationTarget("down_acl_failure");
     try {
+      await migrateUp(target.pool, target.context);
+      await administrativePool.query(
+        `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${target.context.runtimeRole}"`,
+      );
       await expect(
-        migrateDown(migratorPool, {
+        migrateDown(target.pool, {
           allowDestructive: true,
           environment: "test",
-          ...migrationSecurity,
+          ...target.context,
         }),
       ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
-      const state = await migratorPool.query<{ threads: string | null; migration_count: string }>(
+      const state = await target.pool.query<{ threads: string | null; migration_count: string }>(
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
@@ -5610,8 +6214,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
     } finally {
       await administrativePool.query(
-        `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
+        `GRANT CONNECT ON DATABASE "${databaseName}" TO "${target.context.runtimeRole}"`,
       );
+      await target.close();
     }
   });
 
@@ -5638,7 +6243,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       try {
         await migrateDown(target.pool, {
           ...target.context,
-          runtimeRole,
+          runtimeRole: target.context.runtimeRole,
           targetVersion: 14,
           allowDestructive: true,
           environment: "test",
@@ -5668,46 +6273,96 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("down 只有显式 test 授权可执行并能再次向前", async () => {
-    await expect(
-      migrateDown(migratorPool, {
-        allowDestructive: false as true,
-        environment: "test",
-        ...migrationSecurity,
-      }),
-    ).rejects.toThrow("禁止破坏性");
-    expect(
-      await migrateDown(migratorPool, {
-        allowDestructive: true,
-        environment: "test",
-        ...migrationSecurity,
-      }),
-    ).toEqual([]);
-    const usageAfterDown = await migratorPool.query<{ allowed: boolean }>(
-      "SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS allowed",
-      [runtimeRole],
-    );
-    expect(usageAfterDown.rows[0]?.allowed).toBe(false);
-    const downPrivileges = await migratorPool.query<{ privilege: string; allowed: boolean }>(
-      `SELECT requested.privilege,
-              has_table_privilege($1, 'runtime_schema_migrations', requested.privilege) AS allowed
-         FROM unnest($2::text[]) AS requested(privilege)`,
-      [runtimeRole, ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]],
-    );
-    expect(downPrivileges.rows.every((entry) => !entry.allowed)).toBe(true);
-    const routineState = await migratorPool.query<{
-      routine_count: string;
-      default_acl_count: string;
-    }>(
-      `SELECT (SELECT count(*)::text FROM pg_proc
-                WHERE pronamespace = current_schema()::regnamespace) AS routine_count,
-              (SELECT count(*)::text
-                 FROM pg_default_acl defaults
-                WHERE defaults.defaclrole = $1::regrole
-                  AND defaults.defaclobjtype = 'f') AS default_acl_count`,
-      [migratorRole],
-    );
-    expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(migrationContract.count);
+    const target = await createIsolatedMigrationTarget("authorized_down");
+    try {
+      await migrateUp(target.pool, target.context);
+      await expect(
+        migrateDown(target.pool, {
+          allowDestructive: false as true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).rejects.toThrow("禁止破坏性");
+      expect(
+        await migrateDown(target.pool, {
+          allowDestructive: true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).toEqual([]);
+      const usageAfterDown = await target.pool.query<{ allowed: boolean }>(
+        "SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS allowed",
+        [runtimeRole],
+      );
+      expect(usageAfterDown.rows[0]?.allowed).toBe(false);
+      const downPrivileges = await target.pool.query<{ privilege: string; allowed: boolean }>(
+        `SELECT requested.privilege,
+                has_table_privilege($1, 'runtime_schema_migrations', requested.privilege) AS allowed
+           FROM unnest($2::text[]) AS requested(privilege)`,
+        [
+          runtimeRole,
+          ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
+        ],
+      );
+      expect(downPrivileges.rows.every((entry) => !entry.allowed)).toBe(true);
+      const routineState = await target.pool.query<{
+        routine_count: string;
+        default_acl_count: string;
+      }>(
+        `SELECT (SELECT count(*)::text FROM pg_proc
+                  WHERE pronamespace = current_schema()::regnamespace) AS routine_count,
+                (SELECT count(*)::text
+                   FROM pg_default_acl defaults
+                  WHERE defaults.defaclrole = $1::regrole
+                    AND defaults.defaclobjtype = 'f') AS default_acl_count`,
+        [target.context.migratorRole],
+      );
+      expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
+      expect(await migrateUp(target.pool, target.context)).toHaveLength(migrationContract.count);
+    } finally {
+      await target.close();
+    }
+  });
+
+  it("导入导出审计在迁移角色受 RLS 限制时仍以 P0001 阻止回退", async () => {
+    const target = await createIsolatedMigrationTarget("transfer_down_guard");
+    try {
+      await migrateUp(target.pool, target.context);
+      await administrativePool.query(
+        `BEGIN;
+         SET LOCAL search_path TO "${target.context.schema}";
+         SET LOCAL session_replication_role = replica;
+         INSERT INTO agent_definition_audits(definition_id,action,generation,actor_user_id,reason)
+           VALUES('definition_hidden','imported',0,'actor_hidden','test rollback guard');
+         COMMIT;`,
+      );
+      await expect(
+        migrateDown(target.pool, {
+          targetVersion: migrationContract.latestVersion - 1,
+          allowDestructive: true,
+          environment: "test",
+          ...target.context,
+        }),
+      ).rejects.toMatchObject({ code: "UNEXPECTED", cause: { code: "P0001" } });
+      const state = await target.pool.query<{
+        readonly version: number;
+        readonly row_security: boolean;
+        readonly force_row_security: boolean;
+      }>(
+        `SELECT (SELECT max(version)::int FROM runtime_schema_migrations) AS version,
+                relation.relrowsecurity AS row_security,
+                relation.relforcerowsecurity AS force_row_security
+           FROM pg_class relation
+          WHERE relation.oid='agent_definition_audits'::regclass`,
+      );
+      expect(state.rows[0]).toEqual({
+        version: migrationContract.latestVersion,
+        row_security: true,
+        force_row_security: true,
+      });
+    } finally {
+      await target.close();
+    }
   });
 
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {
@@ -5827,7 +6482,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
     const downTarget = await createIsolatedMigrationTarget("runtime_database_temp");
     await administrativePool.query(
-      `GRANT TEMPORARY ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
+      `GRANT TEMPORARY ON DATABASE "${databaseName}" TO "${downTarget.context.runtimeRole}"`,
     );
     try {
       await expect(
@@ -5845,7 +6500,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(downObjects.rows[0]?.count).toBe("0");
     } finally {
       await administrativePool.query(
-        `REVOKE TEMPORARY ON DATABASE "${databaseName}" FROM "${runtimeRole}"`,
+        `REVOKE TEMPORARY ON DATABASE "${databaseName}" FROM "${downTarget.context.runtimeRole}"`,
       );
       await downTarget.close();
     }

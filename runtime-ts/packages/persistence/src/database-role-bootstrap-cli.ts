@@ -3,6 +3,7 @@ import { bootstrapMissingDatabaseRoles } from "./database-role-bootstrap.js";
 import { readDatabaseRoleBootstrapConfiguration } from "./database-role-bootstrap-config.js";
 import { loadDatabaseDevelopmentEnvironment } from "./development-database-environment.js";
 import { PersistenceError } from "./errors.js";
+import { bootstrapEvaluationRole } from "./role-bootstrap.js";
 
 async function runDatabaseRoleBootstrap(
   environment: NodeJS.ProcessEnv,
@@ -18,6 +19,7 @@ async function runDatabaseRoleBootstrap(
     try {
       await client.query("BEGIN");
       const result = await bootstrapMissingDatabaseRoles(client, configuration.credentials);
+      await bootstrapEvaluationRole(client, environment.DATABASE_RUNTIME_ROLE ?? "");
       await client.query("COMMIT");
       return result.createdRoles;
     } catch (error) {
@@ -38,7 +40,7 @@ try {
   );
   const createdRoles = await runDatabaseRoleBootstrap(environment);
   if (createdRoles.length === 0) {
-    console.log("数据库应用角色已完整，无需补齐");
+    console.log("数据库应用角色已完整，评测角色及成员关系已校验");
   } else {
     console.log(`数据库应用角色补齐完成：${createdRoles.join(", ")}`);
   }

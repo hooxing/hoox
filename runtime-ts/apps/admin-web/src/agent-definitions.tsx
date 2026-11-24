@@ -3,11 +3,11 @@ import type {
   AdminAgentRevisionHistory,
   AdminSetAgentAvailability,
   AgentDefinitionDto,
-  EvaluationSuite,
   AgentPinnedModelReferenceDto,
   AgentRevisionContentDto,
   AgentRevisionDto,
   AgentRevisionSection,
+  EvaluationSuite,
 } from "@hoox/protocol";
 import { agentRevisionChangedFields } from "@hoox/protocol";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -25,12 +25,12 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { type FormEvent, useId, useState } from "react";
+import { type FormEvent, useId, useRef, useState } from "react";
 import {
+  AgentDefinitionEditor,
+  AvailabilityFields,
   allTenants,
   availabilityText,
-  AvailabilityFields,
-  AgentDefinitionEditor,
   parseAvailability,
 } from "./agent-definition-editor.js";
 import type { AgentDefinitionApiContract } from "./control-api.js";
@@ -85,6 +85,8 @@ export function AgentDefinitionsPage({
   readonly onBack: () => void;
 }) {
   const query = useAgentDefinitions(api);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importResult, setImportResult] = useState<string>();
   if (query.isError)
     return (
       <Alert
@@ -143,11 +145,28 @@ export function AgentDefinitionsPage({
           </Typography.Text>
         </div>
         {canManage && (
-          <Button type="primary" onClick={() => onOpen()}>
-            新建 Agent
-          </Button>
+          <Space>
+            <Button onClick={() => setImportOpen(true)}>导入 YAML</Button>
+            <Button type="primary" onClick={() => onOpen()}>
+              新建 Agent
+            </Button>
+          </Space>
         )}
       </div>
+      {importResult && <Alert type="success" showIcon title={importResult} />}
+      {canManage && (
+        <AgentConfigurationImport
+          api={api}
+          items={items}
+          open={importOpen}
+          onClose={() => setImportOpen(false)}
+          onImported={(message) => {
+            setImportOpen(false);
+            setImportResult(message);
+            void query.refetch();
+          }}
+        />
+      )}
       {items.length === 0 ? (
         <Empty description="没有可查看的 Agent 定义" />
       ) : (
@@ -176,6 +195,160 @@ export function AgentDefinitionsPage({
 
 function revisionId() {
   return `agent_revision_${crypto.randomUUID()}`;
+}
+
+function AgentConfigurationImport({
+  api,
+  items,
+  open,
+  onClose,
+  onImported,
+}: {
+  readonly api: AgentDefinitionApiContract;
+  readonly items: AdminAgentDefinitionList["items"];
+  readonly open: boolean;
+  readonly onClose: () => void;
+  readonly onImported: (message: string) => void;
+}) {
+  const [yaml, setYaml] = useState("");
+  const [definitionId, setDefinitionId] = useState("");
+  const [validation, setValidation] = useState<{
+    valid: boolean;
+    errors?: readonly { path: string; code: string; message: string }[];
+  }>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  // 输入变化后递增；只接收仍对应当前输入的校验结果，避免迟到的结果为未校验内容启用导入。
+  const inputVersion = useRef(0);
+  const selected = items.find((item) => item.definition.id === definitionId)?.definition;
+  const changeYaml = (value: string) => {
+    inputVersion.current += 1;
+    setYaml(value);
+    setValidation(undefined);
+    setError(undefined);
+  };
+  async function validate() {
+    setBusy(true);
+    setError(undefined);
+    const version = inputVersion.current;
+    try {
+      const result = await api.validateAgentConfiguration(
+        yaml,
+        definitionId || undefined,
+        selected?.generation,
+      );
+      if (version === inputVersion.current) setValidation(result);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "配置校验失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function confirmImport() {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await api.importAgentConfiguration(yaml, definitionId || undefined, selected?.generation);
+      onImported(
+        definitionId ? "已追加新的草稿 Revision，未发布。" : "已导入新的 Agent 草稿，未发布。",
+      );
+      changeYaml("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "导入失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal
+      open={open}
+      title="导入 Agent YAML 配置"
+      width={760}
+      onCancel={() => {
+        if (!busy) onClose();
+      }}
+      footer={[
+        <Button key="cancel" disabled={busy} onClick={onClose}>
+          取消
+        </Button>,
+        <Button
+          key="validate"
+          loading={busy}
+          disabled={!yaml.trim()}
+          onClick={() => void validate()}
+        >
+          校验配置
+        </Button>,
+        <Button
+          key="import"
+          type="primary"
+          loading={busy}
+          disabled={!validation?.valid}
+          onClick={() => void confirmImport()}
+        >
+          确认导入为草稿
+        </Button>,
+      ]}
+    >
+      <Space orientation="vertical" style={{ width: "100%" }}>
+        <label className="agent-field">
+          <span>导入目标</span>
+          <select
+            aria-label="导入目标"
+            value={definitionId}
+            onChange={(event) => {
+              inputVersion.current += 1;
+              setDefinitionId(event.target.value);
+              setValidation(undefined);
+            }}
+          >
+            <option value="">新建 Agent Definition</option>
+            {items.map(({ definition, revision }) => (
+              <option key={definition.id} value={definition.id}>
+                追加到 {revision?.displayName ?? definition.id}（{definition.id}）
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="agent-field">
+          <span>上传 YAML 文件</span>
+          <input
+            type="file"
+            accept=".yaml,.yml,application/yaml,text/yaml"
+            onChange={async (event) => {
+              const file = event.currentTarget.files?.[0];
+              if (file) changeYaml(await file.text());
+            }}
+          />
+        </label>
+        <Input.TextArea
+          aria-label="Agent YAML 配置"
+          rows={16}
+          value={yaml}
+          onChange={(event) => changeYaml(event.target.value)}
+          placeholder="粘贴 schemaVersion: 1 的 Agent YAML 配置"
+        />
+        {validation?.valid && <Alert type="success" showIcon title="配置有效，可以导入。" />}
+        {validation && !validation.valid && (
+          <Alert
+            type="error"
+            showIcon
+            title="配置校验失败"
+            description={
+              <ul>
+                {validation.errors?.map((item) => (
+                  <li key={`${item.path}-${item.code}-${item.message}`}>
+                    <code>{item.path}</code> · {item.message}
+                  </li>
+                ))}
+              </ul>
+            }
+          />
+        )}
+        {error && <Alert type="error" showIcon title={error} />}
+      </Space>
+    </Modal>
+  );
 }
 
 function CreateAgent({
@@ -278,6 +451,7 @@ function AgentHistory({
   const evaluationSuiteFieldId = useId();
   const minimumPassRateFieldId = useId();
   const [notice, setNotice] = useState<string>();
+  const [transferError, setTransferError] = useState<string>();
   const mutation = useMutation({
     gcTime: 0,
     mutationFn: async (write: () => Promise<unknown>) => write(),
@@ -369,6 +543,7 @@ function AgentHistory({
         </Space>
       </div>
       {notice && <Alert type="success" showIcon title={notice} />}
+      {transferError && <Alert type="error" showIcon title={transferError} />}
       {mutation.isError &&
         work?.kind !== "edit" &&
         work?.kind !== "scope" &&
@@ -573,6 +748,32 @@ function AgentHistory({
               <Alert type="error" showIcon title={active.error.message} />
             ) : active.data ? (
               <>
+                {canManage && (
+                  <Button
+                    onClick={() => {
+                      void api
+                        .exportAgentConfiguration(id, active.data?.id ?? "")
+                        .then((yaml) => {
+                          const url = URL.createObjectURL(
+                            new Blob([yaml], { type: "application/yaml" }),
+                          );
+                          const anchor = document.createElement("a");
+                          anchor.href = url;
+                          anchor.download = `${id}-${active.data?.id}.yaml`;
+                          anchor.click();
+                          URL.revokeObjectURL(url);
+                          setTransferError(undefined);
+                        })
+                        .catch((reason: unknown) =>
+                          setTransferError(
+                            reason instanceof Error ? reason.message : "导出配置失败",
+                          ),
+                        );
+                    }}
+                  >
+                    导出此版本 YAML
+                  </Button>
+                )}
                 <section className="agent-content-field" aria-label="版本说明全文">
                   <strong>版本说明</strong>
                   <pre>

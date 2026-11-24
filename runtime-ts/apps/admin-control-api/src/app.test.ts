@@ -1,8 +1,12 @@
-import type { AuthContextResolver } from "@hoox/identity/auth";
 import { BrandingError } from "@hoox/admin-control";
-import { DEFAULT_BRANDING } from "@hoox/protocol";
 import { userId } from "@hoox/domain";
+import type { AuthContextResolver } from "@hoox/identity/auth";
+import {
+  AgentDefinitionAccessError,
+  AgentDefinitionValidationError,
+} from "@hoox/persistence/admin";
 import { PersistenceError } from "@hoox/persistence/postgres";
+import { DEFAULT_BRANDING } from "@hoox/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { type AdminControlApiDependencies, createAdminControlApiApp } from "./app.js";
 
@@ -37,6 +41,7 @@ const modelRevision = {
 
 function fixture(
   sandbox?: AdminControlApiDependencies["sandbox"],
+  agents?: AdminControlApiDependencies["agents"],
   branding?: AdminControlApiDependencies["branding"],
 ) {
   const auth: AuthContextResolver = {
@@ -183,6 +188,7 @@ function fixture(
     app: createAdminControlApiApp({
       ...(branding === undefined ? {} : { branding }),
       ...(sandbox === undefined ? {} : { sandbox }),
+      ...(agents === undefined ? {} : { agents }),
       auth,
       control,
       modelCatalog,
@@ -199,7 +205,7 @@ describe("后台控制 API", () => {
       read: vi.fn(async () => ({ generation: 0, configuration: DEFAULT_BRANDING })),
       save: vi.fn(async () => ({ generation: 1, configuration: DEFAULT_BRANDING })),
     };
-    const { app } = fixture(undefined, branding);
+    const { app } = fixture(undefined, undefined, branding);
     const url = "/v1/admin/control/branding";
     const headers = { authorization: "Bearer admin" };
     const input = {
@@ -243,6 +249,143 @@ describe("后台控制 API", () => {
       await app.close();
     }
   });
+
+  it("保护配置导出和导入权限、写入审计并返回格式路径错误", async () => {
+    const content = {
+      displayName: "导入示例",
+      description: "测试",
+      suggestedQuestions: [],
+      operatorInstructions: "使用中文回答。",
+      replyLanguage: "zh-CN",
+      model: { mode: "platform_default" as const },
+      tools: { mode: "platform_default" as const },
+      skillVersions: [],
+      includeTenantSkills: false,
+      sandboxIdleAction: "pause" as const,
+      memory: { mode: "platform_default" as const },
+    };
+    const definition = {
+      id: "agent_transfer",
+      status: "published" as const,
+      generation: 1,
+      availability: { mode: "all_tenants" as const },
+      currentRevisionId: "agent_transfer_revision",
+      createdAt: "2026-11-20T00:00:00.000Z",
+      updatedAt: "2026-11-20T00:00:00.000Z",
+    };
+    const revision = {
+      id: "agent_transfer_revision",
+      definitionId: definition.id,
+      revision: 1,
+      status: "published" as const,
+      content,
+      digest: "a".repeat(64),
+      createdAt: definition.createdAt,
+      createdBy: "user_admin",
+    };
+    const credentialSecret = "credential-secret-placeholder-e1";
+    const agents = {
+      validateImport: vi.fn(async () => undefined),
+      readRevisionForExport: vi.fn(async () => ({ definition, revision, credentialSecret })),
+      createDraft: vi.fn(async () => ({
+        definition: { ...definition, status: "draft" },
+        revision: { ...revision, status: "draft" },
+      })),
+    } as unknown as NonNullable<AdminControlApiDependencies["agents"]>;
+    const { app } = fixture(undefined, agents);
+    const url = "/v1/admin/control/agent-definitions";
+    const yaml = `schemaVersion: 1\ndefinition:\n  id: agent_transfer\n  availability:\n    mode: all_tenants\nrevision:\n  content:\n    displayName: 导入示例\n    description: 测试\n    suggestedQuestions: []\n    operatorInstructions: 使用中文回答。\n    replyLanguage: zh-CN\n    model:\n      mode: platform_default\n    tools:\n      mode: platform_default\n    skillVersions: []\n    includeTenantSkills: false\n    sandboxIdleAction: pause\n    memory:\n      mode: platform_default\n`;
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `${url}/${definition.id}/revisions/${revision.id}/export`,
+        })
+      ).statusCode,
+    ).toBe(401);
+    const exported = await app.inject({
+      method: "GET",
+      url: `${url}/${definition.id}/revisions/${revision.id}/export`,
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(exported.statusCode).toBe(200);
+    expect(exported.headers["content-type"]).toContain("application/yaml");
+    expect(exported.body).toContain("schemaVersion: 1");
+    expect(exported.body).not.toContain(credentialSecret);
+    expect(agents.readRevisionForExport).toHaveBeenCalledWith(
+      "user_admin",
+      definition.id,
+      revision.id,
+    );
+
+    const noPermission = await app.inject({
+      method: "POST",
+      url: `${url}/import`,
+      headers: { "content-type": "application/json" },
+      payload: { yaml, dryRun: true },
+    });
+    expect(noPermission.statusCode).toBe(401);
+    const invalid = await app.inject({
+      method: "POST",
+      url: `${url}/import`,
+      headers: { authorization: "Bearer admin", "content-type": "application/json" },
+      payload: { yaml: `${yaml}unknownField: true\n`, dryRun: false },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({
+      validationErrors: [{ code: "UNKNOWN_FIELD" }],
+    });
+    const imported = await app.inject({
+      method: "POST",
+      url: `${url}/import`,
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "agent-config-import-1",
+      },
+      payload: { yaml, dryRun: false },
+    });
+    expect(imported.statusCode).toBe(201);
+    expect(agents.validateImport).not.toHaveBeenCalled();
+    expect(agents.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "agent_transfer", auditAction: "imported" }),
+    );
+    vi.mocked(agents.validateImport).mockRejectedValueOnce(
+      new AgentDefinitionValidationError("请选择已保存、已启用且绑定托管凭据的模型"),
+    );
+    const missingCredential = await app.inject({
+      method: "POST",
+      url: `${url}/import`,
+      headers: { authorization: "Bearer admin", "content-type": "application/json" },
+      payload: { yaml, dryRun: true },
+    });
+    expect(missingCredential.statusCode).toBe(200);
+    expect(missingCredential.json()).toMatchObject({
+      data: { valid: false, errors: [{ code: "REFERENCE_INVALID", path: "/revision/content" }] },
+    });
+    vi.mocked(agents.validateImport).mockRejectedValueOnce(new AgentDefinitionAccessError());
+    const deniedDryRun = await app.inject({
+      method: "POST",
+      url: `${url}/import`,
+      headers: { authorization: "Bearer admin", "content-type": "application/json" },
+      payload: { yaml, dryRun: true },
+    });
+    expect(deniedDryRun.statusCode).toBe(401);
+    vi.mocked(agents.createDraft).mockRejectedValueOnce(new AgentDefinitionAccessError());
+    const deniedImport = await app.inject({
+      method: "POST",
+      url: `${url}/import`,
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "agent-config-import-denied",
+      },
+      payload: { yaml, dryRun: false },
+    });
+    expect(deniedImport.statusCode).toBe(401);
+    await app.close();
+  });
+
   it("指标路由需要后台身份并转发窗口与来源筛选", async () => {
     const { app, control } = fixture();
     const url =

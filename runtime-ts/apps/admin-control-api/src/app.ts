@@ -1,25 +1,33 @@
 import { randomUUID } from "node:crypto";
-import { BrandingError, type BrandingAdminPort } from "@hoox/admin-control";
-import { SaveBrandingRequestSchema, type SaveBrandingRequest } from "@hoox/protocol";
-import { DomainError } from "@hoox/domain";
 import {
   type AdminControlService,
   AdminControlServiceError,
+  type BrandingAdminPort,
+  BrandingError,
   type ControlMutationContext,
   digestControlRequest,
-  type MemoryProviderConfiguration,
-  type ModelProviderConfiguration,
   ExternalToolAdminError,
   type ExternalToolAdminService,
+  type MemoryProviderConfiguration,
+  type ModelProviderConfiguration,
   RunExplorerError,
   type SandboxControlServicePort,
 } from "@hoox/admin-control";
+import { DomainError } from "@hoox/domain";
 import type { AuthContextResolver } from "@hoox/identity/auth";
 import {
+  AgentDefinitionAccessError,
+  type AgentDefinitionAdminRepositoryPort,
+  AgentDefinitionValidationError,
+  IntegrationAdminError,
+} from "@hoox/persistence/admin";
+import { PersistenceError } from "@hoox/persistence/postgres";
+import {
   AdminControlOverviewSuccessEnvelopeSchema,
+  AgentConfigurationError,
+  type AgentMetricsQueryDto,
   AgentMetricsQueryDtoSchema,
   AgentMetricsSuccessEnvelopeSchema,
-  type AgentMetricsQueryDto,
   ControlAuditListSuccessEnvelopeSchema,
   type ControlRevisionPath,
   ControlRevisionPathSchema,
@@ -28,7 +36,6 @@ import {
   type CreateModelProviderDraftRequest,
   CreateModelProviderDraftRequestSchema,
   createErrorEnvelope,
-  normalizeRuntimeToolSelection,
   ErrorEnvelopeSchema,
   IdentityAdminConfigurationSuccessEnvelopeSchema,
   MemoryProviderRevisionListSuccessEnvelopeSchema,
@@ -37,6 +44,7 @@ import {
   ModelProviderControlRevisionRequestSchema,
   ModelProviderRevisionListSuccessEnvelopeSchema,
   ModelProviderRevisionSuccessEnvelopeSchema,
+  normalizeRuntimeToolSelection,
   PiModelCatalogModelListSuccessEnvelopeSchema,
   PiModelCatalogProviderListSuccessEnvelopeSchema,
   PlatformUserPageSuccessEnvelopeSchema,
@@ -57,6 +65,8 @@ import {
   type SandboxProfilePath,
   SandboxProfilePathSchema,
   SandboxProfileSuccessSchema,
+  type SaveBrandingRequest,
+  SaveBrandingRequestSchema,
   type SaveMemoryProviderConfigurationRequest,
   SaveMemoryProviderConfigurationRequestSchema,
   type SaveModelProviderConfigurationRequest,
@@ -74,22 +84,15 @@ import {
   registerSkillAdminApiRoutes,
   type SkillAdminApiRouteDependencies,
 } from "@hoox/skill-admin-api";
-import {
-  AgentDefinitionAccessError,
-  type AgentDefinitionAdminRepositoryPort,
-  AgentDefinitionValidationError,
-  IntegrationAdminError,
-} from "@hoox/persistence/admin";
-import { PersistenceError } from "@hoox/persistence/postgres";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
-import { EXTERNAL_TOOL_ROUTE_PREFIX, registerExternalToolRoutes } from "./external-tool-routes.js";
 import { registerAgentDefinitionRoutes } from "./agent-definition-routes.js";
+import { type EvaluationAdminPort, registerEvaluationRoutes } from "./evaluation-routes.js";
+import { EXTERNAL_TOOL_ROUTE_PREFIX, registerExternalToolRoutes } from "./external-tool-routes.js";
 import type { IdentityAdminService } from "./identity-configuration.js";
+import { type IntegrationAdminPort, registerIntegrationRoutes } from "./integration-routes.js";
 import type { PiModelCatalogPort } from "./pi-model-catalog.js";
-import { registerIntegrationRoutes, type IntegrationAdminPort } from "./integration-routes.js";
-import { registerRunExplorerRoutes, type RunExplorerRouteService } from "./run-explorer-routes.js";
-import { registerEvaluationRoutes, type EvaluationAdminPort } from "./evaluation-routes.js";
+import { type RunExplorerRouteService, registerRunExplorerRoutes } from "./run-explorer-routes.js";
 
 const strict = { additionalProperties: false } as const;
 const AuditQuerySchema = Type.Object(
@@ -202,7 +205,13 @@ export function createAdminControlApiApp(
       failure,
       validationMessage(error, request, failure),
     );
-    await reply.status(response.status).send(response.body);
+    await reply
+      .status(response.status)
+      .send(
+        error instanceof AgentConfigurationError
+          ? { ...response.body, validationErrors: error.errors }
+          : response.body,
+      );
   });
 
   app.get("/live", async (request) =>
@@ -779,6 +788,7 @@ class AdminControlApiFailure extends Error {
 function failureKind(error: unknown, request: FastifyRequest): FailureKind {
   if (error instanceof BrandingError)
     return error.kind === "forbidden" ? "unauthorized" : "conflict";
+  if (error instanceof AgentConfigurationError) return "bad_request";
   if (
     request.routeOptions.url?.startsWith("/v1/admin/control/integrations/") &&
     error instanceof DomainError
@@ -860,6 +870,7 @@ function validationMessage(
   request: FastifyRequest,
   kind: FailureKind,
 ): string | undefined {
+  if (error instanceof AgentConfigurationError) return "Agent 配置文件校验失败";
   if (error instanceof ExternalToolAdminError) return error.message;
   if (kind !== "bad_request" || request.routeOptions.url?.startsWith(EXTERNAL_TOOL_ROUTE_PREFIX))
     return undefined;

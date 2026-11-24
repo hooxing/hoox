@@ -55,7 +55,7 @@ Windows PowerShell 可用 `Copy-Item .env.example .env`。编辑 `.env`，至少
 pnpm db:setup
 ```
 
-该命令让仓库根 `.env` 覆盖长驻终端中的旧数据库变量，先通过 `DATABASE_BOOTSTRAP_URL` 补齐当前数据库缺少的应用登录角色，再对同一数据库执行迁移。补齐过程可重复执行，不修改已存在角色的密码或属性；如果角色被同一 PostgreSQL 集群中的其他数据库依赖，会在任何角色创建和迁移 DDL 前失败并报告具体角色与数据库。只需检查角色状态时可单独运行 `pnpm db:roles:bootstrap`。
+该命令让仓库根 `.env` 覆盖长驻终端中的旧数据库变量，先通过 `DATABASE_BOOTSTRAP_URL` 补齐当前数据库缺少的应用登录角色，以及由 Runtime 名派生的 NOLOGIN 评测角色和仅允许显式切换的成员关系，再对同一数据库执行迁移。补齐过程可重复执行，不修改已存在角色的密码或属性，不覆盖已有成员关系的授权选项；角色边界见[数据库角色](architecture/persistence-and-database.md#数据库角色)。如果角色被同一 PostgreSQL 集群中的其他数据库依赖，会在事务提交前失败并报告角色与数据库。只需补齐角色时可单独运行 `pnpm db:roles:bootstrap`。
 
 #### 迁移基线重置
 

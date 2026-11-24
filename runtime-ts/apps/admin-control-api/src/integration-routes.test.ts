@@ -3,8 +3,8 @@ import { IntegrationAdminError } from "@hoox/persistence/admin";
 import type { validateExternalHttpsTarget } from "@hoox/tool-router";
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
-import { createAdminControlApiApp, type AdminControlApiDependencies } from "./app.js";
-import { registerIntegrationRoutes, type IntegrationAdminPort } from "./integration-routes.js";
+import { type AdminControlApiDependencies, createAdminControlApiApp } from "./app.js";
+import { type IntegrationAdminPort, registerIntegrationRoutes } from "./integration-routes.js";
 
 type ValidatedExternalTarget = Awaited<ReturnType<typeof validateExternalHttpsTarget>>;
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { isoTimestamp, tenantId, userId } from "@hoox/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createAdminSessionAuthResolver } from "../../runtime-ts/apps/admin-control-api/src/session-auth.js";
+import { registerHttpMiddleware } from "../../runtime-ts/apps/api/src/http-middleware.js";
 import { createLocalAccountAuthService } from "../../runtime-ts/apps/api/src/local-account-auth.js";
 import { registerInstallationRoutes } from "../../runtime-ts/apps/api/src/routes/installation.js";
 import { registerSkillAdminApiRoutes } from "../../runtime-ts/apps/skill-admin-api/src/app.js";
@@ -130,6 +131,73 @@ async function seedTeam(scope: typeof teamScope): Promise<void> {
   });
 }
 
+async function cleanupSkillPublicationFixtures(input: {
+  readonly submissionIds: readonly string[];
+  readonly canonicalKeys: readonly string[];
+  readonly namespaces: readonly string[];
+  readonly operatorUserIds: readonly string[];
+}): Promise<void> {
+  await withTransaction(admin, async (client) => {
+    await client.query(
+      `DELETE FROM "${schema}".skill_publication_commands WHERE submission_id=ANY($1::text[])`,
+      [input.submissionIds],
+    );
+    await client.query(
+      `DELETE FROM "${schema}".skill_publication_audits WHERE submission_id=ANY($1::text[])`,
+      [input.submissionIds],
+    );
+    await client.query(
+      `DELETE FROM "${schema}".skill_publication_files WHERE submission_id=ANY($1::text[])`,
+      [input.submissionIds],
+    );
+    await client.query(
+      `UPDATE "${schema}".skill_publication_submissions
+          SET status='draft',reviewed_by=NULL,rejection_reason=NULL,published_skill_id=NULL
+        WHERE submission_id=ANY($1::text[])`,
+      [input.submissionIds],
+    );
+    const skillIds = await client.query<{ id: string }>(
+      `SELECT id FROM "${schema}".skills WHERE canonical_key=ANY($1::text[])`,
+      [input.canonicalKeys],
+    );
+    const ids = skillIds.rows.map((row) => row.id);
+    if (ids.length > 0) {
+      await client.query(
+        `UPDATE "${schema}".skills SET status='revoked',recommended_version=NULL
+          WHERE id=ANY($1::text[])`,
+        [ids],
+      );
+      await client.query(
+        `DELETE FROM "${schema}".skill_version_files WHERE skill_id=ANY($1::text[])`,
+        [ids],
+      );
+      await client.query(`DELETE FROM "${schema}".skill_versions WHERE skill_id=ANY($1::text[])`, [
+        ids,
+      ]);
+      await client.query(`DELETE FROM "${schema}".skills WHERE id=ANY($1::text[])`, [ids]);
+    }
+    await client.query(
+      `DELETE FROM "${schema}".skill_publication_submissions WHERE submission_id=ANY($1::text[])`,
+      [input.submissionIds],
+    );
+    await client.query(
+      `DELETE FROM "${schema}".skill_namespace_audits WHERE namespace=ANY($1::text[])`,
+      [input.namespaces],
+    );
+    await client.query(
+      `DELETE FROM "${schema}".skill_namespace_publishers WHERE namespace=ANY($1::text[])`,
+      [input.namespaces],
+    );
+    await client.query(`DELETE FROM "${schema}".skill_namespaces WHERE namespace=ANY($1::text[])`, [
+      input.namespaces,
+    ]);
+    await client.query(
+      `DELETE FROM "${schema}".platform_skill_operators WHERE user_id=ANY($1::text[])`,
+      [input.operatorUserIds],
+    );
+  });
+}
+
 beforeAll(async () => {
   admin = createPostgresPool({ connectionString: bootstrapDatabaseUrl, maxConnections: 2 });
   await admin.query(
@@ -246,14 +314,14 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       { table: "platform_control_operators", role: "viewer" },
       { table: "platform_skill_operators", role: "admin" },
       { table: "platform_skill_operators", role: "reviewer" },
-      { table: "platform_skill_operators", role: "publisher" },
     ] as const;
     const installation = new PgInstallationRepository(runtime);
     for (const [index, entry] of roles.entries()) {
       const actor = userId(`legacy_admin_session_${unique}_${index}`);
-      await admin.query("INSERT INTO app_users(id,created_at) VALUES($1,clock_timestamp())", [
-        actor,
-      ]);
+      await admin.query(
+        `INSERT INTO "${schema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
+        [actor],
+      );
       await admin.query(
         `INSERT INTO "${schema}".${entry.table}(user_id,role,status)
          VALUES($1,$2,'active')`,
@@ -263,6 +331,18 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         true,
       );
     }
+    const publisherWithoutNamespace = userId(`role_only_publisher_${unique}`);
+    await admin.query(
+      `INSERT INTO "${schema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
+      [publisherWithoutNamespace],
+    );
+    await admin.query(
+      `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status)
+       VALUES($1,'publisher','active')`,
+      [publisherWithoutNamespace],
+    );
+    expect(await installation.canStartAdminSession(publisherWithoutNamespace)).toBe(false);
+    expect(await installation.canAccessControl(publisherWithoutNamespace)).toBe(false);
   });
 
   it("Skill 命名空间发布者只能发布授权目录，撤销立即生效并保留审计", async () => {
@@ -287,6 +367,9 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
     const adminPublications = new SkillPublicationService(authorization, repository);
     const publisherPublications = new SkillPublicationService(authorization, repository);
     const namespace = `wp-${unique.replaceAll("_", "-")}`;
+    const selfServiceNamespace = `self-service-${unique.replaceAll("_", "-")}`;
+    const submissionIds = [`self_service_${unique}`, `namespace_${unique}`, `review_${unique}`];
+    const operatorUserIds: string[] = [scopeA.userId];
     try {
       await adminPublications.createNamespace(scopeA.userId, namespace);
       await adminPublications.grantNamespace(scopeA.userId, namespace, scopeB.userId);
@@ -296,7 +379,6 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       expect(await installation.isAdministrator(scopeB.userId)).toBe(false);
       expect(await installation.canAccessControl(scopeB.userId)).toBe(false);
 
-      const selfServiceNamespace = `self-service-${unique.replaceAll("_", "-")}`;
       await adminPublications.createNamespace(scopeA.userId, selfServiceNamespace);
       const localAccounts = createLocalAccountAuthService({
         repository: new PgLocalAccountRepository(runtime),
@@ -308,6 +390,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         password: "publisher-password-123",
       });
       const publisherId = userId(ordinaryAccount.profile.id);
+      operatorUserIds.push(publisherId);
       await admin.query(
         `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status)
          VALUES($1,'publisher','active')`,
@@ -316,6 +399,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       await adminPublications.grantNamespace(scopeA.userId, selfServiceNamespace, publisherId);
       const authApp = createFastify();
       const adminSkillApi = createFastify();
+      registerHttpMiddleware(authApp);
       registerInstallationRoutes(
         authApp,
         {
@@ -368,8 +452,6 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
             publisher: "Hoox",
             description: "真实会话链路发布验证",
             compatibility: "Agent Skills 标准格式",
-            sourceUrl: "",
-            sourceRevision: "",
             licenseSpdx: "MIT",
             files: [
               {
@@ -394,6 +476,17 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         });
         expect(publishResponse.statusCode).toBe(200);
         expect(publishResponse.json().data.status).toBe("published");
+        const revokeResponse = await adminSkillApi.inject({
+          method: "POST",
+          url: `/v1/admin/skill-submissions/${submissionId}/revoke`,
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            "idempotency-key": `self-service-revoke-${unique}`,
+          },
+          payload: { expectedVersionToken: 1 },
+        });
+        expect(revokeResponse.statusCode).toBe(200);
         expect(await installation.canAccessControl(publisherId)).toBe(false);
         expect(await installation.isAdministrator(publisherId)).toBe(false);
         await adminPublications.revokeNamespace(scopeA.userId, selfServiceNamespace, publisherId);
@@ -401,7 +494,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
           url: "/v1/auth/admin-principal",
           headers: { authorization: `Bearer ${token}` },
         });
-        expect(revokedSession.statusCode).toBe(401);
+        expect(revokedSession.statusCode, JSON.stringify(revokedSession.json())).toBe(401);
         const deniedPublishApi = await adminSkillApi.inject({
           url: "/v1/admin/skill-submissions",
           headers: { authorization: `Bearer ${token}` },
@@ -439,9 +532,11 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       } as const;
       const submission = await publisherPublications.create(create);
       const reviewerId = userId(`skill_reviewer_${unique}`);
-      await admin.query("INSERT INTO app_users(id,created_at) VALUES($1,clock_timestamp())", [
-        reviewerId,
-      ]);
+      operatorUserIds.push(reviewerId);
+      await admin.query(
+        `INSERT INTO "${schema}".app_users(id,created_at) VALUES($1,clock_timestamp())`,
+        [reviewerId],
+      );
       await admin.query(
         `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status)
          VALUES($1,'reviewer','active')`,
@@ -648,6 +743,15 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       expect(sessionAcl.rows[0]).toEqual({ user_id: true, revoked_at: true, granted_by: false });
       expect(await installation.canStartAdminSession(scopeB.userId)).toBe(false);
     } finally {
+      await cleanupSkillPublicationFixtures({
+        submissionIds,
+        canonicalKeys: [
+          `${selfServiceNamespace}.automation-helper`,
+          `${namespace}.automation-helper`,
+        ],
+        namespaces: [namespace, selfServiceNamespace],
+        operatorUserIds,
+      });
       objects.close();
       await publisherPool.end();
     }
@@ -673,7 +777,11 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
     const authorization = new PgSkillPublicationAuthorization(publisherPool);
     const repository = new PgSkillPublicationRepository(publisherPool, objects);
     const publications = new SkillPublicationService(authorization, repository);
+    const adminPublications = new SkillPublicationService(authorization, repository);
     const cases = ["publish", "revoke", "replay", "create"] as const;
+    const publishedSubmissionIds: string[] = [];
+    const submissionIds: string[] = [];
+    const namespaces = cases.map((action) => `race-${action}-${unique.replaceAll("_", "-")}`);
     try {
       for (const action of cases) {
         const namespace = `race-${action}-${unique.replaceAll("_", "-")}`;
@@ -702,6 +810,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
           idempotencyKey: `race-create-${action}-${unique}`,
         };
         const submission = await publications.create(create);
+        submissionIds.push(submission.submissionId);
         const publishCommand = {
           userId: scopeB.userId,
           submissionId: submission.submissionId,
@@ -709,7 +818,10 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
           recommended: true,
           idempotencyKey: `race-publish-${action}-${unique}`,
         };
-        if (action !== "publish") await publications.publish(publishCommand);
+        if (action === "revoke" || action === "replay") {
+          await publications.publish(publishCommand);
+          publishedSubmissionIds.push(submission.submissionId);
+        }
         if (action === "replay") await publications.publish(publishCommand);
         const operation = () =>
           action === "create"
@@ -765,11 +877,27 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
           client.release();
         }
         const result = await outcome;
-        expect("error" in result ? result.error : result.value).toMatchObject({
+        expect("error" in result ? result.error : result.value, action).toMatchObject({
           code: "NOT_FOUND",
         });
       }
     } finally {
+      for (const submissionId of publishedSubmissionIds) {
+        await adminPublications.revoke({
+          userId: scopeA.userId,
+          submissionId,
+          expectedVersionToken: 1,
+          idempotencyKey: `race-cleanup-${submissionId}`,
+        });
+      }
+      await cleanupSkillPublicationFixtures({
+        submissionIds,
+        canonicalKeys: ["revoke", "replay"].map(
+          (action) => `race-${action}-${unique.replaceAll("_", "-")}.automation-helper`,
+        ),
+        namespaces,
+        operatorUserIds: [scopeA.userId],
+      });
       objects.close();
       await publisherPool.end();
     }
@@ -1039,7 +1167,9 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
 
   it("管理员直接发布和上传更新保留精确安装引用、幂等审计与下架约束", async () => {
     await admin.query(
-      `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status) VALUES ($1,'admin','active')`,
+      `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status)
+       VALUES ($1,'admin','active')
+       ON CONFLICT(user_id) DO UPDATE SET role=EXCLUDED.role,status=EXCLUDED.status`,
       [scopeA.userId],
     );
     const publisherUrl = new URL(runtimeDatabaseUrl);

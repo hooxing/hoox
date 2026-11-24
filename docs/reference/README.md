@@ -12,6 +12,7 @@
 | [评测管理 API](admin-evaluations.md) | 管理 Agent 评测集和用例时 | 评测资源如何按 AgentDefinition 读写，当前提供哪些管理路由 |
 | [公开 API v1](public-api.md) | 以服务凭据接入 Hoox 时 | 哪些 v1 路由属于兼容契约，如何认证、续连事件和处理幂等？ |
 | [Agent 配置文件](agent-configuration.md) | 在后台或自动化流程导入、导出 Agent 时 | YAML 字段、引用校验、dry-run 和管理接口如何使用？ |
+| [Skill 发布](skill-publishing.md) | 管理命名空间、授权发布者或调用 Skill 发布 API 时 | 命名空间命名、角色权限、发布路由和跨空间失败语义是什么？ |
 | [可嵌入聊天组件](chat-embed.md) | 把 Agent 对话嵌入业务网站时 | 如何挂载 React/原生入口、定制主题并通过同源代理安全认证？ |
 | [历史文件与 ResourceFS](history-files.md) | 浏览个人历史交付物或在 Sandbox 中读取历史文件时 | 查询窗口、分页、虚拟目录、所有权和数据边界是什么 |
 | [文件预览与选区引用](file-preview.md) | 维护交付文件预览或向 Agent 引用内容时 | 浏览器支持范围、大小屏交互、版本绑定与安全边界是什么 |

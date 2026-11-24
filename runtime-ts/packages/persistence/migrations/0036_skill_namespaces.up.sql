@@ -24,6 +24,20 @@ CREATE TABLE skill_namespace_audits (
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+ALTER TABLE skill_publication_audits ADD COLUMN namespace text;
+ALTER TABLE skill_publication_audits ADD COLUMN skill_version text;
+UPDATE skill_publication_audits audit
+   SET namespace=CASE
+         WHEN position('.' in submission.canonical_key)>0
+           THEN split_part(submission.canonical_key,'.',1)
+         ELSE 'legacy'
+       END,
+       skill_version=submission.skill_version
+  FROM skill_publication_submissions submission
+ WHERE submission.submission_id=audit.submission_id;
+ALTER TABLE skill_publication_audits ALTER COLUMN namespace SET NOT NULL;
+ALTER TABLE skill_publication_audits ALTER COLUMN skill_version SET NOT NULL;
+
 ALTER TABLE skill_namespace_publishers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_namespace_publishers FORCE ROW LEVEL SECURITY;
 ALTER TABLE skill_namespaces ENABLE ROW LEVEL SECURITY;
@@ -119,27 +133,112 @@ CREATE POLICY skill_publication_submissions_reviewer_update_policy ON skill_publ
         AND operator.status='active' AND operator.role='reviewer')
   );
 DROP POLICY skill_publication_files_publisher_policy ON skill_publication_files;
-CREATE POLICY skill_publication_files_publisher_policy ON skill_publication_files FOR ALL
-  USING (EXISTS (SELECT 1 FROM skill_publication_submissions submission WHERE submission.submission_id=skill_publication_files.submission_id))
-  WITH CHECK (EXISTS (SELECT 1 FROM skill_publication_submissions submission WHERE submission.submission_id=skill_publication_files.submission_id));
+CREATE POLICY skill_publication_files_publisher_policy ON skill_publication_files FOR SELECT
+  USING (EXISTS (SELECT 1 FROM skill_publication_submissions submission WHERE submission.submission_id=skill_publication_files.submission_id));
+CREATE POLICY skill_publication_files_publisher_insert_policy ON skill_publication_files FOR INSERT
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM skill_publication_submissions submission
+     WHERE submission.submission_id=skill_publication_files.submission_id
+       AND submission.created_by=NULLIF(current_setting('app.user_id',true),'')
+       AND submission.status='draft'
+       AND (
+         EXISTS (SELECT 1 FROM platform_skill_operators operator
+           WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'')
+             AND operator.status='active' AND operator.role='admin')
+         OR (
+           NOT EXISTS (SELECT 1 FROM platform_skill_operators operator
+             WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'')
+               AND operator.status='active' AND operator.role='reviewer')
+           AND EXISTS (SELECT 1 FROM skill_namespace_publishers grant_row
+             WHERE grant_row.namespace=split_part(submission.canonical_key,'.',1)
+               AND grant_row.user_id=NULLIF(current_setting('app.user_id',true),'')
+               AND grant_row.revoked_at IS NULL)
+         )
+       )
+  ));
 CREATE POLICY skill_publication_files_reviewer_read_policy ON skill_publication_files FOR SELECT
   USING (EXISTS (SELECT 1 FROM platform_skill_operators operator
     WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'')
       AND operator.status='active' AND operator.role='reviewer'));
 DROP POLICY skill_publication_commands_publisher_policy ON skill_publication_commands;
-CREATE POLICY skill_publication_commands_publisher_policy ON skill_publication_commands FOR ALL
+CREATE POLICY skill_publication_commands_publisher_policy ON skill_publication_commands FOR SELECT
   USING (actor_user_id=NULLIF(current_setting('app.user_id',true),'') AND EXISTS (
     SELECT 1 FROM skill_publication_submissions submission
      WHERE submission.submission_id=skill_publication_commands.submission_id
-  ))
+  ));
+CREATE POLICY skill_publication_commands_publisher_insert_policy ON skill_publication_commands FOR INSERT
   WITH CHECK (actor_user_id=NULLIF(current_setting('app.user_id',true),'') AND EXISTS (
     SELECT 1 FROM skill_publication_submissions submission
      WHERE submission.submission_id=skill_publication_commands.submission_id
+       AND (
+         (skill_publication_commands.operation IN ('approve','reject')
+          AND submission.status=CASE skill_publication_commands.operation
+            WHEN 'approve' THEN 'approved' ELSE 'rejected' END
+          AND submission.reviewed_by=skill_publication_commands.actor_user_id
+          AND submission.version_token=skill_publication_commands.result_version_token
+          AND EXISTS (SELECT 1 FROM platform_skill_operators operator
+            WHERE operator.user_id=skill_publication_commands.actor_user_id
+              AND operator.status='active' AND operator.role IN ('admin','reviewer')))
+         OR
+         (skill_publication_commands.operation NOT IN ('approve','reject')
+          AND (
+            EXISTS (SELECT 1 FROM platform_skill_operators operator
+              WHERE operator.user_id=skill_publication_commands.actor_user_id
+                AND operator.status='active' AND operator.role='admin')
+            OR (
+              NOT EXISTS (SELECT 1 FROM platform_skill_operators operator
+                WHERE operator.user_id=skill_publication_commands.actor_user_id
+                  AND operator.status='active' AND operator.role='reviewer')
+              AND EXISTS (SELECT 1 FROM skill_namespace_publishers grant_row
+                WHERE grant_row.namespace=split_part(submission.canonical_key,'.',1)
+                  AND grant_row.user_id=skill_publication_commands.actor_user_id
+                  AND grant_row.revoked_at IS NULL)
+            )
+          ))
+       )
   ));
 DROP POLICY skill_publication_audits_publisher_policy ON skill_publication_audits;
-CREATE POLICY skill_publication_audits_publisher_policy ON skill_publication_audits FOR ALL
-  USING (EXISTS (SELECT 1 FROM skill_publication_submissions submission WHERE submission.submission_id=skill_publication_audits.submission_id))
-  WITH CHECK (EXISTS (SELECT 1 FROM skill_publication_submissions submission WHERE submission.submission_id=skill_publication_audits.submission_id));
+CREATE POLICY skill_publication_audits_publisher_policy ON skill_publication_audits FOR SELECT
+  USING (EXISTS (SELECT 1 FROM skill_publication_submissions submission WHERE submission.submission_id=skill_publication_audits.submission_id));
+CREATE POLICY skill_publication_audits_publisher_insert_policy ON skill_publication_audits FOR INSERT
+  WITH CHECK (actor_user_id=NULLIF(current_setting('app.user_id',true),'') AND EXISTS (
+    SELECT 1 FROM skill_publication_submissions submission
+     WHERE submission.submission_id=skill_publication_audits.submission_id
+       AND skill_publication_audits.namespace=CASE
+         WHEN position('.' in submission.canonical_key)>0
+           THEN split_part(submission.canonical_key,'.',1)
+         ELSE 'legacy'
+       END
+       AND skill_publication_audits.skill_version=submission.skill_version
+       AND (
+         (skill_publication_audits.operation IN ('approve','reject')
+          AND skill_publication_audits.before_status='submitted'
+          AND skill_publication_audits.after_status=CASE skill_publication_audits.operation
+            WHEN 'approve' THEN 'approved' ELSE 'rejected' END
+          AND submission.status=skill_publication_audits.after_status
+          AND submission.reviewed_by=skill_publication_audits.actor_user_id
+          AND submission.version_token=skill_publication_audits.version_token
+          AND EXISTS (SELECT 1 FROM platform_skill_operators operator
+            WHERE operator.user_id=skill_publication_audits.actor_user_id
+              AND operator.status='active' AND operator.role IN ('admin','reviewer')))
+         OR
+         (skill_publication_audits.operation NOT IN ('approve','reject')
+          AND (
+            EXISTS (SELECT 1 FROM platform_skill_operators operator
+              WHERE operator.user_id=skill_publication_audits.actor_user_id
+                AND operator.status='active' AND operator.role='admin')
+            OR (
+              NOT EXISTS (SELECT 1 FROM platform_skill_operators operator
+                WHERE operator.user_id=skill_publication_audits.actor_user_id
+                  AND operator.status='active' AND operator.role='reviewer')
+              AND EXISTS (SELECT 1 FROM skill_namespace_publishers grant_row
+                WHERE grant_row.namespace=split_part(submission.canonical_key,'.',1)
+                  AND grant_row.user_id=skill_publication_audits.actor_user_id
+                  AND grant_row.revoked_at IS NULL)
+            )
+          ))
+       )
+  ));
 CREATE POLICY skill_publication_audits_reviewer_read_policy ON skill_publication_audits FOR SELECT
   USING (EXISTS (SELECT 1 FROM platform_skill_operators operator
     WHERE operator.user_id=NULLIF(current_setting('app.user_id',true),'')
@@ -174,11 +273,3 @@ CREATE POLICY skill_version_files_agent_admin_read_policy ON skill_version_files
   USING (EXISTS (SELECT 1 FROM platform_control_operators actor
     WHERE actor.user_id=NULLIF(current_setting('app.user_id',true),'')
       AND actor.status='active' AND actor.role IN ('operator','admin')));
-
-ALTER TABLE skill_publication_audits ADD COLUMN namespace text;
-ALTER TABLE skill_publication_audits ADD COLUMN skill_version text;
-UPDATE skill_publication_audits audit SET namespace=CASE WHEN position('.' in submission.canonical_key)>0 THEN split_part(submission.canonical_key,'.',1) ELSE 'legacy' END, skill_version=submission.skill_version
-  FROM skill_publication_submissions submission WHERE submission.submission_id=audit.submission_id;
-ALTER TABLE skill_publication_audits ALTER COLUMN namespace SET NOT NULL;
-ALTER TABLE skill_publication_audits ALTER COLUMN skill_version SET NOT NULL;
-

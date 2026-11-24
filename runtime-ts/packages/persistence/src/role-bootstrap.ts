@@ -3562,10 +3562,18 @@ const skillPublisherPolicyBindings = Object.freeze([
     "skill_publication_submissions_reviewer_read_policy",
     "publisher",
   ],
+  [
+    "skill_publication_submissions",
+    "skill_publication_submissions_reviewer_update_policy",
+    "publisher",
+  ],
   ["skill_publication_files", "skill_publication_files_publisher_policy", "publisher"],
+  ["skill_publication_files", "skill_publication_files_publisher_insert_policy", "publisher"],
   ["skill_publication_files", "skill_publication_files_reviewer_read_policy", "publisher"],
   ["skill_publication_commands", "skill_publication_commands_publisher_policy", "publisher"],
+  ["skill_publication_commands", "skill_publication_commands_publisher_insert_policy", "publisher"],
   ["skill_publication_audits", "skill_publication_audits_publisher_policy", "publisher"],
+  ["skill_publication_audits", "skill_publication_audits_publisher_insert_policy", "publisher"],
   ["skill_publication_audits", "skill_publication_audits_reviewer_read_policy", "publisher"],
   ["skills", "skills_admin_publisher_policy", "publisher"],
   ["skill_versions", "skill_versions_admin_publisher_policy", "publisher"],
@@ -3793,7 +3801,9 @@ async function rebindRoleScopedPolicies(
         (table === "skill_namespaces" ||
           table === "skill_namespace_publishers" ||
           table === "skill_namespace_audits" ||
-          policy.endsWith("_reviewer_read_policy"))
+          policy.endsWith("_reviewer_read_policy") ||
+          policy.endsWith("_reviewer_update_policy") ||
+          policy.endsWith("_publisher_insert_policy"))
       )
         continue;
       const role = target === "migrator" ? context.migratorRole : context.skillPublisherRole;

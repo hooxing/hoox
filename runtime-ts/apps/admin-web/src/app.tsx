@@ -33,29 +33,30 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
-import { AgentDefinitionsPage } from "./agent-definitions.js";
 import { BrandingSettings } from "./branding-settings.js";
 import { BrandLogo, brandForeground, brandingTokens, useBranding } from "@hoox/ui-theme/branding";
-import { EvaluationsPage } from "./evaluations.js";
 import { readAdminAccessToken } from "./admin-session.js";
+import { AgentDefinitionsPage } from "./agent-definitions.js";
 import {
   AdminApiError,
   filesToRequests,
   resolvePackagePath,
   SkillAdminApi,
   type SkillAdminApiContract,
+  type SkillNamespaceDto,
 } from "./api.js";
 import { HOOX_APP_ICON_PATH } from "./brand.js";
 import {
-  type AdminControlApiContract,
   AdminControlApi,
+  type AdminControlApiContract,
   type AgentDefinitionApiContract,
 } from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
+import { EvaluationsPage } from "./evaluations.js";
 import { ExternalToolsPage } from "./external-tools.js";
+import { InstallationProgress } from "./installation-progress.js";
 import { IntegrationApiKeysPage } from "./integration-api-keys.js";
 import { IntegrationWebhooksPage } from "./integration-webhooks.js";
-import { InstallationProgress } from "./installation-progress.js";
 import { PlaygroundPage } from "./playground.js";
 import { RunExplorerDetail, RunExplorerList } from "./run-explorer.js";
 import { RunExplorerApi, type RunExplorerApiContract } from "./run-explorer-api.js";
@@ -228,12 +229,14 @@ function SubmissionList({
 
 function CreateSubmissionForm({
   api,
+  namespaces,
   replacing,
   onCancelReplacement,
   onCreated,
   onError,
 }: {
   readonly api: SkillAdminApiContract;
+  readonly namespaces: readonly string[];
   readonly replacing?: SkillSubmissionDto | undefined;
   readonly onCancelReplacement: () => void;
   readonly onCreated: (submission: SkillSubmissionDto) => void;
@@ -354,13 +357,15 @@ function CreateSubmissionForm({
       <form className="create-form" onSubmit={(event) => void submit(event)}>
         <div className="form-grid">
           <label>
-            规范键
+            规范键（使用命名空间前缀）
             <input
               required
               readOnly={replacing !== undefined}
               maxLength={128}
               pattern="[a-z0-9][a-z0-9._-]{0,127}"
-              placeholder="code-review"
+              placeholder={
+                namespaces[0] === undefined ? "code-review" : `${namespaces[0]}.code-review`
+              }
               value={form.canonicalKey}
               onChange={(event) => update("canonicalKey", event.target.value)}
             />
@@ -763,6 +768,11 @@ export function SkillConsole({
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<AdminApiError>();
   const [replacing, setReplacing] = useState<SkillSubmissionDto>();
+  const [publicationAccess, setPublicationAccess] =
+    useState<Readonly<{ role: string; namespaces: readonly string[] }>>();
+  const [managedNamespaces, setManagedNamespaces] = useState<readonly SkillNamespaceDto[]>([]);
+  const [newNamespace, setNewNamespace] = useState("");
+  const [publisherUserId, setPublisherUserId] = useState("");
 
   const loadFirstPage = useCallback(async () => {
     setLoading(true);
@@ -786,6 +796,23 @@ export function SkillConsole({
   useEffect(() => {
     void loadFirstPage();
   }, [loadFirstPage]);
+
+  const loadNamespaceAccess = useCallback(async () => {
+    if (apiClient.getPublicationAccess === undefined) return;
+    try {
+      const access = await apiClient.getPublicationAccess();
+      setPublicationAccess(access);
+      if (access.role === "admin" && apiClient.listNamespaces !== undefined) {
+        setManagedNamespaces(await apiClient.listNamespaces());
+      }
+    } catch {
+      setPublicationAccess(undefined);
+    }
+  }, [apiClient]);
+
+  useEffect(() => {
+    void loadNamespaceAccess();
+  }, [loadNamespaceAccess]);
 
   useEffect(() => {
     if (selectedId === undefined) {
@@ -848,7 +875,10 @@ export function SkillConsole({
       <header className="topbar">
         <div>
           <span className="eyebrow">{branding.productName}</span>
-          <h1>技能发布管理台</h1>
+          <h1>{publicationAccess?.role === "publisher" ? "Skill 自助发布" : "技能发布管理台"}</h1>
+          {publicationAccess?.role === "publisher" && (
+            <p>可发布命名空间：{publicationAccess.namespaces.join("、") || "暂无授权"}</p>
+          )}
         </div>
         <button
           type="button"
@@ -859,11 +889,89 @@ export function SkillConsole({
         </button>
       </header>
 
+      {publicationAccess?.role === "admin" && apiClient.createNamespace !== undefined && (
+        <section className="create-panel" aria-label="Skill 命名空间与发布者授权">
+          <h2>命名空间与发布者</h2>
+          <form
+            className="create-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void apiClient
+                .createNamespace?.(newNamespace)
+                .then(() => {
+                  setNewNamespace("");
+                  return loadNamespaceAccess();
+                })
+                .catch((reason: unknown) => setError(presentError(reason)));
+            }}
+          >
+            <label>
+              新建命名空间
+              <input
+                required
+                maxLength={63}
+                pattern="[a-z0-9][a-z0-9_-]{0,62}"
+                value={newNamespace}
+                onChange={(event) => setNewNamespace(event.target.value)}
+              />
+            </label>
+            <Button htmlType="submit" type="primary">
+              创建命名空间
+            </Button>
+          </form>
+          {managedNamespaces.map((namespace) => (
+            <section key={namespace.namespace} aria-label={`${namespace.namespace} 发布者`}>
+              <h3>{namespace.namespace}</h3>
+              {namespace.publishers.map((publisher) => (
+                <p key={publisher.userId}>
+                  {publisher.userId}{" "}
+                  <Button
+                    onClick={() =>
+                      void apiClient
+                        .revokeNamespace?.(namespace.namespace, publisher.userId)
+                        .then(loadNamespaceAccess)
+                        .catch((reason: unknown) => setError(presentError(reason)))
+                    }
+                  >
+                    撤销授权
+                  </Button>
+                </p>
+              ))}
+              <form
+                className="create-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void apiClient
+                    .grantNamespace?.(namespace.namespace, publisherUserId)
+                    .then(() => {
+                      setPublisherUserId("");
+                      return loadNamespaceAccess();
+                    })
+                    .catch((reason: unknown) => setError(presentError(reason)));
+                }}
+              >
+                <label>
+                  发布者用户 ID
+                  <input
+                    required
+                    maxLength={128}
+                    value={publisherUserId}
+                    onChange={(event) => setPublisherUserId(event.target.value)}
+                  />
+                </label>
+                <Button htmlType="submit">授权发布</Button>
+              </form>
+            </section>
+          ))}
+        </section>
+      )}
+
       {error !== undefined && <ErrorBanner error={error} onDismiss={() => setError(undefined)} />}
 
       <CreateSubmissionForm
         key={replacing?.submissionId ?? "new-skill"}
         api={apiClient}
+        namespaces={publicationAccess?.namespaces ?? []}
         replacing={replacing}
         onCancelReplacement={() => setReplacing(undefined)}
         onCreated={(submission) => {
@@ -978,7 +1086,6 @@ const navigation: NonNullable<MenuProps["items"]> = [
       { key: "/models", icon: <RobotOutlined />, label: "模型服务" },
       { key: "/memory", icon: <BulbOutlined />, label: "记忆服务" },
       { key: "/sandboxes", icon: <DatabaseOutlined />, label: "沙箱服务" },
-      { key: "/skills", icon: <DatabaseOutlined />, label: "Skills" },
     ],
   },
   {
@@ -999,6 +1106,10 @@ const navigation: NonNullable<MenuProps["items"]> = [
       { key: "/integration-webhooks", icon: <ToolOutlined />, label: "Webhook" },
     ],
   },
+];
+
+const publisherNavigation: NonNullable<MenuProps["items"]> = [
+  { key: "/skills", icon: <DatabaseOutlined />, label: "Skill 发布" },
 ];
 
 const pageMetadata: Readonly<
@@ -1134,9 +1245,89 @@ function AdminPlatform({
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const activeControlApi = controlApi ?? defaultManagementApi;
+  const [controlAccess, setControlAccess] = useState(false);
+  const [publicationAccess, setPublicationAccess] = useState(false);
+  const [permissionError, setPermissionError] = useState(false);
+  const [permissionsReady, setPermissionsReady] = useState(false);
+  const [permissionRetry, setPermissionRetry] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: permissionRetry 是权限查询失败后的显式重试触发器。
+  useEffect(() => {
+    let active = true;
+    setPermissionsReady(false);
+    setPermissionError(false);
+    const denied = (reason: unknown) => reason instanceof AdminApiError && reason.status === 404;
+    void Promise.all([
+      activeControlApi.getControlAccess().then(
+        (access) => access.allowed,
+        (reason: unknown) => {
+          throw reason;
+        },
+      ),
+      apiClient.getPublicationAccess === undefined
+        ? Promise.resolve(false)
+        : apiClient.getPublicationAccess().then(
+            () => true,
+            (reason: unknown) => {
+              if (denied(reason)) return false;
+              throw reason;
+            },
+          ),
+    ])
+      .then(([hasControlAccess, hasPublicationAccess]) => {
+        if (!active) return;
+        setControlAccess(hasControlAccess);
+        setPublicationAccess(hasPublicationAccess);
+        setPermissionsReady(true);
+      })
+      .catch(() => {
+        if (!active) return;
+        setPermissionError(true);
+        setPermissionsReady(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeControlApi, apiClient, permissionRetry]);
   const activeKey = navigationKey(location.pathname);
   const { configuration: branding } = useBranding();
   const metadata = pageMetadata[activeKey] ?? defaultPageMetadata;
+
+  if (!permissionsReady) {
+    return (
+      <main className="admin-login-required" aria-live="polite">
+        正在确认后台权限…
+      </main>
+    );
+  }
+
+  if (permissionError) {
+    return (
+      <main className="admin-login-required" role="alert">
+        <p>无法确认后台权限，未加载管理功能。</p>
+        <Button onClick={() => setPermissionRetry((value) => value + 1)}>重试权限查询</Button>
+      </main>
+    );
+  }
+
+  if (!controlAccess && !publicationAccess) {
+    return (
+      <main className="admin-login-required" role="alert">
+        当前账号没有可用的后台管理权限。
+        {onLogout !== undefined && (
+          <button type="button" className="installation-logout" onClick={onLogout}>
+            退出登录
+          </button>
+        )}
+      </main>
+    );
+  }
+
+  const allowedNavigation = [
+    ...(controlAccess ? navigation : []),
+    ...(publicationAccess ? publisherNavigation : []),
+  ];
+  const fallbackPath = controlAccess ? "/overview" : publicationAccess ? "/skills" : "/";
 
   return (
     <Layout className="platform-admin-shell">
@@ -1172,7 +1363,7 @@ function AdminPlatform({
         <Menu
           className="platform-menu"
           mode="inline"
-          items={navigation}
+          items={allowedNavigation}
           selectedKeys={[activeKey]}
           onClick={({ key }) =>
             navigate({ pathname: key, search: location.search === "?setup=1" ? "?setup=1" : "" })
@@ -1210,7 +1401,13 @@ function AdminPlatform({
             <span className="platform-operator">
               <span className="platform-operator-avatar">A</span>
               <span>
-                <strong>平台管理员</strong>
+                <strong>
+                  {controlAccess
+                    ? publicationAccess
+                      ? "平台管理与 Skill 发布"
+                      : "平台控制面"
+                    : "Skill 发布者"}
+                </strong>
                 <small>权限由管理网关确认</small>
               </span>
             </span>
@@ -1223,118 +1420,124 @@ function AdminPlatform({
         </Header>
         <Content className="platform-content">
           <Routes>
-            <Route path="/branding" element={<BrandingSettings />} />
-            <Route path="/integration-api-keys" element={<IntegrationApiKeysPage />} />
-            <Route path="/integration-webhooks" element={<IntegrationWebhooksPage />} />
-            <Route
-              path="/overview"
-              element={
-                <AdminControlConsole
-                  view="overview"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
+            {controlAccess && (
+              <>
+                <Route path="/branding" element={<BrandingSettings />} />
+                <Route path="/integration-api-keys" element={<IntegrationApiKeysPage />} />
+                <Route path="/integration-webhooks" element={<IntegrationWebhooksPage />} />
+                <Route
+                  path="/overview"
+                  element={
+                    <AdminControlConsole
+                      view="overview"
+                      {...(controlApi === undefined ? {} : { api: controlApi })}
+                    />
+                  }
                 />
-              }
-            />
-            <Route
-              path="/analytics"
-              element={
-                <AdminControlConsole
-                  view="analytics"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                <Route
+                  path="/analytics"
+                  element={
+                    <AdminControlConsole
+                      view="analytics"
+                      {...(controlApi === undefined ? {} : { api: controlApi })}
+                    />
+                  }
                 />
-              }
-            />
-            <Route
-              path="/users"
-              element={
-                <AdminControlConsole
-                  view="users"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                <Route
+                  path="/users"
+                  element={
+                    <AdminControlConsole
+                      view="users"
+                      {...(controlApi === undefined ? {} : { api: controlApi })}
+                    />
+                  }
                 />
-              }
-            />
-            <Route
-              path="/identity"
-              element={
-                <AdminControlConsole
-                  view="identity"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                <Route
+                  path="/identity"
+                  element={
+                    <AdminControlConsole
+                      view="identity"
+                      {...(controlApi === undefined ? {} : { api: controlApi })}
+                    />
+                  }
                 />
-              }
-            />
-            <Route
-              path="/models"
-              element={
-                <AdminControlConsole
-                  view="models"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                <Route
+                  path="/models"
+                  element={
+                    <AdminControlConsole
+                      view="models"
+                      {...(controlApi === undefined ? {} : { api: controlApi })}
+                    />
+                  }
                 />
-              }
-            />
-            <Route
-              path="/memory"
-              element={
-                <AdminControlConsole
-                  view="memory"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                <Route
+                  path="/memory"
+                  element={
+                    <AdminControlConsole
+                      view="memory"
+                      {...(controlApi === undefined ? {} : { api: controlApi })}
+                    />
+                  }
                 />
-              }
-            />
-            <Route
-              path="/external-tools"
-              element={<ExternalToolsPage api={defaultManagementApi} />}
-            />
-            <Route
-              path="/external-tools/http-preview"
-              element={<ExternalToolsPage api={defaultManagementApi} httpPreview />}
-            />
-            <Route
-              path="/agent-definitions"
-              element={<AgentDefinitionsRoute api={agentApi} kind="list" />}
-            />
-            <Route
-              path="/agent-definitions/draft/new"
-              element={<AgentDefinitionsRoute api={agentApi} kind="create" />}
-            />
-            <Route
-              path="/agent-definitions/:definitionId"
-              element={<AgentDefinitionsRoute api={agentApi} kind="detail" />}
-            />
-            <Route
-              path="/evaluations"
-              element={<EvaluationsPage agents={agentApi} api={defaultManagementApi} />}
-            />
-            <Route
-              path="/playground"
-              element={<PlaygroundPage agentApi={agentApi} runApi={runApi} />}
-            />
-            <Route path="/runs" element={<RunExplorerListRoute api={runApi} />} />
-            <Route
-              path="/runs/:tenantId/:runId"
-              element={<RunExplorerDetailRoute api={runApi} />}
-            />
-            <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
-            <Route path="/sandboxes" element={<SandboxConfigurationPanel />} />
-            <Route
-              path="/settings"
-              element={
-                <AdminControlConsole
-                  view="settings"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                <Route
+                  path="/external-tools"
+                  element={<ExternalToolsPage api={defaultManagementApi} />}
                 />
-              }
-            />
-            <Route
-              path="/audits"
-              element={
-                <AdminControlConsole
-                  view="audits"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                <Route
+                  path="/external-tools/http-preview"
+                  element={<ExternalToolsPage api={defaultManagementApi} httpPreview />}
                 />
-              }
-            />
-            <Route path="/" element={<Navigate to="/overview" replace />} />
-            <Route path="*" element={<Navigate to="/overview" replace />} />
+                <Route
+                  path="/agent-definitions"
+                  element={<AgentDefinitionsRoute api={agentApi} kind="list" />}
+                />
+                <Route
+                  path="/agent-definitions/draft/new"
+                  element={<AgentDefinitionsRoute api={agentApi} kind="create" />}
+                />
+                <Route
+                  path="/agent-definitions/:definitionId"
+                  element={<AgentDefinitionsRoute api={agentApi} kind="detail" />}
+                />
+                <Route
+                  path="/evaluations"
+                  element={<EvaluationsPage agents={agentApi} api={defaultManagementApi} />}
+                />
+                <Route
+                  path="/playground"
+                  element={<PlaygroundPage agentApi={agentApi} runApi={runApi} />}
+                />
+                <Route path="/runs" element={<RunExplorerListRoute api={runApi} />} />
+                <Route
+                  path="/runs/:tenantId/:runId"
+                  element={<RunExplorerDetailRoute api={runApi} />}
+                />
+                <Route path="/sandboxes" element={<SandboxConfigurationPanel />} />
+                <Route
+                  path="/settings"
+                  element={
+                    <AdminControlConsole
+                      view="settings"
+                      {...(controlApi === undefined ? {} : { api: controlApi })}
+                    />
+                  }
+                />
+                <Route
+                  path="/audits"
+                  element={
+                    <AdminControlConsole
+                      view="audits"
+                      {...(controlApi === undefined ? {} : { api: controlApi })}
+                    />
+                  }
+                />
+              </>
+            )}
+            {publicationAccess && (
+              <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
+            )}
+            <Route path="/" element={<Navigate to={fallbackPath} replace />} />
+            <Route path="*" element={<Navigate to={fallbackPath} replace />} />
           </Routes>
         </Content>
       </Layout>

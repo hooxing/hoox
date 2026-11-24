@@ -91,6 +91,8 @@ import type { PiModelCatalogPort } from "./pi-model-catalog.js";
 import { registerIntegrationRoutes, type IntegrationAdminPort } from "./integration-routes.js";
 import { registerRunExplorerRoutes, type RunExplorerRouteService } from "./run-explorer-routes.js";
 import { registerEvaluationRoutes, type EvaluationAdminPort } from "./evaluation-routes.js";
+import { registerSkillNamespaceRoutes } from "./skill-namespace-routes.js";
+import type { SkillPublicationService } from "@hoox/skill";
 
 const strict = { additionalProperties: false } as const;
 const AuditQuerySchema = Type.Object(
@@ -137,9 +139,18 @@ export interface AdminControlApiDependencies {
   readonly evaluations?: EvaluationAdminPort;
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
+  readonly controlAccess?: { resolveRole(userId: string): Promise<string | undefined> };
   readonly identity: IdentityAdminService;
   readonly modelCatalog: PiModelCatalogPort;
   readonly skills: Omit<SkillAdminApiRouteDependencies, "auth">;
+  readonly skillNamespaces?: Pick<
+    SkillPublicationService,
+    | "publicationAccess"
+    | "listNamespaces"
+    | "createNamespace"
+    | "grantNamespace"
+    | "revokeNamespace"
+  >;
   readonly readiness: { probe(): Promise<void> };
   readonly now?: () => Date;
 }
@@ -621,6 +632,20 @@ export function createAdminControlApiApp(
   registerProviderActions(app, dependencies, "model_provider", "model-providers");
   registerProviderActions(app, dependencies, "memory_provider", "memory-providers");
   registerSkillAdminApiRoutes(app, { auth: dependencies.auth, ...dependencies.skills });
+  if (dependencies.skillNamespaces !== undefined) {
+    registerSkillNamespaceRoutes(app, {
+      auth: dependencies.auth,
+      publications: dependencies.skillNamespaces,
+    });
+  }
+  if (dependencies.controlAccess !== undefined) {
+    app.get("/v1/admin/control/access", async (request) => {
+      const userId = await actor(request);
+      return success(request, {
+        allowed: (await dependencies.controlAccess?.resolveRole(userId)) !== undefined,
+      });
+    });
+  }
 
   async function actor(request: FastifyRequest): Promise<string> {
     const principal = await dependencies.auth.resolve({

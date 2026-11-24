@@ -3,6 +3,7 @@ import { loadMigrations } from "../../runtime-ts/packages/persistence/src/migrat
 export interface PostgreSqlMigrationContract {
   readonly versions: readonly number[];
   readonly latestVersion: number;
+  readonly previousVersion: number;
   readonly count: number;
 }
 
@@ -28,6 +29,7 @@ export function loadPostgreSqlMigrationContract(): Promise<PostgreSqlMigrationCo
     return {
       versions,
       latestVersion,
+      previousVersion: versions.at(-2) ?? 0,
       count: versions.length,
     };
   });

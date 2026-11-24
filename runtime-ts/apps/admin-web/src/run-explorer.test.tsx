@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
+import type { AdminControlApiContract } from "./control-api.js";
 import {
   DeepSeekTrajectoryDebugger,
   loadTrajectoryPages,
@@ -741,6 +742,9 @@ describe("运行详情", () => {
     const container = render(
       <App
         apiClient={{} as SkillAdminApiContract}
+        controlApi={
+          { getControlAccess: async () => ({ allowed: true }) } as AdminControlApiContract
+        }
         runApi={api}
         initialPath="/runs/tenant_a/run_1"
       />,

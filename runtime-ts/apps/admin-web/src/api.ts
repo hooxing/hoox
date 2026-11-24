@@ -68,7 +68,7 @@ export class SkillAdminApi {
     private readonly authorizationHeader: () => string | undefined = adminAuthorizationHeader,
   ) {}
 
-  private async request<T>(path = "", init: RequestInit = {}): Promise<T> {
+  private async request<T>(path = "", init: RequestInit = {}, endpoint = this.baseUrl): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     const authorizationHeader = this.authorizationHeader();
@@ -93,7 +93,7 @@ export class SkillAdminApi {
 
     let response: Response;
     try {
-      response = await this.fetcher(`${this.baseUrl}${path}`, {
+      response = await this.fetcher(`${endpoint}${path}`, {
         ...init,
         credentials: "same-origin",
         headers,
@@ -172,6 +172,52 @@ export class SkillAdminApi {
       body: JSON.stringify(input),
     });
   }
+
+  getPublicationAccess(): Promise<{
+    readonly role: string;
+    readonly namespaces: readonly string[];
+  }> {
+    return this.request("/v1/admin/control/skill-publication-access", {}, "");
+  }
+
+  listNamespaces(): Promise<readonly SkillNamespaceDto[]> {
+    return this.request("/v1/admin/control/skill-namespaces", {}, "");
+  }
+
+  createNamespace(namespace: string): Promise<{ readonly namespace: string }> {
+    return this.request(
+      "/v1/admin/control/skill-namespaces",
+      { method: "POST", body: JSON.stringify({ namespace }) },
+      "",
+    );
+  }
+
+  grantNamespace(namespace: string, userId: string): Promise<{ readonly granted: boolean }> {
+    return this.request(
+      `/v1/admin/control/skill-namespaces/${encodeURIComponent(namespace)}/publishers`,
+      { method: "POST", body: JSON.stringify({ userId }) },
+      "",
+    );
+  }
+
+  revokeNamespace(namespace: string, userId: string): Promise<{ readonly revoked: boolean }> {
+    return this.request(
+      `/v1/admin/control/skill-namespaces/${encodeURIComponent(namespace)}/publishers/${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+      "",
+    );
+  }
+}
+
+export interface SkillNamespaceDto {
+  readonly namespace: string;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly publishers: readonly {
+    readonly userId: string;
+    readonly grantedBy: string;
+    readonly grantedAt: string;
+  }[];
 }
 
 async function fingerprintWriteRequest(
@@ -246,4 +292,14 @@ export type SkillAdminApiContract = Pick<
   | "reviewSubmission"
   | "revokeSubmission"
   | "submitSubmission"
->;
+> &
+  Partial<
+    Pick<
+      SkillAdminApi,
+      | "getPublicationAccess"
+      | "listNamespaces"
+      | "createNamespace"
+      | "grantNamespace"
+      | "revokeNamespace"
+    >
+  >;

@@ -11,7 +11,7 @@ import { RUNTIME_TOOL_CATALOG } from "@hoox/protocol";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AdminApiError } from "./api.js";
+import { AdminApiError, SkillAdminApi } from "./api.js";
 import { App } from "./app.js";
 import type { AdminControlApiContract } from "./control-api.js";
 
@@ -64,6 +64,7 @@ const overview = {
 
 function fixture(): AdminControlApiContract {
   return {
+    getControlAccess: vi.fn(async () => ({ allowed: true })),
     overview: vi.fn(async () => overview),
     agentMetrics: vi.fn(async () => []),
     getIdentityConfiguration: vi.fn(async () => ({
@@ -276,6 +277,10 @@ function runtimeToolAction(container: HTMLElement, label: string): HTMLButtonEle
 
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  vi.spyOn(SkillAdminApi.prototype, "getPublicationAccess").mockResolvedValue({
+    role: "admin",
+    namespaces: [],
+  });
 });
 
 describe("统一平台管理导航", () => {

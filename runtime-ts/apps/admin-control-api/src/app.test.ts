@@ -43,6 +43,7 @@ function fixture(
   sandbox?: AdminControlApiDependencies["sandbox"],
   agents?: AdminControlApiDependencies["agents"],
   branding?: AdminControlApiDependencies["branding"],
+  controlAccess?: AdminControlApiDependencies["controlAccess"],
 ) {
   const auth: AuthContextResolver = {
     resolve: vi.fn(async (input) =>
@@ -191,6 +192,7 @@ function fixture(
       ...(agents === undefined ? {} : { agents }),
       auth,
       control,
+      ...(controlAccess === undefined ? {} : { controlAccess }),
       modelCatalog,
       identity,
       skills: { publications },
@@ -200,6 +202,26 @@ function fixture(
 }
 
 describe("后台控制 API", () => {
+  it("控制面权限探针只返回当前已认证用户是否有独立控制面角色", async () => {
+    const resolveRole = vi.fn(async (id: string) => (id === "user_admin" ? "operator" : undefined));
+    const { app } = fixture(undefined, undefined, undefined, { resolveRole });
+    const response = await app.inject({
+      url: "/v1/admin/control/access",
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toEqual({ allowed: true });
+    expect(resolveRole).toHaveBeenCalledWith("user_admin");
+    expect(
+      (
+        await app.inject({
+          url: "/v1/admin/control/access",
+          headers: { authorization: "Bearer publisher" },
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
+
   it("品牌配置要求管理身份，严格校验字段并转发保存；拒绝权限与冲突映射", async () => {
     const branding = {
       read: vi.fn(async () => ({ generation: 0, configuration: DEFAULT_BRANDING })),

@@ -7,6 +7,7 @@ import { IntegrationApiKeysPage } from "./integration-api-keys.js";
 import { IntegrationWebhooksPage } from "./integration-webhooks.js";
 import { App } from "./app.js";
 import type { SkillAdminApiContract } from "./api.js";
+import type { AdminControlApiContract } from "./control-api.js";
 import { button, enter, field, render, settle } from "./testing/admin-component.js";
 
 const key = {
@@ -55,7 +56,15 @@ describe("后台接入页面", () => {
     ["/integration-api-keys", "API Key"],
     ["/integration-webhooks", "Webhook"],
   ])("路由 %s 提供接入分组和 Tenant 选择", async (path, name) => {
-    const root = render(<App apiClient={{} as SkillAdminApiContract} initialPath={path} />);
+    const root = render(
+      <App
+        apiClient={{} as SkillAdminApiContract}
+        controlApi={
+          { getControlAccess: async () => ({ allowed: true }) } as AdminControlApiContract
+        }
+        initialPath={path}
+      />,
+    );
     await settle();
     expect(root.textContent).toContain("接入");
     expect(root.textContent).toContain(name);

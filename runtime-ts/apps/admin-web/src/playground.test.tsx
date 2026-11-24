@@ -2,6 +2,7 @@
 
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
 import { AdminControlApi } from "./control-api.js";
 import { startPlaygroundRun } from "./playground-api.js";
@@ -34,6 +35,7 @@ function mount({
   accept?: () => Promise<Response>;
 } = {}) {
   const fetcher = vi.fn<typeof fetch>(async (path) => {
+    if (path === "/v1/admin/control/access") return response({ allowed: true });
     if (path === list)
       return response({
         canManage,
@@ -71,7 +73,12 @@ function mount({
     throw Error("意外请求");
   });
   vi.stubGlobal("fetch", fetcher);
-  const page = render(<App controlApi={new AdminControlApi()} initialPath="/playground" />);
+  const apiClient = {
+    getPublicationAccess: async () => ({ role: "admin", namespaces: [] }),
+  } as unknown as SkillAdminApiContract;
+  const page = render(
+    <App apiClient={apiClient} controlApi={new AdminControlApi()} initialPath="/playground" />,
+  );
   return { page, fetcher };
 }
 
@@ -120,7 +127,11 @@ describe("后台 Playground", () => {
     ).toBe("Agent");
     expect(page.textContent).toContain("只有 Agent 管理员");
     expect(page.querySelector("form")).toBeNull();
-    expect(fetcher.mock.calls.map(([path]) => path)).toEqual([list]);
+    expect(
+      fetcher.mock.calls
+        .map(([path]) => path)
+        .filter((path) => path !== "/v1/admin/control/access"),
+    ).toEqual([list]);
   });
 
   it("随本次受理提交 Mock JSON，不自报来源或 Tenant；用受理结果定位 D1 详情", async () => {
@@ -135,7 +146,11 @@ describe("后台 Playground", () => {
     expect(new Headers(req?.headers).get("Authorization")).toBe(`Bearer ${token}`);
     expect(new Headers(req?.headers).get("Idempotency-Key")).toBeTruthy();
     expect(new Headers(req?.headers).has("X-Tenant-Id")).toBe(false);
-    expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
+    expect(
+      fetcher.mock.calls
+        .map(([path]) => path)
+        .filter((path) => path !== "/v1/admin/control/access"),
+    ).toEqual([
       list,
       `${list}/agent_first/revisions`,
       endpoint,
@@ -190,11 +205,11 @@ describe("后台 Playground", () => {
     await chooseDraft(page);
     await submit(page);
     expect(page.textContent).toContain("没有发起 Playground 运行的权限");
-    expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
-      list,
-      `${list}/agent_first/revisions`,
-      endpoint,
-    ]);
+    expect(
+      fetcher.mock.calls
+        .map(([path]) => path)
+        .filter((path) => path !== "/v1/admin/control/access"),
+    ).toEqual([list, `${list}/agent_first/revisions`, endpoint]);
   });
 
   it("不使用缺失的会话，也不从不完整的受理结果推算 Tenant", async () => {

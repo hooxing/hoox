@@ -68,7 +68,7 @@ export function registerInstallationRoutes(
       reply.header("Cache-Control", "no-store");
       if (!limiter.accept(request.ip)) throw new ApiFailure("dependency_unavailable");
       const session = await localAccounts.login(request.body);
-      if (!(await installation.repository.isAdministrator(session.profile.id))) {
+      if (!(await installation.repository.canStartAdminSession(session.profile.id))) {
         await localAccounts.logout(`Bearer ${session.accessToken}`);
         throw new ApiFailure("unauthorized");
       }
@@ -83,7 +83,7 @@ export function registerInstallationRoutes(
     });
     if (
       principal === undefined ||
-      !(await installation.repository.canAccessControl(principal.userId))
+      !(await installation.repository.canStartAdminSession(principal.userId))
     )
       throw new ApiFailure("unauthorized");
     return success(request, { userId: principal.userId });

@@ -50,6 +50,26 @@ function envelope(data: unknown): unknown {
 }
 
 describe("技能发布管理 API", () => {
+  it("调用命名空间权限与授权管理路由", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response(envelope({ role: "publisher", namespaces: ["team-tools"] })))
+      .mockResolvedValueOnce(response(envelope([])))
+      .mockResolvedValueOnce(response(envelope({ namespace: "team-tools" })));
+    const api = new SkillAdminApi(fetcher);
+    await expect(api.getPublicationAccess()).resolves.toEqual({
+      role: "publisher",
+      namespaces: ["team-tools"],
+    });
+    await expect(api.listNamespaces()).resolves.toEqual([]);
+    await api.createNamespace("team-tools");
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/admin/control/skill-publication-access",
+      "/v1/admin/control/skill-namespaces",
+      "/v1/admin/control/skill-namespaces",
+    ]);
+  });
+
   it.each([
     ["未声明可重试标志的503", () => response({}, 503)],
     ["成功响应缺少数据", () => response({})],

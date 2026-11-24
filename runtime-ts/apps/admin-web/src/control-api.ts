@@ -422,6 +422,10 @@ export class AdminControlApi {
     return this.request("/overview");
   }
 
+  getControlAccess(): Promise<{ readonly allowed: boolean }> {
+    return this.request("/access");
+  }
+
   async agentMetrics(query: AgentMetricsQueryDto) {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(query))
@@ -601,6 +605,7 @@ function catalogServiceUnavailable(reason: unknown): reason is AdminApiError {
 export type AdminControlApiContract = Pick<
   AdminControlApi,
   | "overview"
+  | "getControlAccess"
   | "agentMetrics"
   | "getIdentityConfiguration"
   | "updateIdentityConfiguration"

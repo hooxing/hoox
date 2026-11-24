@@ -30,12 +30,14 @@ class ScriptedClient {
       return { rows: [{ role: "admin" }], rowCount: 1 };
     }
     if (sql.includes("FROM skill_publication_commands")) return { rows: [], rowCount: 0 };
-    if (sql.includes("FROM skill_publication_submissions") && sql.includes("FOR UPDATE")) {
+    if (sql.includes("FROM skill_publication_submissions")) {
+      if (values?.[0] === "submission_missing") return { rows: [], rowCount: 0 };
       if (this.submissionStatus !== undefined) {
         return {
           rows: [
             {
               submission_id: "submission_rejected",
+              canonical_key: "rejected.skill",
               status: this.submissionStatus,
               version_token: "1",
               created_by: "user_admin",
@@ -233,8 +235,8 @@ describe("PostgreSQL 管理 Skill 发布持久化", () => {
     },
   );
 
-  it("绕过领域层调用发布也拒绝普通发布者", async () => {
-    const { repository, statements } = directPublicationFixture("draft", "publisher");
+  it("绕过领域层调用发布也拒绝普通审核者", async () => {
+    const { repository, statements } = directPublicationFixture("draft", "reviewer");
     await expect(
       repository.publish({
         actorUserId: userId("user_admin"),
@@ -271,7 +273,9 @@ describe("PostgreSQL 管理 Skill 发布持久化", () => {
     const roleIndex = client.statements.findIndex((sql) =>
       sql.includes("platform_skill_operators"),
     );
-    const submissionIndex = client.statements.findIndex((sql) => sql.includes("FOR UPDATE"));
+    const submissionIndex = client.statements.findIndex((sql) =>
+      sql.includes("FROM skill_publication_submissions"),
+    );
     expect(roleIndex).toBeGreaterThan(0);
     expect(submissionIndex).toBeGreaterThan(roleIndex);
   });

@@ -36,6 +36,13 @@ function requestKeys(fetcher: ReturnType<typeof vi.fn<typeof fetch>>): (string |
 }
 
 describe("后台控制 Web API", () => {
+  it("独立读取当前会话的控制面权限", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ data: { allowed: false } }));
+    const api = new AdminControlApi(fetcher);
+    await expect(api.getControlAccess()).resolves.toEqual({ allowed: false });
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/v1/admin/control/access");
+  });
+
   it("保存已提交但响应丢失时复用原幂等键，成功后新操作释放旧键", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

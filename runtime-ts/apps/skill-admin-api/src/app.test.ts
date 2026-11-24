@@ -27,11 +27,25 @@ class FakeAuthorization implements SkillPublicationAuthorizationPort {
   async resolveRole(user: UserId) {
     return this.roles.get(user);
   }
+
+  async hasNamespaceAccess() {
+    return true;
+  }
+  async listAccessibleNamespaces() {
+    return ["test"];
+  }
 }
 
 class FakePublicationPort implements SkillPublicationPort {
   current: SkillPublicationSubmission | undefined;
   lastList: Parameters<SkillPublicationPort["list"]>[0] | undefined;
+
+  async listNamespaces() {
+    return [];
+  }
+  async createNamespace() {}
+  async grantNamespace() {}
+  async revokeNamespace() {}
 
   async list(input: Parameters<SkillPublicationPort["list"]>[0]) {
     this.lastList = input;
@@ -149,7 +163,7 @@ function fixture() {
 }
 
 const createPayload = {
-  canonicalKey: "code-review",
+  canonicalKey: "test.code-review",
   displayName: "代码审阅",
   publisher: "Cube",
   version: "1.2.3",
@@ -292,7 +306,7 @@ describe("Skill 管理 API", () => {
     await app.close();
   });
 
-  it("管理员上传后直接发布和无原因下架，普通发布者仍无权发布", async () => {
+  it("命名空间发布者可以发布，管理员可继续无原因下架", async () => {
     const { app } = fixture();
     const { version: _version, ...payload } = createPayload;
     const created = await app.inject({
@@ -303,20 +317,13 @@ describe("Skill 管理 API", () => {
     });
     expect(created.statusCode).toBe(200);
     expect(created.json().data.version).toMatch(/^upload-[0-9a-f]{32}$/u);
-    const forbidden = await app.inject({
+    const published = await app.inject({
       method: "POST",
       url: "/v1/admin/skill-submissions/submission_http_test/publish",
       headers: {
         authorization: "Bearer publisher",
         "idempotency-key": "skill-direct-forbidden-0001",
       },
-      payload: { expectedVersionToken: 0, recommended: true },
-    });
-    expect(forbidden.statusCode).toBe(404);
-    const published = await app.inject({
-      method: "POST",
-      url: "/v1/admin/skill-submissions/submission_http_test/publish",
-      headers: { authorization: "Bearer admin", "idempotency-key": "skill-direct-publish-0001" },
       payload: { expectedVersionToken: 0, recommended: true },
     });
     expect(published.statusCode, published.body).toBe(200);

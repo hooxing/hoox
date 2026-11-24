@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { button, enter, field, render, select, settle } from "./testing/admin-component.js";
 import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
+import type { AdminControlApiContract } from "./control-api.js";
 
 const draft: AdminMcpDraftDto = {
   draftId: "draft_1",
@@ -44,7 +45,13 @@ const ok = (data: unknown) => Response.json({ data });
 async function mount(initial: Response, path = "/external-tools") {
   const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(initial);
   vi.stubGlobal("fetch", fetcher);
-  const root = render(<App apiClient={{} as SkillAdminApiContract} initialPath={path} />);
+  const root = render(
+    <App
+      apiClient={{} as SkillAdminApiContract}
+      controlApi={{ getControlAccess: async () => ({ allowed: true }) } as AdminControlApiContract}
+      initialPath={path}
+    />,
+  );
   await settle();
   const click = async (name: string) => {
     act(() => button(root, name).click());

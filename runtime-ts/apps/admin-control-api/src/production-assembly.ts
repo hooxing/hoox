@@ -177,6 +177,10 @@ async function assembleRealService(
       new ModelProviderCredentialCipher(configuration.providerSecrets.modelCredentialEncryptionKey),
     );
     const explorer = new PgAdminRunExplorerRepository(controlPool);
+    const publications = new SkillPublicationService(
+      new PgSkillPublicationAuthorization(skillPublisherPool),
+      new PgSkillPublicationRepository(skillPublisherPool, activePublisher),
+    );
     const dependencies = {
       branding: new PgBrandingRepository(controlPool),
       integrations: new PgIntegrationAdminRepository(
@@ -228,6 +232,7 @@ async function assembleRealService(
         trajectoryStore,
       ),
       auth: input.auth,
+      controlAccess: repository,
       identity: createIdentityAdminService({
         repository: new PgIdentityConfigurationRepository(controlPool),
         roles: repository,
@@ -242,11 +247,9 @@ async function assembleRealService(
       ),
       modelCatalog: createPiModelCatalog(),
       skills: {
-        publications: new SkillPublicationService(
-          new PgSkillPublicationAuthorization(skillPublisherPool),
-          new PgSkillPublicationRepository(skillPublisherPool, activePublisher),
-        ),
+        publications,
       },
+      skillNamespaces: publications,
       readiness: {
         probe: async () => {
           await controlPostgresProbe();

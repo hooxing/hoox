@@ -8,7 +8,11 @@ import { AgentDefinitionsPage } from "./agent-definitions.js";
 import { AgentSkillSelector } from "./agent-skill-selector.js";
 import type { SkillAdminApiContract } from "./api.js";
 import { App } from "./app.js";
-import { AdminControlApi, type AgentDefinitionApiContract } from "./control-api.js";
+import {
+  AdminControlApi,
+  type AdminControlApiContract,
+  type AgentDefinitionApiContract,
+} from "./control-api.js";
 import { button, enter, field, render, select, settle } from "./testing/admin-component.js";
 
 const timestamp = "2026-11-20T00:00:00.000Z";
@@ -255,6 +259,9 @@ describe("后台 Agent 管理", () => {
     const container = render(
       <App
         apiClient={{} as SkillAdminApiContract}
+        controlApi={
+          { getControlAccess: async () => ({ allowed: true }) } as AdminControlApiContract
+        }
         agentApi={api}
         initialPath={`/agent-definitions/${definition.id}`}
       />,

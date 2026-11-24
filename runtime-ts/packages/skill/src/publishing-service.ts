@@ -2,18 +2,20 @@ import { createHash } from "node:crypto";
 import type { UserId } from "@hoox/domain";
 import { SkillServiceError, skillInvariant } from "./errors.js";
 import type {
+  SkillNamespace,
   SkillPublicationAuthorizationPort,
   SkillPublicationCommandResult,
+  SkillPublicationMetadata,
   SkillPublicationPage,
   SkillPublicationPort,
   SkillPublicationRole,
   SkillPublicationSubmission,
   SkillPublicationUploadFile,
-  SkillPublicationMetadata,
 } from "./publishing-contracts.js";
 import { validateSkillPublicationPackage } from "./publishing-package.js";
 
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
+const namespacePattern = /^[a-z0-9][a-z0-9_-]{0,62}$/u;
 const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u;
 
 export class SkillPublicationService {
@@ -22,13 +24,48 @@ export class SkillPublicationService {
     private readonly port: SkillPublicationPort,
   ) {}
 
+  async publicationAccess(
+    userId: UserId,
+  ): Promise<{ readonly role: SkillPublicationRole; readonly namespaces: readonly string[] }> {
+    const role = await this.requireRole(userId, ["publisher", "reviewer", "admin"]);
+    return {
+      role,
+      namespaces: await callPort(() => this.authorization.listAccessibleNamespaces(userId)),
+    };
+  }
+
+  async listNamespaces(userId: UserId): Promise<readonly SkillNamespace[]> {
+    await this.requireRole(userId, ["admin"]);
+    return callNamespacePort(() => this.port.listNamespaces(userId));
+  }
+
+  async createNamespace(userId: UserId, namespace: string): Promise<void> {
+    await this.requireRole(userId, ["admin"]);
+    skillInvariant(namespacePattern.test(namespace), "INVALID_REQUEST", "Skill 命名空间名称无效");
+    return callNamespacePort(() => this.port.createNamespace(userId, namespace));
+  }
+
+  async grantNamespace(userId: UserId, namespace: string, publisherUserId: UserId): Promise<void> {
+    await this.requireRole(userId, ["admin"]);
+    skillInvariant(namespacePattern.test(namespace), "INVALID_REQUEST", "Skill 命名空间名称无效");
+    skillInvariant(idPattern.test(publisherUserId), "INVALID_REQUEST", "发布者身份无效");
+    return callNamespacePort(() => this.port.grantNamespace(userId, namespace, publisherUserId));
+  }
+
+  async revokeNamespace(userId: UserId, namespace: string, publisherUserId: UserId): Promise<void> {
+    await this.requireRole(userId, ["admin"]);
+    skillInvariant(namespacePattern.test(namespace), "INVALID_REQUEST", "Skill 命名空间名称无效");
+    skillInvariant(idPattern.test(publisherUserId), "INVALID_REQUEST", "发布者身份无效");
+    return callNamespacePort(() => this.port.revokeNamespace(userId, namespace, publisherUserId));
+  }
+
   async list(input: {
     readonly userId: UserId;
     readonly limit?: number;
     readonly cursor?: string;
     readonly latestOnly?: boolean;
   }): Promise<SkillPublicationPage> {
-    await this.requireRole(input.userId, ["publisher", "reviewer", "admin"]);
+    const role = await this.requireRole(input.userId, ["publisher", "reviewer", "admin"]);
     const limit = input.limit ?? 30;
     assertVersionToken(limit - 1, "发布列表页大小无效");
     skillInvariant(limit >= 1 && limit <= 100, "INVALID_REQUEST", "发布列表页大小无效");
@@ -38,7 +75,7 @@ export class SkillPublicationService {
       "INVALID_REQUEST",
       "Skill 列表模式无效",
     );
-    return callPort(() =>
+    const page = await callPort(() =>
       this.port.list({
         actorUserId: input.userId,
         limit,
@@ -46,13 +83,28 @@ export class SkillPublicationService {
         ...(input.latestOnly === undefined ? {} : { latestOnly: input.latestOnly }),
       }),
     );
+    if (role !== "publisher") return page;
+    const namespaces = new Set(
+      await callPort(() => this.authorization.listAccessibleNamespaces(input.userId)),
+    );
+    const items = page.items.filter((item) =>
+      namespaceFromCanonicalKey(item.canonicalKey, namespaces),
+    );
+    const lastVisible = items.at(-1);
+    return Object.freeze({
+      items,
+      ...(lastVisible === undefined || page.nextSubmissionId === undefined
+        ? {}
+        : { nextSubmissionId: lastVisible.submissionId }),
+    });
   }
 
   async get(userId: UserId, submissionId: string): Promise<SkillPublicationSubmission> {
-    await this.requireRole(userId, ["publisher", "reviewer", "admin"]);
+    const role = await this.requireRole(userId, ["publisher", "reviewer", "admin"]);
     assertIdentifier(submissionId, "发布申请 ID 无效");
     const submission = await callPort(() => this.port.get({ actorUserId: userId, submissionId }));
     if (submission === undefined) throw new SkillServiceError("NOT_FOUND", "发布申请不存在");
+    if (role === "publisher") await this.requireNamespace(userId, submission.canonicalKey);
     return submission;
   }
 
@@ -63,7 +115,8 @@ export class SkillPublicationService {
     readonly files: readonly SkillPublicationUploadFile[];
     readonly idempotencyKey: string;
   }): Promise<SkillPublicationSubmission> {
-    await this.requireRole(input.userId, ["publisher", "admin"]);
+    const role = await this.requireRole(input.userId, ["publisher", "admin"]);
+    if (role !== "admin") await this.requireNamespace(input.userId, input.metadata.canonicalKey);
     assertIdentifier(input.submissionId, "发布申请 ID 无效");
     assertIdempotencyKey(input.idempotencyKey);
     const packageInput = validateSkillPublicationPackage({
@@ -89,11 +142,15 @@ export class SkillPublicationService {
     if (result.outcome === "created" || result.outcome === "replayed") {
       return result.submission;
     }
+    if (result.outcome === "not_found") {
+      throw new SkillServiceError("NOT_FOUND", "Skill 命名空间不存在");
+    }
     throw new SkillServiceError("CONFLICT", "Skill 规范键或版本已存在");
   }
 
   async submit(input: TransitionRequest): Promise<SkillPublicationSubmission> {
-    await this.requireRole(input.userId, ["publisher", "admin"]);
+    const role = await this.requireRole(input.userId, ["publisher", "admin"]);
+    if (role !== "admin") await this.requireSubmissionNamespace(input.userId, input.submissionId);
     return this.transition(input, "submit", [], (request) => this.port.submit(request));
   }
 
@@ -125,7 +182,8 @@ export class SkillPublicationService {
   async publish(
     input: TransitionRequest & { readonly recommended: boolean },
   ): Promise<SkillPublicationSubmission> {
-    await this.requireRole(input.userId, ["admin"]);
+    const role = await this.requireRole(input.userId, ["publisher", "admin"]);
+    if (role !== "admin") await this.requireSubmissionNamespace(input.userId, input.submissionId);
     return this.transition(input, "publish", [input.recommended], (request) =>
       this.port.publish({ ...request, recommended: input.recommended }),
     );
@@ -134,7 +192,8 @@ export class SkillPublicationService {
   async revoke(
     input: TransitionRequest & { readonly reason?: string },
   ): Promise<SkillPublicationSubmission> {
-    await this.requireRole(input.userId, ["admin"]);
+    const role = await this.requireRole(input.userId, ["publisher", "admin"]);
+    if (role !== "admin") await this.requireSubmissionNamespace(input.userId, input.submissionId);
     if (input.reason !== undefined) assertReason(input.reason, "下架原因无效");
     return this.transition(input, "revoke", [input.reason ?? null], (request) =>
       this.port.revoke({
@@ -187,6 +246,22 @@ export class SkillPublicationService {
     }
     return role;
   }
+
+  private async requireSubmissionNamespace(userId: UserId, submissionId: string): Promise<void> {
+    const submission = await this.get(userId, submissionId);
+    await this.requireNamespace(userId, submission.canonicalKey);
+  }
+
+  private async requireNamespace(userId: UserId, canonicalKey: string): Promise<void> {
+    const separator = canonicalKey.indexOf(".");
+    const namespace = separator < 1 ? "" : canonicalKey.slice(0, separator);
+    if (
+      !namespacePattern.test(namespace) ||
+      !(await callPort(() => this.authorization.hasNamespaceAccess(userId, namespace)))
+    ) {
+      throw new SkillServiceError("NOT_FOUND", "Skill 命名空间不存在");
+    }
+  }
 }
 
 interface TransitionRequest {
@@ -233,11 +308,33 @@ function digest(operation: string, fields: readonly unknown[]): string {
     .digest("hex");
 }
 
+function namespaceFromCanonicalKey(canonicalKey: string, namespaces: ReadonlySet<string>): boolean {
+  const separator = canonicalKey.indexOf(".");
+  return separator > 0 && namespaces.has(canonicalKey.slice(0, separator));
+}
+
 async function callPort<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
   } catch (error) {
     if (error instanceof SkillServiceError) throw error;
     throw new SkillServiceError("DEPENDENCY_UNAVAILABLE", "管理员 Skill 发布服务暂时不可用");
+  }
+}
+
+async function callNamespacePort<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof SkillServiceError) throw error;
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String((error as { readonly code?: unknown }).code)
+        : "";
+    if (code === "CONFLICT")
+      throw new SkillServiceError("CONFLICT", "Skill 命名空间或授权状态已变化");
+    if (code === "CONSTRAINT_VIOLATION")
+      throw new SkillServiceError("NOT_FOUND", "Skill 命名空间或发布者不存在");
+    throw new SkillServiceError("DEPENDENCY_UNAVAILABLE", "Skill 命名空间管理服务暂时不可用");
   }
 }

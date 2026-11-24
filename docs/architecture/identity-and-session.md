@@ -91,3 +91,5 @@ production Web 使用内嵌身份入口，旧 `/v1/auth/register` 和 `/v1/auth/
 `POST /v1/installation/login` 只允许有效的本地管理员密码登录，使用既有 scrypt 凭据与 Hoox Session。工作台正常邮箱登录被身份服务以 401 拒绝时可尝试该入口，其他故障不降级。初始管理员不会按邮箱自动绑定后续 Better Auth 注册身份；显式账号关联尚未提供。
 
 管理 API 收到 Hoox Session 后，通过固定主 API 的 `GET /v1/auth/admin-principal` 确认账号和有效管理角色，禁止重定向、限制超时和响应大小；验证失败不会降级固定开发身份。viewer、operator、admin 及已有 Skill 管理身份继续进入各领域授权，页面不能替代服务端权限校验。安装来源、令牌和部署秘密见[配置参考](../reference/configuration.md#后台管理)，决策理由见[后台控制面与运行配置](admin-control-plane.md)。
+
+平台管理员可在管理页签发 `hoox_at_` 后台访问令牌，服务端只保存每枚令牌独立随机盐的哈希。每次请求都按创建者身份重新查询当前后台角色，并拒绝已撤销、过期、失权或超出 `agent-config:read` / `agent-config:write` 作用域的请求；写作用域同时授予读取。令牌仅可调用 Agent 配置读取、导出、dry-run 校验和导入路由，不能访问令牌管理或其他后台接口。使用审计按请求记录，最后使用时间最多每五分钟更新一次。访问令牌只在创建响应返回一次；JWT 后台凭据仍可用于 CLI 兼容调用。

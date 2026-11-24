@@ -98,6 +98,9 @@ vi.mock("@hoox/persistence/admin", () => ({
       return Promise.resolve({});
     }
   },
+  PgAdminAccessTokenRepository: class {
+    constructor() {}
+  },
   PgAgentDefinitionRepository: class {
     constructor(pool: unknown) {
       mocks.agentRepositoryConstructed(pool);

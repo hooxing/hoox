@@ -1,5 +1,7 @@
 # 配置参考
 
+CLI 的可选 `HOOX_URL` 和 `HOOX_TOKEN` 只由命令行进程读取，分别表示后台 origin 与后台 Bearer 凭据；不会自动加载 `.env`。`--token-file` 优先于 `HOOX_TOKEN`，本地离线校验不要求这两个变量。后台 JWT 的独立 audience、文件和重试约束见 [CLI 参考](cli.md)。这两个变量不是服务启动必填项。
+
 Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。development 和 production 使用不同契约；示例文件只允许明显占位值。
 
 ## 配置文件

@@ -203,6 +203,8 @@ const adminControlTables = new Set([
   "agent_evaluation_results",
   "agent_evaluation_case_jobs",
   "admin_run_content_access_audits",
+  "admin_access_tokens",
+  "admin_access_token_audits",
 ]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
@@ -224,6 +226,8 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["agent_revision_revocations", new Set(["SELECT"])],
   ["agent_definition_commands", new Set()],
   ["agent_definition_audits", new Set()],
+  ["admin_access_tokens", new Set()],
+  ["admin_access_token_audits", new Set()],
   ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspace_revisions", new Set(["SELECT", "INSERT"])],
@@ -1457,6 +1461,14 @@ export async function activeTablePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
+  const accessTokenState = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.admin_access_tokens',$1::text)) IS NOT NULL AND to_regclass(format('%I.admin_access_token_audits',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  if (!accessTokenState.rows[0]?.present) {
+    policy.delete("admin_access_tokens");
+    policy.delete("admin_access_token_audits");
+  }
   if (await hasRunFeedback(client, schema))
     policy.set("run_feedback", new Set(["SELECT", "INSERT", "DELETE"]));
   if (await hasClientTools(client, schema))
@@ -2692,6 +2704,14 @@ async function assertAdminControlBoundary(
   const sandboxEnabled = enabled && (await hasManagedSandboxState(client, context.schema));
   const integrationsEnabled = enabled && (await hasIntegrationAdminState(client, context.schema));
   const endUsersEnabled = enabled && (await hasApiEndUserState(client, context.schema));
+  const accessTokensEnabled =
+    enabled &&
+    (
+      await client.query<{ present: boolean }>(
+        "SELECT to_regclass(format('%I.admin_access_tokens',$1::text)) IS NOT NULL AND to_regclass(format('%I.admin_access_token_audits',$1::text)) IS NOT NULL AS present",
+        [context.schema],
+      )
+    ).rows[0]?.present === true;
   const allowed = new Map<string, ReadonlySet<string>>(
     enabled
       ? [
@@ -2719,6 +2739,10 @@ async function assertAdminControlBoundary(
     allowed.set("integration_admin_audits", new Set(["SELECT", "INSERT"]));
   }
   if (endUsersEnabled) allowed.set("api_end_users", new Set(["SELECT"]));
+  if (accessTokensEnabled) {
+    allowed.set("admin_access_tokens", new Set(["SELECT", "INSERT"]));
+    allowed.set("admin_access_token_audits", new Set(["SELECT", "INSERT"]));
+  }
   const externalToolAdminEnabled =
     enabled && (await hasExternalToolAdminState(client, context.schema));
   if (externalToolAdminEnabled) {
@@ -2869,6 +2893,12 @@ async function assertAdminControlBoundary(
     updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
   }
   if (endUsersEnabled) updatePolicy.set("api_end_users", new Set(["status"]));
+  if (accessTokensEnabled) {
+    updatePolicy.set(
+      "admin_access_tokens",
+      new Set(["last_used_at", "last_use_audited_at", "revoked_at"]),
+    );
+  }
   if (updatePolicy.size > 0) {
     const updates = await client.query<{
       readonly table_name: string;
@@ -3606,6 +3636,10 @@ const externalToolAdminTables = Object.freeze([
 ] as const);
 
 const adminControlPolicyBindings = Object.freeze([
+  ["admin_access_tokens", "admin_access_tokens_migrator_policy", "migrator"],
+  ["admin_access_tokens", "admin_access_tokens_admin_policy", "control"],
+  ["admin_access_token_audits", "admin_access_token_audits_migrator_policy", "migrator"],
+  ["admin_access_token_audits", "admin_access_token_audits_admin_policy", "control"],
   ["skills", "skills_agent_admin_read_policy", "control"],
   ["skill_versions", "skill_versions_agent_admin_read_policy", "control"],
   ["skill_version_files", "skill_version_files_agent_admin_read_policy", "control"],
@@ -3836,7 +3870,16 @@ async function rebindRoleScopedPolicies(
     }
   }
   if (await hasAdminControlState(client, context.schema)) {
+    const accessTokenTables = await client.query<{ present: boolean }>(
+      "SELECT to_regclass(format('%I.admin_access_tokens',$1::text)) IS NOT NULL AND to_regclass(format('%I.admin_access_token_audits',$1::text)) IS NOT NULL AS present",
+      [context.schema],
+    );
     for (const [table, policy, target] of adminControlPolicyBindings) {
+      if (
+        (table === "admin_access_tokens" || table === "admin_access_token_audits") &&
+        !accessTokenTables.rows[0]?.present
+      )
+        continue;
       if (
         (policy === "skills_agent_admin_read_policy" ||
           policy === "skill_versions_agent_admin_read_policy" ||
@@ -4229,6 +4272,18 @@ async function grantAdminControlAccess(
        GRANT SELECT,INSERT ON TABLE
          ${schema}.identity_auth_audits,${schema}.identity_auth_commands TO ${control};
        GRANT DELETE ON TABLE ${schema}.better_auth_sessions TO ${control}`,
+    );
+  }
+  const accessTokenState = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.admin_access_tokens',$1::text)) IS NOT NULL AND to_regclass(format('%I.admin_access_token_audits',$1::text)) IS NOT NULL AS present",
+    [context.schema],
+  );
+  if (accessTokenState.rows[0]?.present) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.admin_access_tokens TO ${control};
+       GRANT UPDATE(last_used_at,last_use_audited_at,revoked_at)
+         ON TABLE ${schema}.admin_access_tokens TO ${control};
+       GRANT SELECT,INSERT ON TABLE ${schema}.admin_access_token_audits TO ${control}`,
     );
   }
 }

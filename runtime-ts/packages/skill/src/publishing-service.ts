@@ -2,15 +2,15 @@ import { createHash } from "node:crypto";
 import type { UserId } from "@hoox/domain";
 import { SkillServiceError, skillInvariant } from "./errors.js";
 import type {
+  SkillNamespace,
   SkillPublicationAuthorizationPort,
   SkillPublicationCommandResult,
+  SkillPublicationMetadata,
   SkillPublicationPage,
   SkillPublicationPort,
   SkillPublicationRole,
   SkillPublicationSubmission,
   SkillPublicationUploadFile,
-  SkillPublicationMetadata,
-  SkillNamespace,
 } from "./publishing-contracts.js";
 import { validateSkillPublicationPackage } from "./publishing-package.js";
 
@@ -141,6 +141,9 @@ export class SkillPublicationService {
     );
     if (result.outcome === "created" || result.outcome === "replayed") {
       return result.submission;
+    }
+    if (result.outcome === "not_found") {
+      throw new SkillServiceError("NOT_FOUND", "Skill 命名空间不存在");
     }
     throw new SkillServiceError("CONFLICT", "Skill 规范键或版本已存在");
   }

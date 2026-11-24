@@ -387,10 +387,13 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
           if (keyNamespace !== "") {
             await lockKey(client, namespacePublisherLock(keyNamespace, command.actorUserId));
           }
-          await requireRole(client, command.actorUserId, ["publisher", "admin"]);
-          if ((await readActiveRole(client, command.actorUserId)) === "publisher") {
+          const role = await readActiveRole(client, command.actorUserId);
+          if (role !== "publisher" && role !== "admin") {
+            return { outcome: "not_found" as const };
+          }
+          if (role === "publisher") {
             if (!(await hasPublisherNamespace(client, command.actorUserId, keyNamespace))) {
-              return { outcome: "key_conflict" as const };
+              return { outcome: "not_found" as const };
             }
           }
           if (keyNamespace !== "") await lockKey(client, namespaceNameLock(keyNamespace));
@@ -448,7 +451,11 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
         },
         false,
       );
-      if (result.outcome === "key_conflict" || result.outcome === "version_conflict") {
+      if (
+        result.outcome === "not_found" ||
+        result.outcome === "key_conflict" ||
+        result.outcome === "version_conflict"
+      ) {
         return result;
       }
       return {

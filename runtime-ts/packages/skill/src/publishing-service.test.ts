@@ -1,8 +1,9 @@
-import { isoTimestamp, userId, type UserId } from "@hoox/domain";
+import { isoTimestamp, type UserId, userId } from "@hoox/domain";
 import { describe, expect, it } from "vitest";
 import type {
   SkillPublicationAuthorizationPort,
   SkillPublicationCommandResult,
+  SkillPublicationCreateResult,
   SkillPublicationPort,
   SkillPublicationRole,
   SkillPublicationSubmission,
@@ -68,6 +69,7 @@ class FakeAuthorization implements SkillPublicationAuthorizationPort {
 
 class FakePort implements SkillPublicationPort {
   current = submission;
+  createResult: SkillPublicationCreateResult | undefined;
   lastCreate: Parameters<SkillPublicationPort["create"]>[0] | undefined;
   lastCommand: Parameters<SkillPublicationPort["submit"]>[0] | undefined;
   lastList: Parameters<SkillPublicationPort["list"]>[0] | undefined;
@@ -88,9 +90,11 @@ class FakePort implements SkillPublicationPort {
     return this.current;
   }
 
-  async create(input: Parameters<SkillPublicationPort["create"]>[0]) {
+  async create(
+    input: Parameters<SkillPublicationPort["create"]>[0],
+  ): Promise<SkillPublicationCreateResult> {
     this.lastCreate = input;
-    return { outcome: "created" as const, submission: this.current };
+    return this.createResult ?? { outcome: "created", submission: this.current };
   }
 
   async submit(input: Parameters<SkillPublicationPort["submit"]>[0]) {
@@ -226,6 +230,36 @@ describe("管理员 Skill 发布领域服务", () => {
       }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(port.lastCommand).toBeUndefined();
+  });
+
+  it("持久化提交前发现命名空间授权已撤销时隐藏发布冲突", async () => {
+    const port = new FakePort();
+    port.createResult = { outcome: "not_found" };
+    const service = new SkillPublicationService(new FakeAuthorization(), port);
+    await expect(
+      service.create({
+        userId: publisher,
+        submissionId: "submission_revoked_during_create",
+        metadata: {
+          canonicalKey: "team.revoked-skill",
+          displayName: "撤权竞态技能",
+          publisher: "Cube",
+          description: "验证撤权后的统一隐藏语义",
+          compatibility: "runtime >= 1",
+          sourceUrl: "https://example.invalid/repo",
+          sourceRevision: "commit-123",
+          licenseSpdx: "MIT",
+        },
+        files: [
+          {
+            path: "SKILL.md",
+            mediaType: "text/markdown",
+            contentBase64: Buffer.from("# Revoked\n").toString("base64"),
+          },
+        ],
+        idempotencyKey: "skill-publish-revoked-create-01",
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
   it("不接受缺少入口文件的包，即使操作者是管理员", async () => {

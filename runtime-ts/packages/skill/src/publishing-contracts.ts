@@ -103,7 +103,7 @@ export type SkillPublicationCreateResult =
       readonly outcome: "created" | "replayed";
       readonly submission: SkillPublicationSubmission;
     }
-  | { readonly outcome: "key_conflict" | "version_conflict" };
+  | { readonly outcome: "not_found" | "key_conflict" | "version_conflict" };
 
 export type SkillPublicationCommandResult =
   | {

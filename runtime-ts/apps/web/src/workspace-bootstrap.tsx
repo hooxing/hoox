@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { SiteRoot } from "./site-root.js";
+import { BrandingProvider } from "@hoox/ui-theme/branding";
 
 document.documentElement.dataset.surface = "workspace";
 document.title = "Hoox 工作台";
@@ -16,4 +17,9 @@ if (robots === null) {
   document.head.append(tag);
 }
 const rootElement = document.getElementById("root");
-if (rootElement !== null) createRoot(rootElement).render(<SiteRoot />);
+if (rootElement !== null)
+  createRoot(rootElement).render(
+    <BrandingProvider>
+      <SiteRoot />
+    </BrandingProvider>,
+  );

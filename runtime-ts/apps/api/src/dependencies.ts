@@ -1,5 +1,6 @@
 import type { ScheduledTaskManagementPort } from "@hoox/automation";
 import type { InstallationRepository } from "@hoox/identity";
+import type { BrandConfiguration } from "@hoox/protocol";
 import type { BlobStore } from "@hoox/persistence/blob";
 import type {
   AgentDefinitionRepositoryPort,
@@ -40,6 +41,7 @@ import type {
 } from "./ports.js";
 
 export interface ApiDependencies {
+  readonly publicBranding?: { read(): Promise<BrandConfiguration> };
   readonly auth: AuthContextResolver;
   readonly clientToolResults?: Pick<PgClientToolResults, "submit">;
   readonly evaluationCommand?: Pick<PgEvaluationCommand, "execute">;

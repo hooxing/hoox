@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useBranding, BrandLogo } from "@hoox/ui-theme/branding";
 
 type InstallationStatus = { initialized: boolean; setupTokenRequired: boolean };
 const sessionKey = "hoox.auth-session.v2";
@@ -19,6 +20,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function AdminAccessGate({ children }: { readonly children: ReactNode }) {
+  const { configuration: branding } = useBranding();
   const [status, setStatus] = useState<InstallationStatus>();
   const [authenticated, setAuthenticated] = useState(false);
   const [error, setError] = useState("");
@@ -98,7 +100,7 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
     <main className="installation-page">
       <section className="installation-card" aria-labelledby="installation-title">
         <a className="installation-brand" href="/">
-          Hoox
+          {branding.logoDataUrl ? <BrandLogo /> : branding.productName}
         </a>
         <p className="installation-eyebrow">
           {status?.initialized ? "管理控制台" : "首次运行 · 1 / 3"}
@@ -108,7 +110,7 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
             ? "正在连接服务"
             : status.initialized
               ? "管理员登录"
-              : "欢迎使用 Hoox"}
+              : `欢迎使用 ${branding.productName}`}
         </h1>
         <p className="installation-description">
           {status?.initialized

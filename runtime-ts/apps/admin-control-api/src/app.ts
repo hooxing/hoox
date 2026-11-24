@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { BrandingError, type BrandingAdminPort } from "@hoox/admin-control";
+import { SaveBrandingRequestSchema, type SaveBrandingRequest } from "@hoox/protocol";
 import { DomainError } from "@hoox/domain";
 import {
   type AdminControlService,
@@ -128,6 +130,7 @@ type ControlServiceContract = Pick<
 >;
 
 export interface AdminControlApiDependencies {
+  readonly branding?: BrandingAdminPort;
   readonly integrations?: IntegrationAdminPort;
   readonly sandbox?: SandboxControlServicePort;
   readonly runs?: RunExplorerRouteService;
@@ -315,6 +318,20 @@ export function createAdminControlApiApp(
   }
   if (dependencies.runs !== undefined) {
     registerRunExplorerRoutes(app, dependencies.runs, { actor, success });
+  }
+  if (dependencies.branding) {
+    const branding = dependencies.branding;
+    app.get("/v1/admin/control/branding", async (request) =>
+      success(request, await branding.read(await actor(request))),
+    );
+    app.put<{ Body: SaveBrandingRequest }>(
+      "/v1/admin/control/branding",
+      {
+        preValidation: async (request) => requireJson(request),
+        schema: { body: SaveBrandingRequestSchema },
+      },
+      async (request) => success(request, await branding.save(await actor(request), request.body)),
+    );
   }
   if (dependencies.externalTools) {
     registerExternalToolRoutes(app, dependencies.externalTools, {
@@ -783,6 +800,8 @@ class AdminControlApiFailure extends Error {
 }
 
 function failureKind(error: unknown, request: FastifyRequest): FailureKind {
+  if (error instanceof BrandingError)
+    return error.kind === "forbidden" ? "unauthorized" : "conflict";
   if (error instanceof AgentConfigurationError) return "bad_request";
   if (
     request.routeOptions.url?.startsWith("/v1/admin/control/integrations/") &&

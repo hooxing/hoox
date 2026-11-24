@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const root = new URL("../", import.meta.url);
@@ -70,8 +70,12 @@ describe("Hoox 项目身份契约", () => {
       "<title>Hoox 内部轨迹</title>",
     );
     const workspaceView = readText("runtime-ts/apps/web/src/workspace-view.tsx");
-    expect(workspaceView).toContain(">Hoox<");
+    // 白标后工作台名称来自品牌配置，未配置时的默认产品名固定为 Hoox。
+    expect(workspaceView).toContain("{configuration.productName}");
     expect(workspaceView).toContain('src={HOOX_HORIZONTAL_PATH} alt="Hoox"');
+    expect(readText("runtime-ts/packages/protocol/src/branding.ts")).toContain(
+      'productName: "Hoox"',
+    );
     expect(readText("runtime-ts/apps/web/src/brand.ts")).toContain(
       "brand/hoox-horizontal-transparent.png",
     );

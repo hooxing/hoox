@@ -50,6 +50,7 @@ vi.mock("@hoox/persistence/blob", () => ({
 }));
 vi.mock("@hoox/persistence/postgres", () => ({
   PgInstallationRepository: class {},
+  PgPublicBrandingRepository: class {},
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
 }));
 vi.mock("@hoox/persistence/thread", () => ({

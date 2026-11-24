@@ -3588,3 +3588,31 @@ h2 {
   border-radius: 10px;
   background: var(--surface-page);
 }
+
+.custom-brand-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-weight: var(--weight-semibold);
+}
+
+.custom-brand-logo img {
+  max-width: 80px;
+  max-height: 48px;
+  object-fit: contain;
+}
+
+.branding-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.branding-footer a {
+  color: var(--text-secondary);
+}

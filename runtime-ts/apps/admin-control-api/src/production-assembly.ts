@@ -18,6 +18,7 @@ import {
   ExternalToolDraftCredentialCipher,
   PgExternalToolAdminRepository,
   PgAdminControlRepository,
+  PgBrandingRepository,
   PgIntegrationAdminRepository,
   PgAdminRunExplorerRepository,
   PgAgentDefinitionRepository,
@@ -181,6 +182,7 @@ async function assembleRealService(
       new PgSkillPublicationRepository(skillPublisherPool, activePublisher),
     );
     const dependencies = {
+      branding: new PgBrandingRepository(controlPool),
       integrations: new PgIntegrationAdminRepository(
         controlPool,
         configuration.providerSecrets.webhookSecretEncryptionKey === undefined

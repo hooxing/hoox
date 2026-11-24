@@ -6,6 +6,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SkillAdminApiContract } from "./api.js";
 import { App, browserRouterBasename } from "./app.js";
+import { DEFAULT_BRANDING } from "@hoox/protocol";
+import { BrandingProvider } from "@hoox/ui-theme/branding";
 
 const digest = "b".repeat(64);
 const roots: Root[] = [];
@@ -125,6 +127,38 @@ afterEach(() => {
 });
 
 describe("技能发布管理界面", () => {
+  it("后台默认品牌 DOM 不变，定制产品名和主题同时生效", async () => {
+    const api = apiFixture(submission());
+    const baseline = mount(api);
+    await settle();
+    const before = baseline.querySelector(".platform-logo")?.innerHTML;
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.push(root);
+    await act(async () =>
+      root.render(
+        <BrandingProvider load={false}>
+          <App apiClient={api} />
+        </BrandingProvider>,
+      ),
+    );
+    await settle();
+    expect(host.querySelector(".platform-logo")?.innerHTML).toBe(before);
+    await act(async () =>
+      root.render(
+        <BrandingProvider
+          key="custom"
+          load={false}
+          initial={{ ...DEFAULT_BRANDING, productName: "定制后台", primaryColor: "#336699" }}
+        >
+          <App apiClient={api} />
+        </BrandingProvider>,
+      ),
+    );
+    expect(host.querySelector(".platform-logo")?.textContent).toContain("定制后台");
+    expect(document.documentElement.style.getPropertyValue("--action-primary")).toBe("#336699");
+  });
   it("真实后台缺少 Hoox 会话时展示工作台登录入口", () => {
     localStorage.clear();
     const container = document.createElement("div");

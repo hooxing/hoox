@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LandingPage } from "./landing-page.js";
 import { SiteRoot } from "./site-root.js";
+import { BrandingProvider } from "@hoox/ui-theme/branding";
 
 const { hydrateRoot, render } = vi.hoisted(() => ({ hydrateRoot: vi.fn(), render: vi.fn() }));
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render }), hydrateRoot }));
@@ -44,7 +45,8 @@ describe("Web 入口装配", () => {
     document.body.innerHTML = '<div id="root"></div>';
     await import("./workspace-bootstrap.js");
     expect(document.documentElement.dataset.surface).toBe("workspace");
-    expect(render.mock.calls[0]?.[0].type).toBe(SiteRoot);
+    expect(render.mock.calls[0]?.[0].type.name).toBe(BrandingProvider.name);
+    expect(render.mock.calls[0]?.[0].props.children.type).toBe(SiteRoot);
     expect(document.title).toBe("Hoox 工作台");
     expect(document.querySelector('meta[name="robots"]')?.getAttribute("content")).toBe(
       "noindex, nofollow",
@@ -58,7 +60,8 @@ describe("Web 入口装配", () => {
     await import("./bootstrap.js");
     await vi.dynamicImportSettled();
     expect(document.documentElement.dataset.surface).toBe("workspace");
-    expect(render.mock.calls[0]?.[0].type).toBe(SiteRoot);
+    expect(render.mock.calls[0]?.[0].type.name).toBe(BrandingProvider.name);
+    expect(render.mock.calls[0]?.[0].props.children.type).toBe(SiteRoot);
     expect(hydrateRoot).not.toHaveBeenCalled();
     expect(
       document.head.querySelector('link[rel="canonical"], meta[property="og:type"]'),

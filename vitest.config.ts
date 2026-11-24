@@ -5,6 +5,9 @@ export default defineConfig({
   resolve: {
     // Workspace 测试必须命中当前源码，不能误用上一次构建残留的 dist。
     alias: {
+      "@hoox/ui-theme/branding": fileURLToPath(
+        new URL("./runtime-ts/packages/ui-theme/branding.tsx", import.meta.url),
+      ),
       "@hoox/protocol/file-references": fileURLToPath(
         new URL("./runtime-ts/packages/protocol/src/file-references.ts", import.meta.url),
       ),

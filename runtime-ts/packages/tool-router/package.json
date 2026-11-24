@@ -15,6 +15,10 @@
     "typebox": "1.1.38"
   },
   "exports": {
+    "./cli-files": {
+      "types": "./src/cli-files.ts",
+      "default": "./dist/cli-files.js"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./dist/index.js"

@@ -1,0 +1,31 @@
+{
+  "name": "@hoox/cli",
+  "version": "0.1.0",
+  "description": "Hoox Agent 配置命令行",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "hoox": "dist/hoox.js"
+  },
+  "publishConfig": {
+    "directory": "dist"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/build.mjs",
+    "clean": "tsc -b tsconfig.json --clean",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "typecheck:built": "tsc -p tsconfig.test.json",
+    "test": "vitest run --root ../../.. runtime-ts/packages/cli/tests"
+  },
+  "dependencies": {
+    "@hoox/protocol": "workspace:*",
+    "@hoox/tool-router": "workspace:*",
+    "esbuild": "0.27.7"
+  }
+}

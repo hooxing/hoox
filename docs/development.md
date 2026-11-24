@@ -192,6 +192,19 @@ corepack pnpm dev:admin:web
 
 统一 Admin API 在同一个 3003 listener 提供模型、记忆、配置、统计与 Skill 管理路由，共用管理身份，但在进程内继续使用 Admin Control 和 Skill Publisher 两套数据库连接；Skill 发布对象存储也保持独立凭据。详细边界见[维护者开发边界](maintainers/runtime-development-boundaries.md#管理员-skill-上架)与[后台控制面与运行配置](architecture/admin-control-plane.md)。轨迹查看命令见[命令参考](reference/commands.md)。
 
+## 用 CLI 管理 Agent 配置
+
+准备符合 [Agent 配置文件格式](reference/agent-configuration.md)的 `agent.yaml` 后，可先离线校验，再将配置推送为草稿：
+
+```sh
+corepack pnpm --filter @hoox/cli... build
+node runtime-ts/packages/cli/dist/hoox.js validate agent.yaml
+export HOOX_URL=https://control.example.invalid
+node runtime-ts/packages/cli/dist/hoox.js push agent.yaml --token-file /path/to/hoox-access-token --json
+```
+
+推荐在后台创建仅具备所需 Agent 配置作用域的访问令牌，并将其安全写入凭据文件；JWT 仍可作为备选。push 不发布；草稿发布仍需后台显式操作。参数、退出码、pull 与重试限制见 [`hoox` 命令行参考](reference/cli.md)。
+
 ## 提交前验证
 
 文档改动至少执行：

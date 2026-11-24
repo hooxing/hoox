@@ -179,6 +179,7 @@ jobs:
           pnpm --filter "@hoox/api..." build
           suites=(
             tests/integration/postgres-admin-run-explorer.integration.test.ts
+            tests/integration/postgres-cli.integration.test.ts
             tests/integration/sdk-public-api.integration.test.ts
           )
           pnpm exec vitest run --config vitest.integration.config.ts "${suites[@]}"

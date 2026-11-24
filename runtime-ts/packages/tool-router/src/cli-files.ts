@@ -1,7 +1,12 @@
+import { constants } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { open, writeFile } from "node:fs/promises";
 
 export async function readCliTextFile(path: string, maximumBytes: number): Promise<string> {
-  const file = await open(path, "r");
+  if (!(await lstat(path)).isFile()) throw new Error("CLI_FILE_NOT_REGULAR");
+  const flags =
+    process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NONBLOCK;
+  const file = await open(path, flags);
   try {
     if (!(await file.stat()).isFile()) throw new Error("CLI_FILE_NOT_REGULAR");
     const buffer = Buffer.alloc(maximumBytes + 1);

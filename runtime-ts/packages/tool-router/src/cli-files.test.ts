@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,16 @@ describe("CLI 显式文件边界", () => {
       await expect(readCliTextFile(directory, 20)).rejects.toThrow("CLI_FILE_NOT_REGULAR");
       await writeFile(file, Buffer.from([0xff]));
       await expect(readCliTextFile(file, 20)).rejects.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it.skipIf(process.platform === "win32")("非阻塞拒绝没有写端的 FIFO", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hoox-cli-fifo-"));
+    const fifo = join(directory, "input.yaml");
+    try {
+      execFileSync("mkfifo", [fifo]);
+      await expect(readCliTextFile(fifo, 20)).rejects.toThrow("CLI_FILE_NOT_REGULAR");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

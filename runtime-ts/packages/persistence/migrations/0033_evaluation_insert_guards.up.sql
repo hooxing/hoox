@@ -19,6 +19,13 @@ BEGIN
       AND thread_id=id AND EXISTS (SELECT 1 FROM evaluation_run_command c
         WHERE c.case_snapshot IS NOT NULL AND c.planned_run_id=runs.id)
     )$policy$,evaluation);
+  EXECUTE format($policy$CREATE POLICY evaluation_role_worker_assignment_insert_guard ON worker_tenant_assignments
+    AS RESTRICTIVE FOR INSERT TO %I WITH CHECK (
+      tenant_id=current_setting('app.tenant_id',true)
+      AND EXISTS (SELECT 1 FROM evaluation_run_command c JOIN threads t ON t.id=c.planned_run_id
+        WHERE c.case_snapshot IS NOT NULL AND c.planned_run_id=t.id
+          AND t.tenant_id=worker_tenant_assignments.tenant_id AND t.is_evaluation)
+    )$policy$,evaluation);
   EXECUTE format($policy$CREATE POLICY evaluation_role_snapshot_insert_guard ON run_agent_snapshots
     AS RESTRICTIVE FOR INSERT TO %I WITH CHECK (
       tenant_id=current_setting('app.tenant_id',true) AND run_id=thread_id
@@ -71,8 +78,13 @@ BEGIN
   EXECUTE format($policy$CREATE POLICY evaluation_role_receipt_event_insert_guard ON thread_input_receipt_events
     AS RESTRICTIVE FOR INSERT TO %I WITH CHECK (
       tenant_id=current_setting('app.tenant_id',true)
-      AND EXISTS (SELECT 1 FROM evaluation_run_command c WHERE c.case_snapshot IS NOT NULL
-        AND c.planned_run_id=thread_input_receipt_events.thread_id)
+      AND EXISTS (SELECT 1 FROM evaluation_run_command c JOIN runs r
+        ON r.tenant_id=thread_input_receipt_events.tenant_id AND r.id=c.planned_run_id
+        WHERE c.planned_run_id=thread_input_receipt_events.thread_id AND (
+          c.case_snapshot IS NOT NULL OR (r.status='cancelled'
+            AND event_kind='disposition_changed' AND disposition='cancelled'
+            AND (c.cancel_requested_at IS NOT NULL OR NOT c.member_active
+              OR NOT c.account_active OR NOT c.actor_active))))
     )$policy$,evaluation);
   EXECUTE format($policy$CREATE POLICY evaluation_role_continuity_metric_insert_guard ON thread_continuity_metric_observations
     AS RESTRICTIVE FOR INSERT TO %I WITH CHECK (
@@ -95,7 +107,11 @@ BEGIN
   EXECUTE format($policy$CREATE POLICY evaluation_role_workspace_result_insert_guard ON run_workspace_results
     AS RESTRICTIVE FOR INSERT TO %I WITH CHECK (
       tenant_id=current_setting('app.tenant_id',true) AND run_id=thread_id
-      AND EXISTS (SELECT 1 FROM evaluation_run_command c WHERE c.case_snapshot IS NOT NULL
-        AND c.planned_run_id=run_workspace_results.run_id)
+      AND EXISTS (SELECT 1 FROM evaluation_run_command c JOIN runs r
+        ON r.tenant_id=run_workspace_results.tenant_id AND r.id=c.planned_run_id
+        WHERE c.planned_run_id=run_workspace_results.run_id
+          AND (c.case_snapshot IS NOT NULL OR (r.status='cancelled'
+            AND (c.cancel_requested_at IS NOT NULL OR NOT c.member_active
+              OR NOT c.account_active OR NOT c.actor_active))))
     )$policy$,evaluation);
 END $$;

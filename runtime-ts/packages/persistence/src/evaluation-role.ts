@@ -71,7 +71,14 @@ export async function assertEvaluationRoleSafe(
        AND NOT has_database_privilege(role.oid,current_database(),'TEMP')
        AND NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname!~'^pg_'
          AND nspname<>'information_schema' AND ($3::text IS NULL OR nspname<>$3)
-         AND has_schema_privilege(role.oid,oid,'CREATE')) AS safe
+         AND has_schema_privilege(role.oid,oid,'CREATE'))
+       AND NOT EXISTS (SELECT 1 FROM pg_largeobject_metadata large_object
+         WHERE large_object.lomowner=role.oid OR EXISTS (
+           SELECT 1 FROM aclexplode(large_object.lomacl) acl
+            WHERE acl.grantee IN (role.oid,0) AND acl.privilege_type IN ('SELECT','UPDATE')))
+       AND NOT EXISTS (SELECT 1 FROM pg_default_acl defaults
+         CROSS JOIN LATERAL aclexplode(defaults.defaclacl) acl
+         WHERE acl.grantee IN (role.oid,0)) AS safe
        FROM pg_roles role WHERE role.rolname=$1`,
     [evaluationRoleName(runtimeRole), runtimeRole, repairSchema ?? null],
   );
@@ -82,7 +89,10 @@ export async function assertEvaluationRoleSafe(
     );
   }
   if (result.rows[0]?.safe !== true) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "评测数据库角色或成员关系边界不安全");
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      "评测数据库角色、对象权限、默认权限或成员关系边界不安全",
+    );
   }
 }
 

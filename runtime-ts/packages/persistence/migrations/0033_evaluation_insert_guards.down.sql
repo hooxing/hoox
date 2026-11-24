@@ -11,4 +11,5 @@ DROP POLICY evaluation_role_skill_snapshot_insert_guard ON run_skill_snapshots;
 DROP POLICY evaluation_role_workspace_insert_guard ON workspaces;
 DROP POLICY evaluation_role_thread_insert_guard ON threads;
 DROP POLICY evaluation_role_run_insert_guard ON runs;
+DROP POLICY evaluation_role_worker_assignment_insert_guard ON worker_tenant_assignments;
 DROP POLICY evaluation_role_snapshot_insert_guard ON run_agent_snapshots;

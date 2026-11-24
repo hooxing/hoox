@@ -959,6 +959,109 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("拒绝评测角色及 PUBLIC 的大对象 SELECT 与 UPDATE 权限", async () => {
+    const target = await createIsolatedMigrationTarget("eval_large_object");
+    let largeObjectId: string | undefined;
+    try {
+      await migrateUp(target.pool, target.context);
+      const evaluation = evaluationRoleName(target.context.runtimeRole);
+      const created = await administrativePool.query<{ oid: string }>(
+        "SELECT lo_create(0)::text AS oid",
+      );
+      largeObjectId = created.rows[0]?.oid;
+      if (!largeObjectId) throw new Error("未创建测试大对象");
+      for (const [privilege, grantee] of [
+        ["SELECT", `"${evaluation}"`],
+        ["UPDATE", `"${evaluation}"`],
+        ["SELECT", "PUBLIC"],
+        ["UPDATE", "PUBLIC"],
+      ] as const) {
+        await administrativePool.query(
+          `GRANT ${privilege} ON LARGE OBJECT ${largeObjectId} TO ${grantee}`,
+        );
+        await expect(
+          withTransaction(administrativePool, (client) =>
+            assertEvaluationRoleSafe(client, target.context.runtimeRole),
+          ),
+        ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+        await administrativePool.query(
+          `REVOKE ${privilege} ON LARGE OBJECT ${largeObjectId} FROM ${grantee}`,
+        );
+      }
+    } finally {
+      if (largeObjectId)
+        await administrativePool.query("SELECT lo_unlink($1::oid)", [largeObjectId]);
+      await target.close();
+    }
+  });
+
+  it("在对象创建前拒绝全局及 Schema 局部默认 ACL", async () => {
+    const target = await createIsolatedMigrationTarget("eval_default_acl");
+    const futureSchema = `it_eval_future_${process.pid}_${isolatedMigrationCounter}`;
+    let evaluation: string | undefined;
+    try {
+      await migrateUp(target.pool, target.context);
+      evaluation = evaluationRoleName(target.context.runtimeRole);
+      await administrativePool.query(
+        `CREATE SCHEMA "${futureSchema}" AUTHORIZATION "${target.context.migratorRole}"`,
+      );
+      await expect(
+        withTransaction(administrativePool, (client) =>
+          assertEvaluationRoleSafe(client, target.context.runtimeRole),
+        ),
+      ).resolves.toBeUndefined();
+
+      await administrativePool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           GRANT SELECT ON TABLES TO "${evaluation}"`,
+      );
+      await expect(
+        withTransaction(administrativePool, (client) =>
+          assertEvaluationRoleSafe(client, target.context.runtimeRole),
+        ),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      await target.pool.query(`CREATE TABLE "${futureSchema}".future_global(value integer)`);
+      await expect(
+        target.pool.query<{ allowed: boolean }>(
+          "SELECT has_table_privilege($1,$2,'SELECT') AS allowed",
+          [evaluation, `${futureSchema}.future_global`],
+        ),
+      ).resolves.toMatchObject({ rows: [{ allowed: true }] });
+      await administrativePool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           REVOKE SELECT ON TABLES FROM "${evaluation}"`,
+      );
+
+      await administrativePool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           IN SCHEMA "${futureSchema}" GRANT SELECT ON TABLES TO PUBLIC`,
+      );
+      await expect(
+        withTransaction(administrativePool, (client) =>
+          assertEvaluationRoleSafe(client, target.context.runtimeRole),
+        ),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      await target.pool.query(`CREATE TABLE "${futureSchema}".future_public(value integer)`);
+      await expect(
+        target.pool.query<{ allowed: boolean }>(
+          "SELECT has_table_privilege($1,$2,'SELECT') AS allowed",
+          [evaluation, `${futureSchema}.future_public`],
+        ),
+      ).resolves.toMatchObject({ rows: [{ allowed: true }] });
+    } finally {
+      await administrativePool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           REVOKE SELECT ON TABLES FROM "${evaluation}";
+         ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           REVOKE SELECT ON TABLES FROM PUBLIC;
+         ALTER DEFAULT PRIVILEGES FOR ROLE "${target.context.migratorRole}"
+           IN SCHEMA "${futureSchema}" REVOKE SELECT ON TABLES FROM PUBLIC;
+         DROP SCHEMA IF EXISTS "${futureSchema}" CASCADE`,
+      );
+      await target.close();
+    }
+  });
+
   it("仅允许受控超级用户预置评测角色", async () => {
     const admin = `it_eval_admin_${process.pid}`;
     const runtime = `it_eval_runtime_${process.pid}`;
@@ -1259,6 +1362,24 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         );
         return action(client);
       });
+    await expect(
+      withTenantTransaction(runtimePool, scope, async (client) => {
+        await setLocalEvaluationRole(client);
+        return client.query(
+          `INSERT INTO worker_tenant_assignments(tenant_id,state,next_attempt_at)
+           VALUES($1,'ready',clock_timestamp())`,
+          [scope.tenantId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      inCommand((client) =>
+        client.query(
+          `INSERT INTO worker_tenant_assignments(tenant_id,state,next_attempt_at)
+           VALUES('other_tenant','ready',clock_timestamp())`,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
     for (const table of ["threads", "runs"] as const) {
       const statement = `SELECT id FROM ${table} WHERE id=ANY($1::text[]) ORDER BY id`;
       const ids = [first.plannedRunId, second.plannedRunId];

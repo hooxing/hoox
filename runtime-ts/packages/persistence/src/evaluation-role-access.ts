@@ -45,6 +45,7 @@ const inserts = [
   "run_execution_inputs",
   "run_dispatch_outbox",
   "run_workspace_results",
+  "worker_tenant_assignments",
 ] as const;
 const columnReads: Readonly<Record<string, readonly string[]>> = {
   memberships: ["tenant_id", "user_id", "status", "role"],

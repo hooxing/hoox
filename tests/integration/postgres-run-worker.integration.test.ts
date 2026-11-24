@@ -969,7 +969,13 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     if (!safePgIdentifier.test(isolatedSchema)) throw new Error("工具模式测试 Schema 名称无效");
     // 迁移角色只能拥有一个 Schema，隔离用例不能复用主套件的迁移角色。
     const isolatedMigratorRole = `it_rw_tool_mg_${suffix}`;
-    if (!safePgIdentifier.test(isolatedMigratorRole) || !safePgIdentifier.test(databaseName)) {
+    const isolatedRuntimeRole = `it_rw_tool_rt_${suffix}`;
+    const isolatedEvaluationRole = evaluationRoleName(isolatedRuntimeRole);
+    if (
+      !safePgIdentifier.test(isolatedMigratorRole) ||
+      !safePgIdentifier.test(isolatedRuntimeRole) ||
+      !safePgIdentifier.test(databaseName)
+    ) {
       throw new Error("工具模式测试迁移角色或数据库名称无效");
     }
     const isolatedMigratorPassword = randomBytes(24).toString("hex");
@@ -1034,12 +1040,16 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       await withTransaction(admin, async (client) => {
         await client.query(`CREATE ROLE "${isolatedMigratorRole}" LOGIN PASSWORD '${isolatedMigratorPassword}'
           NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-          GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedMigratorRole}";
+          CREATE ROLE "${isolatedRuntimeRole}" NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedMigratorRole}", "${isolatedRuntimeRole}";
           CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedMigratorRole}"`);
       });
       isolatedDatabasePrepared = true;
+      await withTransaction(admin, (client) =>
+        bootstrapEvaluationRole(client, isolatedRuntimeRole),
+      );
       await migrateUp(isolatedMigrator, {
-        runtimeRole,
+        runtimeRole: isolatedRuntimeRole,
         migratorRole: isolatedMigratorRole,
         skillPublisherRole,
         workerCoordinatorRole,
@@ -1182,8 +1192,11 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       await isolatedMigrator.end();
       if (isolatedDatabasePrepared) {
         await admin.query(`DROP SCHEMA IF EXISTS "${isolatedSchema}" CASCADE;
-          REVOKE ALL PRIVILEGES ON DATABASE "${databaseName}" FROM "${isolatedMigratorRole}";
-          DROP ROLE "${isolatedMigratorRole}"`);
+          REVOKE ALL PRIVILEGES ON DATABASE "${databaseName}" FROM "${isolatedMigratorRole}", "${isolatedRuntimeRole}";
+          REVOKE "${isolatedEvaluationRole}" FROM "${isolatedRuntimeRole}";
+          DROP ROLE "${isolatedMigratorRole}";
+          DROP ROLE "${isolatedEvaluationRole}";
+          DROP ROLE "${isolatedRuntimeRole}"`);
       }
     }
   }, 90_000);

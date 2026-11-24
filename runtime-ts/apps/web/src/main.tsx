@@ -56,6 +56,7 @@ import {
 } from "./account-access.js";
 import { type AutomationCenterApi, AutomationCenterDialog } from "./automation-center.js";
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
+import { BrandLogo, BrandingFooter, moduleVisible, useBranding } from "@hoox/ui-theme/branding";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { clearAccountDrafts, useConversationDraft } from "./conversation-draft.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
@@ -358,6 +359,7 @@ function AuthenticatedWorkspace({
   readonly onSignOut: () => void;
 }) {
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
+  const { configuration: branding } = useBranding();
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [uploadFiles, setUploadFiles] = useState<readonly File[]>([]);
   const [historyFiles, setHistoryFiles] = useState<readonly HistoryFile[]>([]);
@@ -1470,7 +1472,7 @@ function AuthenticatedWorkspace({
               个性化
             </button>
           )}
-          {skillCenterApi !== undefined && (
+          {moduleVisible(branding, "skills") && skillCenterApi !== undefined && (
             <button
               type="button"
               className="skill-center-entry"
@@ -1483,7 +1485,7 @@ function AuthenticatedWorkspace({
               {activeTeam === undefined ? "技能中心" : "团队技能"}
             </button>
           )}
-          {automationCenterApi !== undefined && (
+          {moduleVisible(branding, "automations") && automationCenterApi !== undefined && (
             <button
               type="button"
               className="automation-entry"
@@ -1496,7 +1498,7 @@ function AuthenticatedWorkspace({
               定时任务
             </button>
           )}
-          {cloudDriveApi !== undefined && (
+          {moduleVisible(branding, "history_files") && cloudDriveApi !== undefined && (
             <button
               type="button"
               className="cloud-drive-entry"
@@ -1509,58 +1511,60 @@ function AuthenticatedWorkspace({
               云盘
             </button>
           )}
-          {teamWorkspaceApi !== undefined && teams.length > 0 && (
-            <TeamSwitcher
-              teams={teams}
-              {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
-              loading={teamsLoading}
-              onSwitch={(teamId) => {
-                setSelectedTeamId(teamId);
-                setCloudTeamId(teamId);
-              }}
-              onNewTeamThread={() => {
-                if (selectedTeam !== undefined) switchWorkspace(selectedTeam.id);
-              }}
-              onOpenTeamCenter={() => setTeamCenterOpen(true)}
-              taskCount={teamThreads.length}
-            >
-              <ThreadNavigation ariaLabel="团队任务列表">
-                {teamThreadsLoading ? (
-                  <div className="empty compact">
-                    <LoaderCircle className="spin" size={18} />
-                    正在加载团队任务
-                  </div>
-                ) : teamThreads.length === 0 ? (
-                  <div className="empty compact">还没有团队任务。</div>
-                ) : (
-                  teamThreads.map((thread) => (
-                    <button
-                      type="button"
-                      className={
-                        activeTeamId === selectedTeam?.id && thread.id === state.selectedThreadId
-                          ? "thread selected"
-                          : "thread"
-                      }
-                      key={thread.id}
-                      onClick={() => selectWorkspaceThread(selectedTeam?.id, thread.id)}
-                      aria-label={`${thread.title}${thread.status === "archived" ? "，已归档" : ""}`}
-                    >
-                      <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
-                      {availableAgents.find((agent) => agent.id === thread.agentDefinitionId) && (
-                        <small>
-                          {
-                            availableAgents.find((agent) => agent.id === thread.agentDefinitionId)
-                              ?.displayName
-                          }
-                        </small>
-                      )}
-                      {thread.status === "archived" && <small>已归档</small>}
-                    </button>
-                  ))
-                )}
-              </ThreadNavigation>
-            </TeamSwitcher>
-          )}
+          {moduleVisible(branding, "team_spaces") &&
+            teamWorkspaceApi !== undefined &&
+            teams.length > 0 && (
+              <TeamSwitcher
+                teams={teams}
+                {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
+                loading={teamsLoading}
+                onSwitch={(teamId) => {
+                  setSelectedTeamId(teamId);
+                  setCloudTeamId(teamId);
+                }}
+                onNewTeamThread={() => {
+                  if (selectedTeam !== undefined) switchWorkspace(selectedTeam.id);
+                }}
+                onOpenTeamCenter={() => setTeamCenterOpen(true)}
+                taskCount={teamThreads.length}
+              >
+                <ThreadNavigation ariaLabel="团队任务列表">
+                  {teamThreadsLoading ? (
+                    <div className="empty compact">
+                      <LoaderCircle className="spin" size={18} />
+                      正在加载团队任务
+                    </div>
+                  ) : teamThreads.length === 0 ? (
+                    <div className="empty compact">还没有团队任务。</div>
+                  ) : (
+                    teamThreads.map((thread) => (
+                      <button
+                        type="button"
+                        className={
+                          activeTeamId === selectedTeam?.id && thread.id === state.selectedThreadId
+                            ? "thread selected"
+                            : "thread"
+                        }
+                        key={thread.id}
+                        onClick={() => selectWorkspaceThread(selectedTeam?.id, thread.id)}
+                        aria-label={`${thread.title}${thread.status === "archived" ? "，已归档" : ""}`}
+                      >
+                        <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
+                        {availableAgents.find((agent) => agent.id === thread.agentDefinitionId) && (
+                          <small>
+                            {
+                              availableAgents.find((agent) => agent.id === thread.agentDefinitionId)
+                                ?.displayName
+                            }
+                          </small>
+                        )}
+                        {thread.status === "archived" && <small>已归档</small>}
+                      </button>
+                    ))
+                  )}
+                </ThreadNavigation>
+              </TeamSwitcher>
+            )}
           <div className="thread-heading">
             <span>个人任务</span>
             <span>{visiblePersonalThreads.length}</span>
@@ -1626,12 +1630,14 @@ function AuthenticatedWorkspace({
           </ThreadNavigation>
           <AccountMenu
             profile={accountProfile}
-            {...(selectedTeam === undefined ? {} : { activeTeamName: selectedTeam.displayName })}
+            {...(selectedTeam === undefined || !moduleVisible(branding, "team_spaces")
+              ? {}
+              : { activeTeamName: selectedTeam.displayName })}
             canManageActiveTeam={
               selectedTeam !== undefined &&
               (selectedTeam.role === "owner" || selectedTeam.role === "admin")
             }
-            {...(teamWorkspaceApi === undefined
+            {...(teamWorkspaceApi === undefined || !moduleVisible(branding, "team_spaces")
               ? {}
               : {
                   onOpenTeamCenter: () => {
@@ -1649,6 +1655,7 @@ function AuthenticatedWorkspace({
                 })}
             onSignOut={onSignOut}
           />
+          <BrandingFooter />
         </NavigationSidebar>
         <section className="content" aria-label="对话工作区">
           <button
@@ -1688,7 +1695,12 @@ function AuthenticatedWorkspace({
           )}
           {!selected ? (
             <div className="empty primary">
-              <img className="welcome-logo" src={HOOX_HORIZONTAL_PATH} alt="" aria-hidden="true" />
+              <BrandLogo
+                className="welcome-logo"
+                src={HOOX_HORIZONTAL_PATH}
+                alt=""
+                aria-hidden="true"
+              />
               <h1>准备好协作了吗？</h1>
               <p>描述任务后会自动创建会话，并用首条请求作为标题。</p>
               <NewThreadAgentWelcome
@@ -1708,7 +1720,7 @@ function AuthenticatedWorkspace({
                 actionLoading={actionLoading}
                 onArchive={() => void archive()}
                 onCancel={() => void cancel()}
-                {...(apiClient.forkThread === undefined
+                {...(apiClient.forkThread === undefined || !moduleVisible(branding, "team_spaces")
                   ? {}
                   : activeTeam === undefined
                     ? teams.length > 0
@@ -1749,7 +1761,7 @@ function AuthenticatedWorkspace({
                   />
                   {state.run ? (
                     <InlineArtifactDelivery
-                      artifacts={state.artifacts}
+                      artifacts={moduleVisible(branding, "artifacts") ? state.artifacts : []}
                       onPreview={(artifactId) => void preview(artifactId)}
                       onDownload={(artifactId) => void download(artifactId)}
                     />
@@ -1785,7 +1797,8 @@ function AuthenticatedWorkspace({
             files={uploadFiles}
             selectedHistoryFiles={historyFiles}
             onHistoryFilesChange={setHistoryFiles}
-            {...(apiClient.listHistoryFiles === undefined
+            {...(apiClient.listHistoryFiles === undefined ||
+            !moduleVisible(branding, "history_files")
               ? {}
               : {
                   historyFileApi: {
@@ -1873,7 +1886,7 @@ function AuthenticatedWorkspace({
             <pre>{textPreview.text}</pre>
           </dialog>
         )}
-        {skillCenterOpen && skillCenterApi !== undefined && (
+        {moduleVisible(branding, "skills") && skillCenterOpen && skillCenterApi !== undefined && (
           <SkillCenterDialog
             api={skillCenterApi}
             {...(activeTeam === undefined
@@ -1882,75 +1895,84 @@ function AuthenticatedWorkspace({
             onClose={() => setSkillCenterOpen(false)}
           />
         )}
-        {automationCenterOpen && automationCenterApi !== undefined && (
-          <AutomationCenterDialog
-            api={automationCenterApi}
-            threads={state.threads}
-            {...(state.selectedThreadId === undefined
-              ? {}
-              : { initialThreadId: state.selectedThreadId })}
-            onClose={() => setAutomationCenterOpen(false)}
-          />
-        )}
+        {moduleVisible(branding, "automations") &&
+          automationCenterOpen &&
+          automationCenterApi !== undefined && (
+            <AutomationCenterDialog
+              api={automationCenterApi}
+              threads={state.threads}
+              {...(state.selectedThreadId === undefined
+                ? {}
+                : { initialThreadId: state.selectedThreadId })}
+              onClose={() => setAutomationCenterOpen(false)}
+            />
+          )}
         {personalizationOpen && personalizationApi !== undefined && (
           <PersonalizationDialog
             api={personalizationApi}
-            hasTeams={teams.length > 0}
+            hasTeams={moduleVisible(branding, "team_spaces") && teams.length > 0}
             onClose={() => setPersonalizationOpen(false)}
           />
         )}
-        {cloudDriveOpen && personalCloudDriveApi !== undefined && (
-          <CloudDriveDialog
-            api={personalCloudDriveApi}
-            selectedFiles={historyFiles}
-            {...(activeTeamId === undefined
-              ? {
-                  onSelectFile: selectPersonalCloudFile,
-                }
-              : {})}
-            teams={teamCloudDriveSources}
-            {...(cloudTeamId === undefined ? {} : { selectedTeamId: cloudTeamId })}
-            onSwitchTeam={setCloudTeamId}
-            onSelectTeamFile={selectTeamCloudFile}
-            onClose={() => setCloudDriveOpen(false)}
-          />
-        )}
-        {teamCenterOpen && teamWorkspaceApi !== undefined && (
-          <TeamCenterDialog
-            userId={accountProfile.id}
-            teams={teams}
-            {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
-            loading={teamsLoading}
-            onSelectTeam={(teamId) => {
-              setSelectedTeamId(teamId);
-              setCloudTeamId(teamId);
-            }}
-            onCreate={createTeam}
-            onRefresh={refreshTeams}
-            onManage={(teamId) => {
-              setSelectedTeamId(teamId);
-              setTeamCenterOpen(false);
-              setTeamManagementOpen(true);
-            }}
-            onClose={() => setTeamCenterOpen(false)}
-          />
-        )}
-        {teamManagementOpen && managedTeam !== undefined && teamWorkspaceApi !== undefined && (
-          <TeamManagementDialog
-            api={teamWorkspaceApi}
-            team={managedTeam}
-            onDissolved={() => {
-              setTeamManagementOpen(false);
-              setTeams((current) => {
-                const remaining = current.filter((team) => team.id !== managedTeam.id);
-                setSelectedTeamId(remaining[0]?.id);
-                return remaining;
-              });
-              if (activeTeamId === managedTeam.id) switchWorkspace(undefined);
-            }}
-            onClose={() => setTeamManagementOpen(false)}
-          />
-        )}
+        {moduleVisible(branding, "history_files") &&
+          cloudDriveOpen &&
+          personalCloudDriveApi !== undefined && (
+            <CloudDriveDialog
+              api={personalCloudDriveApi}
+              selectedFiles={historyFiles}
+              {...(activeTeamId === undefined
+                ? {
+                    onSelectFile: selectPersonalCloudFile,
+                  }
+                : {})}
+              teams={moduleVisible(branding, "team_spaces") ? teamCloudDriveSources : []}
+              {...(cloudTeamId === undefined ? {} : { selectedTeamId: cloudTeamId })}
+              onSwitchTeam={setCloudTeamId}
+              onSelectTeamFile={selectTeamCloudFile}
+              onClose={() => setCloudDriveOpen(false)}
+            />
+          )}
+        {moduleVisible(branding, "team_spaces") &&
+          teamCenterOpen &&
+          teamWorkspaceApi !== undefined && (
+            <TeamCenterDialog
+              userId={accountProfile.id}
+              teams={teams}
+              {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
+              loading={teamsLoading}
+              onSelectTeam={(teamId) => {
+                setSelectedTeamId(teamId);
+                setCloudTeamId(teamId);
+              }}
+              onCreate={createTeam}
+              onRefresh={refreshTeams}
+              onManage={(teamId) => {
+                setSelectedTeamId(teamId);
+                setTeamCenterOpen(false);
+                setTeamManagementOpen(true);
+              }}
+              onClose={() => setTeamCenterOpen(false)}
+            />
+          )}
+        {moduleVisible(branding, "team_spaces") &&
+          teamManagementOpen &&
+          managedTeam !== undefined &&
+          teamWorkspaceApi !== undefined && (
+            <TeamManagementDialog
+              api={teamWorkspaceApi}
+              team={managedTeam}
+              onDissolved={() => {
+                setTeamManagementOpen(false);
+                setTeams((current) => {
+                  const remaining = current.filter((team) => team.id !== managedTeam.id);
+                  setSelectedTeamId(remaining[0]?.id);
+                  return remaining;
+                });
+                if (activeTeamId === managedTeam.id) switchWorkspace(undefined);
+              }}
+              onClose={() => setTeamManagementOpen(false)}
+            />
+          )}
       </main>
     </FilePreviewContext.Provider>
   );

@@ -4,6 +4,8 @@ import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appendFileReferences, type FileReference } from "@hoox/protocol/file-references";
+import { DEFAULT_BRANDING, type BrandConfiguration } from "@hoox/protocol";
+import { BrandingProvider } from "@hoox/ui-theme/branding";
 import { developmentSession, persistAccountSession } from "./account-access.js";
 import {
   ApiError,
@@ -99,12 +101,25 @@ function deferred<T>(): Deferred<T> {
 
 const mountedRoots: Root[] = [];
 
-function mount(apiClient: AppApi): { readonly container: HTMLDivElement; readonly root: Root } {
+function mount(
+  apiClient: AppApi,
+  branding?: BrandConfiguration,
+): { readonly container: HTMLDivElement; readonly root: Root } {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   mountedRoots.push(root);
-  act(() => root.render(<App apiClient={apiClient} />));
+  act(() =>
+    root.render(
+      branding ? (
+        <BrandingProvider load={false} initial={branding}>
+          <App apiClient={apiClient} />
+        </BrandingProvider>
+      ) : (
+        <App apiClient={apiClient} />
+      ),
+    ),
+  );
   return { container, root };
 }
 
@@ -141,6 +156,88 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("隐藏团队与交付物面板不改变数据权限，团队发布入口也隐藏", async () => {
+    const personalThread = thread("branding_personal");
+    const latest = run("branding_run", personalThread.id);
+    const team = {
+      id: "tenant_brand_team",
+      displayName: "品牌测试团队",
+      role: "owner" as const,
+      joinedAt: "2026-08-09T08:00:00.000Z",
+    };
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [personalThread]),
+      listLatestRuns: vi.fn(async () => [latest]),
+      getRun: vi.fn(async () => latest),
+      listArtifacts: vi.fn(async () => [textArtifact()]),
+      listTeams: vi.fn(async () => [team]),
+      createTeam: vi.fn(async () => team),
+      listTeamMembers: vi.fn(async () => []),
+      addTeamMember: vi.fn(),
+      changeTeamMemberRole: vi.fn(),
+      removeTeamMember: vi.fn(),
+      dissolveTeam: vi.fn(),
+      forkThread: vi.fn(async () => thread("published_brand")),
+    });
+    const baseline = mount(apiClient);
+    await settleEffects();
+    expect(baseline.container.querySelector(".inline-artifact-delivery")).not.toBeNull();
+    expect(baseline.container.textContent).toContain("发布到团队");
+    const hidden = mount(apiClient, {
+      ...DEFAULT_BRANDING,
+      hiddenModules: ["team_spaces", "artifacts"],
+    });
+    await settleEffects();
+    expect(hidden.container.querySelector(".inline-artifact-delivery")).toBeNull();
+    expect(hidden.container.textContent).not.toContain("发布到团队");
+    expect(hidden.container.textContent).not.toContain("品牌测试团队");
+    expect(apiClient.listArtifacts).toHaveBeenCalledWith(personalThread.id, latest.id);
+  });
+  it("默认品牌关键 DOM 不变；定制品牌及页脚生效，白名单隐藏入口与历史文件选择", async () => {
+    const apiClient = apiFixture({
+      listSkills: vi.fn(async () => ({ items: [] })),
+      listInstalledSkills: vi.fn(async () => []),
+      installSkill: vi.fn(),
+      setSkillEnabled: vi.fn(),
+      uninstallSkill: vi.fn(),
+      listScheduledTasks: vi.fn(async () => []),
+      createScheduledTask: vi.fn(),
+      updateScheduledTask: vi.fn(),
+      listHistoryFiles: vi.fn(async () => ({
+        items: [],
+        range: { activeAfter: "2026-02-07T00:00:00.000Z" },
+        hasMore: false,
+        hasOlder: false,
+      })),
+      downloadHistoryFile: vi.fn(async () => "https://example.invalid/history"),
+    });
+    const baseline = mount(apiClient);
+    await settleEffects();
+    const baselineHtml = baseline.container.querySelector(".brand")?.outerHTML;
+    const defaults = mount(apiClient, DEFAULT_BRANDING);
+    await settleEffects();
+    expect(defaults.container.querySelector(".brand")?.outerHTML).toBe(baselineHtml);
+    expect(defaults.container.querySelector(".skill-center-entry")).not.toBeNull();
+    expect(defaults.container.querySelector(".automation-entry")).not.toBeNull();
+    expect(defaults.container.querySelector(".cloud-drive-entry")).not.toBeNull();
+    const custom = mount(apiClient, {
+      ...DEFAULT_BRANDING,
+      productName: "定制工作台",
+      primaryColor: "#ffff00",
+      footerLinks: [{ text: "支持中心", url: "https://example.invalid/support" }],
+      hiddenModules: ["team_spaces", "skills", "automations", "history_files", "artifacts"],
+    });
+    await settleEffects();
+    expect(custom.container.textContent).toContain("定制工作台");
+    expect(
+      custom.container.querySelector('a[href="https://example.invalid/support"]'),
+    ).not.toBeNull();
+    expect(
+      custom.container.querySelector(".skill-center-entry,.automation-entry,.cloud-drive-entry"),
+    ).toBeNull();
+    expect(custom.container.textContent).not.toContain("新建团队");
+    expect(document.documentElement.style.getPropertyValue("--action-primary")).toBe("#ffff00");
+  });
   it("终端用户工作台不渲染集成配置入口", async () => {
     const legacyApi = {
       ...apiFixture(),

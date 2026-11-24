@@ -9,6 +9,7 @@ function date(value: string | null): string {
 
 export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenApiContract }) {
   const [tokens, setTokens] = useState<readonly AdminAccessTokenDto[]>([]);
+  const [now, setNow] = useState(() => Date.now());
   const [name, setName] = useState("");
   const [read, setRead] = useState(true);
   const [write, setWrite] = useState(false);
@@ -28,6 +29,20 @@ export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenA
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    const expirations = tokens
+      .filter((token) => token.revokedAt === null)
+      .map((token) => Date.parse(token.expiresAt))
+      .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > now);
+    if (expirations.length === 0) return;
+    const nextExpiration = Math.min(...expirations);
+    const timer = setTimeout(
+      () => setNow(Date.now()),
+      Math.max(1, Math.min(nextExpiration - now, 60_000)),
+    );
+    return () => clearTimeout(timer);
+  }, [now, tokens]);
 
   const create = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -151,11 +166,19 @@ export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenA
                 <td>{date(token.createdAt)}</td>
                 <td>{date(token.lastUsedAt)}</td>
                 <td>{date(token.expiresAt)}</td>
-                <td>{token.revokedAt === null ? "有效" : "已撤销"}</td>
+                <td>
+                  {token.revokedAt !== null
+                    ? "已撤销"
+                    : Date.parse(token.expiresAt) <= now
+                      ? "已过期"
+                      : "有效"}
+                </td>
                 <td>
                   <button
                     type="button"
-                    disabled={busy || token.revokedAt !== null}
+                    disabled={
+                      busy || token.revokedAt !== null || Date.parse(token.expiresAt) <= now
+                    }
                     onClick={() => void revoke(token)}
                   >
                     撤销

@@ -56,4 +56,27 @@ describe("后台访问令牌", () => {
     expect(api.revokeAccessToken).toHaveBeenCalledWith(accessToken.id);
     expect(root.textContent).toContain("已撤销");
   });
+
+  it("页面停留时令牌到期后更新状态", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-24T00:00:00.000Z") });
+    const api: AdminAccessTokenApiContract = {
+      listAccessTokens: vi.fn(async () => [
+        { ...accessToken, expiresAt: new Date(Date.now() + 1_000).toISOString() },
+      ]),
+      createAccessToken: vi.fn(),
+      revokeAccessToken: vi.fn(),
+    };
+    try {
+      const root = render(<AdminAccessTokensPage api={api} />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(root.textContent).toContain("有效");
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(root.textContent).toContain("已过期");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

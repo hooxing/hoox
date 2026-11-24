@@ -45,6 +45,7 @@ import { SkillCenterService, type SkillCenterPort, type SkillInstallation } from
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApiKeyToken } from "@hoox/identity";
 import { type ApiDependencies, createApiApp } from "./app.js";
+import { DEFAULT_BRANDING } from "@hoox/protocol";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec } from "./cursor.js";
 import type {
@@ -1783,6 +1784,30 @@ describe("API Key 路由授权", () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("匿名与普通身份只读取品牌公开投影，端点不提供写操作", async () => {
+    const base = fixture();
+    const publicBranding = {
+      read: vi.fn(async () => ({ ...DEFAULT_BRANDING, productName: "示例平台" })),
+    };
+    const app = createApiApp({ ...base.dependencies, publicBranding }, { logger: false });
+    try {
+      for (const headers of [{}, { authorization: "Bearer invalid" }]) {
+        const response = await app.inject({ url: "/v1/public/branding", headers });
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data).toEqual({ ...DEFAULT_BRANDING, productName: "示例平台" });
+        expect(response.headers["cache-control"]).toContain("no-store");
+      }
+      expect(
+        (await app.inject({ url: "/v1/public/branding", method: "PUT", payload: DEFAULT_BRANDING }))
+          .statusCode,
+      ).toBe(404);
+      const fallback = await base.app.inject({ url: "/v1/public/branding" });
+      expect(fallback.json().data).toEqual(DEFAULT_BRANDING);
+    } finally {
+      await app.close();
+      await base.app.close();
+    }
+  });
   it("用户 API 不再公开 API Key 与 Webhook 管理路由", async () => {
     const { app } = fixture();
     openApps.push(app);

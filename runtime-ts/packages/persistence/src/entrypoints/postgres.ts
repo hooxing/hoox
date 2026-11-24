@@ -12,6 +12,7 @@ export {
 } from "../pg-core-repositories.js";
 export * from "../pg-evaluation-command.js";
 export * from "../pg-installation.js";
+export * from "../pg-branding.js";
 export * from "../pg-playground.js";
 export { RunAgentUnavailableError } from "../pg-run-agent-snapshot.js";
 export * from "../pg-run-feedback.js";

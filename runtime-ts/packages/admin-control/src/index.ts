@@ -7,6 +7,7 @@ import {
 import { createHash } from "node:crypto";
 
 export * from "./agent-definition.js";
+export * from "./branding.js";
 export * from "./evaluation.js";
 export * from "./external-tools.js";
 export * from "./run-compaction-settings.js";

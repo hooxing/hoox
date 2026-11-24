@@ -4,6 +4,7 @@ export * from "../agent-definition-port.js";
 export * from "../external-tool-credential.js";
 export * from "../model-provider-credential.js";
 export * from "../pg-admin-control.js";
+export * from "../pg-branding.js";
 export * from "../pg-admin-run-explorer.js";
 export * from "../pg-agent-definition.js";
 export * from "../pg-evaluation.js";

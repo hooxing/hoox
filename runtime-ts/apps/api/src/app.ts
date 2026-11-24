@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { MAX_RUN_INPUT_UTF8_BYTES } from "@hoox/protocol";
+import { DEFAULT_BRANDING, normalizeBranding } from "@hoox/protocol";
+import { success } from "./http.js";
 import Fastify, { type FastifyInstance, LogController } from "fastify";
 import { isApiCreateCapability } from "./capabilities.js";
 import type { ApiDependencies } from "./dependencies.js";
@@ -90,6 +92,13 @@ export function createApiApp(
           },
   });
   const service = new ApiService(normalizedDependencies);
+  app.get("/v1/public/branding", async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    return success(
+      request,
+      normalizeBranding((await normalizedDependencies.publicBranding?.read()) ?? DEFAULT_BRANDING),
+    );
+  });
   const { authenticate, authenticateSelectedTenant } = createRequestAuthentication(service);
 
   if (normalizedDependencies.resourceUploads !== undefined) {

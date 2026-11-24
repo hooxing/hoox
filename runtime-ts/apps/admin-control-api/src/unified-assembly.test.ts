@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("@hoox/tool-router", () => ({ probeMcpEndpoint: mocks.probeMcpEndpoint }));
 
 vi.mock("@hoox/persistence/admin", () => ({
+  PgBrandingRepository: class {},
   PgEvaluationDriver: class {},
   PgEvaluationRepository: class {},
   PgIntegrationAdminRepository: class {},
@@ -262,6 +263,7 @@ describe("统一后台 API 固定装配", () => {
       });
       expect(dependencies.skills.publications).toBeDefined();
       expect(dependencies.agents).toBeDefined();
+      expect(dependencies.branding).toBeDefined();
       await dependencies.externalTools?.probe({
         actorUserId: "user_admin",
         draftId: "draft_1",

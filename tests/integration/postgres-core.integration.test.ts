@@ -6195,7 +6195,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     try {
       await migrateUp(target.pool, target.context);
       await administrativePool.query(
-        `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${runtimeRole}"`,
+        `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${target.context.runtimeRole}"`,
       );
       await expect(
         migrateDown(target.pool, {
@@ -6214,7 +6214,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
     } finally {
       await administrativePool.query(
-        `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
+        `GRANT CONNECT ON DATABASE "${databaseName}" TO "${target.context.runtimeRole}"`,
       );
       await target.close();
     }

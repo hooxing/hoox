@@ -39,8 +39,13 @@ Thread 创建时固定绑定平台拥有的 AgentDefinition；迁移为既有 Th
 | Team Coordinator | API 团队协作 Repository | 在 Runtime 白名单基础上额外获得团队目录与 Membership 授权列的最小权限；Webhook 订阅只有筛选所需列的 SELECT、Outbox 只能入队，用于解散时的批量取消事件，除去重唯一键外不能读取 Outbox，不能读取或改写订阅密文，也不能改写已入队记录；Worker 不持有 |
 | Admin Control | 统一 Admin API 控制面 | 控制面配置、AgentDefinition 发布与撤销、Run 浏览器受限视图及正文访问审计、外部工具版本发布与撤销、审计及统计投影；AgentDefinition 写入仅允许当前有效的 `operator` 或 `admin` 身份；工具凭据仅 INSERT，管理投影不读取密文。接入配置另由有效平台 `admin` 按 Tenant RLS 管理：只开放 Key、Webhook 订阅元数据与专用审计的必要权限，以及 User/Tenant/Membership 的关联列；不能读取 Webhook 密文、Run/Thread 底表或 Webhook Outbox，不能撤销人类 Membership、恢复已吊销 Key 或改写作用域与目的地址 |
 | Skill Publisher | 统一 Admin API Skill 路由 | Skill 发布状态机与对应对象存储权限 |
+| Evaluation（NOLOGIN） | API 的评测命令事务通过 `SET LOCAL ROLE` 使用 | 仅评测受理、附件解析、配置与 Skill 快照、V2 队列入队、对账和取消所需的表权限与列级 UPDATE；独占评测授权策略及 `evaluation_run_command` 读取，不持有控制面、凭据、DELETE、序列或 Routine 权限 |
 
 角色属于整个 PostgreSQL 集群；同一集群的开发、预览和生产数据库使用不同角色集合。迁移在任何 DDL 前校验全部角色、Schema owner、`search_path` 与跨数据库依赖，并在同一事务中完成 Schema 迁移、迁移记录、策略重绑定和最小 ACL 重建。readiness 探测的是实际连接身份，而不是配置文件中的声明。
+
+评测角色由 Runtime 角色名派生：不超过 52 字符时追加 `_evaluation`；更长时取前 43 字符、下划线、完整 Runtime 名的 MD5 前 8 位，再追加 `_evaluation`，总长不超过 PostgreSQL 的 63 字符上限。无需新增连接、密码或环境变量。该角色必须为 `NOLOGIN NOINHERIT`，无危险属性、上游角色、对象 ownership、CREATE 或 TEMP 权限；唯一成员是当前 Runtime，成员关系必须为 `INHERIT FALSE, SET TRUE, ADMIN FALSE`。这是常驻服务禁止角色成员关系的唯一例外。迁移与 ACL bootstrap 对角色属性、成员关系、跨库依赖及精确权限白名单失败关闭，不静默修复未知的已有属性。
+
+数据库级预置先于业务迁移：开发的角色 bootstrap、CI 准备脚本及 Demo 发布共用的 `postgres-init.sh` 均补齐缺失评测角色与成员关系；保留数据卷升级也走既有预置步骤，不要求部署方新增变量或另行执行授权。业务迁移不创建集群角色，迁移回退只撤销 Schema 内权限和策略变更，不删除角色。
 
 ## Playground 持久化边界
 

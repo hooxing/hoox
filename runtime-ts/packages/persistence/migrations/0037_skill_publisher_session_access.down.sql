@@ -1,0 +1,1 @@
+DROP POLICY skill_namespace_publishers_runtime_session_read_policy ON skill_namespace_publishers;

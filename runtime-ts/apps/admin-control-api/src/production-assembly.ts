@@ -232,6 +232,7 @@ async function assembleRealService(
         trajectoryStore,
       ),
       auth: input.auth,
+      controlAccess: repository,
       identity: createIdentityAdminService({
         repository: new PgIdentityConfigurationRepository(controlPool),
         roles: repository,

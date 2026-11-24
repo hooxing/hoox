@@ -1612,6 +1612,7 @@ export async function activeTablePolicy(
   }
   if (await hasSkillNamespaceState(client, schema)) {
     for (const table of skillNamespaceTables) policy.set(table, new Set());
+    policy.set("skill_namespace_publishers", new Set(["SELECT"]));
   }
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
@@ -4024,6 +4025,16 @@ async function grantAdminControlAccess(
         ALTER POLICY platform_skill_operators_runtime_read_policy ON ${schema}.platform_skill_operators TO ${runtime};
         ALTER POLICY platform_skill_operators_initialize_policy ON ${schema}.platform_skill_operators TO ${runtime};
         GRANT SELECT,INSERT ON ${schema}.platform_skill_operators TO ${runtime}`);
+    }
+    const namespaceState = await client.query<{ present: boolean }>(
+      "SELECT to_regclass(format('%I.skill_namespace_publishers',$1::text)) IS NOT NULL AS present",
+      [context.schema],
+    );
+    if (namespaceState.rows[0]?.present) {
+      await client.query(`
+        ALTER POLICY skill_namespace_publishers_runtime_session_read_policy
+          ON ${schema}.skill_namespace_publishers TO ${runtime};
+        GRANT SELECT ON ${schema}.skill_namespace_publishers TO ${runtime}`);
     }
   }
   const titleReference = await client.query<{ present: boolean }>(

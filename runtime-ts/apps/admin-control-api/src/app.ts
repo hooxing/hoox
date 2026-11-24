@@ -139,6 +139,7 @@ export interface AdminControlApiDependencies {
   readonly evaluations?: EvaluationAdminPort;
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
+  readonly controlAccess?: { resolveRole(userId: string): Promise<string | undefined> };
   readonly identity: IdentityAdminService;
   readonly modelCatalog: PiModelCatalogPort;
   readonly skills: Omit<SkillAdminApiRouteDependencies, "auth">;
@@ -635,6 +636,14 @@ export function createAdminControlApiApp(
     registerSkillNamespaceRoutes(app, {
       auth: dependencies.auth,
       publications: dependencies.skillNamespaces,
+    });
+  }
+  if (dependencies.controlAccess !== undefined) {
+    app.get("/v1/admin/control/access", async (request) => {
+      const userId = await actor(request);
+      return success(request, {
+        allowed: (await dependencies.controlAccess?.resolveRole(userId)) !== undefined,
+      });
     });
   }
 

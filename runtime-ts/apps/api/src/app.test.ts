@@ -1852,9 +1852,11 @@ describe("Fastify API 契约", () => {
         return session;
       }),
     };
+    let publisherAccess = true;
     const repository = {
       initialized: async () => initialized,
       isAdministrator: vi.fn(async () => false),
+      canStartAdminSession: vi.fn(async () => publisherAccess),
       canAccessControl: vi.fn(async () => true),
     };
     const { app } = fixture({
@@ -1899,17 +1901,25 @@ describe("Fastify API 契约", () => {
         })
       ).statusCode,
     ).toBe(200);
-    expect(repository.canAccessControl).toHaveBeenCalledWith("user_setup");
+    expect(repository.canStartAdminSession).toHaveBeenCalledWith("user_setup");
+    expect(repository.canAccessControl).not.toHaveBeenCalled();
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/installation/login",
+      payload: { email: "setup@example.invalid", password: "setup-password" },
+    });
+    expect(login.statusCode).toBe(200);
+    expect(login.json().data.profile.id).toBe("user_setup");
+    expect(localAccounts.logout).not.toHaveBeenCalled();
+    publisherAccess = false;
     expect(
       (
         await app.inject({
-          method: "POST",
-          url: "/v1/installation/login",
-          payload: { email: "setup@example.invalid", password: "setup-password" },
+          url: "/v1/auth/admin-principal",
+          headers: { authorization: "Bearer hoox_session_test" },
         })
       ).statusCode,
     ).toBe(401);
-    expect(localAccounts.logout).toHaveBeenCalledWith(`Bearer ${session.accessToken}`);
   });
 
   it("仅在装配本地账号能力时暴露注册登录路由", async () => {

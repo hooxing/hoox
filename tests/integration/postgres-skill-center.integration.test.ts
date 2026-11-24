@@ -1,12 +1,19 @@
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { tenantId, userId } from "@hoox/domain";
+import { isoTimestamp, tenantId, userId } from "@hoox/domain";
+import { registerInstallationRoutes } from "../../runtime-ts/apps/api/src/routes/installation.js";
+import { createLocalAccountAuthService } from "../../runtime-ts/apps/api/src/local-account-auth.js";
+import { createAdminSessionAuthResolver } from "../../runtime-ts/apps/admin-control-api/src/session-auth.js";
+import { registerSkillAdminApiRoutes } from "../../runtime-ts/apps/skill-admin-api/src/app.js";
+import { PgLocalAccountRepository } from "../../runtime-ts/packages/persistence/src/pg-local-account.js";
 import { SkillPublicationService } from "../../runtime-ts/packages/skill/src/publishing-service.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { publishDevelopmentCsvPdfSkill } from "../../runtime-ts/packages/persistence/src/development-csv-pdf-publisher.js";
 import { loadMigrations, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgSkillCenterRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-skill-filesystem.js";
+import { PgInstallationRepository } from "../../runtime-ts/packages/persistence/src/pg-installation.js";
 import {
   PgSkillPublicationAuthorization,
   PgSkillPublicationRepository,
@@ -61,6 +68,9 @@ const csvPdfObjectStorage = {
   secretAccessKey: requiredEnvironment("SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY"),
   forcePathStyle: requiredEnvironment("SKILL_PUBLISHER_S3_FORCE_PATH_STYLE") === "true",
 } as const;
+const createFastify = createRequire(
+  new URL("../../runtime-ts/apps/api/package.json", import.meta.url),
+)("fastify") as () => Parameters<typeof registerInstallationRoutes>[0];
 const testMigrationUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
@@ -242,6 +252,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
     const publisherPool = createPostgresPool({
       connectionString: publisherUrl.toString(),
       schema,
+      applicationName: `hoox-e4-publisher-${unique}`,
       maxConnections: 2,
     });
     const objects = new S3StableSkillPublisher(csvPdfObjectStorage);
@@ -254,6 +265,125 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       await adminPublications.createNamespace(scopeA.userId, namespace);
       await adminPublications.grantNamespace(scopeA.userId, namespace, scopeB.userId);
       await adminPublications.grantNamespace(scopeA.userId, namespace, scopeB.userId);
+      const installation = new PgInstallationRepository(runtime);
+      expect(await installation.canStartAdminSession(scopeB.userId)).toBe(true);
+      expect(await installation.isAdministrator(scopeB.userId)).toBe(false);
+      expect(await installation.canAccessControl(scopeB.userId)).toBe(false);
+
+      const selfServiceNamespace = `self-service-${unique.replaceAll("_", "-")}`;
+      await adminPublications.createNamespace(scopeA.userId, selfServiceNamespace);
+      const localAccounts = createLocalAccountAuthService({
+        repository: new PgLocalAccountRepository(runtime),
+        clock: { now: () => isoTimestamp(new Date().toISOString()) },
+      });
+      const ordinaryAccount = await localAccounts.register({
+        displayName: "自助发布者",
+        email: `publisher-${unique}@example.invalid`,
+        password: "publisher-password-123",
+      });
+      const publisherId = userId(ordinaryAccount.profile.id);
+      await admin.query(
+        `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status)
+         VALUES($1,'publisher','active')`,
+        [publisherId],
+      );
+      await adminPublications.grantNamespace(scopeA.userId, selfServiceNamespace, publisherId);
+      const authApp = createFastify();
+      const adminSkillApi = createFastify();
+      registerInstallationRoutes(
+        authApp,
+        {
+          repository: installation,
+          administratorAccounts: localAccounts,
+          runtimeEnvironment: "test",
+        },
+        localAccounts,
+        {},
+      );
+      const sessionAuth = createAdminSessionAuthResolver(
+        "http://identity.test",
+        undefined,
+        async (_input, init) => {
+          const response = await authApp.inject({
+            url: "/v1/auth/admin-principal",
+            headers: init?.headers as Record<string, string>,
+          });
+          return new Response(response.body, {
+            status: response.statusCode,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      );
+      registerSkillAdminApiRoutes(adminSkillApi, {
+        auth: sessionAuth,
+        publications: publisherPublications,
+        submissionId: () => `self_service_${unique}`,
+      });
+      try {
+        await Promise.all([authApp.ready(), adminSkillApi.ready()]);
+        const login = await authApp.inject({
+          method: "POST",
+          url: "/v1/installation/login",
+          payload: { email: ordinaryAccount.profile.email, password: "publisher-password-123" },
+        });
+        expect(login.statusCode).toBe(200);
+        const token = login.json().data.accessToken as string;
+        const createResponse = await adminSkillApi.inject({
+          method: "POST",
+          url: "/v1/admin/skill-submissions",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            "idempotency-key": `self-service-create-${unique}`,
+          },
+          payload: {
+            canonicalKey: `${selfServiceNamespace}.automation-helper`,
+            displayName: "授权用户发布的技能",
+            publisher: "Hoox",
+            description: "真实会话链路发布验证",
+            compatibility: "Agent Skills 标准格式",
+            sourceUrl: "",
+            sourceRevision: "",
+            licenseSpdx: "MIT",
+            files: [
+              {
+                path: "SKILL.md",
+                mediaType: "text/markdown",
+                contentBase64: Buffer.from("# E4 integration\n").toString("base64"),
+              },
+            ],
+          },
+        });
+        expect(createResponse.statusCode).toBe(200);
+        const submissionId = createResponse.json().data.submissionId as string;
+        const publishResponse = await adminSkillApi.inject({
+          method: "POST",
+          url: `/v1/admin/skill-submissions/${submissionId}/publish`,
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            "idempotency-key": `self-service-publish-${unique}`,
+          },
+          payload: { expectedVersionToken: 0, recommended: true },
+        });
+        expect(publishResponse.statusCode).toBe(200);
+        expect(publishResponse.json().data.status).toBe("published");
+        expect(await installation.canAccessControl(publisherId)).toBe(false);
+        expect(await installation.isAdministrator(publisherId)).toBe(false);
+        await adminPublications.revokeNamespace(scopeA.userId, selfServiceNamespace, publisherId);
+        const revokedSession = await authApp.inject({
+          url: "/v1/auth/admin-principal",
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(revokedSession.statusCode).toBe(401);
+        const deniedPublishApi = await adminSkillApi.inject({
+          url: "/v1/admin/skill-submissions",
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(deniedPublishApi.statusCode).toBe(404);
+      } finally {
+        await Promise.all([adminSkillApi.close(), authApp.close()]);
+      }
       await expect(publisherPublications.publicationAccess(scopeB.userId)).resolves.toEqual({
         role: "publisher",
         namespaces: [namespace],
@@ -337,6 +467,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         ),
       ).toBe(true);
       await adminPublications.revokeNamespace(scopeA.userId, namespace, scopeB.userId);
+      expect(await installation.canStartAdminSession(scopeB.userId)).toBe(false);
       await expect(
         publisherPublications.get(scopeB.userId, submission.submissionId),
       ).rejects.toMatchObject({ code: "NOT_FOUND" });
@@ -357,6 +488,36 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       ]);
 
       const migrations = await loadMigrations();
+      const sessionMigration = migrations.find(
+        (item) => item.name === "skill_publisher_session_access",
+      );
+      expect(sessionMigration).toBeDefined();
+      const sessionClient = await migrator.connect();
+      try {
+        await sessionClient.query("BEGIN");
+        await sessionClient.query(sessionMigration?.downSql ?? "");
+        const removed = await sessionClient.query<{ present: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1
+            AND tablename='skill_namespace_publishers'
+            AND policyname='skill_namespace_publishers_runtime_session_read_policy') AS present`,
+          [schema],
+        );
+        expect(removed.rows[0]?.present).toBe(false);
+        await sessionClient.query(sessionMigration?.upSql ?? "");
+        const restored = await sessionClient.query<{ present: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1
+            AND tablename='skill_namespace_publishers'
+            AND policyname='skill_namespace_publishers_runtime_session_read_policy') AS present`,
+          [schema],
+        );
+        expect(restored.rows[0]?.present).toBe(true);
+        await sessionClient.query("ROLLBACK");
+      } catch (error) {
+        await sessionClient.query("ROLLBACK");
+        throw error;
+      } finally {
+        sessionClient.release();
+      }
       const migration = migrations.find((item) => item.name === "skill_namespaces");
       expect(migration).toBeDefined();
       const client = await migrator.connect();
@@ -374,6 +535,122 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         throw error;
       } finally {
         client.release();
+      }
+    } finally {
+      objects.close();
+      await publisherPool.end();
+    }
+  });
+
+  it("撤权与发布、撤回及幂等重放串行，撤权提交后拒绝操作", async () => {
+    await admin.query(
+      `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status) VALUES
+        ($1,'admin','active')
+       ON CONFLICT(user_id) DO UPDATE SET role=EXCLUDED.role,status=EXCLUDED.status`,
+      [scopeA.userId],
+    );
+    const publisherUrl = new URL(runtimeDatabaseUrl);
+    publisherUrl.username = skillPublisherRole;
+    publisherUrl.password = skillPublisherPassword;
+    const publisherPool = createPostgresPool({
+      connectionString: publisherUrl.toString(),
+      schema,
+      applicationName: `hoox-e4-race-${unique}`,
+      maxConnections: 2,
+    });
+    const objects = new S3StableSkillPublisher(csvPdfObjectStorage);
+    const authorization = new PgSkillPublicationAuthorization(publisherPool);
+    const repository = new PgSkillPublicationRepository(publisherPool, objects);
+    const publications = new SkillPublicationService(authorization, repository);
+    const cases = ["publish", "revoke", "replay"] as const;
+    try {
+      for (const action of cases) {
+        const namespace = `race-${action}-${unique.replaceAll("_", "-")}`;
+        await publications.createNamespace(scopeA.userId, namespace);
+        await publications.grantNamespace(scopeA.userId, namespace, scopeB.userId);
+        const create = {
+          userId: scopeB.userId,
+          submissionId: `race_${action}_${unique}`,
+          metadata: {
+            canonicalKey: `${namespace}.automation-helper`,
+            displayName: "并发撤权测试技能",
+            publisher: "Hoox",
+            description: "验证撤权与发布操作串行",
+            compatibility: "Agent Skills 标准格式",
+            sourceUrl: "",
+            sourceRevision: "",
+            licenseSpdx: "MIT",
+          },
+          files: [
+            {
+              path: "SKILL.md",
+              mediaType: "text/markdown",
+              contentBase64: Buffer.from("# Race\n").toString("base64"),
+            },
+          ],
+          idempotencyKey: `race-create-${action}-${unique}`,
+        };
+        const submission = await publications.create(create);
+        const publishCommand = {
+          userId: scopeB.userId,
+          submissionId: submission.submissionId,
+          expectedVersionToken: 0,
+          recommended: true,
+          idempotencyKey: `race-publish-${action}-${unique}`,
+        };
+        if (action !== "publish") await publications.publish(publishCommand);
+        if (action === "replay") await publications.publish(publishCommand);
+        const operation = () =>
+          action === "publish" || action === "replay"
+            ? publications.publish(publishCommand)
+            : publications.revoke({
+                userId: scopeB.userId,
+                submissionId: submission.submissionId,
+                expectedVersionToken: 1,
+                idempotencyKey: `race-revoke-${action}-${unique}`,
+              });
+        const client = await admin.connect();
+        let outcome!: Promise<{ value: unknown } | { error: unknown }>;
+        try {
+          await client.query("BEGIN");
+          await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+            `skill-namespace-publisher|${namespace}|${scopeB.userId}`,
+          ]);
+          await client.query(
+            `UPDATE "${schema}".skill_namespace_publishers
+                SET revoked_by=$3,revoked_at=clock_timestamp()
+              WHERE namespace=$1 AND user_id=$2 AND revoked_at IS NULL`,
+            [namespace, scopeB.userId, scopeA.userId],
+          );
+          outcome = operation().then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error }),
+          );
+          let waiting = false;
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            const activity = await client.query<{ waiting: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                  WHERE application_name=$1 AND wait_event_type='Lock' AND wait_event='advisory'
+               ) AS waiting`,
+              [`hoox-e4-race-${unique}`],
+            );
+            waiting = activity.rows[0]?.waiting === true;
+            if (waiting) break;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          expect(waiting).toBe(true);
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        } finally {
+          client.release();
+        }
+        const result = await outcome;
+        expect("error" in result ? result.error : result.value).toMatchObject({
+          code: "NOT_FOUND",
+        });
       }
     } finally {
       objects.close();

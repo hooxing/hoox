@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 export interface InstallationRepository {
   initialized(): Promise<boolean>;
   isAdministrator(userId: string): Promise<boolean>;
+  canStartAdminSession(userId: string): Promise<boolean>;
   canAccessControl(userId: string): Promise<boolean>;
 }
 

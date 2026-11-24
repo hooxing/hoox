@@ -16,6 +16,23 @@ export class PgInstallationRepository {
     return this.hasRole(userId, false);
   }
 
+  async canStartAdminSession(userId: string): Promise<boolean> {
+    return withTransaction(this.pool, async (client) => {
+      await client.query("SELECT set_config('app.user_id',$1,true)", [userId]);
+      const result = await client.query<{ allowed: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM platform_control_operators
+            WHERE user_id=$1 AND status='active' AND role='admin'
+         ) OR EXISTS (
+           SELECT 1 FROM skill_namespace_publishers
+            WHERE user_id=$1 AND revoked_at IS NULL
+         ) AS allowed`,
+        [userId],
+      );
+      return result.rows[0]?.allowed === true;
+    });
+  }
+
   async isAdministrator(userId: string): Promise<boolean> {
     return this.hasRole(userId, true);
   }

@@ -524,7 +524,21 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
         command.actorUserId,
         async (client) => {
           const role = await requireRole(client, command.actorUserId, plan.roles);
+          const prior = await readCommand(client, command.actorUserId, command.idempotencyKey);
+          const candidateId = prior?.submission_id ?? command.submissionId;
+          const candidate = await readSnapshot(client, candidateId);
+          if (candidate === undefined) return { outcome: "not_found" as const };
+          const namespace = namespaceFromCanonicalKey(candidate.row.canonical_key);
+          if (role === "publisher") {
+            await lockKey(client, namespacePublisherLock(namespace, command.actorUserId));
+          }
           await lockCommand(client, command.actorUserId, command.idempotencyKey);
+          if (
+            role === "publisher" &&
+            !(await hasPublisherNamespace(client, command.actorUserId, namespace))
+          ) {
+            return { outcome: "not_found" as const };
+          }
           const replay = await readCommand(client, command.actorUserId, command.idempotencyKey);
           if (replay !== undefined) {
             if (
@@ -540,13 +554,6 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
           }
           const current = await readSnapshot(client, command.submissionId, true);
           if (current === undefined) return { outcome: "not_found" as const };
-          if (role === "publisher") {
-            const namespace = namespaceFromCanonicalKey(current.row.canonical_key);
-            await lockKey(client, namespacePublisherLock(namespace, command.actorUserId));
-            if (!(await hasPublisherNamespace(client, command.actorUserId, namespace))) {
-              return { outcome: "not_found" as const };
-            }
-          }
           const versionToken = Number(current.row.version_token);
           if (versionToken !== command.expectedVersionToken) {
             return { outcome: "version_conflict" as const };
@@ -629,7 +636,6 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
           return { outcome: "updated" as const, snapshot };
         },
         false,
-        "SERIALIZABLE",
       );
       if (
         result.outcome === "not_found" ||

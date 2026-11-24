@@ -116,7 +116,7 @@ ls -l /opt/hoox-demo/shared/*.env
 
 ## 保留数据卷升级
 
-PostgreSQL 数据卷保留时，Docker 不会重新执行初始化脚本。发布脚本因此在迁移前以容器内 `infra.env` 幂等执行 `postgres-init.sh`：只创建缺失的角色、授予 CONNECT 并确保 Schema 存在，不修改已有角色的密码或属性；角色安全属性仍由迁移前置检查失败关闭。
+PostgreSQL 数据卷保留时，Docker 不会重新执行初始化脚本。发布脚本因此在迁移前以容器内 `infra.env` 幂等执行 `postgres-init.sh`：创建缺失的登录角色和派生的 NOLOGIN 评测角色，补齐 Runtime 到评测角色的非继承成员关系，向登录角色授予 CONNECT 并确保 Schema 存在。无需新增部署变量或手工授权；不修改已有角色的密码或属性，不覆盖已有成员关系的授权选项，角色安全边界仍由迁移前置检查失败关闭，详见[数据库角色](../architecture/persistence-and-database.md#数据库角色)。
 
 发布前必须在服务器共享配置中补齐 Scheduler 的 Webhook 投递与轨迹目录身份，否则发布在拉取镜像前以退出码 2 失败，不改动当前版本：
 

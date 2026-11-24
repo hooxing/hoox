@@ -374,6 +374,7 @@ async function evaluationFixture(suffix: string, globalLimit: number) {
     sql: administrativePool,
     schema,
     adminControlPool,
+    runtimePool,
     repositories,
   };
 }
@@ -860,6 +861,248 @@ async function seedWebhookRun(
 }
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("评测策略在普通 custom/generic 计划中不执行评测子计划，且可回滚重放", async () => {
+    const target = await createIsolatedMigrationTarget("eval_plan");
+    const pool = createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema: target.context.schema,
+    });
+    try {
+      await migrateUp(target.pool, target.context);
+      const fixture = await createFixture("eval_plan", new PgCoreRepositories(pool));
+      interface PlanNode {
+        readonly "Relation Name"?: string;
+        readonly "Parent Relationship"?: string;
+        readonly "Actual Loops": number;
+        readonly "Actual Rows": number;
+        readonly Plans?: readonly PlanNode[];
+      }
+      const evaluationNodes = (node: PlanNode, initPlan = false): readonly PlanNode[] => {
+        const withinInitPlan = initPlan || node["Parent Relationship"] === "InitPlan";
+        if (node["Relation Name"]?.startsWith("agent_evaluation_")) {
+          expect(withinInitPlan).toBe(true);
+          return [node];
+        }
+        return (node.Plans ?? []).flatMap((child) => evaluationNodes(child, withinInitPlan));
+      };
+      const assertFastPath = async () => {
+        for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+          await withTenantTransaction(pool, fixture.scope, async (client) => {
+            await client.query("SELECT set_config('plan_cache_mode',$1,true)", [mode]);
+            for (const batch of [undefined, ""]) {
+              if (batch !== undefined) {
+                await client.query("SELECT set_config('app.evaluation_batch',$1,true)", [batch]);
+              }
+              const statements = [
+                ["threads", "SELECT id FROM threads WHERE tenant_id=$1 AND id=$2"],
+                ["runs", "SELECT id FROM runs WHERE tenant_id=$1 AND thread_id=$2"],
+                [
+                  "revisions",
+                  "SELECT id FROM agent_revisions WHERE definition_id=$1 AND status=$2",
+                ],
+                ["definitions", "SELECT id FROM agent_definitions WHERE id=$1 AND status=$2"],
+                [
+                  "snapshot",
+                  `INSERT INTO run_agent_snapshots(tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content)
+                  SELECT t.tenant_id,t.id,t.id,d.id,r.id,r.content_digest,r.content FROM threads t
+                  JOIN agent_definitions d ON d.id=t.agent_definition_id AND d.status='published'
+                  JOIN agent_revisions r ON r.definition_id=d.id AND r.id=d.current_revision_id AND r.status='published'
+                  WHERE t.tenant_id=$1 AND t.id=$2 AND (d.availability_mode='all_tenants' OR EXISTS (
+                    SELECT 1 FROM agent_definition_tenants scope
+                     WHERE scope.definition_id=d.id AND scope.tenant_id=t.tenant_id AND scope.available
+                  )) RETURNING run_id`,
+                ],
+              ] as const;
+              for (const [name, statement] of statements) {
+                const values =
+                  name === "revisions" || name === "definitions"
+                    ? "'agent_default','published'"
+                    : `'${fixture.scope.tenantId}','${fixture.thread.id}'`;
+                await client.query(`PREPARE eval_plan_${name}(text,text) AS ${statement}`);
+                try {
+                  await client.query("SAVEPOINT evaluation_plan");
+                  const plan = await client.query<{ "QUERY PLAN": readonly { Plan: PlanNode }[] }>(
+                    `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE eval_plan_${name}(${values})`,
+                  );
+                  const root = plan.rows[0]?.["QUERY PLAN"][0]?.Plan;
+                  expect(root).toBeDefined();
+                  if (!root) throw new Error("缺少执行计划");
+                  expect(root["Actual Rows"]).toBeGreaterThan(0);
+                  for (const node of evaluationNodes(root)) {
+                    expect(node["Actual Loops"], `${mode}/${name}/${batch ?? "unset"}`).toBe(0);
+                  }
+                  await client.query("ROLLBACK TO SAVEPOINT evaluation_plan");
+                  await client.query("RELEASE SAVEPOINT evaluation_plan");
+                } finally {
+                  await client.query(`DEALLOCATE eval_plan_${name}`);
+                }
+              }
+            }
+          });
+        }
+      };
+      await assertFastPath();
+      const migration = (await loadMigrations()).find(
+        (migration) => migration.name === "evaluation_policy_fast_path",
+      );
+      if (!migration) throw new Error("缺少评测策略迁移");
+      await migrateDown(target.pool, {
+        ...target.context,
+        targetVersion: migration.version - 1,
+        allowDestructive: true,
+        environment: "test",
+      });
+      const restored = await target.pool.query<{ predicate: string }>(
+        `SELECT pg_get_expr(polqual,polrelid) AS predicate FROM pg_policy
+          WHERE polrelid='agent_revisions'::regclass AND polname='evaluation_revision_read'`,
+      );
+      expect(restored.rows[0]?.predicate).toContain("EXISTS");
+      expect(restored.rows[0]?.predicate).not.toContain("CASE");
+      await expect(assertFastPath()).rejects.toThrow();
+      await migrateUp(target.pool, target.context);
+      await assertFastPath();
+    } finally {
+      await pool.end();
+      await target.close();
+    }
+  });
+
+  it("评测命令只授权租约的 planned Run，并拒绝伪造来源与快照", async () => {
+    const { actor, repo, command, driver, sql, schema, runtimePool } = await evaluationFixture(
+      "rls_scope",
+      2,
+    );
+    await repo.saveSuite(actor, {
+      id: "eval_rls_scope",
+      definitionId: "agent_default",
+      name: "命令范围",
+      description: "",
+      cases: ["first", "second"].map((id) => ({
+        id,
+        name: id,
+        inputText: "输入",
+        attachments: [],
+        assertions: [],
+      })),
+    });
+    await repo.startRun(actor, {
+      id: "eval_rls_scope_batch",
+      definitionId: "agent_default",
+      suiteId: "eval_rls_scope",
+      revisionId: "eval_revision_rls_scope",
+      maxConcurrency: 2,
+    });
+    const first = await driver.claim();
+    const second = await driver.claim();
+    if (!first || !second) throw new Error("缺少并发评测租约");
+    expect(await command.execute(first)).toBe("active");
+    expect(await command.execute(second)).toBe("active");
+    await sql.query(
+      `INSERT INTO "${schema}".agent_revisions(id,definition_id,revision,status,content,content_digest,created_by)
+       SELECT 'eval_revision_rls_other',definition_id,1003,'draft',content,content_digest,$1
+         FROM "${schema}".agent_revisions WHERE id='eval_revision_rls_scope'`,
+      [actor],
+    );
+    const scope = { tenantId: tenantId(first.tenantId), userId: userId(actor) };
+    const inCommand = <Result>(action: (client: PoolClient) => Promise<Result>, lease = first) =>
+      withTenantTransaction(runtimePool, scope, async (client) => {
+        await client.query(
+          "SELECT set_config('app.evaluation_batch',$1,true),set_config('app.evaluation_token',$2,true),set_config('app.evaluation_generation',$3,true)",
+          [lease.batchId, lease.token, lease.generation],
+        );
+        return action(client);
+      });
+    for (const table of ["threads", "runs"] as const) {
+      const statement = `SELECT id FROM ${table} WHERE id=ANY($1::text[]) ORDER BY id`;
+      const ids = [first.plannedRunId, second.plannedRunId];
+      expect(
+        (
+          await withTenantTransaction(runtimePool, scope, (client) =>
+            client.query(statement, [ids]),
+          )
+        ).rows,
+      ).toEqual([]);
+      expect((await inCommand((client) => client.query(statement, [ids]))).rows).toEqual([
+        { id: first.plannedRunId },
+      ]);
+      for (const lease of [
+        { ...first, batchId: "another_batch" },
+        { ...first, token: "00000000-0000-0000-0000-000000000000" },
+        { ...first, generation: String(Number(first.generation) + 1) },
+      ]) {
+        expect((await inCommand((client) => client.query(statement, [ids]), lease)).rows).toEqual(
+          [],
+        );
+      }
+    }
+    const snapshot = (
+      await sql.query<{
+        definition_id: string;
+        revision_id: string;
+        revision_digest: string;
+        content: unknown;
+      }>(
+        `SELECT definition_id,revision_id,revision_digest,content FROM "${schema}".run_agent_snapshots WHERE run_id=$1`,
+        [first.plannedRunId],
+      )
+    ).rows[0];
+    if (!snapshot) throw new Error("缺少评测快照");
+    const insertSnapshot = (
+      client: PoolClient,
+      id: string,
+      revisionId: string,
+      digest: string,
+      content: unknown,
+    ) =>
+      client.query(
+        `INSERT INTO run_agent_snapshots(tenant_id,run_id,thread_id,definition_id,revision_id,revision_digest,content)
+       VALUES($1,$2,$2,$3,$4,$5,$6)`,
+        [scope.tenantId, id, snapshot.definition_id, revisionId, digest, content],
+      );
+    for (const [id, revisionId, digest, content] of [
+      [second.plannedRunId, snapshot.revision_id, snapshot.revision_digest, snapshot.content],
+      [first.plannedRunId, "eval_revision_rls_other", snapshot.revision_digest, snapshot.content],
+      [first.plannedRunId, snapshot.revision_id, "0".repeat(64), snapshot.content],
+      [first.plannedRunId, snapshot.revision_id, snapshot.revision_digest, {}],
+    ] as const) {
+      await expect(
+        inCommand((client) => insertSnapshot(client, id, revisionId, digest, content)),
+      ).rejects.toMatchObject({ code: "42501" });
+    }
+    await sql.query(`DELETE FROM "${schema}".run_agent_snapshots WHERE run_id=$1`, [
+      first.plannedRunId,
+    ]);
+    await expect(
+      inCommand((client) =>
+        insertSnapshot(
+          client,
+          first.plannedRunId,
+          snapshot.revision_id,
+          snapshot.revision_digest,
+          snapshot.content,
+        ),
+      ),
+    ).resolves.toMatchObject({ rowCount: 1 });
+    await expect(
+      inCommand((client) =>
+        client.query(
+          `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,is_evaluation,created_at,updated_at)
+       VALUES($1,'forged_evaluation_thread',$2,'伪造评测','active',true,now(),now())`,
+          [scope.tenantId, actor],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      inCommand((client) =>
+        client.query(
+          `INSERT INTO runs(tenant_id,id,thread_id,status,origin,created_at,updated_at)
+       VALUES($1,'forged_evaluation_run',$2,'queued','evaluation',now(),now())`,
+          [scope.tenantId, first.plannedRunId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+  });
+
   it("评测正文列仅经身份投影开放，结果只允许追加写入", async () => {
     const { actor, repo, adminControlPool, sql, schema } = await evaluationFixture("acl", 1);
     await repo.saveSuite(actor, {

@@ -204,6 +204,35 @@ jobs:
           DATABASE_MIGRATOR_ROLE: m4_ci_migrator
         run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-resource.integration.test.ts
 
+      - name: 启动 Skill Center 对象存储
+        # 与 Demo Compose 固定的 MinIO/mc 版本一致；仅用于本次 CI 的占位凭据。
+        run: |
+          docker run -d --name ci-minio -p 19000:9000 \
+            -e MINIO_ROOT_USER=ci-minio-placeholder \
+            -e MINIO_ROOT_PASSWORD=ci-minio-placeholder-password \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for attempt in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:19000/minio/health/ready >/dev/null && break
+            sleep 2
+          done
+          docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-04-16T18-13-26Z -c \
+            "mc alias set ci http://127.0.0.1:19000 ci-minio-placeholder ci-minio-placeholder-password && mc mb --ignore-existing ci/agent-runtime-ci"
+
+      - name: 验证 Skill Center 命名空间发布、审核与回退
+        env:
+          DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          MIGRATION_DATABASE_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+          SKILL_PUBLISHER_S3_ENDPOINT: http://127.0.0.1:19000
+          SKILL_PUBLISHER_S3_BUCKET: agent-runtime-ci
+          SKILL_PUBLISHER_S3_REGION: us-east-1
+          SKILL_PUBLISHER_S3_ACCESS_KEY_ID: ci-minio-placeholder
+          SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY: ci-minio-placeholder-password
+          SKILL_PUBLISHER_S3_FORCE_PATH_STYLE: "true"
+        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-skill-center.integration.test.ts
+
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:
           RUN_PG_RUN_WORKER_INTEGRATION: "true"

@@ -6,9 +6,9 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
-  BrandLogo,
   BrandingFooter,
   BrandingProvider,
+  BrandLogo,
   brandForeground,
   brandingTokens,
   contrast,
@@ -140,13 +140,17 @@ describe("共享品牌主题", () => {
           customRoot.render(
             <BrandingProvider
               load={false}
-              initial={{ ...DEFAULT_BRANDING, productName: "示例平台", primaryColor: "#ffff00" }}
+              initial={{
+                ...DEFAULT_BRANDING,
+                productName: "示例 $& 平台",
+                primaryColor: "#ffff00",
+              }}
             >
               <BrandLogo />
             </BrandingProvider>,
           ),
         );
-        expect(document.title).toBe("示例平台 工作台");
+        expect(document.title).toBe("示例 $& 平台 工作台");
         expect(document.documentElement.style.getPropertyValue("--action-primary-text")).toBe(
           "#000000",
         );

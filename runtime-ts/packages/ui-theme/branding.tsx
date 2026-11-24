@@ -1,16 +1,16 @@
 import {
-  DEFAULT_BRANDING,
-  normalizeBranding,
   type BrandConfiguration,
   type BrandModule,
+  DEFAULT_BRANDING,
+  normalizeBranding,
 } from "@hoox/protocol";
 import {
   createContext,
+  type ImgHTMLAttributes,
+  type ReactNode,
   useContext,
   useEffect,
   useState,
-  type ReactNode,
-  type ImgHTMLAttributes,
 } from "react";
 
 const BrandContext = createContext({
@@ -82,7 +82,7 @@ export function BrandingProvider({
     );
     for (const [key, value] of Object.entries(tokens)) root.style.setProperty(key, value);
     if (configuration.productName !== "Hoox")
-      document.title = originalTitle.replace("Hoox", configuration.productName);
+      document.title = originalTitle.replace("Hoox", () => configuration.productName);
     const icons = Array.from(
       document.querySelectorAll<HTMLLinkElement>('link[rel="icon"],link[rel="apple-touch-icon"]'),
     );

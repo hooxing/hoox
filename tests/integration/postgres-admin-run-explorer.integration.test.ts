@@ -29,6 +29,11 @@ import {
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { loadPostgreSqlMigrationContract } from "./postgres-migration-contract.js";
+import {
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
+import { withTransaction } from "../../runtime-ts/packages/persistence/src/postgres.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -218,6 +223,9 @@ beforeAll(async () => {
   migrator = createPostgresPool({ connectionString: roleUrl(roles.migratorRole), schema });
   control = createPostgresPool({ connectionString: roleUrl(roles.adminControlRole), schema });
   runtime = createPostgresPool({ connectionString: roleUrl(roles.runtimeRole), schema });
+  await withTransaction(administrator, (client) =>
+    bootstrapEvaluationRole(client, roles.runtimeRole),
+  );
   await migrateUp(migrator, security);
   await seed();
 });
@@ -228,6 +236,7 @@ afterAll(async () => {
   await migrator?.end();
   if (created) {
     await administrator.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await administrator.query(`DROP ROLE IF EXISTS "${evaluationRoleName(roles.runtimeRole)}"`);
     for (const role of Object.values(roles)) {
       await administrator.query(`DROP OWNED BY "${role}"; DROP ROLE "${role}"`);
     }

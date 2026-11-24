@@ -1,5 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
+import { withTransaction } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { AdminControlService } from "../../runtime-ts/packages/admin-control/src/index.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
@@ -121,6 +126,9 @@ beforeAll(async () => {
   migrator = createPostgresPool({ connectionString: roleUrl(roles.migratorRole), schema });
   runtime = createPostgresPool({ connectionString: roleUrl(roles.runtimeRole), schema });
   control = createPostgresPool({ connectionString: roleUrl(roles.adminControlRole), schema });
+  await withTransaction(administrator, (client) =>
+    bootstrapEvaluationRole(client, roles.runtimeRole),
+  );
   await migrateUp(migrator, security);
   await administrator.query(
     `INSERT INTO "${schema}".app_users(id,created_at) VALUES('title_acl_admin',clock_timestamp())`,
@@ -166,6 +174,7 @@ afterAll(async () => {
   await migrator?.end();
   if (created) {
     await administrator.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await administrator.query(`DROP ROLE IF EXISTS "${evaluationRoleName(roles.runtimeRole)}"`);
     for (const role of Object.values(roles)) {
       await administrator.query(`DROP OWNED BY "${role}"; DROP ROLE "${role}"`);
     }

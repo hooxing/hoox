@@ -10,9 +10,14 @@ import { expect, it } from "vitest";
 import { WebhookDispatcher } from "../../runtime-ts/apps/scheduler/src/webhook-dispatcher.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
+import {
   createPostgresPool,
   type Pool,
   withTenantTransaction,
+  withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import {
   enqueueRunStatusWebhook,
@@ -75,6 +80,7 @@ it("Webhook 保留数据卷升级：旧 Tenant 经角色预置与迁移后可完
       );
     }
     await admin.query(`CREATE SCHEMA ${schema} AUTHORIZATION ${roles.migratorRole}`);
+    await withTransaction(admin, (client) => bootstrapEvaluationRole(client, roles.runtimeRole));
     const migrations = fileURLToPath(
       new URL("../../runtime-ts/packages/persistence/migrations/", import.meta.url),
     );
@@ -85,6 +91,7 @@ it("Webhook 保留数据卷升级：旧 Tenant 经角色预置与迁移后可完
       await copyFile(join(migrations, file), join(scratch, file));
     const migrator = pool(roles.migratorRole);
     await migrateUp(migrator, { ...legacy, schema, directory: scratch });
+    await admin.query(`DROP ROLE "${evaluationRoleName(roles.runtimeRole)}"`);
     await admin.query(
       `INSERT INTO app_users(id,created_at) VALUES ('user_demo',now()); INSERT INTO tenants(id,kind,owner_user_id,created_at) VALUES ('tenant_demo','personal','user_demo',now())`,
     );
@@ -242,6 +249,7 @@ it("Webhook 保留数据卷升级：旧 Tenant 经角色预置与迁移后可完
       await Promise.all(pools.map((p) => p.end()));
       if (created) {
         await cluster.query(`DROP DATABASE "${db}"`);
+        await cluster.query(`DROP ROLE IF EXISTS "${evaluationRoleName(roles.runtimeRole)}"`);
         for (const name of Object.values(roles)) await cluster.query(`DROP ROLE IF EXISTS ${name}`);
       }
     } finally {

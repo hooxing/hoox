@@ -2,6 +2,7 @@ import { resourceId, resourceVersionId, runId, tenantId, threadId, userId } from
 import type { EvaluationCase } from "@hoox/protocol";
 import { appendAttachmentsToLatestUserPrompt } from "@hoox/resource";
 import { PersistenceError } from "./errors.js";
+import { setLocalEvaluationRole } from "./evaluation-role.js";
 import { createRevisionRun } from "./pg-playground.js";
 import { findFile } from "./pg-resource-filesystem.js";
 import { inputDigest } from "./pg-run-dispatch.js";
@@ -36,6 +37,7 @@ export class PgEvaluationCommand {
     const scope = { tenantId: tenantId(command.tenantId), userId: userId(command.userId) };
     try {
       return await withTenantTransaction(this.pool, scope, async (client) => {
+        await setLocalEvaluationRole(client);
         // 丢响应和换代可重放同一命令；锁和预留的 Run ID 跨所有 API 实例生效。
         await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
           `evaluation:${command.plannedRunId}`,

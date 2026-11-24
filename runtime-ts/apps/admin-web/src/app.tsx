@@ -1086,7 +1086,6 @@ const navigation: NonNullable<MenuProps["items"]> = [
       { key: "/models", icon: <RobotOutlined />, label: "模型服务" },
       { key: "/memory", icon: <BulbOutlined />, label: "记忆服务" },
       { key: "/sandboxes", icon: <DatabaseOutlined />, label: "沙箱服务" },
-      { key: "/skills", icon: <DatabaseOutlined />, label: "Skills" },
     ],
   },
   {
@@ -1246,34 +1245,89 @@ function AdminPlatform({
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
-  const [publisherOnly, setPublisherOnly] = useState(false);
-  const [publicationAccessReady, setPublicationAccessReady] = useState(
-    apiClient.getPublicationAccess === undefined,
-  );
+  const activeControlApi = controlApi ?? defaultManagementApi;
+  const [controlAccess, setControlAccess] = useState(false);
+  const [publicationAccess, setPublicationAccess] = useState(false);
+  const [permissionError, setPermissionError] = useState(false);
+  const [permissionsReady, setPermissionsReady] = useState(false);
+  const [permissionRetry, setPermissionRetry] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: permissionRetry 是权限查询失败后的显式重试触发器。
   useEffect(() => {
-    if (apiClient.getPublicationAccess === undefined) return;
-    void apiClient
-      .getPublicationAccess()
-      .then((access) => {
-        setPublisherOnly(access.role === "publisher");
-        setPublicationAccessReady(true);
+    let active = true;
+    setPermissionsReady(false);
+    setPermissionError(false);
+    const denied = (reason: unknown) => reason instanceof AdminApiError && reason.status === 404;
+    void Promise.all([
+      activeControlApi.getControlAccess().then(
+        (access) => access.allowed,
+        (reason: unknown) => {
+          throw reason;
+        },
+      ),
+      apiClient.getPublicationAccess === undefined
+        ? Promise.resolve(false)
+        : apiClient.getPublicationAccess().then(
+            () => true,
+            (reason: unknown) => {
+              if (denied(reason)) return false;
+              throw reason;
+            },
+          ),
+    ])
+      .then(([hasControlAccess, hasPublicationAccess]) => {
+        if (!active) return;
+        setControlAccess(hasControlAccess);
+        setPublicationAccess(hasPublicationAccess);
+        setPermissionsReady(true);
       })
       .catch(() => {
-        setPublisherOnly(true);
-        setPublicationAccessReady(true);
+        if (!active) return;
+        setPermissionError(true);
+        setPermissionsReady(true);
       });
-  }, [apiClient]);
+    return () => {
+      active = false;
+    };
+  }, [activeControlApi, apiClient, permissionRetry]);
   const activeKey = navigationKey(location.pathname);
   const { configuration: branding } = useBranding();
   const metadata = pageMetadata[activeKey] ?? defaultPageMetadata;
 
-  if (!publicationAccessReady) {
+  if (!permissionsReady) {
     return (
       <main className="admin-login-required" aria-live="polite">
         正在确认后台权限…
       </main>
     );
   }
+
+  if (permissionError) {
+    return (
+      <main className="admin-login-required" role="alert">
+        <p>无法确认后台权限，未加载管理功能。</p>
+        <Button onClick={() => setPermissionRetry((value) => value + 1)}>重试权限查询</Button>
+      </main>
+    );
+  }
+
+  if (!controlAccess && !publicationAccess) {
+    return (
+      <main className="admin-login-required" role="alert">
+        当前账号没有可用的后台管理权限。
+        {onLogout !== undefined && (
+          <button type="button" className="installation-logout" onClick={onLogout}>
+            退出登录
+          </button>
+        )}
+      </main>
+    );
+  }
+
+  const allowedNavigation = [
+    ...(controlAccess ? navigation : []),
+    ...(publicationAccess ? publisherNavigation : []),
+  ];
+  const fallbackPath = controlAccess ? "/overview" : publicationAccess ? "/skills" : "/";
 
   return (
     <Layout className="platform-admin-shell">
@@ -1309,7 +1363,7 @@ function AdminPlatform({
         <Menu
           className="platform-menu"
           mode="inline"
-          items={publisherOnly ? publisherNavigation : navigation}
+          items={allowedNavigation}
           selectedKeys={[activeKey]}
           onClick={({ key }) =>
             navigate({ pathname: key, search: location.search === "?setup=1" ? "?setup=1" : "" })
@@ -1347,7 +1401,13 @@ function AdminPlatform({
             <span className="platform-operator">
               <span className="platform-operator-avatar">A</span>
               <span>
-                <strong>{publisherOnly ? "Skill 发布者" : "平台管理员"}</strong>
+                <strong>
+                  {controlAccess
+                    ? publicationAccess
+                      ? "平台管理与 Skill 发布"
+                      : "平台控制面"
+                    : "Skill 发布者"}
+                </strong>
                 <small>权限由管理网关确认</small>
               </span>
             </span>
@@ -1360,12 +1420,7 @@ function AdminPlatform({
         </Header>
         <Content className="platform-content">
           <Routes>
-            {publisherOnly ? (
-              <>
-                <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
-                <Route path="*" element={<Navigate to="/skills" replace />} />
-              </>
-            ) : (
+            {controlAccess && (
               <>
                 <Route path="/branding" element={<BrandingSettings />} />
                 <Route path="/integration-api-keys" element={<IntegrationApiKeysPage />} />
@@ -1457,7 +1512,6 @@ function AdminPlatform({
                   path="/runs/:tenantId/:runId"
                   element={<RunExplorerDetailRoute api={runApi} />}
                 />
-                <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
                 <Route path="/sandboxes" element={<SandboxConfigurationPanel />} />
                 <Route
                   path="/settings"
@@ -1477,10 +1531,13 @@ function AdminPlatform({
                     />
                   }
                 />
-                <Route path="/" element={<Navigate to="/overview" replace />} />
-                <Route path="*" element={<Navigate to="/overview" replace />} />
               </>
             )}
+            {publicationAccess && (
+              <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
+            )}
+            <Route path="/" element={<Navigate to={fallbackPath} replace />} />
+            <Route path="*" element={<Navigate to={fallbackPath} replace />} />
           </Routes>
         </Content>
       </Layout>

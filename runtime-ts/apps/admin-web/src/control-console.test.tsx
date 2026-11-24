@@ -64,6 +64,7 @@ const overview = {
 
 function fixture(): AdminControlApiContract {
   return {
+    getControlAccess: vi.fn(async () => ({ allowed: true })),
     overview: vi.fn(async () => overview),
     agentMetrics: vi.fn(async () => []),
     getIdentityConfiguration: vi.fn(async () => ({

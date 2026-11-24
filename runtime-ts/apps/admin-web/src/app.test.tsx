@@ -5,6 +5,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SkillAdminApiContract } from "./api.js";
+import { AdminApiError } from "./api.js";
+import type { AdminControlApiContract } from "./control-api.js";
 import { App, browserRouterBasename } from "./app.js";
 import { DEFAULT_BRANDING } from "@hoox/protocol";
 import { BrandingProvider } from "@hoox/ui-theme/branding";
@@ -81,16 +83,23 @@ function apiFixture(
       status: "revoked" as const,
       versionToken: 8,
     })),
+    getPublicationAccess: vi.fn(async () => ({ role: "admin", namespaces: [] })),
     ...overrides,
   };
 }
 
-function mount(api: SkillAdminApiContract): HTMLDivElement {
+function controlApiFixture(
+  access: () => Promise<{ readonly allowed: boolean }> = async () => ({ allowed: true }),
+): AdminControlApiContract {
+  return { getControlAccess: access } as unknown as AdminControlApiContract;
+}
+
+function mount(api: SkillAdminApiContract, controlApi = controlApiFixture()): HTMLDivElement {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   roots.push(root);
-  act(() => root.render(<App apiClient={api} />));
+  act(() => root.render(<App apiClient={api} controlApi={controlApi} initialPath="/skills" />));
   return container;
 }
 
@@ -139,7 +148,7 @@ describe("技能发布管理界面", () => {
     await act(async () =>
       root.render(
         <BrandingProvider load={false}>
-          <App apiClient={api} />
+          <App apiClient={api} controlApi={controlApiFixture()} />
         </BrandingProvider>,
       ),
     );
@@ -152,7 +161,7 @@ describe("技能发布管理界面", () => {
           load={false}
           initial={{ ...DEFAULT_BRANDING, productName: "定制后台", primaryColor: "#336699" }}
         >
-          <App apiClient={api} />
+          <App apiClient={api} controlApi={controlApiFixture()} />
         </BrandingProvider>,
       ),
     );
@@ -190,12 +199,67 @@ describe("技能发布管理界面", () => {
           namespaces: ["team-tools"],
         })),
       }),
+      controlApiFixture(async () => ({ allowed: false })),
     );
     await settle();
     expect(container.querySelector("h1")?.textContent).toBe("Skill 自助发布");
     expect(container.querySelector(".platform-menu")?.textContent).toContain("Skill 发布");
     expect(container.querySelector(".platform-menu")?.textContent).not.toContain("身份与登录");
     expect(container.textContent).toContain("team-tools");
+  });
+
+  it("仅控制面管理员保留控制面导航，不因没有 Skill 权限而受限", async () => {
+    const container = mount(
+      apiFixture(submission(), {
+        getPublicationAccess: vi.fn(async () => {
+          throw new AdminApiError("无 Skill 权限", 404, false);
+        }),
+      }),
+    );
+    await settle();
+    expect(container.querySelector(".platform-menu")?.textContent).toContain("身份与登录");
+    expect(container.querySelector(".platform-menu")?.textContent).not.toContain("Skill 发布");
+  });
+
+  it("同时具有控制面与发布权限时组合两类导航", async () => {
+    const container = mount(
+      apiFixture(submission(), {
+        getPublicationAccess: vi.fn(async () => ({
+          role: "publisher",
+          namespaces: ["team-tools"],
+        })),
+      }),
+    );
+    await settle();
+    expect(container.querySelector(".platform-menu")?.textContent).toContain("身份与登录");
+    expect(container.querySelector(".platform-menu")?.textContent).toContain("Skill 发布");
+  });
+
+  it("权限查询失败显示错误并允许重试，不推断用户角色", async () => {
+    const access = vi
+      .fn<() => Promise<{ readonly allowed: boolean }>>()
+      .mockRejectedValueOnce(new Error("网络暂不可用"))
+      .mockResolvedValue({ allowed: true });
+    const container = mount(
+      apiFixture(submission(), {
+        getPublicationAccess: vi.fn(async () => ({
+          role: "publisher",
+          namespaces: ["team-tools"],
+        })),
+      }),
+      controlApiFixture(access),
+    );
+    await settle();
+    expect(container.textContent).toContain("无法确认后台权限");
+    expect(container.querySelector(".platform-menu")).toBeNull();
+    const retry = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("重试权限查询"),
+    );
+    if (retry === undefined) throw new Error("未找到权限查询重试按钮");
+    await act(async () => retry.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await settle();
+    expect(container.querySelector(".platform-menu")?.textContent).toContain("身份与登录");
+    expect(container.querySelector(".platform-menu")?.textContent).toContain("Skill 发布");
   });
 
   it("平台 Skill 管理员可以创建命名空间、授予并撤销发布者", async () => {

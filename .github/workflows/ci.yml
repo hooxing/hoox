@@ -205,18 +205,14 @@ jobs:
         run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-resource.integration.test.ts
 
       - name: 启动 Skill Center 对象存储
-        # 与 Demo Compose 固定的 MinIO/mc 版本一致（官方 quay.io 镜像）；仅用于本次 CI 的占位凭据。
+        # MinIO 开源版已归档、社区镜像与二进制均不再提供；CI 仅需 S3 兼容接口，使用固定版本的测试用 S3 模拟服务。
         run: |
-          docker run -d --name ci-minio -p 19000:9000 \
-            -e MINIO_ROOT_USER=ci-minio-placeholder \
-            -e MINIO_ROOT_PASSWORD=ci-minio-placeholder-password \
-            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
-          for attempt in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:19000/minio/health/ready >/dev/null && break
+          docker run -d --name ci-s3 -p 19000:9090 -e initialBuckets=agent-runtime-ci adobe/s3mock:3.12.0
+          for attempt in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:19000/agent-runtime-ci >/dev/null && break
             sleep 2
           done
-          docker run --rm --network host --entrypoint sh quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z -c \
-            "mc alias set ci http://127.0.0.1:19000 ci-minio-placeholder ci-minio-placeholder-password && mc mb --ignore-existing ci/agent-runtime-ci"
+          curl -fsS http://127.0.0.1:19000/agent-runtime-ci >/dev/null
 
       - name: 验证 Skill Center 命名空间发布、审核与回退
         env:
@@ -228,8 +224,8 @@ jobs:
           SKILL_PUBLISHER_S3_ENDPOINT: http://127.0.0.1:19000
           SKILL_PUBLISHER_S3_BUCKET: agent-runtime-ci
           SKILL_PUBLISHER_S3_REGION: us-east-1
-          SKILL_PUBLISHER_S3_ACCESS_KEY_ID: ci-minio-placeholder
-          SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY: ci-minio-placeholder-password
+          SKILL_PUBLISHER_S3_ACCESS_KEY_ID: ci-s3-placeholder
+          SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY: ci-s3-placeholder-secret
           SKILL_PUBLISHER_S3_FORCE_PATH_STYLE: "true"
         run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-skill-center.integration.test.ts
 

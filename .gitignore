@@ -32,3 +32,6 @@ runtime-ts/vendor/cubesandbox-sdk/*.tar.gz
 
 # 本地使用的第三方 Skill，来源与许可证未登记，不进入仓库
 .agents/skills/refactoring-ui/
+
+# 本地临时文件（可能含凭据），不得提交
+/temp/

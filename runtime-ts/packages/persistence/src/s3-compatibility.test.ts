@@ -167,4 +167,17 @@ describe("S3 提供方兼容边界", () => {
     );
     expect(isOssEndpoint("https://notaliyuncs.com")).toBe(false);
   });
+
+  it.each([
+    ["https://s3.oss-ap-northeast-2.aliyuncs.com.", true],
+    ["https://S3.OSS-AP-NORTHEAST-2.ALIYUNCS.COM", true],
+    ["https://s3.oss-ap-northeast-2.aliyuncs.com:443", true],
+    ["https://s3.oss-ap-northeast-2.aliyuncs.com.:8443", true],
+    ["https://aliyuncs.com.evil.invalid", false],
+    ["https://evil-aliyuncs.com", false],
+    ["https://aliyuncs.com", false],
+    ["http://127.0.0.1:19100", false],
+  ])("端点 %s 的 OSS 识别为 %s（尾点、大小写、端口与伪造后缀）", (endpoint, expected) => {
+    expect(isOssEndpoint(endpoint)).toBe(expected);
+  });
 });

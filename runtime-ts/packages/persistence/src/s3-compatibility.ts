@@ -8,7 +8,10 @@ export function parseS3ConditionalWrite(value: string): S3ConditionalWrite {
 }
 
 export function isOssEndpoint(endpoint: string | undefined): boolean {
-  return endpoint !== undefined && new URL(endpoint).hostname.endsWith(".aliyuncs.com");
+  if (endpoint === undefined) return false;
+  // 规范化单个 DNS 根标签尾点，避免 `*.aliyuncs.com.` 漏判而退回 OSS 不支持的 If-None-Match。
+  const hostname = new URL(endpoint).hostname.replace(/\.$/u, "");
+  return hostname.endsWith(".aliyuncs.com");
 }
 
 export function resolveS3ConditionalWrite(config: {

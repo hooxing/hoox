@@ -1,3 +1,4 @@
+import { parseS3ConditionalWrite, type S3ConditionalWrite } from "@hoox/persistence/blob";
 import {
   parseProductionJwtSigningKeys,
   type ProductionJwtVerificationKey,
@@ -110,6 +111,10 @@ const environmentSchema = Object.freeze({
   S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
   S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
+  S3_CONDITIONAL_WRITE: {
+    ...stringEnvironmentField({ requiredIn: [] }),
+    parse: parseS3ConditionalWrite,
+  },
   DEV_ADMIN_CONTROL_USER_ID: stringEnvironmentField({
     requiredIn: optional,
     maxLength: 128,
@@ -170,6 +175,7 @@ export interface AdminControlApiProcessConfiguration {
     readonly accessKeyId: string;
     readonly secretAccessKey: string;
     readonly forcePathStyle: boolean;
+    readonly conditionalWrite?: S3ConditionalWrite;
   }>;
   readonly trajectoryObjectStorage: Readonly<{
     readonly endpoint: string;
@@ -178,6 +184,7 @@ export interface AdminControlApiProcessConfiguration {
     readonly accessKeyId: string;
     readonly secretAccessKey: string;
     readonly forcePathStyle: boolean;
+    readonly conditionalWrite?: S3ConditionalWrite;
   }>;
   readonly providerSecrets: Readonly<{
     readonly webhookSecretEncryptionKey?: string;
@@ -252,6 +259,9 @@ export function parseAdminControlApiProcessEnvironment(
     accessKeyId: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_ACCESS_KEY_ID"),
     secretAccessKey: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY"),
     forcePathStyle: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_FORCE_PATH_STYLE"),
+    ...(parsed.values.S3_CONDITIONAL_WRITE === undefined
+      ? {}
+      : { conditionalWrite: parsed.values.S3_CONDITIONAL_WRITE }),
   });
   const trajectoryObjectStorage = Object.freeze({
     endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
@@ -260,6 +270,9 @@ export function parseAdminControlApiProcessEnvironment(
     accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
     secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
     forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
+    ...(parsed.values.S3_CONDITIONAL_WRITE === undefined
+      ? {}
+      : { conditionalWrite: parsed.values.S3_CONDITIONAL_WRITE }),
   });
   if (parsed.runtimeEnvironment === "production") {
     assertProductionObjectStorageEndpoint(objectStorage.endpoint);

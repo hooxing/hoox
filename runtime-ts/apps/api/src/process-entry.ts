@@ -1,3 +1,4 @@
+import { parseS3ConditionalWrite, type S3ConditionalWrite } from "@hoox/persistence/blob";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
@@ -133,6 +134,10 @@ const apiEnvironmentSchema = Object.freeze({
   S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
   S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
+  S3_CONDITIONAL_WRITE: {
+    ...stringEnvironmentField({ requiredIn: optionalEnvironments }),
+    parse: parseS3ConditionalWrite,
+  },
   RESOURCE_FILESYSTEM_SIGNING_KEY: stringEnvironmentField({ secret: true, maxLength: 256 }),
   HISTORY_FILESYSTEM_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
   HISTORY_TITLE_GENERATION_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
@@ -200,6 +205,7 @@ export interface ApiProcessConfiguration {
     readonly accessKeyId: string;
     readonly secretAccessKey: string;
     readonly forcePathStyle: boolean;
+    readonly conditionalWrite?: S3ConditionalWrite;
   }>;
   readonly resourceFilesystemSigningKey: string;
   readonly historyFilesystemEnabled: boolean;
@@ -341,6 +347,9 @@ export function parseApiProcessEnvironment(
     accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
     secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
     forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
+    ...(parsed.values.S3_CONDITIONAL_WRITE === undefined
+      ? {}
+      : { conditionalWrite: parsed.values.S3_CONDITIONAL_WRITE }),
   });
   if (developmentPrincipals !== undefined) {
     assertDevelopmentPublicObjectStorageEndpoint(

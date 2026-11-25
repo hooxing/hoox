@@ -157,6 +157,9 @@ async function assembleRealService(
       accessKeyId: configuration.objectStorage.accessKeyId,
       secretAccessKey: configuration.objectStorage.secretAccessKey,
       forcePathStyle: configuration.objectStorage.forcePathStyle,
+      ...(configuration.objectStorage.conditionalWrite === undefined
+        ? {}
+        : { conditionalWrite: configuration.objectStorage.conditionalWrite }),
     });
     const activePublisher = publisher;
     const repository = new PgAdminControlRepository(

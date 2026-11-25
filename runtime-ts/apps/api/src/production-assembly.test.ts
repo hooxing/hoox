@@ -34,7 +34,9 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("@hoox/persistence/blob", () => ({
+vi.mock("@hoox/persistence/blob", async (importOriginal) => ({
+  parseS3ConditionalWrite: (await importOriginal<typeof import("@hoox/persistence/blob")>())
+    .parseS3ConditionalWrite,
   createS3BlobStore: mocks.createS3BlobStore,
   DurableResourceBlobWriter: class {},
   probeS3BlobStore: mocks.probeS3BlobStore,

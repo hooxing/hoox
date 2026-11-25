@@ -6,6 +6,8 @@ import {
 } from "@hoox/persistence/admin";
 import {
   createS3BlobStore,
+  parseS3ConditionalWrite,
+  type S3ConditionalWrite,
   createS3StableBlobGarbageCollector,
   PgBlobLifecycleRepository,
   RUNTIME_BLOB_OBJECT_PREFIX,
@@ -89,6 +91,10 @@ const schedulerEnvironmentSchema = Object.freeze({
   S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
   S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
+  S3_CONDITIONAL_WRITE: {
+    ...stringEnvironmentField({ requiredIn: [] }),
+    parse: parseS3ConditionalWrite,
+  },
   RUN_TRAJECTORY_RETENTION_DAYS: integerEnvironmentField({
     requiredIn: [],
     minimum: 1,
@@ -210,6 +216,7 @@ export interface SchedulerProcessConfiguration {
     accessKeyId: string;
     secretAccessKey: string;
     forcePathStyle: boolean;
+    conditionalWrite?: S3ConditionalWrite;
   }>;
   readonly trajectoryRetentionDays: number;
   readonly sandbox: Readonly<{
@@ -467,6 +474,9 @@ export function parseSchedulerProcessEnvironment(
       accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
       secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
       forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
+      ...(parsed.values.S3_CONDITIONAL_WRITE === undefined
+        ? {}
+        : { conditionalWrite: parsed.values.S3_CONDITIONAL_WRITE }),
     }),
     trajectoryRetentionDays: parsed.values.RUN_TRAJECTORY_RETENTION_DAYS ?? 30,
     sandbox: Object.freeze({

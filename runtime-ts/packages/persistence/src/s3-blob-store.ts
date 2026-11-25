@@ -3,13 +3,20 @@ import {
   CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
-  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import {
+  applyS3ConditionalWrite,
+  isOssEndpoint,
+  isS3ObjectAlreadyExists,
+  probeS3ObjectReadiness,
+  resolveS3ConditionalWrite,
+  type S3ConditionalWrite,
+} from "./s3-compatibility.js";
 import {
   assertBlobPurpose,
   assertBlobRef,
@@ -52,6 +59,7 @@ export interface S3BlobStoreConfig {
 }
 
 export interface CreateS3BlobStoreConfig extends S3BlobStoreConfig {
+  readonly conditionalWrite?: S3ConditionalWrite;
   readonly endpoint?: string;
   readonly publicEndpoint?: string;
   readonly region: string;
@@ -84,6 +92,7 @@ export interface S3CopyObjectInput {
 }
 
 export interface S3PresignInput {
+  readonly storedMediaType?: string;
   readonly key: string;
   readonly ttlSeconds: number;
   readonly responseMediaType: string;
@@ -492,6 +501,7 @@ export class S3BlobStore implements BlobStore {
     assertProviderBlobSizeWithin(metadata.size, this.maxBlobSizeBytes);
     assertStoredDescriptor(metadata, input.blob);
     return this.client.presignGet({
+      storedMediaType: metadata.mediaType,
       key,
       ttlSeconds: input.ttlSeconds,
       responseMediaType: input.responseMediaType,
@@ -678,12 +688,12 @@ export function createS3BlobStore(
   return new S3BlobStore(createAwsObjectClient(config), authorizations, config);
 }
 
-/** 生产 readiness 的真实 Bucket/凭据探针；只发 HEAD，不读取对象或响应正文。 */
+/** 生产 readiness 只探测固定哨兵对象的读权限，200 或 404 均为就绪。 */
 export async function probeS3BlobStore(config: CreateS3BlobStoreConfig): Promise<void> {
   assertBucket(config.bucket);
   const client = new S3Client(awsClientConfig(config));
   try {
-    await client.send(new HeadBucketCommand({ Bucket: config.bucket }));
+    await probeS3ObjectReadiness(client, config.bucket);
   } finally {
     client.destroy();
   }
@@ -864,7 +874,15 @@ function createAwsObjectClient(config: CreateS3BlobStoreConfig): S3ObjectClient 
     config.publicEndpoint === undefined
       ? client
       : new S3Client({ ...clientConfig, endpoint: config.publicEndpoint });
-  return new AwsS3ObjectClient(client, presignClient, config.bucket);
+  return new AwsS3ObjectClient(
+    client,
+    presignClient,
+    config.bucket,
+    resolveS3ConditionalWrite(config),
+    isOssEndpoint(config.endpoint) ||
+      isOssEndpoint(config.publicEndpoint) ||
+      config.conditionalWrite === "oss-forbid-overwrite",
+  );
 }
 
 function awsClientConfig(config: CreateS3BlobStoreConfig): S3ClientConfig {
@@ -882,6 +900,8 @@ class AwsS3ObjectClient implements S3ObjectClient {
     private readonly client: S3Client,
     private readonly presignClient: S3Client,
     private readonly bucket: string,
+    private readonly conditionalWrite: S3ConditionalWrite,
+    private readonly ossCompatibility: boolean,
   ) {}
 
   async put(input: S3PutObjectInput, signal?: AbortSignal): Promise<void> {
@@ -894,8 +914,8 @@ class AwsS3ObjectClient implements S3ObjectClient {
         ContentType: input.descriptor.mediaType,
         Metadata: { sha256: input.descriptor.sha256 },
         CacheControl: "private, no-store",
-        IfNoneMatch: "*",
       });
+      applyS3ConditionalWrite(command, this.conditionalWrite);
       if (signal === undefined) await this.client.send(command);
       else await this.client.send(command, { abortSignal: signal });
     } catch (error) {
@@ -984,11 +1004,19 @@ class AwsS3ObjectClient implements S3ObjectClient {
 
   async presignGet(input: S3PresignInput): Promise<string> {
     try {
+      const delivery =
+        this.ossCompatibility &&
+        (input.storedMediaType !== input.responseMediaType ||
+          !["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"].includes(
+            input.storedMediaType,
+          ))
+          ? "artifact-download"
+          : input.delivery;
       const command = new GetObjectCommand({
         Bucket: this.bucket,
         Key: input.key,
-        ResponseContentType: input.responseMediaType,
-        ResponseContentDisposition: contentDisposition(input.delivery, input.downloadName),
+        ...(this.ossCompatibility ? {} : { ResponseContentType: input.responseMediaType }),
+        ResponseContentDisposition: contentDisposition(delivery, input.downloadName),
       });
       return await getSignedUrl(this.presignClient, command, { expiresIn: input.ttlSeconds });
     } catch (error) {
@@ -1038,7 +1066,7 @@ function normalizeWriteError(error: unknown, message: string): BlobStoreError {
 
 function awsOperationError(error: unknown, mutating: boolean): BlobStoreError {
   const statusCode = awsStatusCode(error);
-  if (statusCode === 412) {
+  if (isS3ObjectAlreadyExists(error)) {
     return new BlobStoreError("BLOB_PRECONDITION_FAILED", "对象条件写入未满足", {
       result: "known",
       cause: error,

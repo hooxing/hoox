@@ -89,6 +89,25 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
 }
 
 describe("后台控制 API 进程入口", () => {
+  it.each(["if-none-match", "oss-forbid-overwrite"])(
+    "向发布与轨迹存储传递可选 S3 条件写入方式：%s",
+    (mode) => {
+      const configuration = parseAdminControlApiProcessEnvironment({
+        ...productionEnvironment(),
+        S3_CONDITIONAL_WRITE: mode,
+      });
+      expect(configuration.objectStorage.conditionalWrite).toBe(mode);
+      expect(configuration.trajectoryObjectStorage.conditionalWrite).toBe(mode);
+    },
+  );
+  it("拒绝无效 S3 条件写入覆盖", () => {
+    expect(() =>
+      parseAdminControlApiProcessEnvironment({
+        ...productionEnvironment(),
+        S3_CONDITIONAL_WRITE: "invalid-placeholder",
+      }),
+    ).toThrow("INVALID:S3_CONDITIONAL_WRITE");
+  });
   it("接入管理读取独立 Webhook 根密钥，并拒绝过短配置", () => {
     const root = "webhook-root-placeholder-at-least-32-bytes";
     expect(

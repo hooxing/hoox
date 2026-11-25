@@ -10,7 +10,9 @@ const mocks = vi.hoisted(() => ({
   retentionStarted: vi.fn(async () => 0),
 }));
 
-vi.mock("@hoox/persistence/blob", () => ({
+vi.mock("@hoox/persistence/blob", async (importOriginal) => ({
+  parseS3ConditionalWrite: (await importOriginal<typeof import("@hoox/persistence/blob")>())
+    .parseS3ConditionalWrite,
   createS3BlobStore: () => ({}),
   createS3StableBlobGarbageCollector: () => ({}),
   PgBlobLifecycleRepository: class {},

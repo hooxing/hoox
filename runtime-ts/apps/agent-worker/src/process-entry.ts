@@ -11,6 +11,7 @@ import {
 } from "@hoox/artifact";
 import { tenantId } from "@hoox/domain";
 import type { InternalTrajectoryDiagnosticRecord } from "@hoox/trajectory";
+import { parseS3ConditionalWrite, type S3ConditionalWrite } from "@hoox/persistence/blob";
 import {
   type Mem0DevelopmentConfiguration,
   Mem0PlatformMemoryProvider,
@@ -177,6 +178,10 @@ const workerEnvironmentSchema = Object.freeze({
   S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
   S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
+  S3_CONDITIONAL_WRITE: {
+    ...stringEnvironmentField({ requiredIn: [] }),
+    parse: parseS3ConditionalWrite,
+  },
   SANDBOX_DEFAULT_PROVIDER: stringEnvironmentField({ maxLength: 16, requiredIn: [] }),
   SANDBOX_ENABLED_PROVIDERS: stringEnvironmentField({ maxLength: 64, requiredIn: [] }),
   E2B_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
@@ -357,6 +362,7 @@ export interface WorkerProcessConfiguration {
     accessKeyId: string;
     secretAccessKey: string;
     forcePathStyle: boolean;
+    conditionalWrite?: S3ConditionalWrite;
   }>;
   readonly sandbox: Readonly<{
     defaultProviderKey: SandboxProviderKey;
@@ -708,6 +714,9 @@ export function parseWorkerProcessEnvironment(
       accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
       secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
       forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
+      ...(parsed.values.S3_CONDITIONAL_WRITE === undefined
+        ? {}
+        : { conditionalWrite: parsed.values.S3_CONDITIONAL_WRITE }),
     }),
     sandbox: Object.freeze({
       defaultProviderKey,
@@ -998,6 +1007,9 @@ async function assembleWorkerRuntime(
       accessKeyId: configuration.objectStorage.accessKeyId,
       secretAccessKey: configuration.objectStorage.secretAccessKey,
       forcePathStyle: configuration.objectStorage.forcePathStyle,
+      ...(configuration.objectStorage.conditionalWrite === undefined
+        ? {}
+        : { conditionalWrite: configuration.objectStorage.conditionalWrite }),
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
       maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
       // Resource 上传仍由 API 限制为 16 MiB；Worker 还需读取中心校验过的 32 MiB Skill 资源。
@@ -1760,6 +1772,9 @@ export async function probeDevelopmentWorkerDependencies(
       accessKeyId: configuration.objectStorage.accessKeyId,
       secretAccessKey: configuration.objectStorage.secretAccessKey,
       forcePathStyle: configuration.objectStorage.forcePathStyle,
+      ...(configuration.objectStorage.conditionalWrite === undefined
+        ? {}
+        : { conditionalWrite: configuration.objectStorage.conditionalWrite }),
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
       maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
       // Readiness 必须使用与真实 Worker 相同的绝对读取边界，避免预检成功、装配失败。

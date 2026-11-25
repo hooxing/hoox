@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import {
   GetObjectCommand,
-  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -10,6 +9,13 @@ import {
 import type { SkillPublicationFileDescriptor, ValidatedSkillPublicationPackage } from "@hoox/skill";
 import { RUNTIME_BLOB_OBJECT_PREFIX } from "./blob-storage-contract.js";
 import type { StableBlobRef } from "./blob-store.js";
+import {
+  applyS3ConditionalWrite,
+  isS3ObjectAlreadyExists,
+  probeS3ObjectReadiness,
+  resolveS3ConditionalWrite,
+  type S3ConditionalWrite,
+} from "./s3-compatibility.js";
 
 const catalogTenantId = "skill_catalog";
 const manifestMediaType = "application/vnd.cube.skill-manifest+json";
@@ -36,13 +42,12 @@ export interface StableSkillPublicationObjectStore {
 }
 
 export interface SkillPublicationS3Client {
-  send(
-    command: HeadBucketCommand | HeadObjectCommand | PutObjectCommand | GetObjectCommand,
-  ): Promise<unknown>;
+  send(command: HeadObjectCommand | PutObjectCommand | GetObjectCommand): Promise<unknown>;
   destroy?(): void;
 }
 
 export interface S3StableSkillPublisherConfig {
+  readonly conditionalWrite?: S3ConditionalWrite;
   readonly bucket: string;
   readonly endpoint?: string;
   readonly region: string;
@@ -61,10 +66,12 @@ export class S3StableSkillPublisher implements StableSkillPublicationObjectStore
   private readonly client: SkillPublicationS3Client;
   private readonly ownsClient: boolean;
   private readonly bucket: string;
+  private readonly conditionalWrite: S3ConditionalWrite;
 
   constructor(config: S3StableSkillPublisherConfig) {
     assertConfiguration(config);
     this.bucket = config.bucket;
+    this.conditionalWrite = resolveS3ConditionalWrite(config);
     this.ownsClient = config.client === undefined;
     this.client =
       config.client ??
@@ -131,7 +138,7 @@ export class S3StableSkillPublisher implements StableSkillPublicationObjectStore
   }
 
   async probe(): Promise<void> {
-    await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
+    await probeS3ObjectReadiness(this.client, this.bucket);
   }
 
   private async putStable(input: {
@@ -149,21 +156,19 @@ export class S3StableSkillPublisher implements StableSkillPublicationObjectStore
     const existing = await this.head(physicalObjectKey);
     if (existing === undefined) {
       try {
-        await this.client.send(
-          new PutObjectCommand({
-            Bucket: this.bucket,
-            Key: physicalObjectKey,
-            Body: input.body,
-            ContentLength: input.body.byteLength,
-            ContentType: input.mediaType,
-            Metadata: { sha256: input.digest },
-            CacheControl: "private, no-store",
-            IfNoneMatch: "*",
-          }),
-        );
+        const command = new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: physicalObjectKey,
+          Body: input.body,
+          ContentLength: input.body.byteLength,
+          ContentType: input.mediaType,
+          Metadata: { sha256: input.digest },
+          CacheControl: "private, no-store",
+        });
+        applyS3ConditionalWrite(command, this.conditionalWrite);
+        await this.client.send(command);
       } catch (error) {
-        // 并发首次写入只允许由 If-None-Match 竞争失败；随后统一读取规范对象证明。
-        if (!isPreconditionFailure(error)) throw error;
+        if (!isS3ObjectAlreadyExists(error)) throw error;
       }
     }
     const stored = await this.head(physicalObjectKey);
@@ -366,12 +371,4 @@ function isMissingObject(error: unknown): boolean {
     value.name === "NoSuchKey" ||
     value.$metadata?.httpStatusCode === 404
   );
-}
-
-function isPreconditionFailure(error: unknown): boolean {
-  const value = error as {
-    readonly name?: string;
-    readonly $metadata?: { readonly httpStatusCode?: number };
-  };
-  return value.name === "PreconditionFailed" || value.$metadata?.httpStatusCode === 412;
 }

@@ -46,6 +46,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - API、Worker、Scheduler 和 Admin Control 均须配置非空的 `S3_ENDPOINT`、`S3_BUCKET`、`S3_REGION`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` 与 `S3_FORCE_PATH_STYLE`（仅接受 `true` 或 `false`）。Scheduler 用于轨迹 Blob 恢复和保留期清理，Admin Control 用于读取；即使尚无轨迹或关闭模型原始报文诊断，这些字段仍是启动必填项。
 - 四个进程必须访问同一对象桶，但可使用按服务授权的独立凭据；这些 `S3_*` 凭据与 `SKILL_PUBLISHER_S3_*` 发布凭据必须分离。Admin Control 的轨迹读取只需 trace 对象读权限；Scheduler 还需恢复 pending Blob 的复制写入和删除权限，不能只授予只读或删除权限。Demo 当前仍复用 `infra.env` 初始化的运行时 S3 用户，尚未按轨迹前缀拆分策略。
 - 面向浏览器的 `S3_PUBLIC_ENDPOINT` 必须和 API/Web origin 隔离。
+- `S3_CONDITIONAL_WRITE` 为可选覆盖，仅接受 `if-none-match` 或 `oss-forbid-overwrite`；不配置时，各客户端按自身 `S3_ENDPOINT` 或 `SKILL_PUBLISHER_S3_ENDPOINT` 主机判断：`*.aliyuncs.com` 使用 OSS 禁止覆盖请求头，其他使用 `If-None-Match: *`。显式值同时作用于 Runtime Blob 与 Skill 发布存储；混合供应商部署通常应省略，反向代理隐藏 OSS 域名时才需显式选择。OSS 类型回退也适用于显式 `oss-forbid-overwrite` 模式，详见[对象存储兼容性验证](../operations/object-storage-conformance.md)。
 - 不要执行 `docker compose down -v`，除非明确要删除本地 MinIO 数据。
 
 完整逻辑运行轨迹存入共享 trace Blob 存储，默认保留 30 天。`RUN_TRAJECTORY_RETENTION_DAYS` 可设为 1–365 天；Scheduler 以 `DATABASE_TRAJECTORY_DIRECTORY_URL` 连接 `DATABASE_TRAJECTORY_DIRECTORY_ROLE` 读取 Tenant ID 目录，再使用 Runtime 身份逐租户清理到期索引与无引用 Blob。迁移命令只需目录角色名；不得向生产 Scheduler 注入 Worker Coordinator 凭据。对象删除失败时保留索引供下次周期重试。轨迹仅含去除请求头和凭据字段后的逻辑事件，不含原始 HTTP response/SSE。模型原始 request body 诊断仍由 `MODEL_WIRE_TRACE_ENABLED` 独立控制。

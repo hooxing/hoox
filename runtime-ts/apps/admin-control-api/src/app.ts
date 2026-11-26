@@ -146,6 +146,7 @@ export interface AdminControlApiDependencies {
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
   readonly controlAccess?: { resolveRole(userId: string): Promise<string | undefined> };
+  readonly demoReleaseId?: string;
   readonly accessTokens?: PgAdminAccessTokenRepository;
   readonly identity: IdentityAdminService;
   readonly modelCatalog: PiModelCatalogPort;
@@ -657,8 +658,13 @@ export function createAdminControlApiApp(
   if (dependencies.controlAccess !== undefined) {
     app.get("/v1/admin/control/access", async (request) => {
       const userId = await actor(request);
+      const allowed = (await dependencies.controlAccess?.resolveRole(userId)) !== undefined;
+      const isSession = singleHeader(request, "authorization")?.startsWith("Bearer hoox_session_");
       return success(request, {
-        allowed: (await dependencies.controlAccess?.resolveRole(userId)) !== undefined,
+        allowed,
+        ...(allowed && isSession && dependencies.demoReleaseId !== undefined
+          ? { demoReleaseId: dependencies.demoReleaseId }
+          : {}),
       });
     });
   }

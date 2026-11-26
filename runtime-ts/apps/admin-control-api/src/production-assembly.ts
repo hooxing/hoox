@@ -190,6 +190,9 @@ async function assembleRealService(
       new PgSkillPublicationRepository(skillPublisherPool, activePublisher),
     );
     const dependencies = {
+      ...(configuration.demoReleaseId === undefined
+        ? {}
+        : { demoReleaseId: configuration.demoReleaseId }),
       branding: new PgBrandingRepository(controlPool),
       integrations: new PgIntegrationAdminRepository(
         controlPool,

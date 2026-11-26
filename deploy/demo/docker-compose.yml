@@ -106,6 +106,7 @@ services:
       - ${HOOX_DEMO_ROOT:-/opt/hoox-demo}/shared/admin-control.env
     environment:
       DEV_ADMIN_CONTROL_USER_ID: ${DEMO_ADMIN_USER_ID:-user_demo_pending}
+      HOOX_DEMO_RELEASE_ID: ${HOOX_DEMO_RELEASE_ID:-}
     command: ["node", "runtime-ts/apps/admin-control-api/dist/development-main.js"]
     depends_on:
       postgres:

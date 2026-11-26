@@ -61,6 +61,11 @@ const environmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   ADMIN_CONTROL_IDENTITY_API_URL: urlEnvironmentField({ requiredIn: optional }),
+  HOOX_DEMO_RELEASE_ID: {
+    ...stringEnvironmentField({ requiredIn: optional }),
+    parse: (value: string) =>
+      /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value) ? value : undefined,
+  },
   BETTER_AUTH_SECRET: stringEnvironmentField({ secret: true, maxLength: 4096 }),
   ADMIN_CONTROL_LISTEN_HOST: stringEnvironmentField({ requiredIn: production, maxLength: 253 }),
   ADMIN_CONTROL_LISTEN_PORT: integerEnvironmentField({
@@ -163,6 +168,7 @@ export interface AdminControlApiProcessConfiguration {
   readonly evaluationPollMs?: number;
   readonly evaluationGlobalConcurrency?: number;
   readonly identityApiUrl?: string;
+  readonly demoReleaseId?: string;
   readonly databaseAdminControlRole?: string;
   readonly databaseSkillPublisherRole?: string;
   readonly listenHost: string;
@@ -348,6 +354,9 @@ export function parseAdminControlApiProcessEnvironment(
     evaluationPollMs: parsed.values.EVALUATION_POLL_MS ?? 1000,
     evaluationGlobalConcurrency: parsed.values.EVALUATION_GLOBAL_CONCURRENCY ?? 8,
     identityApiUrl: parsed.values.ADMIN_CONTROL_IDENTITY_API_URL ?? "http://127.0.0.1:3001",
+    ...(parsed.values.HOOX_DEMO_RELEASE_ID === undefined
+      ? {}
+      : { demoReleaseId: parsed.values.HOOX_DEMO_RELEASE_ID }),
     ...(databaseAdminControlRole === undefined ? {} : { databaseAdminControlRole }),
     ...(databaseSkillPublisherRole === undefined ? {} : { databaseSkillPublisherRole }),
     listenHost,

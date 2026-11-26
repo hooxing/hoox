@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { defineConfig } from "vite";
+import { resolveBuildInfo } from "./build-info.js";
 
 // 代理不得把远程安装请求伪装成本地回环；保留 Host 并标记原始远程来源。
 export function preserveInstallationSource(
@@ -18,6 +19,7 @@ export default defineConfig(() => {
   return {
     base: "/admin/",
     plugins: [react()],
+    define: { __HOOX_BUILD_INFO__: JSON.stringify(resolveBuildInfo(process.env)) },
     publicDir: resolve(import.meta.dirname, "../../public"),
     server: {
       host: "127.0.0.1",

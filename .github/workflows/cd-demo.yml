@@ -47,6 +47,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/demo-release-gate.mjs
 
+      - name: 读取已检出提交的可复现构建时间
+        if: steps.revision.outputs.should_deploy == 'true'
+        id: build_time
+        run: |
+          timestamp="$(git show -s --format=%cI HEAD)"
+          printf 'timestamp=%s\n' "$timestamp" >> "$GITHUB_OUTPUT"
+
       - name: 初始化 Buildx
         if: steps.revision.outputs.should_deploy == 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
@@ -68,6 +75,9 @@ jobs:
           file: Dockerfile.demo
           platforms: linux/arm64
           push: true
+          build-args: |
+            HOOX_BUILD_SHA=${{ github.event.workflow_run.head_sha || github.sha }}
+            HOOX_BUILD_TIME=${{ steps.build_time.outputs.timestamp }}
           tags: ${{ env.IMAGE_NAME }}:${{ steps.revision.outputs.release_id }}
           cache-from: type=gha,scope=hoox-demo-arm64
           cache-to: type=gha,mode=max,scope=hoox-demo-arm64

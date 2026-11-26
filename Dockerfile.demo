@@ -15,9 +15,16 @@ COPY scripts/demo-static-server.mjs ./scripts/demo-static-server.mjs
 COPY scripts/prepare-demo-sandbox-key.mjs ./scripts/prepare-demo-sandbox-key.mjs
 RUN mkdir -p model-wire-traces
 RUN --network=none pnpm install --offline --frozen-lockfile \
- && pnpm --filter "@hoox/api..." --filter "@hoox/agent-worker..." --filter "@hoox/scheduler..." --filter "@hoox/web..." --filter "@hoox/admin-control-api..." build \
- && pnpm --filter @hoox/admin-web build:demo \
- && pnpm install --offline --prod --frozen-lockfile --force
+ && pnpm --filter "@hoox/api..." --filter "@hoox/agent-worker..." --filter "@hoox/scheduler..." --filter "@hoox/web..." --filter "@hoox/admin-control-api..." build
+
+FROM build AS admin-web-build
+ARG HOOX_BUILD_SHA
+ARG HOOX_BUILD_TIME
+RUN --network=none HOOX_BUILD_SHA="$HOOX_BUILD_SHA" HOOX_BUILD_TIME="$HOOX_BUILD_TIME" \
+  pnpm --filter @hoox/admin-web build:demo
+
+FROM build AS runtime-build
+RUN --network=none pnpm install --offline --prod --frozen-lockfile --force
 
 FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 
@@ -25,7 +32,8 @@ WORKDIR /opt/hoox
 ENV NODE_ENV=development
 LABEL org.opencontainers.image.source="https://github.com/hooxing/hoox" \
       org.opencontainers.image.description="Hoox 单机测试演示运行时"
-COPY --from=build --chown=1000:1000 /opt/hoox /opt/hoox
+COPY --from=runtime-build --chown=1000:1000 /opt/hoox /opt/hoox
+COPY --from=admin-web-build --chown=1000:1000 /opt/hoox/runtime-ts/apps/admin-web/dist ./runtime-ts/apps/admin-web/dist
 USER 1000:1000
 
 CMD ["node", "scripts/demo-static-server.mjs"]

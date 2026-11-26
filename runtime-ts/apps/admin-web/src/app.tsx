@@ -49,6 +49,7 @@ import {
 import { HOOX_APP_ICON_PATH } from "./brand.js";
 import {
   AdminControlApi,
+  type AdminControlAccess,
   type AdminControlApiContract,
   type AgentDefinitionApiContract,
 } from "./control-api.js";
@@ -61,6 +62,7 @@ import { IntegrationWebhooksPage } from "./integration-webhooks.js";
 import { PlaygroundPage } from "./playground.js";
 import { RunExplorerDetail, RunExplorerList } from "./run-explorer.js";
 import { RunExplorerApi, type RunExplorerApiContract } from "./run-explorer-api.js";
+import { PlatformBuildInfo } from "./platform-build-info.js";
 import { SandboxConfigurationPanel } from "./sandbox-configuration-panel.js";
 import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
 
@@ -1248,7 +1250,8 @@ function AdminPlatform({
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const activeControlApi = controlApi ?? defaultManagementApi;
-  const [controlAccess, setControlAccess] = useState(false);
+  const [access, setAccess] = useState<AdminControlAccess>();
+  const controlAccess = access?.allowed === true;
   const [publicationAccess, setPublicationAccess] = useState(false);
   const [permissionError, setPermissionError] = useState(false);
   const [permissionsReady, setPermissionsReady] = useState(false);
@@ -1260,12 +1263,7 @@ function AdminPlatform({
     setPermissionError(false);
     const denied = (reason: unknown) => reason instanceof AdminApiError && reason.status === 404;
     void Promise.all([
-      activeControlApi.getControlAccess().then(
-        (access) => access.allowed,
-        (reason: unknown) => {
-          throw reason;
-        },
-      ),
+      activeControlApi.getControlAccess(),
       apiClient.getPublicationAccess === undefined
         ? Promise.resolve(false)
         : apiClient.getPublicationAccess().then(
@@ -1276,9 +1274,9 @@ function AdminPlatform({
             },
           ),
     ])
-      .then(([hasControlAccess, hasPublicationAccess]) => {
+      .then(([access, hasPublicationAccess]) => {
         if (!active) return;
-        setControlAccess(hasControlAccess);
+        setAccess(access);
         setPublicationAccess(hasPublicationAccess);
         setPermissionsReady(true);
       })
@@ -1372,13 +1370,10 @@ function AdminPlatform({
           }
         />
         <div className="platform-sider-footer">
-          <span className="service-health-dot" aria-hidden="true" />
-          {!collapsed && (
-            <span>
-              <strong>控制面</strong>
-              <small>连接状态以页面数据为准</small>
-            </span>
-          )}
+          <PlatformBuildInfo
+            collapsed={collapsed}
+            releaseId={controlAccess ? access.demoReleaseId : undefined}
+          />
         </div>
       </Sider>
       <Layout className="platform-main-layout">

@@ -82,6 +82,11 @@ function messageFor(status: number): string {
   return "后台控制服务暂时不可用，请稍后重试。";
 }
 
+export interface AdminControlAccess {
+  readonly allowed: boolean;
+  readonly demoReleaseId?: string;
+}
+
 export class AdminControlApi {
   listAccessTokens(input: {
     readonly status: AdminAccessTokenStatus;
@@ -440,7 +445,7 @@ export class AdminControlApi {
     return this.request("/overview");
   }
 
-  getControlAccess(): Promise<{ readonly allowed: boolean }> {
+  getControlAccess(): Promise<AdminControlAccess> {
     return this.request("/access");
   }
 

@@ -44,10 +44,14 @@ function fixture(
   agents?: AdminControlApiDependencies["agents"],
   branding?: AdminControlApiDependencies["branding"],
   controlAccess?: AdminControlApiDependencies["controlAccess"],
+  demoReleaseId?: string,
 ) {
   const auth: AuthContextResolver = {
     resolve: vi.fn(async (input) =>
-      input.authorization === "Bearer admin" ? { userId: userId("user_admin") } : undefined,
+      input.authorization === "Bearer admin" ||
+      input.authorization === "Bearer hoox_session_fixture"
+        ? { userId: userId("user_admin") }
+        : undefined,
     ),
   };
   const control = {
@@ -193,6 +197,7 @@ function fixture(
       auth,
       control,
       ...(controlAccess === undefined ? {} : { controlAccess }),
+      ...(demoReleaseId === undefined ? {} : { demoReleaseId }),
       modelCatalog,
       identity,
       skills: { publications },
@@ -220,6 +225,30 @@ describe("后台控制 API", () => {
         })
       ).statusCode,
     ).toBe(401);
+  });
+
+  it("Demo 发布 ID 只随有控制面权限的会话返回，不进入健康探针", async () => {
+    const resolveRole = vi
+      .fn<NonNullable<AdminControlApiDependencies["controlAccess"]>["resolveRole"]>()
+      .mockResolvedValueOnce("operator")
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce("operator");
+    const { app } = fixture(undefined, undefined, undefined, { resolveRole }, "demo-42");
+    const url = "/v1/admin/control/access";
+    const headers = { authorization: "Bearer hoox_session_fixture" };
+    const allowed = await app.inject({ url, headers });
+    expect(allowed.json().data).toEqual({ allowed: true, demoReleaseId: "demo-42" });
+    expect(allowed.headers["cache-control"]).toContain("no-store");
+    const denied = await app.inject({ url, headers });
+    expect(denied.json().data).toEqual({ allowed: false });
+    const nonSession = await app.inject({ url, headers: { authorization: "Bearer admin" } });
+    expect(nonSession.json().data).toEqual({ allowed: true });
+    const anonymous = await app.inject({ url });
+    expect(anonymous.statusCode).toBe(401);
+    expect(anonymous.body).not.toContain("demo-42");
+    const readiness = await app.inject({ url: "/ready" });
+    expect(readiness.statusCode).toBe(200);
+    expect(readiness.body).not.toContain("demo-42");
   });
 
   it("品牌配置要求管理身份，严格校验字段并转发保存；拒绝权限与冲突映射", async () => {

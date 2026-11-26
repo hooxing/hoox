@@ -83,8 +83,7 @@ body {
 }
 
 .platform-logo-copy,
-.platform-operator > span:last-child,
-.platform-sider-footer > span:last-child {
+.platform-operator > span:last-child {
   display: grid;
   min-width: 0;
 }
@@ -153,40 +152,71 @@ body {
 }
 
 .platform-sider-footer {
+  flex: 0 0 auto;
+  margin: 0 var(--space-3) var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-2);
+}
+
+.platform-build-trigger {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 48px;
-  margin: 0 var(--space-3) var(--space-3);
-  border-top: 1px solid var(--border-subtle);
-  padding: var(--space-3) var(--space-2) 0;
+  width: 100%;
+  min-height: 36px;
+  border: 0;
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-2);
   color: var(--text-secondary);
+  background: transparent;
+  font: inherit;
   font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
 }
 
-.platform-sider-footer strong {
-  font-weight: var(--weight-semibold);
+.platform-build-trigger:hover,
+.platform-build-trigger[aria-expanded="true"] {
+  background: var(--surface-hover);
+  color: var(--text-primary);
 }
 
-.platform-sider-footer small {
+.platform-sider.ant-layout-sider-collapsed .platform-build-trigger {
+  justify-content: center;
+}
+
+.platform-build-summary {
+  display: grid;
+  min-width: 0;
+}
+
+.platform-build-summary > * {
   overflow: hidden;
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.platform-sider.ant-layout-sider-collapsed .platform-sider-footer {
-  justify-content: center;
-  padding-inline: 0;
+.platform-build-summary small {
+  color: var(--text-tertiary);
+  font-size: inherit;
 }
 
-.service-health-dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--neutral-500);
+.platform-build-details {
+  display: grid;
+  gap: var(--space-1) var(--space-3);
+  grid-template-columns: auto minmax(0, 1fr);
+  margin: 0;
+  max-width: min(440px, calc(100vw - 56px));
+  font-size: var(--text-xs);
+}
+
+.platform-build-details dt {
+  color: var(--text-secondary);
+}
+
+.platform-build-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .platform-main-layout.ant-layout {

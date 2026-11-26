@@ -8,6 +8,7 @@
 - 管理请求使用同源 Hoox Session，Admin API 向固定主 API 校验会话与有效管理身份，再按领域角色（`viewer`、`operator`、`admin` 及 Skill 管理身份）授权。浏览器路由、菜单可见性和查询缓存都不构成授权事实。
 - 统计面只能读取预定义的跨 Tenant 聚合视图，不获得 Prompt、模型正文、Tenant 业务行或对象存储内容。[Run 浏览器与正文访问](#run-浏览器与正文访问)和[接入管理](#接入管理边界)使用各自独立的受限读取与授权，不能借此访问任意业务表。
 - PostgreSQL、对象存储、监听地址、数据库角色和平台根秘密（包括 `MODEL_CREDENTIAL_ENCRYPTION_KEY`）由部署配置提供，不依赖自身管理的动态配置，也没有通用环境变量编辑器。
+- 版本、提交和构建时间属于后台静态产物。Demo 发布 ID 由部署注入，不能进入静态产物或公开健康检查；`GET /v1/admin/control/access` 仅在有效 Hoox Session 拥有控制面角色时附带只读 `demoReleaseId`，且禁止缓存。不返回其他部署环境值。
 
 ## 配置是类型化、不可变的事实
 

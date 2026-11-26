@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SkillAdminApiContract } from "./api.js";
 import { AdminApiError } from "./api.js";
-import type { AdminControlApiContract } from "./control-api.js";
+import type { AdminControlAccess, AdminControlApiContract } from "./control-api.js";
 import { App, browserRouterBasename } from "./app.js";
 import { DEFAULT_BRANDING } from "@hoox/protocol";
 import { BrandingProvider } from "@hoox/ui-theme/branding";
@@ -89,7 +89,7 @@ function apiFixture(
 }
 
 function controlApiFixture(
-  access: () => Promise<{ readonly allowed: boolean }> = async () => ({ allowed: true }),
+  access: () => Promise<AdminControlAccess> = async () => ({ allowed: true }),
 ): AdminControlApiContract {
   return { getControlAccess: access } as unknown as AdminControlApiContract;
 }
@@ -206,6 +206,17 @@ describe("技能发布管理界面", () => {
     expect(container.querySelector(".platform-menu")?.textContent).toContain("Skill 发布");
     expect(container.querySelector(".platform-menu")?.textContent).not.toContain("身份与登录");
     expect(container.textContent).toContain("team-tools");
+  });
+
+  it.each([true, false])("只有控制面权限探针允许访问时才显示其发布 ID（%s）", async (allowed) => {
+    const container = mount(
+      apiFixture(submission()),
+      controlApiFixture(async () => ({ allowed, demoReleaseId: "demo-42" })),
+    );
+    await settle();
+    expect(
+      container.querySelector(".platform-sider-footer")?.textContent?.includes("demo-42"),
+    ).toBe(allowed);
   });
 
   it("仅控制面管理员保留控制面导航，不因没有 Skill 权限而受限", async () => {

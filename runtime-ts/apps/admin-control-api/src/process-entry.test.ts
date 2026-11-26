@@ -144,6 +144,17 @@ describe("后台控制 API 进程入口", () => {
     ).toThrow("MISSING:DEV_ADMIN_CONTROL_USER_ID");
   });
 
+  it.each([
+    ["demo-42", "demo-42"],
+    ["", undefined],
+    ["/host/releases/demo-42", undefined],
+  ])("只投影格式有效的可选 Demo 发布 ID（%s）", (value, expected) => {
+    const environment = selectAdminControlApiProcessEnvironment(
+      developmentEnvironment({ HOOX_DEMO_RELEASE_ID: value }),
+    );
+    expect(parseAdminControlApiProcessEnvironment(environment).demoReleaseId).toBe(expected);
+  });
+
   it("只投影统一后台声明配置，不接收 Runtime 或 Migrator 凭据", () => {
     const selected = selectAdminControlApiProcessEnvironment({
       ...productionEnvironment(),

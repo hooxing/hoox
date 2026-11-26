@@ -2,6 +2,7 @@
 export * from "../blob-commit-protocol.js";
 export * from "../blob-storage-contract.js";
 export * from "../blob-store.js";
+export { parseS3ConditionalWrite, type S3ConditionalWrite } from "../s3-compatibility.js";
 export * from "../pg-blob-lifecycle.js";
 export * from "../resource-blob-persistence-adapter.js";
 export type { CreateS3BlobStoreConfig } from "../s3-blob-store.js";

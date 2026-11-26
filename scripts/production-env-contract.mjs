@@ -99,6 +99,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
 ]);
 
 export const optionalProductionEnvironmentKeys = Object.freeze([
+  "S3_CONDITIONAL_WRITE",
   "OTEL_EXPORT_ENABLED",
   "OTEL_EXPORT_ENDPOINT",
   "OTEL_EXPORT_HEADERS",

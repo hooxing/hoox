@@ -85,6 +85,9 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         accessKeyId: configuration.objectStorage.accessKeyId,
         secretAccessKey: configuration.objectStorage.secretAccessKey,
         forcePathStyle: configuration.objectStorage.forcePathStyle,
+        ...(configuration.objectStorage.conditionalWrite === undefined
+          ? {}
+          : { conditionalWrite: configuration.objectStorage.conditionalWrite }),
         prefix: RUNTIME_BLOB_OBJECT_PREFIX,
         maxBlobSizeBytes: productionApiMaxBlobSizeBytes,
       });

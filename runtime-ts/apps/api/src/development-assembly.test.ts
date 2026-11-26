@@ -43,7 +43,9 @@ vi.mock("../development-resourcefs-proxy.mjs", () => ({
   startDevelopmentResourceFsProxy: mocks.startDevelopmentResourceFsProxy,
 }));
 
-vi.mock("@hoox/persistence/blob", () => ({
+vi.mock("@hoox/persistence/blob", async (importOriginal) => ({
+  parseS3ConditionalWrite: (await importOriginal<typeof import("@hoox/persistence/blob")>())
+    .parseS3ConditionalWrite,
   createS3BlobStore: mocks.createS3BlobStore,
   DurableResourceBlobWriter: class {},
   RUNTIME_BLOB_OBJECT_PREFIX: "agent-worker",

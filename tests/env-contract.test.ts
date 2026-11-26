@@ -11,6 +11,8 @@ function validExample(): string {
   return [...expectedEnvironmentKeys, ...optionalEnvironmentKeys]
     .map((key) => {
       switch (key) {
+        case "S3_CONDITIONAL_WRITE":
+          return `${key}=if-none-match`;
         case "EXTERNAL_TOOLS_ALLOW_PRIVATE_ADDRESSES":
         case "S3_FORCE_PATH_STYLE":
         case "OTEL_EXPORT_ENABLED":
@@ -67,6 +69,28 @@ function validExample(): string {
     })
     .join("\n");
 }
+
+it.each(["if-none-match", "oss-forbid-overwrite"])("可选 S3 条件写入枚举：%s", (mode) => {
+  expect(
+    validateEnvironmentExample(
+      validExample().replace("S3_CONDITIONAL_WRITE=if-none-match", `S3_CONDITIONAL_WRITE=${mode}`),
+    ),
+  ).toEqual([]);
+});
+
+it("S3 条件写入覆盖可省略但不能为无效值", () => {
+  expect(
+    validateEnvironmentExample(validExample().replace("S3_CONDITIONAL_WRITE=if-none-match", "")),
+  ).toEqual([]);
+  expect(
+    validateEnvironmentExample(
+      validExample().replace(
+        "S3_CONDITIONAL_WRITE=if-none-match",
+        "S3_CONDITIONAL_WRITE=invalid-placeholder",
+      ),
+    ),
+  ).toContain("S3_CONDITIONAL_WRITE 必须为 if-none-match 或 oss-forbid-overwrite");
+});
 
 describe("环境变量示例契约", () => {
   it("按运行时 dotenv 解析带引号值、行尾注释和 CRLF", () => {

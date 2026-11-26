@@ -112,6 +112,9 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           accessKeyId: configuration.objectStorage.accessKeyId,
           secretAccessKey: configuration.objectStorage.secretAccessKey,
           forcePathStyle: configuration.objectStorage.forcePathStyle,
+          ...(configuration.objectStorage.conditionalWrite === undefined
+            ? {}
+            : { conditionalWrite: configuration.objectStorage.conditionalWrite }),
           // Worker 将 Workspace/Artifact 对象置于这个受控前缀；下载端必须解析同一物理命名空间。
           prefix: RUNTIME_BLOB_OBJECT_PREFIX,
           maxBlobSizeBytes: developmentApiMaxBlobSizeBytes,
@@ -127,6 +130,9 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           accessKeyId: configuration.objectStorage.accessKeyId,
           secretAccessKey: configuration.objectStorage.secretAccessKey,
           forcePathStyle: configuration.objectStorage.forcePathStyle,
+          ...(configuration.objectStorage.conditionalWrite === undefined
+            ? {}
+            : { conditionalWrite: configuration.objectStorage.conditionalWrite }),
           prefix: RUNTIME_BLOB_OBJECT_PREFIX,
           maxBlobSizeBytes: developmentApiMaxSkillBlobSizeBytes,
         },

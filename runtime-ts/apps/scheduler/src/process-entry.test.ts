@@ -61,6 +61,20 @@ function developmentEnvironment(): Record<string, string> {
 }
 
 describe("Scheduler 进程入口", () => {
+  it.each(["if-none-match", "oss-forbid-overwrite"])("传递可选 S3 条件写入方式：%s", (mode) => {
+    expect(
+      parseSchedulerProcessEnvironment({ ...productionEnvironment(), S3_CONDITIONAL_WRITE: mode })
+        .objectStorage.conditionalWrite,
+    ).toBe(mode);
+  });
+  it("拒绝无效 S3 条件写入覆盖", () => {
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        S3_CONDITIONAL_WRITE: "invalid-placeholder",
+      }),
+    ).toThrow("INVALID:S3_CONDITIONAL_WRITE");
+  });
   it("无沙箱和模型供应商时仍能解析基础部署，显式启用的沙箱仍校验完整性", () => {
     const env = productionEnvironment();
     for (const key of Object.keys(env)) {

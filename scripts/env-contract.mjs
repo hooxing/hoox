@@ -98,6 +98,7 @@ export const expectedEnvironmentKeys = Object.freeze([
 ]);
 
 export const optionalEnvironmentKeys = Object.freeze([
+  "S3_CONDITIONAL_WRITE",
   "HOOX_URL",
   "HOOX_TOKEN",
   "OTEL_EXPORT_ENABLED",
@@ -298,6 +299,13 @@ export function validateEnvironmentExample(source) {
 
 export function validateS3EnvironmentExample(values) {
   const issues = [];
+  const conditionalWrite = values.get("S3_CONDITIONAL_WRITE");
+  if (
+    conditionalWrite !== undefined &&
+    !["if-none-match", "oss-forbid-overwrite"].includes(conditionalWrite)
+  ) {
+    issues.push("S3_CONDITIONAL_WRITE 必须为 if-none-match 或 oss-forbid-overwrite");
+  }
   for (const key of [
     "S3_ENDPOINT",
     "S3_BUCKET",

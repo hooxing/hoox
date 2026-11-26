@@ -54,6 +54,20 @@ function productionEnvironment(): Record<string, string> {
 }
 
 describe("Agent Worker 进程入口", () => {
+  it.each(["if-none-match", "oss-forbid-overwrite"])("传递可选 S3 条件写入方式：%s", (mode) => {
+    expect(
+      parseWorkerProcessEnvironment({ ...productionEnvironment(), S3_CONDITIONAL_WRITE: mode })
+        .objectStorage.conditionalWrite,
+    ).toBe(mode);
+  });
+  it("拒绝无效 S3 条件写入覆盖", () => {
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        S3_CONDITIONAL_WRITE: "invalid-placeholder",
+      }),
+    ).toThrow("INVALID:S3_CONDITIONAL_WRITE");
+  });
   it("Worker OTLP 配置独立启用，凭据配置错误只输出变量名", () => {
     const env = productionEnvironment();
     expect(parseWorkerProcessEnvironment(env).telemetry).toBeUndefined();

@@ -9,6 +9,18 @@ import {
 const example = readFileSync(new URL("../deploy/production.env.example", import.meta.url), "utf8");
 
 describe("production 部署配置契约", () => {
+  it.each(["if-none-match", "oss-forbid-overwrite"])("接受可选条件写入覆盖：%s", (mode) => {
+    expect(
+      validateProductionEnvironmentExample(`${example}\nS3_CONDITIONAL_WRITE=${mode}\n`),
+    ).toEqual([]);
+  });
+  it("拒绝无效条件写入覆盖", () => {
+    expect(
+      validateProductionEnvironmentExample(
+        `${example}\nS3_CONDITIONAL_WRITE=invalid-placeholder\n`,
+      ),
+    ).toContain("S3_CONDITIONAL_WRITE 必须为 if-none-match 或 oss-forbid-overwrite");
+  });
   it("按运行时 dotenv 解析带引号值、行尾注释和 CRLF", () => {
     const source = example
       .replace(

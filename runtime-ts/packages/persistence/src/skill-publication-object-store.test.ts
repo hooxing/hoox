@@ -1,9 +1,4 @@
-import {
-  type GetObjectCommand,
-  HeadBucketCommand,
-  HeadObjectCommand,
-  PutObjectCommand,
-} from "@aws-sdk/client-s3";
+import { type GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { validateSkillPublicationPackage } from "@hoox/skill";
 import { describe, expect, it } from "vitest";
 import {
@@ -21,8 +16,7 @@ class MemoryS3 implements SkillPublicationS3Client {
   readonly objects = new Map<string, ObjectState>();
   readonly puts: PutObjectCommand[] = [];
 
-  async send(command: HeadBucketCommand | HeadObjectCommand | PutObjectCommand | GetObjectCommand) {
-    if (command instanceof HeadBucketCommand) return {};
+  async send(command: HeadObjectCommand | PutObjectCommand | GetObjectCommand) {
     const key = String(command.input.Key);
     if (command instanceof HeadObjectCommand) {
       const value = this.objects.get(key);
@@ -54,6 +48,53 @@ class MemoryS3 implements SkillPublicationS3Client {
 }
 
 describe("S3 管理 Skill 稳定对象发布", () => {
+  it.each([200, 404, 403, 500])("readiness 仅允许哨兵 HEAD 的 200/404：%s", async (status) => {
+    const commands: HeadObjectCommand[] = [];
+    const publisher = new S3StableSkillPublisher({
+      bucket: "skill-bucket",
+      region: "test-region",
+      client: {
+        async send(command) {
+          expect(command).toBeInstanceOf(HeadObjectCommand);
+          commands.push(command as HeadObjectCommand);
+          if (status !== 200)
+            throw Object.assign(new Error("probe"), { $metadata: { httpStatusCode: status } });
+          return {};
+        },
+      },
+    });
+    if (status === 200 || status === 404) await expect(publisher.probe()).resolves.toBeUndefined();
+    else await expect(publisher.probe()).rejects.toThrow("probe");
+    expect(commands[0]?.input).toEqual({
+      Bucket: "skill-bucket",
+      Key: "__hoox_readiness__/nonexistent",
+    });
+  });
+
+  it.each(["PreconditionFailed", "FileAlreadyExists"])(
+    "并发首次写入的 %s 经规范对象读取收敛",
+    async (name) => {
+      const client = new MemoryS3();
+      const send = client.send.bind(client);
+      client.send = async (command) => {
+        if (command instanceof PutObjectCommand) {
+          await send(command);
+          throw Object.assign(new Error("exists"), {
+            name,
+            $metadata: { httpStatusCode: name === "FileAlreadyExists" ? 409 : 412 },
+          });
+        }
+        return send(command);
+      };
+      const publisher = new S3StableSkillPublisher({
+        bucket: "skill-bucket",
+        region: "test-region",
+        client,
+      });
+      const stored = await publisher.publishPackage(publicationPackage("text/markdown"));
+      expect(stored.files).toHaveLength(1);
+    },
+  );
   it("以 If-None-Match 写入并经 HEAD、GET、哈希校验后返回 Runtime 可读引用", async () => {
     const client = new MemoryS3();
     const publisher = new S3StableSkillPublisher({

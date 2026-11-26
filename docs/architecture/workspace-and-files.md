@@ -64,5 +64,7 @@ building → prepared → committed
 ## 下载与预览
 
 - 下载不相信客户端提供的对象键、媒体类型、文件名或签名参数；签发后再次读取并逐字段确认授权修订与 Blob 绑定，任何漂移按 404 失败关闭。
+- 对象写入记录首次写入的 `Content-Type`，复制时保留；媒体类型不参与内容身份，同一物理对象可被不同类型的业务引用复用。普通 S3 下载仍以授权引用覆盖响应类型；OSS 不发送响应类型覆盖，实际类型来自对象元数据。OSS 仅在存储类型与期望类型完全一致且为 PNG、JPEG、GIF、WebP 或 PDF 时允许内联，类型不一致或危险类型均回退为附件，不通过重写共享对象元数据修正单个引用。
+- Blob 与 Skill 发布的条件首写默认使用 `If-None-Match: *`，OSS 使用 `x-oss-forbid-overwrite: true`；HTTP 412 或 HTTP 409 `FileAlreadyExists` 均表示已存在，必须沿用内容校验后幂等收敛，不能改成无条件覆盖。readiness 只 HEAD 固定哨兵对象，200/404 就绪，其余失败，不要求 Bucket 管理权限。
 - 预签名地址有效期最长 300 秒，Bucket 保持私有。交付物默认 `attachment`；只有安全文本、常见图片和 PDF 可以 inline 预览，HTML、SVG、XML 等主动内容只能下载。
 - 用户只能看到正式 deliverable，诊断与轨迹 Blob 不进入下载界面。未知数据库、对象存储或签名异常不泄漏私有消息、对象键或签名 URL。

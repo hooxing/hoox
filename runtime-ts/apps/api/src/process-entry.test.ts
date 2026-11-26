@@ -53,6 +53,20 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
 }
 
 describe("API 进程入口", () => {
+  it.each(["if-none-match", "oss-forbid-overwrite"])("传递可选 S3 条件写入方式：%s", (mode) => {
+    expect(
+      parseApiProcessEnvironment({ ...productionEnvironment(), S3_CONDITIONAL_WRITE: mode })
+        .objectStorage.conditionalWrite,
+    ).toBe(mode);
+  });
+  it("拒绝无效 S3 条件写入覆盖且不泄漏值", () => {
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        S3_CONDITIONAL_WRITE: "invalid-secret-placeholder",
+      }),
+    ).toThrow("INVALID:S3_CONDITIONAL_WRITE");
+  });
   it("用户 API 不读取 Webhook 密钥根配置", () => {
     expect(
       "webhookSecretEncryptionKey" in parseApiProcessEnvironment(productionEnvironment()),

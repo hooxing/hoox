@@ -28,6 +28,13 @@ import {
   type S3ObjectClient,
 } from "../../runtime-ts/packages/persistence/src/s3-blob-store.js";
 import { S3StableSkillPublisher } from "../../runtime-ts/packages/persistence/src/skill-publication-object-store.js";
+import {
+  applyS3ConditionalWrite,
+  isOssEndpoint,
+  isS3ObjectAlreadyExists,
+  parseS3ConditionalWrite,
+  resolveS3ConditionalWrite,
+} from "../../runtime-ts/packages/persistence/src/s3-compatibility.js";
 import { validateSkillPublicationPackage } from "../../runtime-ts/packages/skill/src/index.js";
 
 const requiredVariables = [
@@ -55,6 +62,7 @@ let config: CreateS3BlobStoreConfig;
 let blobs: S3BlobStore;
 let objects: S3ObjectClient;
 let sdk: S3Client;
+let ossCompatibility: boolean;
 
 describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端）", () => {
   beforeAll(
@@ -68,10 +76,17 @@ describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端�
           accessKeyId: defined(process.env.S3_ACCESS_KEY_ID),
           secretAccessKey: defined(process.env.S3_SECRET_ACCESS_KEY),
           forcePathStyle: process.env.S3_FORCE_PATH_STYLE === "true",
+          ...(process.env.S3_CONDITIONAL_WRITE === undefined
+            ? {}
+            : { conditionalWrite: parseS3ConditionalWrite(process.env.S3_CONDITIONAL_WRITE) }),
           prefix,
           maxBlobSizeBytes: 16 * 1024 * 1024,
         };
         blobs = createS3BlobStore(config, unavailablePromotion);
+        ossCompatibility =
+          isOssEndpoint(config.endpoint) ||
+          isOssEndpoint(config.publicEndpoint) ||
+          config.conditionalWrite === "oss-forbid-overwrite";
         objects = Reflect.get(blobs, "client") as S3ObjectClient;
         sdk = Reflect.get(objects, "client") as S3Client;
         trackClient(sdk);
@@ -143,7 +158,7 @@ describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端�
     equalBytes(new Uint8Array(await (await download(url)).arrayBuffer()), body);
   });
 
-  conformance('IfNoneMatch "*" 首写成功、重复写拒绝且保留原字节', async () => {
+  conformance("条件写入首写成功、重复写拒绝且保留原字节", async () => {
     const key = `${prefix}/conditional/sequential`;
     const body = Buffer.from("first");
     const replacement = Buffer.from("replacement");
@@ -182,7 +197,7 @@ describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端�
     equalBytes(await collect(defined(await objects.get(key)).body), defined(winner));
   });
 
-  conformance("生产 Blob 在真实 HEAD→PUT 竞争中把 412 收敛为相同内容幂等成功", async () => {
+  conformance("生产 Blob 在真实 HEAD→PUT 竞争中把已存在收敛为相同内容幂等成功", async () => {
     const body = Buffer.from(`race-${randomUUID()}`);
     const uploadId = `upload-${randomUUID()}`;
     const race = missingHeadBarrier(sdk, (key) => key.endsWith(`/${uploadId}`));
@@ -208,9 +223,12 @@ describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端�
     }
   });
 
-  conformance("公网预签名 GET 实际下载并覆盖 Content-Type、UTF-8 Content-Disposition", async () => {
+  conformance("公网预签名 GET 的媒体类型与 UTF-8 附件下载策略", async () => {
     const body = Buffer.from("presigned public download\n");
-    const stable = await stableResource(body);
+    const stable = await stableResource(
+      body,
+      ossCompatibility ? "text/plain" : "application/octet-stream",
+    );
     const url = await blobs.presignDownload({
       scope,
       blob: stable,
@@ -220,6 +238,7 @@ describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端�
     });
     const publicEndpoint = new URL(defined(config.publicEndpoint));
     const signedEndpoint = new URL(url);
+    expect(signedEndpoint.searchParams.has("response-content-type")).toBe(!ossCompatibility);
     const publicHosts = config.forcePathStyle
       ? [publicEndpoint.hostname]
       : [publicEndpoint.hostname, `${config.bucket}.${publicEndpoint.hostname}`];
@@ -235,15 +254,30 @@ describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端�
       "中文 报告+%.txt",
     );
     equalBytes(new Uint8Array(await response.arrayBuffer()), body);
+    const mismatchUrl = await blobs.presignDownload({
+      scope,
+      blob: { ...stable, mediaType: "image/png" },
+      ttlSeconds: 60,
+      responseMediaType: "image/png",
+      delivery: "inline-preview",
+    });
+    const mismatch = await download(mismatchUrl);
+    expect(mismatch.headers.get("content-type")).toBe(
+      ossCompatibility ? "text/plain" : "image/png",
+    );
+    expect(mismatch.headers.get("content-disposition")).toBe(
+      ossCompatibility ? "attachment" : "inline",
+    );
+    equalBytes(new Uint8Array(await mismatch.arrayBuffer()), body);
   });
 
   conformance("预签名 GET 在真实时间过期后拒绝下载", async () => {
-    const stable = await stableResource(Buffer.from("expiry"));
+    const stable = await stableResource(Buffer.from("expiry"), "image/png");
     const url = await blobs.presignDownload({
       scope,
       blob: stable,
       ttlSeconds: 5,
-      responseMediaType: "text/plain",
+      responseMediaType: "image/png",
       delivery: "inline-preview",
     });
     const initial = await download(url);
@@ -286,17 +320,16 @@ describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端�
           );
           const key = `${prefix}/checksums/${mode}/${streaming ? "stream" : "buffer"}`;
           const body = streaming ? Readable.from(bodyChunks(largeBody)) : largeBody;
-          await client.send(
-            new PutObjectCommand({
-              Bucket: config.bucket,
-              Key: key,
-              Body: body,
-              ContentLength: largeBody.byteLength,
-              ContentType: "application/octet-stream",
-              Metadata: { sha256: hash(largeBody) },
-              IfNoneMatch: "*",
-            }),
-          );
+          const command = new PutObjectCommand({
+            Bucket: config.bucket,
+            Key: key,
+            Body: body,
+            ContentLength: largeBody.byteLength,
+            ContentType: "application/octet-stream",
+            Metadata: { sha256: hash(largeBody) },
+          });
+          applyS3ConditionalWrite(command, resolveS3ConditionalWrite(config));
+          await client.send(command);
           expect(checksum).toBe(mode === "WHEN_SUPPORTED");
           expect(chunked).toBe(streaming && mode === "WHEN_SUPPORTED");
           const result = await client.send(
@@ -320,7 +353,7 @@ describe.skipIf(!configured)("对象存储兼容性（真实生产 S3 客户端�
     const publisher = new S3StableSkillPublisher(config);
     const client = Reflect.get(publisher, "client") as S3Client;
     trackClient(client, true);
-    const race = missingHeadBarrier(client, () => true);
+    const race = missingHeadBarrier(client, (key) => key.includes("/stable/skill_catalog/skill/"));
     try {
       await publisher.probe();
       const publication = validateSkillPublicationPackage({
@@ -571,7 +604,8 @@ function missingHeadBarrier(client: S3Client, matches: (key: string) => boolean)
       } catch (error) {
         const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata
           ?.httpStatusCode;
-        if (context.commandName === "PutObjectCommand" && status === 412) conflicts += 1;
+        if (context.commandName === "PutObjectCommand" && isS3ObjectAlreadyExists(error))
+          conflicts += 1;
         if (
           context.commandName === "HeadObjectCommand" &&
           status === 404 &&
@@ -598,8 +632,9 @@ function missingHeadBarrier(client: S3Client, matches: (key: string) => boolean)
 
 async function stableResource(
   body: Uint8Array,
+  mediaType = "application/octet-stream",
 ): Promise<StableBlobRef & { readonly purpose: "resource" }> {
-  const descriptor = descriptorFor(body, "application/octet-stream");
+  const descriptor = descriptorFor(body, mediaType);
   const incarnationId = randomUUID();
   const key = `${prefix}/stable/${scope.tenantId}/resource/sha256/${descriptor.sha256}/incarnations/${incarnationId}`;
   await objects.put({ key, body, descriptor });

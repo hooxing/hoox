@@ -136,9 +136,9 @@ function RuntimeHero() {
           把成果文件交付给你和你的团队。
         </p>
         <p className="landing-hero-description">
-          今天已可用：沙箱执行、文件交付、Skill 中心与团队协作。
+          在后台配置 Agent、接入远程 MCP 工具。
           <br className="landing-desktop-break" />
-          自定义 Agent、外部工具与 API 即将推出，见下方路线图。
+          用工作台交付给团队，也可通过公开 API 接入你的产品。
         </p>
         <div className="landing-actions">
           <a className="landing-button landing-button-primary" href="/app">
@@ -930,46 +930,47 @@ function OperationsSection() {
   );
 }
 
-const roadmapItems = [
-  "后台定义多个 Agent：编辑指令、选择模型与 Skill",
-  "不改代码接入外部工具（MCP / HTTP）",
-  "Playground：发布前试跑与对比版本",
-  "API Key 与公开 API：把 Hoox 嵌入你的产品",
-  "评测：用样例集回归检查 Agent 质量",
+const capabilityItems = [
+  { label: "构建", description: "用 Playground 试跑草稿，再发布 Agent；每次运行固定版本。" },
+  { label: "工具", description: "在后台发布远程 MCP 工具；HTTP 工具在后台仅支持导入预览。" },
+  { label: "集成", description: "用 API Key 调用公开 API v1，配套 TypeScript SDK 和 Webhook。" },
+  { label: "运营", description: "按规则批量评测并对比版本，查看 Agent 指标、成本和用户反馈。" },
+  {
+    label: "配置",
+    description: "用 YAML 和 hoox 命令行管理 Agent 配置，定制工作台和后台的品牌外观。",
+  },
 ] as const;
-function RoadmapSection() {
+
+function CapabilitiesSection() {
   return (
     <section id="roadmap" className="landing-section landing-wrap landing-roadmap">
       <SectionHeading
         index="07"
-        label="路线图"
+        label="平台能力"
         title={
           <>
             打造你自己的 Agent，
             <br />
-            这些即将推出。
+            从试跑到交付。
           </>
         }
       >
-        <p>以下能力尚未发布，不在当前版本中。</p>
-        <RepositoryLink
-          path="/blob/main/docs/plans/20261119-custom-agent-platform.md"
-          className="landing-text-link"
-        >
-          查看实施计划
+        <p>在后台配置和验证 Agent，用工作台交付或接入你的产品。</p>
+        <RepositoryLink path="/blob/main/docs/reference/README.md" className="landing-text-link">
+          查看能力参考
         </RepositoryLink>
       </SectionHeading>
       <ul className="landing-roadmap-list">
-        {roadmapItems.map((item) => (
-          <li key={item}>
-            <span className="landing-roadmap-tag">即将推出</span>
-            {item}
+        {capabilityItems.map(({ label, description }) => (
+          <li key={label}>
+            <span className="landing-roadmap-tag">{label}</span>
+            {description}
           </li>
         ))}
       </ul>
       <p className="landing-roadmap-note">
-        当前为 0.x
-        早期开发阶段：公共接口可能变化，尚未完成生产环境验收。沙箱的暂停与恢复取决于所选供应商的能力与保留策略。
+        当前为 0.x 早期开发阶段：公共接口可能变化，Demo
+        不替代生产环境验收。沙箱的暂停与恢复取决于所选供应商的能力与保留策略。
       </p>
     </section>
   );
@@ -1052,7 +1053,7 @@ export function LandingPage({ privacyUrl, termsUrl }: LandingLinks = {}) {
         <TeamSection />
         <IntegrationSection />
         <OperationsSection />
-        <RoadmapSection />
+        <CapabilitiesSection />
         <section className="landing-open-source landing-wrap" aria-labelledby="opensource-title">
           <p className="landing-eyebrow">OPEN SOURCE. YOUR CONTROL.</p>
           <h2 id="opensource-title">下一步，把你的 Agent 跑起来。</h2>

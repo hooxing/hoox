@@ -42,6 +42,19 @@ describe("正式产品首页", () => {
       /DESIGN STUDY|设计切换|申请内测|虚构样例|demo@|HooxDemo/u,
     );
   });
+  it("展示已交付的平台能力并保留 HTTP 工具发布边界", async () => {
+    await act(async () => root.render(<LandingPage />));
+    expect(container.querySelector(".landing-hero-description")?.textContent).toContain("公开 API");
+    const capabilities = container.querySelector("#roadmap");
+    expect(capabilities?.querySelector("h2")?.textContent).toContain("从试跑到交付");
+    expect(capabilities?.textContent).toContain("HTTP 工具在后台仅支持导入预览");
+    expect(capabilities?.textContent).toContain("公开 API v1");
+    expect(capabilities?.textContent).toContain("按规则批量评测");
+    expect(capabilities?.querySelector("a")?.getAttribute("href")).toBe(
+      "https://github.com/hooxing/hoox/blob/main/docs/reference/README.md",
+    );
+    expect(container.textContent).not.toMatch(/即将推出|以下能力尚未发布/u);
+  });
   it("同域工作台入口不回环，所有开源入口采用安全外链", async () => {
     await act(async () => root.render(<LandingPage />));
     const links = [...container.querySelectorAll<HTMLAnchorElement>("a")];

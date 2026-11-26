@@ -41,16 +41,14 @@ Hoox 面向想把 Agent 交付给团队或用户的开发者与企业。Agent �
 > [!IMPORTANT]
 > Hoox 目前处于 `0.x` 开发阶段。开发环境和工程 Gate 已覆盖大量核心边界，但真实生产基础设施、外部身份系统、容量与完整灾难恢复尚未全部验收。公共接口和数据库 Schema 仍可能变化，请不要把本仓库直接视为可无条件上线的完整产品。
 
-## 路线图
+## 自定义与集成
 
-后台 Agent 管理与工作台选择、MCP 工具发布、Playground 草稿试跑、API Key、Webhook 和 OpenTelemetry 导出已实现；`v0.1.0` 的发布范围、限制与升级方式见[版本说明](docs/releases/v0.1.0.md)。
+- **构建 Agent**：管理员在后台配置指令、模型、工具和 Skill，用 Playground 试跑草稿，再发布到工作台。每次运行固定 Agent 版本。后台可发布远程 MCP 工具；[HTTP 工具](docs/reference/http-tools.md)在后台仅支持导入预览。
+- **接入产品**：使用 API Key 调用[公开 API v1](docs/reference/public-api.md)，支持终端用户映射和客户端工具；提供 [TypeScript SDK](docs/reference/sdk-typescript.md)、[Webhook](docs/reference/webhooks.md) 和[可嵌入聊天组件](docs/reference/chat-embed.md)。
+- **评测与运营**：用[评测集](docs/reference/admin-evaluations.md)按规则批量评测、对比版本，在后台查看 Agent 指标、成本和用户反馈；Worker 可选启用 [OpenTelemetry 导出](docs/reference/configuration.md#worker-opentelemetry-配置)。
+- **配置与发布**：通过后台或 [`hoox` 命令行](docs/reference/cli.md)管理 Agent YAML，定制[工作台和后台品牌](docs/reference/branding.md)，开发者可在获授权的命名空间内[发布 Skill](docs/reference/skill-publishing.md)。
 
-以下能力**尚未实现**，正在按[实施计划](docs/plans/20261119-custom-agent-platform.md)推进，目标契约见[可定制 Agent 平台规范](docs/specs/custom-agent-platform.md)：
-
-- 完整 Headless 接入：稳定公开 API v1、终端用户映射、客户端工具和 TypeScript SDK。
-- HTTP 工具后台发布；当前导入仅提供预览，签名与执行路径不等于发布入口。
-- 评测集与版本评测对比、按 Agent 的运营指标与成本面板、终端用户反馈。
-- 配置即代码、白标和开发者自助发布 Skill。
+尚待完成的方向见[项目路线](docs/roadmap.md)；`v0.1.0` 的发布范围与升级方式见[版本说明](docs/releases/v0.1.0.md)。
 
 ## 核心模型
 

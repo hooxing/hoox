@@ -2,16 +2,10 @@
 
 本页只描述 Hoox 尚未完成的战略方向，不维护实施任务复选框。已经具备的能力和生产缺口以[项目状态](project-status.md)为准，具体实施顺序只有在形成有效计划后才进入[实施计划](plans/README.md)。历史阶段路线以 Git 历史为准。
 
-## 可定制 Agent 平台
+## Agent 工具与评测
 
-Hoox 的主方向是成为开源、可自托管的云端 Agent 平台：其他公司或开发者在后台编写指令、接入自己的工具、上架 Skill，就能得到运行在云端沙箱中的专属 Agent，并通过 Hoox 工作台或公开 API 交付给自己的用户。目标契约见[可定制 Agent 平台规范](specs/custom-agent-platform.md)，实施顺序见[实施计划](plans/20261119-custom-agent-platform.md)。
-
-阶段 Gate：
-
-- **M1 Agent 基座**：一个安装内可以定义、发布多个 Agent，Run 固定 Agent 快照，默认 Agent 与现有行为等价。
-- **M2 不改代码做出自己的 Agent**：远程 MCP 与 HTTP 工具、Playground 和后台 Run 浏览可用；作为首个公开版本 `v0.1.0` 的范围。
-- **M3 Headless**：API Key、公开 API、Webhook、客户端工具与 TypeScript SDK 可用。
-- **M4 评测与运营**：评测集、按 Agent 的指标与成本、反馈、OpenTelemetry 导出、配置即代码与白标可用。
+- 补齐 HTTP 工具后台发布入口。当前后台只提供单端点声明和 OpenAPI 片段的导入预览，已有运行路径不等于可发布。见[外部工具注册边界](architecture/admin-control-plane.md#外部工具注册边界)。
+- 扩展评测用例来源与评分方式。[评测管理](reference/admin-evaluations.md)已支持规则断言的批量运行和版本对比；从真实对话导入用例及评审模型打分尚未启用。
 
 ## 生产验证
 
@@ -21,13 +15,13 @@ Hoox 的主方向是成为开源、可自托管的云端 Agent 平台：其他�
 
 ## 身份与治理
 
-- 将 development 本地账号替换为面向公开产品的身份和账号生命周期。
+- 在目标环境验证现有的 [Web 登录与会话](architecture/identity-and-session.md)，并补齐账号生命周期。
 - 补齐 Tenant 越权矩阵、配额、限流、审计访问和运营权限模型。
 - 现有团队协作基线见[团队协作](architecture/team-collaboration.md)；邀请、成员完整生命周期、资产治理和运营策略完成后，相关能力才能进入正式发布范围。
 
-## 管理面
+## 部署配置的备份与恢复
 
-- 后台提供运行配置导出与导入（与 Agent 配置导入导出合并实施，见[实施计划](plans/20261119-custom-agent-platform.md) E1）：模型、运行设置和沙箱配置导出为可移植文件，凭证保持加密，用于换服务器或清库后恢复。Demo 目前由发布脚本自动备份和恢复，见 [Demo 持续部署](operations/demo-cd.md)。
+- 补齐部署级配置（模型、运行设置和沙箱）的可移植备份与恢复，凭据需保持加密。[Agent YAML](reference/agent-configuration.md)只保存 Agent 配置及其引用，不能恢复部署级配置；Demo 的全局配置由[发布脚本](operations/demo-cd.md)备份和恢复。
 
 ## 运行质量
 

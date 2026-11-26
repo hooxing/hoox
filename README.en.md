@@ -40,16 +40,14 @@ Available today:
 > [!IMPORTANT]
 > Hoox is at the `0.x` development stage. The development environment and engineering gates cover many core boundaries, but real production infrastructure, external identity systems, capacity planning and full disaster recovery are not yet verified. Public APIs and the database schema may still change. Do not treat this repository as a complete product that is ready to go live unconditionally.
 
-## Roadmap
+## Customization and integration
 
-Admin-managed Agents and workbench selection, MCP tool publishing, draft runs in the Playground, API keys, Webhooks and OpenTelemetry export are implemented. See the [v0.1.0 release notes](docs/releases/v0.1.0.md) (Chinese) for release scope, limitations and upgrade guidance.
+- **Build an Agent.** Administrators configure instructions, models, tools, and Skills in the admin console, try drafts in the Playground, and publish Agents for the workbench. Each run pins an Agent revision. The console can publish remote MCP tools; for [HTTP tools](docs/reference/http-tools.md), it only previews imports.
+- **Integrate with your product.** Use an API key to call the [public API v1](docs/reference/public-api.md), which supports end-user mapping and client-side tools. Hoox also provides a [TypeScript SDK](docs/reference/sdk-typescript.md), [Webhooks](docs/reference/webhooks.md), and an [embeddable chat component](docs/reference/chat-embed.md).
+- **Evaluate and monitor.** Run rule-based [evaluation suites](docs/reference/admin-evaluations.md) to compare revisions, and view Agent metrics, costs, and user feedback in the admin console. Workers can optionally [export OpenTelemetry data](docs/reference/configuration.md#worker-opentelemetry-配置).
+- **Configure and publish.** Manage Agent YAML in the admin console or with the [`hoox` CLI](docs/reference/cli.md), customize [workbench and admin branding](docs/reference/branding.md), and [publish Skills](docs/reference/skill-publishing.md) in namespaces where you have publishing access.
 
-The following is **not implemented yet** and is tracked in the [implementation plan](docs/plans/20261119-custom-agent-platform.md) (the target contract is in the [custom Agent platform spec](docs/specs/custom-agent-platform.md)); both documents are in Chinese:
-
-- Complete Headless integration: a stable public API v1, end-user mapping, client-side tools and a TypeScript SDK.
-- HTTP tool publishing in the admin console; imports currently provide previews only, not a publishing path.
-- Evaluation sets and revision comparisons, per-Agent operational metrics and cost dashboards, and end-user feedback.
-- Configuration as code, white-label customization and self-service Skill publishing for developers.
+See the [roadmap](docs/roadmap.md) for remaining work and the [v0.1.0 release notes](docs/releases/v0.1.0.md) for release scope and upgrade guidance (both in Chinese).
 
 ## Quick start
 

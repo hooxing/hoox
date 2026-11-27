@@ -8,8 +8,10 @@
 - 镜像推送到 GHCR，并以不可变 digest 交给目标主机；目标主机不从 Git 仓库现场构建。
 - 单机 Docker Compose 运行 PostgreSQL、MinIO、API、Web、Admin Control、Admin Web、Scheduler 和 Worker。PostgreSQL 与 MinIO 端口只绑定宿主机回环地址。
 - API、Web、Admin Control 与 Admin Web 使用 host network，分别只监听 `127.0.0.1:3001`、`127.0.0.1:4173`、`127.0.0.1:3003` 和 `127.0.0.1:4174`。
-- 宿主机 Nginx 在 `hoox.aisay.cc` 提供 TLS。`/api/` 转发用户 API，`/agent-runtime-demo/` 转发 Demo 对象桶，其余普通路径转发用户 Web；`/admin/` 提供后台静态页面，`/v1/admin/` 通过内部 `auth_request` 校验 Hoox 会话后转发统一后台 API；旧 `/trajectory` 与 `/trajectory/` 返回 `308 /admin/runs`。
+- 宿主机 Nginx 在 `hoox.aisay.cc` 提供 TLS。`/api/` 转发用户 API，`/agent-runtime-demo/` 转发 Demo 对象桶，其余普通路径转发用户 Web；`/admin/` 提供后台静态页面，`/v1/admin/` 转发统一后台 API，默认通过内部 `auth_request` 校验 Hoox 会话；旧 `/trajectory` 与 `/trajectory/` 重定向至 `/admin/runs`。HTTP 重定向和后台 API 上游 Host 使用配置域名，不接受请求 Host 覆盖。
 - Admin Web 从同源工作台的 `hoox.auth-session.v2` 读取未过期 Hoox access token。Nginx 仅在会话属于配置的 Demo 管理员用户时放行后台 API；上游 `Authorization` 由 root-only 配置覆盖为 Admin Control development Token。
+- [CLI](../reference/cli.md#后台凭据与连接) 使用同一站点 origin。仅 Agent Definition 的 Revision 列表、Revision 导出（`GET`）以及新建或指定 Definition 的导入（`POST`）可携带 `hoox_at_` 后台访问令牌直接进入 Admin Control；代理不注入开发令牌。后台逐请求验证令牌、当前角色和作用域。其他后台路径仍经过 Demo 管理员会话关卡。
+- 公开资源上传由 Nginx 精确转发到 API 上传路由并保留请求缓冲，避免慢速请求占用 API handler；网关上限为 17 MiB，应用上限为 16 MiB。16–17 MiB 请求由应用返回公开契约定义的 JSON `413 PAYLOAD_TOO_LARGE`，超过网关上限时由该入口返回同契约 JSON 413。
 - Worker 可把 development 诊断镜像写入容器本地文件系统以支持容器内排障；Demo 不持久化该镜像，也不运行 Trajectory Web 服务。后台运行记录通过受限 PostgreSQL 投影读取持久 Run 事件。升级时 Compose 使用 `--remove-orphans` 清除旧版独立轨迹容器，但不删除数据库或对象存储数据卷。
 - Demo 使用 development 装配以复用单机入口，但必须同时设置 `DEMO_PUBLIC_ACCESS_ENABLED=true`、`DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc`、`DEMO_ADMIN_USER_ID=<Demo 管理员用户 ID>` 和 `DEV_AUTH_ENABLED=false`。固定开发身份、缺失管理员用户、明文 origin 和非回环 API 监听都会在解析期失败。
 
@@ -93,7 +95,7 @@ Demo 的部署类型以服务端 `RUNTIME_ENV` 为准，不能由前端 producti
 
 `scheduler.env` 与 `admin-control.env` 都必须显式包含 `S3_ENDPOINT=http://127.0.0.1:19000`、`S3_BUCKET=agent-runtime-demo`、`S3_REGION=us-east-1`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` 和 `S3_FORCE_PATH_STYLE=true`。端点与桶必须指向 Worker 的同一存储；Demo 当前使用 `infra.env` 中运行时 S3 用户的凭据，不能误填 Skill Publisher 或 MinIO root 凭据。这六项必须写成不加引号、无空白、无行尾注释、不含 `$` 的单行 `KEY=值`（LF 换行），每个键恰好出现一次；预检不执行 env 文件，也不实现 dotenv/Compose 的完整语法，其他写法一律以格式无效拒绝，以免预检与运行时解析不一致。`minio-init` 当前为运行时与 Skill Publisher 用户绑定通用 `readwrite` 策略，尚未自动创建 Scheduler/Admin Control 的受限用户。生产应按[配置参考](../reference/configuration.md#对象存储)分别授权，而不是照搬 Demo 的宽权限。
 
-发布脚本在拉取镜像、改写 `compose.env` 或停止现有容器之前校验这两个文件的六项 `S3_*`：缺失、空值或非法路径风格布尔值均以退出码 2 失败，只报告文件与变量名，不输出值。其他格式和服务权限仍由进程解析与实际依赖检查校验。Scheduler 启动时的环境解析错误输出变量名和 `MISSING`/`INVALID` 等稳定分类，不输出配置值或底层异常。
+发布脚本在执行发布操作前校验 Demo 域名与对象桶字面值，域名必须是合法 DNS 主机名；桶名必须符合对象存储命名字符和长度限制，且不能与 `api`、`admin`、`trajectory` 保留路由重名。脚本随后在拉取镜像、改写 `compose.env` 或停止现有容器之前校验这两个文件的六项 `S3_*`：缺失、空值或非法路径风格布尔值均以退出码 2 失败，只报告文件与变量名，不输出值。其他格式和服务权限仍由进程解析与实际依赖检查校验。Scheduler 启动时的环境解析错误输出变量名和 `MISSING`/`INVALID` 等稳定分类，不输出配置值或底层异常。
 
 仓库目前只为 `infra.env`、`api.env`、`admin-control.env` 和 `scheduler.env` 提供 Demo 局部示例，其余文件需要按当前进程契约准备。生成密码和密钥时避免出现在命令历史、终端录屏、日志或提交中；连接串中的特殊字符需按 URL 规则编码。`infra.env` 同样被 shell 读取，必须同时满足 shell 与 Compose env 文件解析。完成后核对权限及文件存在性，避免打印文件内容：
 
@@ -158,6 +160,7 @@ PostgreSQL 数据卷保留时，Docker 不会重新执行初始化脚本。发�
 ```bash
 curl --fail https://hoox.aisay.cc/
 curl --fail https://hoox.aisay.cc/app
+curl --fail https://hoox.aisay.cc/api/live
 curl --fail https://hoox.aisay.cc/api/ready
 curl --fail https://hoox.aisay.cc/admin/
 curl --fail --location https://hoox.aisay.cc/trajectory/
@@ -169,6 +172,23 @@ docker compose --project-name hoox-demo \
 ```
 
 `/` 展示公开介绍页，首页的工作台入口应跳转到 `/app`；两条路径均应支持直接访问和刷新。未登录访问 `/admin/` 应成功加载不含敏感数据的页面外壳；旧 `/trajectory/` 应重定向到 `/admin/runs`。未携带 Hoox Bearer 的 `/v1/admin/` 必须返回 `401`。在同源工作台使用 Demo 管理员账号登录后，后台应能读取管理数据与运行记录。还应创建 Thread、触发一次 Run，并确认 Worker 能消费同一 Tenant 的 dispatch，Run 出现在后台运行记录中。账号密码保存在运维人员的受限凭据文件中，不得复制到 issue、PR、Actions 日志或本页。
+
+### 核对 HTTPS 响应头
+
+以下头应出现在首页、`/api/live`、后台未授权响应及 HTTPS 重定向上。用 `curl -sI https://hoox.aisay.cc/` 和 `curl -sI https://hoox.aisay.cc/api/live` 检查：
+
+```http
+HTTP/2 200
+server: nginx
+strict-transport-security: max-age=31536000
+content-security-policy: frame-ancestors 'self'
+content-security-policy-report-only: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https:; worker-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'
+x-frame-options: SAMEORIGIN
+referrer-policy: no-referrer
+permissions-policy: camera=(), microphone=(), geolocation=()
+```
+
+Nginx 的 `server` 响应头可能仍显示产品名 `nginx`，但不包含版本号。防外部嵌入的策略直接执行；资源加载策略只在浏览器报告、不拦截。收紧前在浏览器控制台核对首页、登录、工作台文件预览及后台流程；Vite 产物从同源加载，策略保留内联样式以及数据、Blob 和 HTTPS 图片来源。未配置集中报告收集端点。
 
 ### 在后台核对部署版本
 

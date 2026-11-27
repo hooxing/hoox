@@ -1,14 +1,38 @@
+# 令牌只做严格格式筛选；令牌及权限由后台控制面验证。
+map $http_authorization $hoox_demo_cli_token_format {
+    default 0;
+    "~^Bearer hoox_at_[A-Za-z0-9_-]{43}$" 1;
+}
+
+map $request_method $hoox_demo_cli_method {
+    default "";
+    GET GET;
+    POST POST;
+}
+
+map $request_uri $hoox_demo_cli_uri {
+    default "";
+    "~^/v1/admin/control/agent-definitions/[A-Za-z0-9][A-Za-z0-9_-]{2,127}/revisions(?:/[A-Za-z0-9][A-Za-z0-9_-]{2,127}/export)?(?:\?.*)?$" GET;
+    "~^/v1/admin/control/agent-definitions/(?:[A-Za-z0-9][A-Za-z0-9_-]{2,127}/)?import(?:\?.*)?$" POST;
+}
+
+map "$hoox_demo_cli_token_format:$hoox_demo_cli_method:$hoox_demo_cli_uri" $hoox_demo_cli_access {
+    default 0;
+    "1:GET:GET" 1;
+    "1:POST:POST" 1;
+}
 server {
     listen 80;
     listen [::]:80;
     server_name @@DOMAIN@@;
+    server_tokens off;
 
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/letsencrypt;
     }
 
     location / {
-        return 301 https://$host$request_uri;
+        return 301 https://@@DOMAIN@@$request_uri;
     }
 }
 
@@ -16,12 +40,20 @@ server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name @@DOMAIN@@;
+    server_tokens off;
 
     ssl_certificate /etc/letsencrypt/live/@@DOMAIN@@/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/@@DOMAIN@@/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
-    client_max_body_size 32m;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Content-Security-Policy "frame-ancestors 'self'" always;
+    add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https:; worker-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'" always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
+    client_max_body_size 17m;
 
     location ^~ /@@BUCKET@@/ {
         proxy_pass http://127.0.0.1:19000;
@@ -32,7 +64,7 @@ server {
     }
 
     location = /admin {
-        return 308 /admin/;
+        return 308 https://@@DOMAIN@@/admin/;
     }
 
     location = /_hoox_demo_admin_access {
@@ -52,23 +84,54 @@ server {
     }
 
     location = /trajectory {
-        return 308 /admin/runs;
+        return 308 https://@@DOMAIN@@/admin/runs;
     }
 
     location ^~ /trajectory/ {
-        return 308 /admin/runs;
+        return 308 https://@@DOMAIN@@/admin/runs;
     }
 
     location ^~ /v1/admin/ {
+        error_page 418 = @hoox_demo_cli;
+        if ($hoox_demo_cli_access) { return 418; }
         auth_request /_hoox_demo_admin_access;
         include /etc/nginx/hoox-demo-admin-token.conf;
         proxy_read_timeout 610s;
         proxy_pass http://127.0.0.1:3003;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host @@DOMAIN@@;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_buffering off;
+    }
+
+    location @hoox_demo_cli {
+        proxy_pass http://127.0.0.1:3003;
+        proxy_http_version 1.1;
+        proxy_method $request_method;
+        proxy_pass_request_body on;
+        proxy_set_header Content-Length $content_length;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Cookie "";
+        proxy_set_header Host @@DOMAIN@@;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+    }
+
+    location = /api/v1/resources/uploads {
+        error_page 413 = @hoox_upload_payload_too_large;
+        proxy_pass http://127.0.0.1:3001/v1/resources/uploads;
+        proxy_http_version 1.1;
+        proxy_set_header Host @@DOMAIN@@;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+    }
+
+    location @hoox_upload_payload_too_large {
+        default_type application/json;
+        return 413 '{"version":"v1","requestId":"$request_id","error":{"code":"PAYLOAD_TOO_LARGE","message":"请求体超过允许大小","retryable":false}}';
     }
 
     location /api/ {

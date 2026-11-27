@@ -6,6 +6,23 @@ release_id="${RELEASE_ID:?RELEASE_ID is required}"
 image="${HOOX_DEMO_IMAGE:?HOOX_DEMO_IMAGE is required}"
 domain="${HOOX_DEMO_DOMAIN:-hoox.aisay.cc}"
 bucket="${HOOX_DEMO_BUCKET:-agent-runtime-demo}"
+LC_ALL=C
+if (( ${#domain} > 253 )) ||
+  [[ ! "$domain" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]; then
+  echo "Demo 域名格式无效" >&2
+  exit 2
+fi
+if (( ${#bucket} < 3 || ${#bucket} > 63 )) ||
+  [[ ! "$bucket" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ || "$bucket" == *..* || "$bucket" == *.-* || "$bucket" == *-. || "$bucket" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Demo 对象桶名称格式无效" >&2
+  exit 2
+fi
+case "$bucket" in
+  api|admin|trajectory)
+    echo "Demo 对象桶名称与保留路由冲突" >&2
+    exit 2
+    ;;
+esac
 release_dir="$root/releases/$release_id"
 shared_dir="$root/shared"
 compose_file="$release_dir/docker-compose.yml"

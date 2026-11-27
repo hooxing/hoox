@@ -54,8 +54,8 @@ export function EvaluationsPage({
   });
   const save = useMutation({
     mutationFn: (value: EvaluationSuite) => api.saveEvaluationSuite(value),
-    onSuccess: async () =>
-      queryClient.invalidateQueries({ queryKey: ["admin-evaluation-suites", definitionId] }),
+    onSuccess: async (_result, value) =>
+      queryClient.invalidateQueries({ queryKey: ["admin-evaluation-suites", value.definitionId] }),
   });
   const agentsList = definitions.data?.items ?? [];
   if (definitions.isLoading) return <Spin aria-label="正在读取 Agent" />;
@@ -69,12 +69,14 @@ export function EvaluationsPage({
       </Typography.Paragraph>
       <Select
         aria-label="选择 Agent"
-        placeholder="选择 AgentDefinition"
-        style={{ width: 360 }}
+        placeholder="选择 Agent"
+        style={{ width: "100%", maxWidth: 360 }}
+        showSearch={{ optionFilterProp: "label" }}
+        virtual={false}
         value={definitionId || undefined}
-        options={agentsList.map(({ definition }) => ({
+        options={agentsList.map(({ definition, revision }) => ({
           value: definition.id,
-          label: definition.id,
+          label: `${revision?.displayName ?? definition.id}${definition.status === "draft" ? "（草稿）" : ""}`,
         }))}
         onChange={(value) => {
           setDefinitionId(value ?? "");

@@ -1,5 +1,5 @@
 import type { CreateApiKeyRequest } from "@hoox/protocol";
-import { Alert, Button, Card, Input, Space, Tag } from "antd";
+import { Alert, Button, Card, Checkbox, Input, Space, Tag } from "antd";
 import { useCallback, useId, useState } from "react";
 import { integrationApi, type IntegrationApi } from "./integration-api.js";
 import { IntegrationSecret, IntegrationTenant, useIntegrationItems } from "./integration-shared.js";
@@ -42,6 +42,7 @@ function KeyEditor({ api, tenant }: { readonly api: IntegrationApi; readonly ten
       {state.secret && <IntegrationSecret value={state.secret} dismiss={state.dismissSecret} />}
       <Card title="创建 API Key">
         <form
+          className="agent-fields"
           onSubmit={(event) => {
             event.preventDefault();
             void state.run(
@@ -57,8 +58,8 @@ function KeyEditor({ api, tenant }: { readonly api: IntegrationApi; readonly ten
             );
           }}
         >
-          <Space wrap>
-            <label htmlFor={`${formId}-name`}>
+          <div className="credential-form-fields">
+            <label className="agent-field" htmlFor={`${formId}-name`}>
               名称
               <Input
                 id={`${formId}-name`}
@@ -68,7 +69,7 @@ function KeyEditor({ api, tenant }: { readonly api: IntegrationApi; readonly ten
                 onChange={(event) => setName(event.target.value)}
               />
             </label>
-            <label htmlFor={`${formId}-note`}>
+            <label className="agent-field" htmlFor={`${formId}-note`}>
               备注
               <Input
                 id={`${formId}-note`}
@@ -77,21 +78,22 @@ function KeyEditor({ api, tenant }: { readonly api: IntegrationApi; readonly ten
                 onChange={(event) => setNote(event.target.value)}
               />
             </label>
-            <label>
+            <label className="agent-field" htmlFor={`${formId}-expires`}>
               到期时间
-              <input
+              <Input
+                id={`${formId}-expires`}
                 type="datetime-local"
                 value={expiresAt}
                 onChange={(event) => setExpiresAt(event.target.value)}
               />
             </label>
-          </Space>
-          <fieldset>
+          </div>
+          <fieldset className="credential-scopes">
             <legend>作用域</legend>
-            {scopes.map((scope) => (
-              <label key={scope}>
-                <input
-                  type="checkbox"
+            <div className="credential-scope-options">
+              {scopes.map((scope) => (
+                <Checkbox
+                  key={scope}
                   checked={selected.includes(scope)}
                   onChange={(event) =>
                     setSelected((current) =>
@@ -100,14 +102,16 @@ function KeyEditor({ api, tenant }: { readonly api: IntegrationApi; readonly ten
                         : current.filter((value) => value !== scope),
                     )
                   }
-                />
-                {scope}
-              </label>
-            ))}
+                >
+                  {scope}
+                </Checkbox>
+              ))}
+            </div>
           </fieldset>
           <Button
             type="primary"
             htmlType="submit"
+            className="credential-submit"
             disabled={state.busy || !name.trim() || !selected.length}
           >
             创建 API Key

@@ -3,7 +3,13 @@
 import { act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { AdminAccessTokensPage } from "./admin-access-tokens.js";
-import type { AdminAccessTokenApiContract, AdminAccessTokenDto } from "./control-api.js";
+import { App } from "./app.js";
+import type { SkillAdminApiContract } from "./api.js";
+import type {
+  AdminAccessTokenApiContract,
+  AdminAccessTokenDto,
+  AdminControlApiContract,
+} from "./control-api.js";
 import { button, enter, field, render, settle } from "./testing/admin-component.js";
 
 const accessToken: AdminAccessTokenDto = {
@@ -18,6 +24,25 @@ const accessToken: AdminAccessTokenDto = {
 };
 
 describe("后台访问令牌", () => {
+  it("识别访问令牌页顶栏，并给评测菜单项提供可访问名称", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ data: { items: [], nextCursor: null } })),
+    );
+    const root = render(
+      <App
+        apiClient={{} as SkillAdminApiContract}
+        controlApi={
+          { getControlAccess: async () => ({ allowed: true }) } as AdminControlApiContract
+        }
+        initialPath="/access-tokens"
+      />,
+    );
+    await settle();
+    expect(root.querySelector(".platform-page-context strong")?.textContent).toBe("后台访问令牌");
+    expect(root.querySelector('[role="menuitem"][aria-label="评测"]')).not.toBeNull();
+  });
+
   it("创建时仅展示一次明文，并允许撤销", async () => {
     const token = "hoox_at_placeholder-token-value";
     let revoked = false;
@@ -45,17 +70,37 @@ describe("后台访问令牌", () => {
     expect(api.createAccessToken).toHaveBeenCalledWith(
       expect.objectContaining({ name: "CI 配置同步", scopes: ["agent-config:read"] }),
     );
-    expect(root.textContent).toContain(token);
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(token);
     await act(async () => {
-      button(root, "我已保存，关闭").click();
+      button(document, "我已保存，关闭").click();
     });
-    expect(root.textContent).not.toContain(token);
+    expect(document.body.textContent).not.toContain(token);
     await act(async () => {
       button(root, "撤销").click();
       await settle();
     });
     expect(api.revokeAccessToken).toHaveBeenCalledWith(accessToken.id);
     expect(root.textContent).toContain("已撤销");
+  });
+
+  it("显示 CLI 参考，并在同一标签中显示作用域勾选框及其文字", async () => {
+    const api: AdminAccessTokenApiContract = {
+      listAccessTokens: vi.fn(async () => ({ items: [], nextCursor: null })),
+      createAccessToken: vi.fn(),
+      revokeAccessToken: vi.fn(),
+    };
+    const root = render(<AdminAccessTokensPage api={api} />);
+    await settle();
+    expect(root.querySelector('a[href$="/docs/reference/cli.md"]')?.textContent).toBe("CLI 参考");
+    const read = field<HTMLInputElement>(root, "Agent 配置读取");
+    const write = field<HTMLInputElement>(root, "Agent 配置写入");
+    expect(write.closest(".ant-checkbox-wrapper")?.textContent).toBe("Agent 配置写入（包含读取）");
+    act(() => read.click());
+    act(() => write.click());
+    expect(read.checked).toBe(true);
+    expect(read.disabled).toBe(true);
+    act(() => write.click());
+    expect(read.checked).toBe(false);
   });
 
   it("页面停留时令牌到期后更新状态", async () => {
@@ -110,15 +155,16 @@ describe("后台访问令牌", () => {
       button(root, "上一页").click();
       await settle();
     });
-    const statusFilter = root.querySelector<HTMLSelectElement>('[aria-label="令牌状态筛选"]');
+    const statusFilter = root.querySelector('[aria-label="令牌状态筛选"]');
     expect(statusFilter).not.toBeNull();
-    await act(async () => {
-      if (statusFilter) {
-        statusFilter.value = "revoked";
-        statusFilter.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-      await settle();
-    });
+    act(() => statusFilter?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    await settle();
+    const option = [...document.querySelectorAll<HTMLElement>(".ant-select-item-option")].find(
+      (item) => item.textContent === "已撤销",
+    );
+    expect(option).toBeDefined();
+    act(() => option?.click());
+    await settle();
     expect(api.listAccessTokens).toHaveBeenLastCalledWith({ status: "revoked" });
     expect(root.textContent).toContain("已撤销");
   });

@@ -1,5 +1,5 @@
 import { Alert, Button, Card, Select, Space, Typography } from "antd";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { AdminApiError } from "./api.js";
 import { integrationApi, type IntegrationApi } from "./integration-api.js";
 
@@ -12,6 +12,7 @@ export function IntegrationTenant({
   readonly api?: IntegrationApi;
   readonly children: (tenant: string) => ReactNode;
 }) {
+  const selectId = useId();
   const [tenant, setTenant] = useState("");
   const [tenants, setTenants] = useState<Awaited<ReturnType<IntegrationApi["listTenants"]>>>([]);
   const [tenantError, setTenantError] = useState(false);
@@ -34,7 +35,7 @@ export function IntegrationTenant({
   }, [api]);
   const selected = tenants.find((item) => item.tenantId === tenant);
   return (
-    <div className="agent-page">
+    <div className="agent-page integration-page">
       <Typography.Title level={2}>{title}</Typography.Title>
       <Card title="选择接入空间">
         {title === "API Key" ? (
@@ -45,7 +46,7 @@ export function IntegrationTenant({
             </code>
             。详见{" "}
             <a
-              href="https://github.com/hooxing/hoox/blob/main/docs/reference/development-api.md"
+              href="https://github.com/hooxing/hoox/blob/main/docs/reference/public-api.md"
               target="_blank"
               rel="noreferrer"
             >
@@ -62,7 +63,7 @@ export function IntegrationTenant({
               target="_blank"
               rel="noreferrer"
             >
-              Webhook 签名校验
+              Webhook 参考
             </a>
             。
           </Typography.Paragraph>
@@ -73,13 +74,12 @@ export function IntegrationTenant({
         {tenantError && (
           <Alert type="error" title="无法读取空间列表，请确认平台管理员身份后重试。" />
         )}
-        <div>
-          <label htmlFor="integration-tenant-select">空间</label>
+        <div className="agent-field integration-tenant-field">
+          <label htmlFor={selectId}>空间</label>
           <Select
-            id="integration-tenant-select"
+            id={selectId}
             aria-label="选择空间"
-            showSearch
-            optionFilterProp="label"
+            showSearch={{ optionFilterProp: "label" }}
             value={tenant || null}
             placeholder="请选择空间"
             options={tenants.map((item) => ({
@@ -87,11 +87,11 @@ export function IntegrationTenant({
               label: `${item.displayName} (${item.tenantId})${item.isDefault ? "（初始化管理员的个人空间）" : item.kind === "personal" ? "（个人空间）" : "（团队空间）"}`,
             }))}
             onChange={setTenant}
-            style={{ minWidth: 320 }}
+            className="integration-tenant-select"
           />
         </div>
-        {!tenant && tenants.length > 0 && (
-          <Alert type="info" title="未找到初始化管理员的个人空间，请手动选择目标空间。" />
+        {!tenantError && !tenant && tenants.length > 0 && (
+          <Alert type="info" title="此实例未标记默认接入空间，请选择要管理的空间。" />
         )}
       </Card>
       {tenant && (
@@ -168,7 +168,7 @@ export function IntegrationSecret({
   return (
     <Card title="一次性凭据">
       <p>请立即复制并妥善保存，关闭后无法再次查看。请勿放入日志或公开内容。</p>
-      <Typography.Paragraph>
+      <Typography.Paragraph style={{ overflowWrap: "anywhere" }}>
         <code>{value}</code>
       </Typography.Paragraph>
       <Space>

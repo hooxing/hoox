@@ -30,8 +30,8 @@ async function click(root: ParentNode, name: string) {
   await settle();
 }
 const tenantItems = [
-  { tenantId: "tenant_a", displayName: "admin@example.invalid", kind: "personal", isDefault: true },
   { tenantId: "tenant_b", displayName: "团队空间", kind: "team", isDefault: false },
+  { tenantId: "tenant_a", displayName: "admin@example.invalid", kind: "personal", isDefault: true },
   { tenantId: "tenant_first", displayName: "第一空间", kind: "team", isDefault: false },
   { tenantId: "tenant_second", displayName: "第二空间", kind: "team", isDefault: false },
 ];
@@ -71,6 +71,42 @@ describe("后台接入页面", () => {
     expect(root.querySelector('[aria-label="选择空间"]')).toBeDefined();
   });
 
+  it.each([
+    [IntegrationApiKeysPage, "api-keys", "API 参考", "public-api.md"],
+    [IntegrationWebhooksPage, "webhooks", "Webhook 参考", "webhooks.md"],
+  ] as const)(
+    "直接加载标记的个人空间，提供对应参考链接：%s",
+    async (Page, list, label, filename) => {
+      const fetcher = vi.fn<typeof fetch>(async (url) =>
+        String(url).endsWith("/integrations/tenants")
+          ? ok({ items: tenantItems })
+          : ok({ items: [] }),
+      );
+      const root = render(<Page api={new IntegrationApi(fetcher)} />);
+      await settle();
+      expect(root.textContent).toContain("当前空间：admin@example.invalid tenant_a");
+      expect(root.textContent).not.toContain("未标记默认接入空间");
+      expect(fetcher.mock.calls.map(([url]) => String(url))).toContain(
+        `/v1/admin/control/integrations/tenant_a/${list}`,
+      );
+      const reference = [...root.querySelectorAll("a")].find((link) => link.textContent === label);
+      expect(reference?.getAttribute("href")).toMatch(
+        new RegExp(`/docs/reference/${filename}$`, "u"),
+      );
+    },
+  );
+
+  it("未标记默认空间时不把唯一的个人空间当作初始化管理员空间", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      ok({ items: tenantItems.map((item) => ({ ...item, isDefault: false })) }),
+    );
+    const root = render(<IntegrationApiKeysPage api={new IntegrationApi(fetcher)} />);
+    await settle();
+    expect(root.textContent).toContain("此实例未标记默认接入空间");
+    expect(root.textContent).not.toContain("当前空间：");
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
   it("按 Tenant 创建、轮换、吊销 Key，关闭明文后刷新不再展示", async () => {
     const token = "hoox_sk_test-once-placeholder";
     const rotated = "hoox_sk_test-rotated-placeholder";
@@ -91,6 +127,9 @@ describe("后台接入页面", () => {
     enter(field<HTMLInputElement>(root, "名称"), key.name);
     enter(field<HTMLInputElement>(root, "备注"), "业务服务");
     enter(field<HTMLInputElement>(root, "到期时间"), "2099-01-01T00:00");
+    const scope = field<HTMLInputElement>(root, "runs:create");
+    expect(scope.closest(".ant-checkbox-wrapper")?.textContent).toBe("runs:create");
+    act(() => scope.click());
     await click(root, "创建 API Key");
     expect(root.textContent?.includes(token)).toBe(true);
     const payload = JSON.parse(
@@ -99,7 +138,7 @@ describe("后台接入页面", () => {
     expect(payload).toMatchObject({
       name: key.name,
       note: "业务服务",
-      scopes: ["threads:read", "runs:read"],
+      scopes: ["threads:read", "runs:read", "runs:create"],
     });
     expect(Date.parse(payload.expiresAt)).toBeGreaterThan(Date.now());
     await click(root, "已保存，关闭");

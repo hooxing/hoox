@@ -88,6 +88,26 @@ describe("后台首次运行与登录", () => {
       "hoox_session_test",
     );
   });
+  it("已有会话验证期间只显示加载态，验证成功后直接进入后台", async () => {
+    const principal = Promise.withResolvers<Response>();
+    localStorage.setItem(
+      "hoox.auth-session.v2",
+      JSON.stringify({ accessToken: "hoox_session_test" }),
+    );
+    fetcher
+      .mockResolvedValueOnce(
+        Response.json({ data: { initialized: true, setupTokenRequired: false } }),
+      )
+      .mockReturnValueOnce(principal.promise);
+    await mount();
+    expect(fetcher.mock.calls[1]?.[0]).toBe("/api/v1/auth/admin-principal");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("管理员会话");
+    expect(container.querySelector("form")).toBeNull();
+    expect(container.textContent).not.toContain("首次运行");
+    expect(container.textContent).not.toContain("管理员登录");
+    await act(async () => principal.resolve(Response.json({ data: { userId: "user_admin" } })));
+    expect(container.textContent).toBe("后台内容");
+  });
   it("拒绝过期会话并清理本地凭据", async () => {
     localStorage.setItem(
       "hoox.auth-session.v2",

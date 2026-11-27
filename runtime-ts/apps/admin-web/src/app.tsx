@@ -1077,7 +1077,12 @@ const navigation: NonNullable<MenuProps["items"]> = [
     label: "Agent",
     children: [
       { key: "/agent-definitions", icon: <RobotOutlined />, label: "Agent 管理" },
-      { key: "/evaluations", icon: <ExperimentOutlined />, label: "评测" },
+      {
+        key: "/evaluations",
+        icon: <ExperimentOutlined aria-hidden="true" />,
+        label: "评测",
+        ...{ "aria-label": "评测" },
+      },
       { key: "/playground", icon: <ExperimentOutlined />, label: "Playground" },
       { key: "/external-tools", icon: <ToolOutlined />, label: "外部工具" },
     ],
@@ -1143,6 +1148,10 @@ const pageMetadata: Readonly<
   "/users": {
     title: "用户管理",
     description: "账号状态、使用情况与会话治理",
+  },
+  "/access-tokens": {
+    title: "后台访问令牌",
+    description: "签发和撤销 CLI 与 CI 的 Agent 配置凭据",
   },
   "/identity": {
     title: "身份与登录",

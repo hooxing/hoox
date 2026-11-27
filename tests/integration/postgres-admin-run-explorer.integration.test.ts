@@ -1327,7 +1327,6 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
     const repository = new PgBlobLifecycleRepository(runtime);
     const blobs = new S3BlobStore(storage, repository, {
       bucket: "test-trajectory",
-      region: "us-east-1",
       maxBlobSizeBytes: 1024 * 1024,
     });
     const writer = new PgRunTrajectoryStore(

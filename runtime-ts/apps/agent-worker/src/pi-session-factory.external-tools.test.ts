@@ -468,7 +468,7 @@ describe("外部工具经 Worker Session 调用本地 TLS 服务", () => {
     expect(received).toBe(true);
     expect(nextPrefix).toBe(prefix);
     expect(createHash("sha256").update(prefix).digest("hex")).toMatchInlineSnapshot(
-      `"03ce944eb30dbdf224a62545f0eca9419c6d2f3d34783bbb71f994d4a4712c63"`,
+      `"99a93ecc262f53f702884a2cf365166c07870a079c2c4a8f206b4c4017ae4150"`,
     );
     expect(resumed.starts).toHaveLength(0);
   });

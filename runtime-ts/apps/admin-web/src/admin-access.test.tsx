@@ -33,8 +33,8 @@ async function mount() {
 async function submit() {
   await act(async () => {
     container
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      .querySelector("form")
+      ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   });
 }
 function fill(name: string, value: string) {
@@ -84,7 +84,7 @@ describe("后台首次运行与登录", () => {
     await submit();
     expect(fetcher.mock.calls[1]?.[0]).toBe("/api/v1/installation/login");
     expect(container.textContent).toContain("后台内容");
-    expect(JSON.parse(localStorage.getItem("hoox.auth-session.v2")!).accessToken).toBe(
+    expect(JSON.parse(localStorage.getItem("hoox.auth-session.v2") ?? "{}").accessToken).toBe(
       "hoox_session_test",
     );
   });
@@ -92,7 +92,7 @@ describe("后台首次运行与登录", () => {
     const principal = Promise.withResolvers<Response>();
     localStorage.setItem(
       "hoox.auth-session.v2",
-      JSON.stringify({ accessToken: "hoox_session_test" }),
+      JSON.stringify({ accessToken: "hoox_session_test", expiresAt: "2099-01-01" }),
     );
     fetcher
       .mockResolvedValueOnce(
@@ -108,21 +108,28 @@ describe("后台首次运行与登录", () => {
     await act(async () => principal.resolve(Response.json({ data: { userId: "user_admin" } })));
     expect(container.textContent).toBe("后台内容");
   });
-  it("拒绝过期会话并清理本地凭据", async () => {
-    localStorage.setItem(
-      "hoox.auth-session.v2",
-      JSON.stringify({ accessToken: "hoox_session_old" }),
-    );
-    fetcher
-      .mockResolvedValueOnce(
-        Response.json({ data: { initialized: true, setupTokenRequired: false } }),
-      )
-      .mockResolvedValueOnce(new Response(null, { status: 401 }));
-    await mount();
-    expect(container.textContent).toContain("管理员登录");
-    expect(container.textContent).not.toContain("后台内容");
-    expect(localStorage.getItem("hoox.auth-session.v2")).toBeNull();
-  });
+  it.each([
+    { expiresAt: "2000-01-01", expectProbe: false },
+    { expiresAt: "2099-01-01", expectProbe: true },
+  ])(
+    "清理无效会话，只向服务端验证未过期的会话（$expectProbe）",
+    async ({ expiresAt, expectProbe }) => {
+      localStorage.setItem(
+        "hoox.auth-session.v2",
+        JSON.stringify({ accessToken: "hoox_session_old", expiresAt }),
+      );
+      fetcher
+        .mockResolvedValueOnce(
+          Response.json({ data: { initialized: true, setupTokenRequired: false } }),
+        )
+        .mockResolvedValueOnce(new Response(null, { status: 401 }));
+      await mount();
+      expect(fetcher).toHaveBeenCalledTimes(expectProbe ? 2 : 1);
+      expect(container.textContent).toContain("管理员登录");
+      expect(container.textContent).not.toContain("后台内容");
+      expect(localStorage.getItem("hoox.auth-session.v2")).toBeNull();
+    },
+  );
   it("连接失败显示重试入口", async () => {
     fetcher.mockRejectedValue(new Error("unavailable"));
     await mount();

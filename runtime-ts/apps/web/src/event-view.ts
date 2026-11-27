@@ -343,8 +343,9 @@ export function createConversationProjector() {
           const block = blocks[index];
           if (block?.type === "tool") {
             const title = toolPresentationTitle(payload) ?? block.title;
+            const { failure: _previousFailure, ...previousBlock } = block;
             blocks[index] = {
-              ...block,
+              ...previousBlock,
               status,
               ...(title === undefined ? {} : { title }),
               ...(failure === undefined ? {} : { failure }),

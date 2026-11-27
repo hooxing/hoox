@@ -254,18 +254,20 @@ export class PgRunTrajectoryStore {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
       throw new TypeError("运行轨迹分页大小无效");
     }
-    const rows = await this.pool.connect();
-    const page = await (async () => {
-      try {
-        await rows.query("BEGIN");
-        await rows.query("SELECT set_config('app.user_id',$1,true)", [input.actorUserId]);
-        await rows.query(
+    // 审计授权绑定当前事务；视图中的 Blob 元数据仍受目标 Tenant 的 RLS 约束。
+    const page = await withTenantTransaction(
+      this.pool,
+      { tenantId: input.tenantId, userId: input.actorUserId },
+      async (client) => {
+        await client.query(
           `INSERT INTO admin_run_content_access_audits(audit_id,actor_user_id,tenant_id,run_id,attempt_id,query_summary)
            VALUES($1,$2,$3,$4,$5,'{"type":"run_trajectory_page"}'::jsonb)`,
           [input.auditId, input.actorUserId, input.tenantId, input.runId, input.attemptId],
         );
-        await rows.query("SELECT set_config('app.run_content_audit_id',$1,true)", [input.auditId]);
-        const result = await rows.query(
+        await client.query("SELECT set_config('app.run_content_audit_id',$1,true)", [
+          input.auditId,
+        ]);
+        const result = await client.query(
           `SELECT sequence,agent_thread_id,agent_turn_id,source,event_type,occurred_at,monotonic_offset_ms,sha256,size,blob_media_type,
                   blob_reference_id,blob_purpose,blob_state,lifecycle_id,incarnation_id,physical_object_key
              FROM admin_run_trajectory_directory
@@ -284,15 +286,9 @@ export class PgRunTrajectoryStore {
             input.limit + 1,
           ],
         );
-        await rows.query("COMMIT");
         return result.rows;
-      } catch (error) {
-        await rows.query("ROLLBACK").catch(() => undefined);
-        throw error;
-      } finally {
-        rows.release();
-      }
-    })();
+      },
+    );
     let selectedBytes = 0;
     let byteLimited = false;
     const selected = [] as typeof page;

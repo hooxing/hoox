@@ -323,13 +323,13 @@ describe("工作台展示组件", () => {
       expect(tools).toHaveLength(4);
       expect(tools[0]?.textContent).toBe("已完成· 编排工具调用");
       expect(tools[1]?.textContent).toBe("已读取· 需求说明.md");
-      expect(tools[2]?.textContent).toContain("命令执行失败· 检查运行环境");
+      expect(tools[2]?.textContent).toContain("命令步骤未完成· 检查运行环境");
       expect(tools[2]?.classList.contains("is-failed")).toBe(true);
       const failure = tools[2]?.querySelector(".tool-failure-detail");
-      expect(failure?.textContent).toBe(`${message} EXEC_UNAVAILABLE`);
-      expect(failure?.querySelector("code")?.textContent).toBe("EXEC_UNAVAILABLE");
+      expect(failure?.textContent).toBe(message);
+      expect(container.textContent).not.toContain("EXEC_UNAVAILABLE");
       expect(failure?.querySelector("img, strong, script")).toBeNull();
-      expect(tools[3]?.textContent).toBe("读取失败");
+      expect(tools[3]?.textContent).toBe("读取步骤未完成");
       expect(tools[3]?.querySelector(".tool-failure-detail")).toBeNull();
       expect(container.querySelector(".assistant-markdown")?.textContent).toBe("独立模型正文。");
       expect(container.querySelector(".assistant-markdown .tool-failure-detail")).toBeNull();

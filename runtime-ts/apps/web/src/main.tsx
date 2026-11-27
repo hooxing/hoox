@@ -95,6 +95,8 @@ import {
 import { useActionDialog } from "./action-dialog.js";
 
 const api = new RuntimeApi();
+const externalRunDiscoveryIntervalMs = 15_000;
+const streamedRunReconciliationIntervalMs = 15_000;
 
 type PendingConversationInput = PendingThreadInputView & {
   readonly expectedUserOccurrence: number;
@@ -751,9 +753,10 @@ function AuthenticatedWorkspace({
       } catch {
         // 外部 Run 发现是后台增强；短暂失败不能覆盖当前对话或打断用户输入。
       }
-      if (!stopped) timer = window.setTimeout(() => void discoverExternalRun(), 2_500);
+      if (!stopped)
+        timer = window.setTimeout(() => void discoverExternalRun(), externalRunDiscoveryIntervalMs);
     };
-    timer = window.setTimeout(() => void discoverExternalRun(), 2_500);
+    timer = window.setTimeout(() => void discoverExternalRun(), externalRunDiscoveryIntervalMs);
     return () => {
       stopped = true;
       if (timer !== undefined) window.clearTimeout(timer);
@@ -817,6 +820,10 @@ function AuthenticatedWorkspace({
     let outputSettled = apiClient.streamEvents === undefined;
     let polling = false;
     let refreshRequested = false;
+    let checkedForFollowUp = false;
+    let observedRunVersion = 0;
+    const reconciliationIntervalMs =
+      apiClient.streamEvents === undefined ? 1_200 : streamedRunReconciliationIntervalMs;
     const poll = async (): Promise<void> => {
       if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
       if (timer !== undefined) window.clearTimeout(timer);
@@ -827,6 +834,7 @@ function AuthenticatedWorkspace({
       polling = true;
       let recoveryRequired = runExecutionStatusRef.current === "recovery_required";
       try {
+        const requestedRunVersion = observedRunVersion;
         const latest = await apiClient.getRun(threadId, runId);
         recoveryRequired = latest.executionStatus === "recovery_required";
         const [eventPage, artifacts, threadContext, continuityStatus, threadSnapshot] =
@@ -851,7 +859,9 @@ function AuthenticatedWorkspace({
             eventAfterRef.current = eventPage.nextAfter;
             dispatch({ type: "events", page: eventPage });
           }
-          dispatch({ type: "run", run: latest });
+          // 请求期间若收到实时状态更新，迟到的快照不得回退顶栏。
+          const stateIsCurrent = requestedRunVersion === observedRunVersion;
+          if (stateIsCurrent) dispatch({ type: "run", run: latest });
           if (threadSnapshot !== undefined) {
             dispatch({ type: "threadUpdated", thread: threadSnapshot });
           }
@@ -861,12 +871,15 @@ function AuthenticatedWorkspace({
           }
           if (apiClient.getThreadContinuity !== undefined) setContinuity(continuityStatus);
           if (
+            stateIsCurrent &&
+            !checkedForFollowUp &&
             (apiClient.streamEvents === undefined ? !eventPage?.hasMore : outputSettled) &&
             (latest.status === "succeeded" ||
               latest.status === "failed" ||
               latest.status === "cancelled")
           ) {
             const [nextRun] = await apiClient.listLatestRuns(threadId, 1);
+            checkedForFollowUp = true;
             if (
               nextRun !== undefined &&
               nextRun.id !== runId &&
@@ -890,16 +903,14 @@ function AuthenticatedWorkspace({
               latest.executionStatus,
             )
           ) {
-            timer = window.setTimeout(
-              () => void poll(),
-              apiClient.streamEvents === undefined ? 1200 : 5_000,
-            );
+            timer = window.setTimeout(() => void poll(), reconciliationIntervalMs);
           }
         }
       } catch (reason) {
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           setError(reason instanceof ApiError ? reason : new ApiError("轮询运行状态失败", 0, true));
-          if (!recoveryRequired) timer = window.setTimeout(() => void poll(), 1200);
+          if (!recoveryRequired)
+            timer = window.setTimeout(() => void poll(), reconciliationIntervalMs);
         }
       } finally {
         polling = false;
@@ -930,9 +941,12 @@ function AuthenticatedWorkspace({
           if (
             page.items.some(
               (event) =>
-                event.type === "message.completed" ||
-                event.type === "tool.completed" ||
-                event.type === "final_answer.committed",
+                event.type === "tool.completed" &&
+                typeof event.payload === "object" &&
+                event.payload !== null &&
+                "name" in event.payload &&
+                event.payload.name === "deliver_file" &&
+                !("isError" in event.payload && event.payload.isError === true),
             )
           )
             void poll();
@@ -941,8 +955,11 @@ function AuthenticatedWorkspace({
           if (stopped || !currentRunPollRef.current.isCurrent(pollGeneration)) return;
           dispatch({ type: "run", run });
           const status = `${run.status}:${run.executionStatus ?? ""}`;
-          if (observedStatus !== undefined && observedStatus !== status) void poll();
-          observedStatus = status;
+          if (observedStatus !== status) {
+            observedRunVersion += 1;
+            if (observedStatus !== undefined && pollingRunStatuses.has(run.status)) void poll();
+            observedStatus = status;
+          }
         },
         onSettled: () => {
           outputSettled = true;

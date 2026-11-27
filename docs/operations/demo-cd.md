@@ -10,6 +10,7 @@
 - API、Web、Admin Control 与 Admin Web 使用 host network，分别只监听 `127.0.0.1:3001`、`127.0.0.1:4173`、`127.0.0.1:3003` 和 `127.0.0.1:4174`。
 - 宿主机 Nginx 在 `hoox.aisay.cc` 提供 TLS。`/api/` 转发用户 API，`/agent-runtime-demo/` 转发 Demo 对象桶，其余普通路径转发用户 Web；`/admin/` 提供后台静态页面，`/v1/admin/` 通过内部 `auth_request` 校验 Hoox 会话后转发统一后台 API；旧 `/trajectory` 与 `/trajectory/` 返回 `308 /admin/runs`。
 - Admin Web 从同源工作台的 `hoox.auth-session.v2` 读取未过期 Hoox access token。Nginx 仅在会话属于配置的 Demo 管理员用户时放行后台 API；上游 `Authorization` 由 root-only 配置覆盖为 Admin Control development Token。
+- API 与 Worker 的历史文件系统由 Compose 强制启用（`HISTORY_FILESYSTEM_ENABLED=true`），不受各自 shared env 中同名设置覆盖。
 - Worker 可把 development 诊断镜像写入容器本地文件系统以支持容器内排障；Demo 不持久化该镜像，也不运行 Trajectory Web 服务。后台运行记录通过受限 PostgreSQL 投影读取持久 Run 事件。升级时 Compose 使用 `--remove-orphans` 清除旧版独立轨迹容器，但不删除数据库或对象存储数据卷。
 - Demo 使用 development 装配以复用单机入口，但必须同时设置 `DEMO_PUBLIC_ACCESS_ENABLED=true`、`DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc`、`DEMO_ADMIN_USER_ID=<Demo 管理员用户 ID>` 和 `DEV_AUTH_ENABLED=false`。固定开发身份、缺失管理员用户、明文 origin 和非回环 API 监听都会在解析期失败。
 

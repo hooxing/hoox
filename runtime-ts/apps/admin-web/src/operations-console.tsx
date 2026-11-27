@@ -113,13 +113,13 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
           <div>
             <span className="metric-icon">U</span>
             <span>
-              <h3 id="user-metrics-title">用户增长与活跃</h3>
-              <p>账号注册事实与创建对话的去重用户数。</p>
+              <h3 id="user-metrics-title">产品账号</h3>
+              <p>按已注册的产品账号统计，不含仅通过 API 使用的身份。</p>
             </span>
           </div>
         </div>
         <div className="operation-metric-grid">
-          <MetricCard label="累计用户" value={stats.users.total} note="全部本地产品账号" />
+          <MetricCard label="累计产品账号" value={stats.users.total} note="全部产品登录账号" />
           <MetricCard
             label="24h 新增"
             value={stats.users.registered24h}
@@ -127,12 +127,7 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
             tone="positive"
           />
           <MetricCard
-            label="7 日活跃用户"
-            value={stats.users.active7d}
-            note="7 日内更新过对话的创建者去重"
-          />
-          <MetricCard
-            label="已停用用户"
+            label="已停用账号"
             value={stats.users.disabled}
             note="无法登录且会话已撤销"
             tone={stats.users.disabled > 0 ? "warning" : "default"}
@@ -162,6 +157,11 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
             label="24h 活跃对话"
             value={stats.conversations.active24h}
             note="过去 24 小时发生更新"
+          />
+          <MetricCard
+            label="7 日活跃对话创建者"
+            value={stats.users.active7d}
+            note="按创建者去重，含 API 身份"
           />
           <MetricCard
             label="已归档对话"
@@ -232,8 +232,10 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
         </div>
         <dl>
           <div>
-            <dt>活跃用户</dt>
-            <dd>7 日内至少有一条自己创建的对话发生更新，按 userId 去重。</dd>
+            <dt>7 日活跃对话创建者</dt>
+            <dd>
+              统计最近 7 日发生更新的对话，按创建者去重，含 API 身份；不是已注册账号的活跃人数。
+            </dd>
           </div>
           <div>
             <dt>活跃对话</dt>

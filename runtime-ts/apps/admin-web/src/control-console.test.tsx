@@ -1203,8 +1203,15 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
-  it("展示有口径的数据运营和可审计用户状态治理", async () => {
+  it("分开显示产品账号和对话创建者，并提供可审计用户状态治理", async () => {
     const api = fixture();
+    vi.mocked(api.overview).mockResolvedValue({
+      ...overview,
+      statistics: {
+        ...overview.statistics,
+        users: { total: 1, registered24h: 0, active7d: 2, disabled: 0 },
+      },
+    });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -1213,7 +1220,12 @@ describe("统一平台管理导航", () => {
 
     act(() => navigationItem(container, "数据运营").click());
     await settle();
-    expect(container.textContent).toContain("7 日活跃用户");
+    const accounts = container.querySelector('[aria-labelledby="user-metrics-title"]');
+    const conversations = container.querySelector('[aria-labelledby="conversation-metrics-title"]');
+    expect(accounts?.textContent).toContain("累计产品账号1");
+    expect(accounts?.textContent).not.toContain("对话创建者");
+    expect(conversations?.textContent).toContain("7 日活跃对话创建者2");
+    expect(conversations?.textContent).toContain("含 API 身份");
     expect(container.textContent).toContain("Thread.updated_at");
     expect(container.textContent).toContain("等待写入 Mem0");
     expect(container.textContent).toContain("Tokens/s");

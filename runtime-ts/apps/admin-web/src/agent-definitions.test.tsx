@@ -271,6 +271,43 @@ describe("后台 Agent 管理", () => {
     expect(container.querySelector(".ant-menu-item-selected")?.textContent).toContain("Agent 管理");
   });
 
+  it("标记草稿必填项并在字段旁提示，允许省略欢迎语和建议问题", async () => {
+    const onSave = vi.fn(async () => undefined);
+    const page = render(
+      <AgentDefinitionEditor
+        builtinToolLimit={[]}
+        pinnedModelOptions={[]}
+        saving={false}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+    const name = field<HTMLInputElement>(page, "显示名称（必填）");
+    const instructions = field<HTMLTextAreaElement>(page, "Operator 指令（必填）");
+    const language = field<HTMLInputElement>(page, "回复语言（必填）");
+    enter(name, "订单助手");
+    enter(language, " ");
+    act(() => button(page, "保存新草稿").click());
+    expect(instructions.getAttribute("aria-invalid")).toBe("true");
+    expect(instructions.parentElement?.textContent).toContain("请填写 Operator 指令");
+    expect(language.getAttribute("aria-invalid")).toBe("true");
+    expect(language.parentElement?.textContent).toContain("请填写回复语言");
+    expect(onSave).not.toHaveBeenCalled();
+    const description = field<HTMLTextAreaElement>(page, "简介（必填）");
+    expect(description.getAttribute("aria-invalid")).toBe("true");
+    expect(description.parentElement?.textContent).toContain("请填写简介");
+    enter(description, "提供订单信息");
+    enter(instructions, "回答订单问题");
+    enter(language, "zh-CN");
+    act(() => button(page, "保存新草稿").click());
+    await settle();
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ description: "提供订单信息", suggestedQuestions: [] }),
+      { mode: "all_tenants" },
+      "",
+    );
+  });
+
   it("超过 UTF-8 字节上限时禁止提交，且工具选择不越过平台上限", async () => {
     const onSave = vi.fn(async () => undefined);
     const container = render(

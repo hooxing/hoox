@@ -446,7 +446,7 @@ if [[ ! "$tenant_id" =~ ^tenant_[a-zA-Z0-9_-]+$ || ! "$admin_user_id" =~ ^[A-Za-
   exit 1
 fi
 printf '%s\n' \
-  "INSERT INTO :\"runtime_schema\".platform_control_operators(user_id,role,status) VALUES(:'demo_user_id','admin','active') ON CONFLICT (user_id) DO UPDATE SET role='admin',status='active',updated_at=clock_timestamp(); INSERT INTO :\"runtime_schema\".platform_skill_operators(user_id,role,status) VALUES(:'demo_user_id','admin','active') ON CONFLICT (user_id) DO UPDATE SET role='admin',status='active',version_token=platform_skill_operators.version_token+1,updated_at=clock_timestamp();" \
+  "INSERT INTO :\"runtime_schema\".platform_control_operators(user_id,role,status) VALUES(:'demo_user_id','admin','active') ON CONFLICT (user_id) DO UPDATE SET role='admin',status='active',updated_at=clock_timestamp(); INSERT INTO :\"runtime_schema\".platform_skill_operators(user_id,role,status) VALUES(:'demo_user_id','admin','active') ON CONFLICT (user_id) DO UPDATE SET role='admin',status='active',version_token=platform_skill_operators.version_token+1,updated_at=clock_timestamp(); UPDATE :\"runtime_schema\".installation_state SET administrator_user_id=:'demo_user_id',initialized_at=COALESCE(initialized_at,clock_timestamp()) WHERE singleton=true AND administrator_user_id IS NULL;" \
   | compose exec -T postgres psql \
       --username "$POSTGRES_USER" \
       --dbname "$POSTGRES_DB" \

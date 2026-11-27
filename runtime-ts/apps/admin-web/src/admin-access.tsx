@@ -34,19 +34,22 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
     void (async () => {
       const installation = await request<InstallationStatus>("/v1/installation");
       if (!active) return;
-      setStatus(installation);
-      const raw = localStorage.getItem(sessionKey);
-      if (raw === null || !installation.initialized) return;
-      try {
-        const session = JSON.parse(raw) as { accessToken?: string };
-        if (typeof session.accessToken !== "string") return;
-        await request("/v1/auth/admin-principal", {
-          headers: { authorization: `Bearer ${session.accessToken}` },
-        });
-        if (active) setAuthenticated(true);
-      } catch {
-        if (active) localStorage.removeItem(sessionKey);
+      if (installation.initialized) {
+        try {
+          const raw = localStorage.getItem(sessionKey);
+          const session = raw === null ? null : (JSON.parse(raw) as { accessToken?: string });
+          if (typeof session?.accessToken === "string") {
+            await request("/v1/auth/admin-principal", {
+              headers: { authorization: `Bearer ${session.accessToken}` },
+            });
+            if (active) setAuthenticated(true);
+            return;
+          }
+        } catch {
+          if (active) localStorage.removeItem(sessionKey);
+        }
       }
+      if (active) setStatus(installation);
     })().catch(() => {
       if (active) setError("无法连接初始化服务，请确认 API 已启动。");
     });
@@ -56,10 +59,31 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
   }, [reload]);
 
   if (authenticated) return children;
+  if (status === undefined) {
+    return (
+      <main className="installation-page">
+        <section className="installation-card" aria-labelledby="installation-title">
+          <h1 id="installation-title">{error ? "无法连接服务" : "正在连接服务"}</h1>
+          {error ? (
+            <>
+              <p role="alert" className="installation-error">
+                {error}
+              </p>
+              <button type="button" onClick={() => setReload(reload + 1)}>
+                重新连接
+              </button>
+            </>
+          ) : (
+            <p role="status">正在检查安装状态和管理员会话…</p>
+          )}
+        </section>
+      </main>
+    );
+  }
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (status === undefined || busy) return;
+    if (busy) return;
     const form = new FormData(event.currentTarget);
     const password = String(form.get("password"));
     if (!status.initialized && password !== form.get("confirmation")) {
@@ -103,94 +127,69 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
           {branding.logoDataUrl ? <BrandLogo /> : branding.productName}
         </a>
         <p className="installation-eyebrow">
-          {status?.initialized ? "管理控制台" : "首次运行 · 1 / 3"}
+          {status.initialized ? "管理控制台" : "首次运行 · 1 / 3"}
         </p>
         <h1 id="installation-title">
-          {status === undefined
-            ? "正在连接服务"
-            : status.initialized
-              ? "管理员登录"
-              : `欢迎使用 ${branding.productName}`}
+          {status.initialized ? "管理员登录" : `欢迎使用 ${branding.productName}`}
         </h1>
         <p className="installation-description">
-          {status?.initialized
+          {status.initialized
             ? "使用管理员邮箱和密码登录。"
             : "先创建管理员账号，再连接线上模型和沙箱服务。"}
         </p>
-        {status !== undefined && (
-          <form
-            onSubmit={(event) => {
-              void submit(event);
-            }}
-          >
-            {status.setupTokenRequired && !status.initialized && (
-              <label>
-                安装令牌
-                <input
-                  name="setupToken"
-                  type="password"
-                  required
-                  autoComplete="off"
-                  minLength={32}
-                />
-                <small>填写部署环境中的 INSTALLATION_SETUP_TOKEN。</small>
-              </label>
-            )}
+        <form
+          onSubmit={(event) => {
+            void submit(event);
+          }}
+        >
+          {status.setupTokenRequired && !status.initialized && (
             <label>
-              管理员邮箱
-              <input name="email" type="email" required autoComplete="username" maxLength={254} />
+              安装令牌
+              <input name="setupToken" type="password" required autoComplete="off" minLength={32} />
+              <small>填写部署环境中的 INSTALLATION_SETUP_TOKEN。</small>
             </label>
+          )}
+          <label>
+            管理员邮箱
+            <input name="email" type="email" required autoComplete="username" maxLength={254} />
+          </label>
+          <label>
+            密码
+            <input
+              name="password"
+              type="password"
+              required
+              minLength={8}
+              maxLength={128}
+              autoComplete={status.initialized ? "current-password" : "new-password"}
+            />
+          </label>
+          {!status.initialized && (
             <label>
-              密码
+              确认密码
               <input
-                name="password"
+                name="confirmation"
                 type="password"
                 required
                 minLength={8}
                 maxLength={128}
-                autoComplete={status.initialized ? "current-password" : "new-password"}
+                autoComplete="new-password"
               />
             </label>
-            {!status.initialized && (
-              <label>
-                确认密码
-                <input
-                  name="confirmation"
-                  type="password"
-                  required
-                  minLength={8}
-                  maxLength={128}
-                  autoComplete="new-password"
-                />
-              </label>
-            )}
-            {error && (
-              <p role="alert" className="installation-error">
-                {error}
-              </p>
-            )}
-            <button type="submit" disabled={busy}>
-              {busy ? "正在处理…" : status.initialized ? "登录" : "创建管理员并继续"}
-            </button>
-          </form>
-        )}
-        {status === undefined &&
-          (error ? (
-            <>
-              <p role="alert" className="installation-error">
-                {error}
-              </p>
-              <button type="button" onClick={() => setReload(reload + 1)}>
-                重新连接
-              </button>
-            </>
-          ) : (
-            <p role="status">正在检查安装状态…</p>
-          ))}
-        {!status?.initialized && (
+          )}
+          {error && (
+            <p role="alert" className="installation-error">
+              {error}
+            </p>
+          )}
+          <button type="submit" disabled={busy}>
+            {busy ? "正在处理…" : status.initialized ? "登录" : "创建管理员并继续"}
+          </button>
+        </form>
+        {!status.initialized && (
           <p className="installation-note">账号保存在当前实例中。模型和沙箱可在启动后配置。</p>
         )}
-        {status?.initialized && (
+        {status.initialized && (
           <p className="installation-note">
             <a href="/app">使用工作台的其他登录方式</a>
           </p>

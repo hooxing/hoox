@@ -8,14 +8,26 @@ import { EvaluationsPage } from "./evaluations.js";
 import { button, enter, render, settle } from "./testing/admin-component.js";
 
 describe("评测集页面", () => {
-  it("通过控件创建用例并编辑确定性断言", async () => {
+  it("按名称选择草稿 Agent，为该草稿建立带确定性断言的评测集", async () => {
     const saveEvaluationSuite = vi.fn(async (_suite: EvaluationSuite) => null);
+    const listEvaluationSuites = vi.fn(async () => []);
     const agentApi = {
-      listAgentDefinitions: async () => ({ items: [{ definition: { id: "agent_1" } }] }),
+      listAgentDefinitions: async () => ({
+        items: [
+          {
+            definition: { id: "agent_default", status: "published" },
+            revision: { displayName: "默认 Agent" },
+          },
+          {
+            definition: { id: "agent_draft", status: "draft" },
+            revision: { displayName: "订单助手" },
+          },
+        ],
+      }),
       listAgentRevisions: async () => ({ items: [] }),
     };
     const api = {
-      listEvaluationSuites: async () => [],
+      listEvaluationSuites,
       saveEvaluationSuite,
       listEvaluationRuns: async () => [],
       startEvaluationRun: async () => ({ id: "run_1" }),
@@ -31,20 +43,16 @@ describe("评测集页面", () => {
     await settle();
     const combo = page.querySelector<HTMLInputElement>('[role="combobox"]');
     if (!combo) throw new Error("缺少 Agent 选择器");
-    act(() => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
-        combo,
-        "agent_1",
-      );
-      combo.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    enter(combo, "订单助手");
     await settle();
-    act(() =>
-      Array.from(document.querySelectorAll(".ant-select-item-option"))
-        .find((item) => item.textContent?.includes("agent_1"))
-        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (item) => item.textContent === "订单助手（草稿）",
     );
+    expect(option).toBeDefined();
+    act(() => option?.click());
     await settle();
+    expect(listEvaluationSuites).toHaveBeenCalledExactlyOnceWith("agent_draft");
+    expect(page.textContent).toContain("订单助手（草稿）");
     act(() => button(page, "新建评测集").click());
     const name = page.querySelector<HTMLInputElement>('[aria-label="评测集名称"]');
     const input = page.querySelector<HTMLTextAreaElement>('[aria-label="用户输入"]');
@@ -55,6 +63,7 @@ describe("评测集页面", () => {
     enter(assertion, "订单存在");
     act(() => button(page, "保存评测集").click());
     await settle();
+    expect(saveEvaluationSuite.mock.calls[0]?.[0].definitionId).toBe("agent_draft");
     expect(saveEvaluationSuite.mock.calls[0]?.[0].cases[0]?.assertions[0]).toEqual({
       kind: "text_contains",
       value: "订单存在",

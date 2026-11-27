@@ -137,7 +137,12 @@ export async function runCli(
       yaml: true,
     });
     if (typeof exported !== "string") invalidResponse();
-    parseAgentConfiguration(exported);
+    try {
+      parseAgentConfiguration(exported);
+    } catch (error) {
+      if (error instanceof AgentConfigurationError) invalidResponse();
+      throw error;
+    }
     if (options.output !== undefined) {
       try {
         await write(options.output, exported);
@@ -163,7 +168,7 @@ export async function runCli(
               "validation",
               "INVALID_CONFIGURATION",
               "Agent 配置文件校验失败",
-              error.errors,
+              fieldErrors(error.errors),
             )
           : new CliError("service", "INTERNAL_ERROR", "命令执行失败");
     const payload = {

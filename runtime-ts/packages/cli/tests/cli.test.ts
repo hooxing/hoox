@@ -221,6 +221,47 @@ describe("hoox 命令行", () => {
     expect(context.output.join("")).not.toContain(token);
   });
 
+  it.each([false, true])("pull 不读取网关 401 的正文（JSON=%s）", async (json) => {
+    const context = fixture();
+    const cancel = vi.fn(() => Promise.reject(new Error("上游已断开")));
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(6_500_001));
+      },
+      cancel,
+    });
+    context.fetcher.mockResolvedValue(
+      new Response(body, { status: 401, headers: { "content-type": "text/html" } }),
+    );
+    expect(await context.run(["pull", "agent_example", ...(json ? ["--json"] : [])])).toBe(3);
+    expect(context.fetcher).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    if (json) expect(context.result()).toMatchObject({ error: { code: "UNAUTHORIZED" } });
+    else expect(context.errors.join("")).toMatch(/^UNAUTHORIZED:/u);
+  });
+
+  it("网关 HTML 5xx 按 HTTP 状态归类为服务错误而非无效响应", async () => {
+    const context = fixture();
+    const cancel = vi.fn(() => Promise.reject(new Error("上游已断开")));
+    const response = () =>
+      new Response("<html>upstream unavailable</html>", {
+        status: 500,
+        headers: { "content-type": "text/html" },
+      });
+    context.fetcher.mockImplementation(async () => {
+      const value = response();
+      Object.defineProperty(value.body, "cancel", { value: cancel });
+      return value;
+    });
+    expect(await context.run(["pull", "agent_example", "--json"])).toBe(4);
+    expect(context.fetcher).toHaveBeenCalledTimes(3);
+    expect(context.result()).toMatchObject({
+      error: { kind: "service", code: "HTTP_ERROR" },
+    });
+    expect(context.output.join("")).not.toContain("INVALID_RESPONSE");
+    expect(cancel).toHaveBeenCalledTimes(3);
+  });
+
   it("缺凭据退出 3；token-file 优先于环境变量且只读取一次", async () => {
     const missing = fixture({ env: { HOOX_URL: "https://control.example.invalid" } });
     expect(await missing.run(["pull", "agent_example", "--json"])).toBe(3);
@@ -246,7 +287,7 @@ describe("hoox 命令行", () => {
       2,
     );
     expect(context.output.join("")).not.toContain(secret);
-    expect(context.result()).toMatchObject({ error: { errors: [{ path: "/[REDACTED]" }] } });
+    expect(context.result()).toMatchObject({ error: { errors: [{ path: "配置" }] } });
     expect(context.fetcher).not.toHaveBeenCalled();
   });
 
@@ -274,6 +315,42 @@ describe("hoox 命令行", () => {
     expect(await context.run(["push", "agent.yaml", "--json"])).toBe(2);
     expect(context.fetcher).toHaveBeenCalledTimes(1);
     expect(context.output.join("")).not.toContain(token);
+  });
+
+  it("上游字段错误只输出验证过的路径和固定文案，不回显控制字符或未知消息", async () => {
+    for (const args of [
+      ["push", "agent.yaml", "--json"],
+      ["push", "agent.yaml"],
+    ]) {
+      const context = fixture();
+      context.fetcher.mockResolvedValue(
+        Response.json(
+          {
+            validationErrors: [
+              { path: "/definition/id", code: "INVALID", message: "\u001b[31mOWNED\nforged\u0000" },
+              { path: "/definition/\u001b[2J", code: "INVALID", message: "bad path" },
+              {
+                path: "/definition/name",
+                code: "NEW_SECRET_CODE",
+                message: "arbitrary upstream text",
+              },
+            ],
+          },
+          { status: 422 },
+        ),
+      );
+      expect(await context.run(args)).toBe(2);
+      const output = `${context.output.join("")}\n${context.errors.join("")}`;
+      expect(output).toContain("/definition/id");
+      expect(output).toContain("字段值无效");
+      expect(output).toContain("INVALID_VALUE");
+      expect(output).toContain("另有字段未通过校验");
+      expect(output).not.toContain("OWNED");
+      expect(output).not.toContain("forged");
+      expect(output).not.toContain("arbitrary upstream text");
+      expect(output).not.toContain("bad path");
+      expect(output).not.toContain("\u001b");
+    }
   });
 
   it("网络失败退出 4、有限重试，底层异常不进入输出", async () => {
@@ -337,6 +414,44 @@ describe("hoox 命令行", () => {
     expect(await context.run(["pull", "agent_example", "--json"])).toBe(2);
     expect(context.fetcher).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    "pull 导出含未知键的 YAML 返回固定 INVALID_RESPONSE（JSON=%s）",
+    async (json) => {
+      const context = fixture();
+      const upstreamUnknownKey = "upstreamOnlySecretKey";
+      context.fetcher.mockResolvedValue(
+        new Response(`${yaml}\n${upstreamUnknownKey}: true\n`, {
+          headers: { "content-type": "application/yaml" },
+        }),
+      );
+      expect(
+        await context.run([
+          "pull",
+          "agent_example",
+          "--revision",
+          "revision_example",
+          ...(json ? ["--json"] : []),
+        ]),
+      ).toBe(4);
+      if (json) {
+        expect(context.result()).toMatchObject({
+          error: {
+            kind: "service",
+            code: "INVALID_RESPONSE",
+            message: "后台返回了无效响应",
+            errors: [],
+          },
+        });
+      } else {
+        expect(context.errors.join("")).toContain("INVALID_RESPONSE: 后台返回了无效响应");
+      }
+      expect(`${context.output.join("")}\n${context.errors.join("")}`).not.toContain(
+        upstreamUnknownKey,
+      );
+      expect(context.output.join("")).not.toContain("Unexpected property");
+    },
+  );
 
   it("拒绝导出包含令牌的 YAML，不写入文件或标准输出", async () => {
     const context = fixture();

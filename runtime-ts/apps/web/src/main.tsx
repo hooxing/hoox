@@ -1,5 +1,6 @@
 import {
   CalendarClock,
+  ChevronDown,
   Cloud,
   LoaderCircle,
   Pencil,
@@ -12,6 +13,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useReducer,
@@ -358,6 +360,41 @@ function workspaceError(reason: unknown, message: string): ApiError {
 
 function isUnavailableResource(reason: unknown): boolean {
   return reason instanceof ApiError && [401, 403, 404, 410].includes(reason.status);
+}
+
+function SpaceDestinationPicker({
+  teams,
+  activeTeamId,
+  disabled,
+  onSwitch,
+}: {
+  readonly teams: readonly TeamSummary[];
+  readonly activeTeamId?: string;
+  readonly disabled: boolean;
+  readonly onSwitch: (teamId?: string) => void;
+}) {
+  const selectId = useId();
+  return (
+    <label className="agent-picker space-picker" htmlFor={selectId}>
+      <span>创建到</span>
+      <span className="space-picker-control">
+        <select
+          id={selectId}
+          value={activeTeamId ?? ""}
+          disabled={disabled}
+          onChange={(event) => onSwitch(event.target.value || undefined)}
+        >
+          <option value="">个人空间</option>
+          {teams.map((team) => (
+            <option key={team.id} value={team.id}>
+              {team.displayName}
+            </option>
+          ))}
+        </select>
+        <ChevronDown className="space-picker-chevron" size={16} aria-hidden="true" />
+      </span>
+    </label>
+  );
 }
 
 function AuthenticatedWorkspace({
@@ -1818,21 +1855,12 @@ function AuthenticatedWorkspace({
               <h1>准备好协作了吗？</h1>
               <p>描述任务后会自动创建会话，并用首条请求作为标题。</p>
               {moduleVisible(branding, "team_spaces") && teams.length > 0 && (
-                <label className="agent-picker">
-                  <span>创建到</span>
-                  <select
-                    value={activeTeamId ?? ""}
-                    disabled={actionLoading}
-                    onChange={(event) => switchWorkspace(event.target.value || undefined)}
-                  >
-                    <option value="">个人空间</option>
-                    {teams.map((team) => (
-                      <option key={team.id} value={team.id}>
-                        {team.displayName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <SpaceDestinationPicker
+                  teams={teams}
+                  {...(activeTeamId === undefined ? {} : { activeTeamId })}
+                  disabled={actionLoading}
+                  onSwitch={switchWorkspace}
+                />
               )}
               <NewThreadAgentWelcome
                 agents={availableAgents}

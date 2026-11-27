@@ -152,7 +152,9 @@ export interface WriteCheckpointInput {
 
 export type RolloutWriteResult<T> =
   | { readonly outcome: "created" | "replayed"; readonly value: T }
-  | { readonly outcome: "conflict" | "not_authorized" | "not_found" };
+  | {
+      readonly outcome: "conflict" | "not_authorized" | "not_found" | "parent_closed";
+    };
 
 interface EntryRow extends QueryResultRow {
   readonly sequence: string;
@@ -348,6 +350,18 @@ async function lockActiveExecutionFence(
     ],
   );
   return result.rowCount === 1;
+}
+
+async function lockActiveRolloutStream(
+  client: PoolClient,
+  context: TrustedRolloutContext,
+): Promise<boolean> {
+  if (!(await lockActiveExecutionFence(client, context))) return false;
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    scopeParams(context).join("\u001f"),
+  ]);
+  // 共享行锁阻止接管，但不能阻止租约在等待流锁期间到期。
+  return lockActiveExecutionFence(client, context);
 }
 
 function assertPtcInput(input: AppendPtcToolCallInput | AppendPtcToolResultInput): void {
@@ -587,7 +601,7 @@ function normalizeDraft(draft: RolloutEntryDraft): NormalizedRolloutEntryDraft {
 
 /**
  * 仅负责 Runtime Rollout/Checkpoint 事实；不读取也不写入 Pi Session 本地文件。
- * 所有写入先锁定 scope advisory key，避免并发 append 分配相同 sequence。
+ * append、checkpoint 与 PTC journal 共享流锁，按同一顺序推进事实。
  * 执行事务只设置 Tenant；用户侧 RLS 会隐藏 Playground。actor 归属和有效 Membership
  * 仍由授权查询复核，写入和恢复仍校验执行栅栏。
  */
@@ -706,6 +720,9 @@ export class PgRuntimeRolloutRepository {
               workspaceLease: Object.freeze({ ...fence.workspaceLease }),
             }),
           });
+          if (!(await lockActiveRolloutStream(client, context))) {
+            return { outcome: "not_authorized" } as const;
+          }
           const opened = await this.openStreamLocked(
             client,
             {
@@ -744,7 +761,7 @@ export class PgRuntimeRolloutRepository {
         this.pool,
         { tenantId: input.context.scope.tenantId },
         async (client) => {
-          if (!(await lockActiveExecutionFence(client, input.context))) return "not_authorized";
+          if (!(await lockActiveRolloutStream(client, input.context))) return "not_authorized";
           return await this.openStreamLocked(client, input, "root");
         },
       );
@@ -867,15 +884,10 @@ export class PgRuntimeRolloutRepository {
         this.pool,
         { tenantId: input.context.scope.tenantId },
         async (client) => {
-          if (!(await lockActiveExecutionFence(client, input.context)))
+          if (!(await lockActiveRolloutStream(client, input.context))) {
             return { outcome: "not_authorized" };
-          const parentSequence = await this.lockOpenPtcParent(
-            client,
-            input.context,
-            input.parentToolCallId,
-          );
-          if (parentSequence === undefined) return { outcome: "conflict" };
-          // Provider 可跨 Run/Attempt 复用调用 ID；完整 stream scope 内必须命中同一开始事实。
+          }
+          // 精确开始可确认已持久化；父调用闭合时不返回可 dispatch 的 replay。
           const existing = await client.query<PtcDispatchRow>(
             `SELECT * FROM runtime_ptc_dispatches WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3
                AND attempt_id=$4 AND agent_thread_id=$5 AND (tool_call_id=$6 OR start_idempotency_key=$7)`,
@@ -883,13 +895,41 @@ export class PgRuntimeRolloutRepository {
           );
           if (existing.rows.length > 0) {
             const row = existing.rows[0];
-            return existing.rows.length === 1 &&
-              row !== undefined &&
-              samePtcScope(row, input.context) &&
-              row.tool_call_id === input.toolCallId &&
-              row.start_idempotency_key === input.idempotencyKey &&
-              row.start_digest === commandDigest
-              ? { outcome: "replayed", value: undefined }
+            if (
+              existing.rows.length !== 1 ||
+              row === undefined ||
+              !samePtcScope(row, input.context) ||
+              row.tool_call_id !== input.toolCallId ||
+              row.start_idempotency_key !== input.idempotencyKey ||
+              row.start_digest !== commandDigest
+            ) {
+              return { outcome: "conflict" };
+            }
+            const openParentSequence = await this.readOpenPtcParent(
+              client,
+              input.context,
+              input.parentToolCallId,
+            );
+            if (openParentSequence !== row.parent_sequence) {
+              return (await this.isClosedRunCodeParent(
+                client,
+                input.context,
+                input.parentToolCallId,
+                row.parent_sequence,
+              ))
+                ? { outcome: "parent_closed" }
+                : { outcome: "not_found" };
+            }
+            return { outcome: "replayed", value: undefined };
+          }
+          const parentSequence = await this.readOpenPtcParent(
+            client,
+            input.context,
+            input.parentToolCallId,
+          );
+          if (parentSequence === undefined) {
+            return (await this.isClosedRunCodeParent(client, input.context, input.parentToolCallId))
+              ? { outcome: "not_found" }
               : { outcome: "conflict" };
           }
           await client.query(
@@ -947,13 +987,8 @@ export class PgRuntimeRolloutRepository {
         this.pool,
         { tenantId: input.context.scope.tenantId },
         async (client) => {
-          if (!(await lockActiveExecutionFence(client, input.context)))
+          if (!(await lockActiveRolloutStream(client, input.context))) {
             return { outcome: "not_authorized" };
-          if (
-            (await this.lockOpenPtcParent(client, input.context, input.parentToolCallId)) ===
-            undefined
-          ) {
-            return { outcome: "conflict" };
           }
           const existing = await client.query<PtcDispatchRow>(
             `SELECT * FROM runtime_ptc_dispatches WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3
@@ -961,7 +996,15 @@ export class PgRuntimeRolloutRepository {
             [...scopeParams(input.context), input.toolCallId],
           );
           const row = existing.rows[0];
-          if (row === undefined) return { outcome: "not_found" };
+          if (row === undefined) {
+            const parentOpen =
+              (await this.readOpenPtcParent(client, input.context, input.parentToolCallId)) !==
+              undefined;
+            return parentOpen ||
+              (await this.isClosedRunCodeParent(client, input.context, input.parentToolCallId))
+              ? { outcome: "not_found" }
+              : { outcome: "conflict" };
+          }
           if (
             !samePtcScope(row, input.context) ||
             row.parent_tool_call_id !== input.parentToolCallId ||
@@ -980,6 +1023,21 @@ export class PgRuntimeRolloutRepository {
             [...scopeParams(input.context), input.idempotencyKey],
           );
           if (key.rowCount !== 0) return { outcome: "conflict" };
+          const openParentSequence = await this.readOpenPtcParent(
+            client,
+            input.context,
+            input.parentToolCallId,
+          );
+          if (openParentSequence !== row.parent_sequence) {
+            return (await this.isClosedRunCodeParent(
+              client,
+              input.context,
+              input.parentToolCallId,
+              row.parent_sequence,
+            ))
+              ? { outcome: "parent_closed" }
+              : { outcome: "conflict" };
+          }
           // FK 在提交时重新约束 stable/trace 引用，不能只信任上传端口返回的身份；
           // 内联回执的 Blob 列整体为 NULL，由数据库 CHECK 约束 schemaVersion 3 的固定形状。
           await client.query(
@@ -1072,16 +1130,12 @@ export class PgRuntimeRolloutRepository {
     }
   }
 
-  private async lockOpenPtcParent(
+  private async readOpenPtcParent(
     client: PoolClient,
     context: TrustedRolloutContext,
     parentToolCallId: string,
   ): Promise<string | undefined> {
     const params = scopeParams(context);
-    // 与外层 append 共用流锁：父调用闭合与 journal 写入必须形成唯一线性化顺序。
-    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-      params.join("\u001f"),
-    ]);
     const tail = await client.query<EntryRow>(
       `SELECT sequence,kind,tool_call_id,body FROM runtime_rollout_entries
         WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 AND attempt_id=$4 AND agent_thread_id=$5
@@ -1094,6 +1148,32 @@ export class PgRuntimeRolloutRepository {
       (row.body as Record<string, unknown>).toolName === "run_code"
       ? row.sequence
       : undefined;
+  }
+
+  private async isClosedRunCodeParent(
+    client: PoolClient,
+    context: TrustedRolloutContext,
+    parentToolCallId: string,
+    parentSequence?: string,
+  ): Promise<boolean> {
+    const closed = await client.query(
+      `SELECT 1
+         FROM runtime_rollout_entries parent
+         JOIN runtime_rollout_entries result
+           ON result.tenant_id=parent.tenant_id AND result.thread_id=parent.thread_id
+          AND result.run_id=parent.run_id AND result.attempt_id=parent.attempt_id
+          AND result.agent_thread_id=parent.agent_thread_id
+          AND result.tool_call_id=parent.tool_call_id AND result.kind='tool_result'
+          AND result.sequence>parent.sequence
+        WHERE parent.tenant_id=$1 AND parent.thread_id=$2 AND parent.run_id=$3
+          AND parent.attempt_id=$4 AND parent.agent_thread_id=$5
+          AND parent.tool_call_id=$6 AND parent.kind='tool_call'
+          AND parent.body->>'toolName'='run_code'
+          AND ($7::bigint IS NULL OR parent.sequence=$7::bigint)
+        LIMIT 1`,
+      [...scopeParams(context), parentToolCallId, parentSequence ?? null],
+    );
+    return closed.rowCount === 1;
   }
 
   async append(
@@ -1111,13 +1191,10 @@ export class PgRuntimeRolloutRepository {
         this.pool,
         { tenantId: input.context.scope.tenantId },
         async (client) => {
-          if (!(await lockActiveExecutionFence(client, input.context))) {
+          if (!(await lockActiveRolloutStream(client, input.context))) {
             return { outcome: "not_authorized" };
           }
           const params = scopeParams(input.context);
-          await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-            params.join("\u001f"),
-          ]);
           const receipt = await client.query<{
             command_digest: string;
             first_sequence: string;
@@ -1257,13 +1334,10 @@ export class PgRuntimeRolloutRepository {
         this.pool,
         { tenantId: input.context.scope.tenantId },
         async (client) => {
-          if (!(await lockActiveExecutionFence(client, input.context))) {
+          if (!(await lockActiveRolloutStream(client, input.context))) {
             return { outcome: "not_authorized" };
           }
           const params = scopeParams(input.context);
-          await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-            params.join("\u001f"),
-          ]);
           const receipt = await client.query<{ command_digest: string; checkpoint_id: string }>(
             `SELECT command_digest, checkpoint_id
                FROM runtime_rollout_checkpoint_commands

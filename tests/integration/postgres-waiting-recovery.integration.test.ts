@@ -708,6 +708,111 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     ).toBe("already_resolved");
   });
 
+  it("完成证明在 recovery claim、Run claim 与 Workspace lease 过期后仍可独立收口", async () => {
+    const settlementProof = {
+      registryId: `settlement_registry_${unique}`,
+      providerSandboxId: `settlement_sandbox_${unique}`,
+      generation: 3,
+    };
+    const settlementStore = createTestingPgWaitingRecoveryStore(
+      runtime,
+      {
+        async execute(input) {
+          const responseDigest = digestCanonical({ request: input, result: settlementProof });
+          return {
+            outcome: "succeeded" as const,
+            receipt: {
+              ...settlementProof,
+              requestDigest: input.requestDigest,
+              responseDigest,
+              attestation: createHmac("sha256", receiptKey).update(responseDigest).digest("hex"),
+            },
+          };
+        },
+      },
+      {
+        verify(input) {
+          return (
+            input.receipt.attestation ===
+            createHmac("sha256", receiptKey).update(input.receipt.responseDigest).digest("hex")
+          );
+        },
+      },
+      30,
+    );
+    const expiredCheckpointId = `wait_settle_expired_${unique}`;
+    await appendWaitingCheckpointFact(expiredCheckpointId);
+    expect(
+      await settlementStore.record({
+        scope,
+        attemptId,
+        checkpointId: expiredCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await settlementStore.claim({
+      scope,
+      attemptId,
+      checkpointId: expiredCheckpointId,
+      workerId: "expired-settlement-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要待收口 claim");
+    const decision = {
+      outcome: "resume",
+      workspace: "unchanged",
+      sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
+    } as const;
+    for (const effect of ["create", "materialize"] as const) {
+      const intent = await settlementStore.beginEffect({ claim: acquired.claim, decision, effect });
+      if (intent.outcome !== "authorized") throw new Error(`测试需要 ${effect} intent`);
+      expect(
+        await settlementStore.execute({ claim: acquired.claim, intentId: intent.intentId, effect }),
+      ).toEqual({ outcome: "completed" });
+    }
+
+    await withTenantTransaction(migrator, databaseContext, async (client) => {
+      await client.query(
+        `UPDATE waiting_recovery_checkpoints
+            SET claim_expires_at=clock_timestamp()-interval '1 second'
+          WHERE tenant_id=$1 AND checkpoint_id=$2`,
+        [scope.tenantId, expiredCheckpointId],
+      );
+      await client.query(
+        `UPDATE run_claims SET expires_at=clock_timestamp()-interval '1 second',
+            released_at=clock_timestamp()
+          WHERE tenant_id=$1 AND attempt_id=$2`,
+        [scope.tenantId, attemptId],
+      );
+      await client.query(
+        `UPDATE workspace_write_leases SET expires_at=clock_timestamp()-interval '1 second'
+          WHERE tenant_id=$1 AND workspace_id=$2`,
+        [scope.tenantId, scope.workspaceId],
+      );
+    });
+    expect(await settlementStore.resolve({ claim: acquired.claim, decision })).toBe("resolved");
+    expect(
+      await new PgRuntimeRolloutRepository(runtime).append({
+        context: rolloutContext,
+        idempotencyKey: `wait-expired-fence-append-${unique}`,
+        entries: [{ kind: "assistant", body: { text: "must be denied" } }],
+      }),
+    ).toMatchObject({ outcome: "not_authorized" });
+    // 恢复共用 execution fixture 的双栅栏，不污染后续用例。
+    await withTenantTransaction(migrator, databaseContext, async (client) => {
+      await client.query(
+        `UPDATE run_claims SET expires_at=clock_timestamp()+interval '30 minutes',
+            released_at=NULL
+          WHERE tenant_id=$1 AND attempt_id=$2`,
+        [scope.tenantId, attemptId],
+      );
+      await client.query(
+        `UPDATE workspace_write_leases SET expires_at=clock_timestamp()+interval '30 minutes'
+          WHERE tenant_id=$1 AND workspace_id=$2`,
+        [scope.tenantId, scope.workspaceId],
+      );
+    });
+  });
+
   it("伪造 attestation 在 provider 返回后收敛 UNKNOWN 且不会重投", async () => {
     const forgedCheckpointId = `wait_forged_${unique}`;
     await appendWaitingCheckpointFact(forgedCheckpointId);

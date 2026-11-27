@@ -386,6 +386,28 @@ describe("PiWorkerSessionFactory PTC 模式", () => {
     expect(test.sandboxes.acquireCount).toBe(0);
   });
 
+  it("父调用闭合后的精确子调用重放停止 Worker 与 guest 后续调用", async () => {
+    const test = await fixture({
+      constructorMode: "ptc",
+      code: catchAndContinue,
+      startedOutcome: (call) => (call.toolName === "run_code" ? "recorded" : "conflict"),
+    });
+    await expect(test.worker.execute(test.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "IDEMPOTENCY_CONFLICT",
+    });
+
+    const child = startedCalls(test).find((call) => call.toolName === "exec_command");
+    expect(child).toMatchObject({ toolName: "exec_command", parentToolCallId: parentId });
+    expect(startedCalls(test).map((call) => call.toolName)).toEqual(["run_code", "exec_command"]);
+    expect(test.operations).toContain(`conflict:${child?.toolCallId}`);
+    expect(test.operations).not.toContain(`authorize:${child?.toolCallId}`);
+    expect(test.command).not.toHaveBeenCalled();
+    expect(toolPermits(test)).toEqual([]);
+    expect(test.providerTools).toHaveLength(1);
+    expect(test.faux.state.callCount).toBe(1);
+  });
+
   it("父子 started 持久化完成前不执行，子工具依次经过 durable、一次性授权、副作用和结果", async () => {
     const parentGate = Promise.withResolvers<void>();
     const childGate = Promise.withResolvers<void>();

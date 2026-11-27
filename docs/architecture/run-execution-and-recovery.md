@@ -50,6 +50,8 @@ claimed/running/finalizing → recovery_required → abandoned | failed
 
 每个 Attempt 只有一条进程内 `DurableOperationLane`。事件写入、普通 mutation 与读回、外部副作用许可签发与消费、停止检查和续租都按进入顺序串行执行；命令与预期版本必须在进入通道后从最新上下文构造。停止时先停止生产者，再排空通道。
 
+Rollout 的 append、checkpoint 与 PTC journal 写入持有双栅栏的共享行锁，阻止接管与写事务交错。共享行锁不会延长租期：取得流锁后，写事务仍以 PostgreSQL 时钟重验 Run claim 与 Workspace writer 租约；任一已到期即返回 `not_authorized`，不提交任何 Rollout 事实。这是写事务的授权判定点，不要求租约一直有效到 COMMIT。
+
 ## 外部工具快照与撤销
 
 Worker 通过独立的 Worker Coordinator 连接读取 RunAgentSnapshot 中精确 `toolVersionId` 对应的外部工具版本与密文；共享 Runtime 角色无密文视图或底表读取权限。视图将调用方提交的 claim token、claim epoch 和 Workspace lease epoch 与数据库中当前 Attempt、未过期且未释放的 claim、Workspace writer 和队列执行权事实匹配，不将 Tenant/Run 会话设置当作执行授权。凭据只在 Worker 内解密并交给 Tool Router 的 Transport，不进入 Prompt、Schema、事件或模型可见回执。
@@ -101,6 +103,7 @@ Playground 不对 Sandbox 禁网：`exec_command`、Skill 脚本等 Sandbox 命�
 
 - waiting 安全点持久化 scope、Rollout checkpoint、Workspace head、base revision 和可选 Sandbox 身份。Sandbox 只有在 Tenant、Thread、Workspace、base revision、session generation 全部匹配且生命周期明确为 `paused` 时才复用。
 - pause、connect、create、materialize 采用 intent/outbox Saga：持有有效租约时先提交意图，外部调用成功后才在同一事务线性化事件、Rollout 与决定事实。任何外部调用结果未知，或进程在意图后崩溃且没有成功证明，都持久化为 UNKNOWN 并停止自动重试。
+- waiting 恢复写入由恢复 checkpoint claim 独立授权，不属于 Rollout 流锁的双租约写入边界。claim 到期禁止继续发起外部副作用；但同一 claim 身份仍匹配、Attempt generation 仍有效且所需外部效果已有完整证明时，`resolve` 可在 claim 到期后收口。租约到期不会抹去已完成效果证明；缺少证明或 claim/Attempt 身份失效仍拒绝收口。
 - 恢复输入只来自 PostgreSQL 与 stable Blob；Pi Session 内存与 Sandbox 内状态不是事实源。
 - 普通 Worker 永远不能重领 running Run。普通 claim 明确返回 `recovery_required` 后，Worker 只调用窄恢复入口把过期 Attempt 固化为 `recovery_required`；若该 Attempt 持有 Thread Sandbox 租约，同一事务写入唯一的 terminate effect、把 Session 隔离为 `unknown` 并释放租约，远端关闭交给 Scheduler。
 - 队列停留时间不是 Attempt 租约。已入队且可投递、但尚无 Attempt 的 Run 仍由 Dispatch Outbox 重试；不会仅因排队太久被自动判为失败。Attempt 已经进入 `recovery_required` 时，普通 Worker 不再执行它，即使 Run 仍显示原有的 `running` 状态。

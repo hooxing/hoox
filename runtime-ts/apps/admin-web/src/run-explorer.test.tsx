@@ -167,6 +167,20 @@ afterEach(() => {
 });
 
 describe("运行记录列表", () => {
+  it("将最新 Attempt 需要恢复的 Run 显示为需要恢复", async () => {
+    const api = apiFixture(false);
+    api.listRuns.mockResolvedValue({
+      items: [{ ...summary, status: "running", latestAttemptStatus: "recovery_required" }],
+      contentAccess: false,
+    });
+    const container = render(<RunExplorerList api={api} onOpen={vi.fn()} />);
+    await settle();
+    const row = container.querySelector("tbody tr");
+    expect(row?.textContent).toContain("需要恢复");
+    expect(row?.textContent).toContain("当前 Attempt 已暂停，等待恢复处理。");
+    expect(row?.textContent).not.toContain("运行中");
+  });
+
   it("展示结构化指标、提交筛选并按游标加载下一页", async () => {
     const api = apiFixture(false);
     const onOpen = vi.fn();
@@ -219,6 +233,21 @@ describe("运行记录列表", () => {
 });
 
 describe("运行详情", () => {
+  it("详情将需要恢复的最新 Attempt 与说明显示出来", async () => {
+    const api = apiFixture(false);
+    api.getRun.mockResolvedValue({
+      ...detail(false),
+      run: { ...detail(false).run, status: "running", latestAttemptStatus: "recovery_required" },
+    });
+    const container = render(<RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" />);
+    await settle();
+    expect(container.querySelector(".run-detail-metrics")?.textContent).toContain("需要恢复");
+    expect(container.querySelector(".run-detail-metrics")?.textContent).toContain(
+      "当前 Attempt 已暂停，等待恢复处理。",
+    );
+    expect(container.querySelector(".run-detail-metrics")?.textContent).not.toContain("运行中");
+  });
+
   it("非管理员详情只展示结构且不含正文", async () => {
     const api = apiFixture(false);
     const container = render(
@@ -665,6 +694,29 @@ describe("运行详情", () => {
     const partialView = render(<DeepSeekTrajectoryDebugger trajectory={trajectory} />);
     expect(partialView.textContent).toContain("超大事件仅显示有界占位");
     expect(partialView.textContent).toContain("汇总仅覆盖已加载部分");
+  });
+
+  it("真实 RunExplorerApi 读取完整轨迹时保留实例上下文", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/trajectory?")) {
+        return Response.json({ data: { events: [], bytes: 0, hasMore: false } });
+      }
+      return Response.json({ data: detail(true) });
+    });
+    const api = Object.assign(
+      new RunExplorerApi(fetcher, "/v1/admin/control", () => "Bearer placeholder"),
+      {
+        getRun: async () => detail(true),
+        readRunContent: async () => ({ ...detail(true), auditId: "audit_placeholder" }),
+      },
+    ) satisfies RunExplorerApiContract;
+    const container = render(<RunExplorerDetail api={api} tenantId="tenant_a" runId="run_1" />);
+    await settle();
+    expect(fetcher.mock.calls.map(([input]) => String(input))).toContain(
+      "/v1/admin/control/runs/tenant_a/run_1/trajectory?attemptId=attempt_1",
+    );
+    expect(container.textContent).not.toContain("完整轨迹读取失败");
   });
 
   it("轨迹接口故障明确提示，不伪装成旧 Run", async () => {

@@ -1248,7 +1248,10 @@ async function assembleWorkerRuntime(
         workspacePolicy.maxSingleFileBytes,
       ),
       publications: new SimpleArtifactDeliveryService(
-        new PgSimpleDeliveredFileRepository(pool),
+        new PgSimpleDeliveredFileRepository(pool, {
+          historyFilesystemEnabled: configuration.historyFilesystemEnabled,
+          historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
+        }),
         resourceBlobWriter,
       ),
       authorizationVerifier: artifactAuthorization.verifier,

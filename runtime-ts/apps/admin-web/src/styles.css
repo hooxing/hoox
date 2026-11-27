@@ -546,7 +546,7 @@ body {
 
 .statistics-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
   gap: 12px;
   margin: 18px 0;
 }
@@ -1382,7 +1382,7 @@ body {
 
 .model-provider-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 0.75fr) minmax(560px, 1.65fr);
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.65fr);
   gap: 14px;
   align-items: start;
 }
@@ -1727,7 +1727,7 @@ body {
 }
 
 .model-provider-editor {
-  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 0;
 }
 
@@ -1838,8 +1838,8 @@ body {
 }
 
 .model-editor-heading {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto auto auto auto auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 12px 13px;
@@ -1847,8 +1847,10 @@ body {
 
 .model-row-identity {
   display: grid;
+  flex: 1 1 180px;
   gap: 2px;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .model-row-identity code {
@@ -2488,6 +2490,12 @@ body {
   white-space: nowrap;
 }
 
+@media (width <= 1150px) {
+  .model-provider-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (width <= 800px) {
   .platform-nav {
     align-items: flex-start;
@@ -2523,14 +2531,9 @@ body {
   .provider-catalog-grid,
   .pi-search-results,
   .pi-model-search,
-  .model-editor-heading,
   .model-advanced-fields,
   .model-identity-fields,
   .provider-settings-list article {
-    grid-template-columns: 1fr;
-  }
-
-  .model-provider-layout {
     grid-template-columns: 1fr;
   }
 
@@ -4421,6 +4424,64 @@ td:first-child {
 .agent-page {
   gap: 24px;
   max-width: 1024px;
+}
+
+.integration-page,
+.access-token-page {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.integration-page > section {
+  min-width: 0;
+}
+
+.integration-page {
+  overflow-wrap: anywhere;
+}
+
+.integration-tenant-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.integration-tenant-select {
+  width: min(100%, 36rem);
+}
+
+.credential-form-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: var(--space-4);
+}
+
+.credential-form-fields .agent-field {
+  display: grid;
+  min-width: 0;
+}
+
+.credential-scopes {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.credential-scopes legend {
+  margin-bottom: var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.credential-scope-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+}
+
+.credential-submit {
+  justify-self: start;
 }
 
 .agent-page-heading {

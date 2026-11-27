@@ -143,7 +143,7 @@ PostgreSQL 数据卷保留时，Docker 不会重新执行初始化脚本。发�
 2. 上传 `deploy/demo` 中的 Compose、初始化、Nginx 和远程发布契约到新的 release 目录。
 3. 目标主机先核对 Webhook Dispatcher 配置（见“保留数据卷升级”），不一致时在改动任何发布状态前失败；随后拉取 digest，启动 PostgreSQL 与 MinIO，经 TCP 确认 PostgreSQL 就绪后幂等执行初始化脚本补齐缺失的受限角色，并验证 Dispatcher 能以配置的凭据登录，再幂等创建对象桶并执行只向前的数据库迁移。
 4. 以现有管理员用户 ID 或安全占位值启动 API、用户 Web 和 Admin Control，验证本机探针后生成 root-only Admin Control Bearer Token 配置，再原子安装不含 HTTP Basic 的 Nginx 配置。
-5. 在受限数据库连接中检查固定 Demo 账号是否已存在，仅在缺失时通过公开 HTTPS Better Auth 路径注册；已有账号继续使用原凭据。该账号是部署脚本托管的固定演示管理员，脚本将其邮箱状态幂等标记为已验证，再使用同一账号登录并交换 Hoox Session；普通用户仍必须通过 SMTP 验证码完成邮箱验证。账号查询结果无效、初始化失败或登录失败均终止发布并恢复上一应用版本，HTTP 失败只记录状态码，不输出响应正文。随后查询其用户与个人 Tenant，将用户幂等提升为有效平台控制管理员和 Skill 发布管理员。发布脚本只在 `0600` 临时 curl 配置中保存本次验收使用的 Hoox access token。
+5. 在受限数据库连接中检查固定 Demo 账号是否已存在，仅在缺失时通过公开 HTTPS Better Auth 路径注册；已有账号继续使用原凭据。该账号是部署脚本托管的固定演示管理员，脚本将其邮箱状态幂等标记为已验证，再使用同一账号登录并交换 Hoox Session；普通用户仍必须通过 SMTP 验证码完成邮箱验证。账号查询结果无效、初始化失败或登录失败均终止发布并恢复上一应用版本，HTTP 失败只记录状态码，不输出响应正文。随后查询其用户与个人 Tenant，将用户幂等提升为有效平台控制管理员和 Skill 发布管理员，并仅在 `installation_state.administrator_user_id` 为空时将该 Demo 管理员补录为初始化管理员；该写入同时补齐初始化时间，不覆盖已有初始化管理员。该标记用于接入空间目录的默认个人空间识别。发布脚本只在 `0600` 临时 curl 配置中保存本次验收使用的 Hoox access token。
 6. 将实际管理员用户同时注入 API 与 Admin Control，将个人 Tenant 注入 Scheduler 与 Worker，并强制重建应用容器。API 以该用户 ID 作为 Demo 后台会话闸门；Worker 将完整逻辑轨迹写入共享对象存储，Scheduler 负责按保留期清理，不需要本地诊断轨迹卷。
 7. 检查应用服务持续运行，并确认 Worker 无重启且已完成依赖探测、启动消费循环；Worker 启动失败或超过两分钟仍未完成时触发应用镜像回退，API readiness 成功不能替代 Worker 验收。随后检查用户端 readiness、后台 readiness、后台页面、无会话后台 API 的 `401`，以及带管理员 Hoox 会话的后台概览，再切换 `/opt/hoox-demo/current`。只保留最近五个 release 目录；Worker 诊断卷不随 release 目录清理。
 

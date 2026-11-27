@@ -184,6 +184,12 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("DEMO_ADMIN_USER_ID");
     expect(deploy).toContain("platform_control_operators");
     expect(deploy).toContain("platform_skill_operators");
+    expect(deploy).toContain(
+      "UPDATE :\\\"runtime_schema\\\".installation_state SET administrator_user_id=:'demo_user_id',initialized_at=COALESCE(initialized_at,clock_timestamp()) WHERE singleton=true AND administrator_user_id IS NULL",
+    );
+    expect(deploy).not.toContain(
+      "UPDATE :\\\"runtime_schema\\\".installation_state SET administrator_user_id=:'demo_user_id' WHERE singleton=true;",
+    );
     expect(deploy).toContain("restore_services=(postgres minio api web scheduler worker)");
     expect(deploy).toContain('up -d --force-recreate "' + "$" + '{restore_services[@]}"');
     expect(deploy).toContain("restore_services+=(admin-control admin-web)");

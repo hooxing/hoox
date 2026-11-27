@@ -171,13 +171,14 @@ export async function loadTrajectoryPages(
   };
 }
 
-export const runStatusLabels: Readonly<Record<RunStatus, string>> = {
+export const runStatusLabels: Readonly<Record<RunStatus | "recovery_required", string>> = {
   queued: "排队中",
   running: "运行中",
   waiting: "等待回答",
   succeeded: "成功",
   failed: "失败",
   cancelled: "已取消",
+  recovery_required: "需要恢复",
 };
 
 const recordKindLabels: Readonly<Record<string, string>> = {
@@ -211,6 +212,10 @@ export function formatDuration(value: number | undefined): string {
 
 function formatCount(value: number): string {
   return value.toLocaleString("zh-CN");
+}
+
+function displayedRunStatus(run: RunSummaryDto): string {
+  return run.latestAttemptStatus === "recovery_required" ? "recovery_required" : run.status;
 }
 
 function statusLabel(value: string): string {
@@ -255,7 +260,12 @@ function RunRow({
         <time>{formatDate(run.createdAt)}</time>
       </td>
       <td>
-        <span className={`run-status ${run.status}`}>{statusLabel(run.status)}</span>
+        <span className={`run-status ${displayedRunStatus(run)}`}>
+          {statusLabel(displayedRunStatus(run))}
+        </span>
+        {run.latestAttemptStatus === "recovery_required" && (
+          <small>当前 Attempt 已暂停，等待恢复处理。</small>
+        )}
       </td>
       <td>{formatDuration(run.durationMs)}</td>
       <td>{formatCount(run.modelCalls)}</td>
@@ -658,7 +668,12 @@ export function RunExplorerDetail({
         <div className="run-detail-metrics">
           <span>
             <small>状态</small>
-            <strong className={`run-status ${run.status}`}>{statusLabel(run.status)}</strong>
+            <strong className={`run-status ${displayedRunStatus(run)}`}>
+              {statusLabel(displayedRunStatus(run))}
+            </strong>
+            {run.latestAttemptStatus === "recovery_required" && (
+              <small>当前 Attempt 已暂停，等待恢复处理。</small>
+            )}
           </span>
           <span>
             <small>耗时（含排队）</small>
@@ -766,7 +781,8 @@ function RunAttemptTimeline({
     setTrajectoryProgress({ events: 0, bytes: 0, loading: false });
     if (detail.attemptId === undefined || api.readTrajectory === undefined) return;
     const attemptId = detail.attemptId;
-    const readPage = api.readTrajectory;
+    const readPage = (...args: Parameters<NonNullable<RunExplorerApiContract["readTrajectory"]>>) =>
+      api.readTrajectory?.(...args) ?? Promise.reject(new Error("轨迹接口不可用"));
     const readAllPages = async () => {
       setTrajectoryProgress({ events: 0, bytes: 0, loading: true });
       try {

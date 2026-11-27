@@ -1,4 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import {
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  Input,
+  Modal,
+  Select,
+  Space,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
+import { useCallback, useEffect, useId, useState } from "react";
 import type {
   AdminAccessTokenApiContract,
   AdminAccessTokenDto,
@@ -12,6 +25,7 @@ function date(value: string | null): string {
 }
 
 export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenApiContract }) {
+  const formId = useId();
   const [tokens, setTokens] = useState<readonly AdminAccessTokenDto[]>([]);
   const [status, setStatus] = useState<AdminAccessTokenStatus>("active");
   const [cursors, setCursors] = useState<readonly (string | null)[]>([null]);
@@ -115,136 +129,159 @@ export function AdminAccessTokensPage({ api }: { readonly api: AdminAccessTokenA
   };
 
   return (
-    <main className="admin-access-tokens" aria-labelledby="admin-access-tokens-title">
-      <header>
-        <p className="eyebrow">系统安全</p>
-        <h1 id="admin-access-tokens-title">后台访问令牌</h1>
-        <p>令牌以创建者身份执行，并在每次请求时检查当前后台权限。</p>
-      </header>
-      <form onSubmit={(event) => void create(event)}>
-        <label>
-          名称
-          <input
-            required
-            maxLength={120}
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </label>
-        <fieldset>
-          <legend>作用域</legend>
-          <label>
-            <input
-              type="checkbox"
-              checked={read}
-              onChange={(event) => setRead(event.target.checked)}
-            />
-            Agent 配置读取
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={write}
-              onChange={(event) => setWrite(event.target.checked)}
-            />
-            Agent 配置写入（包含读取）
-          </label>
-        </fieldset>
-        <label>
-          有效期
-          <select value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)}>
-            <option value="7">7 天</option>
-            <option value="30">30 天</option>
-            <option value="60">60 天</option>
-            <option value="90">90 天（默认）</option>
-          </select>
-        </label>
-        <button type="submit" disabled={busy || (!read && !write)}>
-          创建令牌
-        </button>
-      </form>
-      {error && <p role="alert">{error}</p>}
+    <section className="agent-page access-token-page" aria-label="后台访问令牌">
+      <Card title="创建令牌">
+        <Typography.Paragraph>
+          令牌供 CLI 和 CI 管理 Agent 配置，以创建者身份执行，并在每次请求时检查当前后台权限。详见{" "}
+          <a
+            href="https://github.com/hooxing/hoox/blob/main/docs/reference/cli.md"
+            target="_blank"
+            rel="noreferrer"
+          >
+            CLI 参考
+          </a>
+          。
+        </Typography.Paragraph>
+        <form className="agent-fields" onSubmit={(event) => void create(event)}>
+          <div className="credential-form-fields">
+            <label className="agent-field" htmlFor={`${formId}-name`}>
+              名称
+              <Input
+                id={`${formId}-name`}
+                required
+                maxLength={120}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </label>
+            <label className="agent-field" htmlFor={`${formId}-expiry`}>
+              有效期
+              <Select
+                id={`${formId}-expiry`}
+                value={expiryDays}
+                onChange={setExpiryDays}
+                options={[
+                  { value: "7", label: "7 天" },
+                  { value: "30", label: "30 天" },
+                  { value: "60", label: "60 天" },
+                  { value: "90", label: "90 天（默认）" },
+                ]}
+              />
+            </label>
+          </div>
+          <fieldset className="credential-scopes">
+            <legend>作用域</legend>
+            <div className="credential-scope-options">
+              <Checkbox
+                checked={read || write}
+                disabled={write}
+                onChange={(event) => setRead(event.target.checked)}
+              >
+                Agent 配置读取
+              </Checkbox>
+              <Checkbox checked={write} onChange={(event) => setWrite(event.target.checked)}>
+                Agent 配置写入（包含读取）
+              </Checkbox>
+            </div>
+          </fieldset>
+          <Button
+            className="credential-submit"
+            type="primary"
+            htmlType="submit"
+            loading={busy}
+            disabled={!name.trim() || (!read && !write)}
+          >
+            创建令牌
+          </Button>
+        </form>
+      </Card>
+      {error && <Alert type="error" showIcon title={error} />}
       {oneTimeToken && (
-        <section role="dialog" aria-modal="true" aria-labelledby="one-time-token-title">
-          <h2 id="one-time-token-title">请立即复制令牌</h2>
-          <p>明文只显示这一次。关闭后无法再次查看。</p>
-          <code>{oneTimeToken}</code>
-          <button type="button" onClick={() => setOneTimeToken("")}>
-            我已保存，关闭
-          </button>
-        </section>
-      )}
-      <label>
-        状态筛选
-        <select
-          aria-label="令牌状态筛选"
-          value={status}
-          onChange={(event) => selectStatus(event.target.value as AdminAccessTokenStatus)}
+        <Modal
+          open
+          title="请立即复制令牌"
+          onCancel={() => setOneTimeToken("")}
+          footer={
+            <Button type="primary" onClick={() => setOneTimeToken("")}>
+              我已保存，关闭
+            </Button>
+          }
         >
-          <option value="active">有效</option>
-          <option value="expired">已过期</option>
-          <option value="revoked">已撤销</option>
-        </select>
-      </label>
-      <div className="admin-access-token-table">
-        <table>
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>作用域</th>
-              <th>创建者</th>
-              <th>创建时间</th>
-              <th>最后使用</th>
-              <th>过期时间</th>
-              <th>状态</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tokens.map((token) => (
-              <tr key={token.id}>
-                <td>{token.name}</td>
-                <td>{token.scopes.join(", ")}</td>
-                <td>{token.createdBy}</td>
-                <td>{date(token.createdAt)}</td>
-                <td>{date(token.lastUsedAt)}</td>
-                <td>{date(token.expiresAt)}</td>
-                <td>
-                  {token.revokedAt !== null
-                    ? "已撤销"
-                    : Date.parse(token.expiresAt) <= now
-                      ? "已过期"
-                      : "有效"}
-                </td>
-                <td>
-                  <button
-                    type="button"
+          <p>明文只显示这一次。关闭后无法再次查看。</p>
+          <Typography.Paragraph style={{ overflowWrap: "anywhere" }}>
+            <code>{oneTimeToken}</code>
+          </Typography.Paragraph>
+        </Modal>
+      )}
+      <Card title="令牌列表">
+        <Space orientation="vertical" style={{ display: "flex", minWidth: 0 }}>
+          <Select<AdminAccessTokenStatus>
+            aria-label="令牌状态筛选"
+            value={status}
+            onChange={selectStatus}
+            options={[
+              { value: "active", label: "有效" },
+              { value: "expired", label: "已过期" },
+              { value: "revoked", label: "已撤销" },
+            ]}
+          />
+          <Table
+            rowKey="id"
+            dataSource={tokens}
+            pagination={false}
+            scroll={{ x: "max-content" }}
+            locale={{ emptyText: "没有符合条件的令牌。" }}
+            columns={[
+              { title: "名称", dataIndex: "name" },
+              { title: "作用域", render: (_, token) => token.scopes.join("、") },
+              { title: "创建者", dataIndex: "createdBy" },
+              { title: "创建时间", render: (_, token) => date(token.createdAt) },
+              { title: "最后使用", render: (_, token) => date(token.lastUsedAt) },
+              { title: "过期时间", render: (_, token) => date(token.expiresAt) },
+              {
+                title: "状态",
+                render: (_, token) =>
+                  token.revokedAt !== null ? (
+                    <Tag>已撤销</Tag>
+                  ) : Date.parse(token.expiresAt) <= now ? (
+                    <Tag color="warning">已过期</Tag>
+                  ) : (
+                    <Tag color="success">有效</Tag>
+                  ),
+              },
+              {
+                title: "操作",
+                render: (_, token) => (
+                  <Button
+                    type="link"
+                    danger
                     disabled={
                       busy || token.revokedAt !== null || Date.parse(token.expiresAt) <= now
                     }
                     onClick={() => void revoke(token)}
                   >
                     撤销
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <nav aria-label="令牌分页">
-        <button
-          type="button"
-          disabled={busy || pageIndex === 0}
-          onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
-        >
-          上一页
-        </button>
-        <span>第 {pageIndex + 1} 页</span>
-        <button type="button" disabled={busy || nextCursor === null} onClick={nextPage}>
-          下一页
-        </button>
-      </nav>
-    </main>
+                  </Button>
+                ),
+              },
+            ]}
+          />
+          <nav aria-label="令牌分页">
+            <Space wrap>
+              <Button
+                disabled={busy || pageIndex === 0}
+                onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
+              >
+                上一页
+              </Button>
+              <Typography.Text>第 {pageIndex + 1} 页</Typography.Text>
+              <Button disabled={busy || nextCursor === null} onClick={nextPage}>
+                下一页
+              </Button>
+            </Space>
+          </nav>
+        </Space>
+      </Card>
+    </section>
   );
 }

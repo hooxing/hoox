@@ -45,11 +45,13 @@ export function AvailabilityFields({
   text,
   onMode,
   onText,
+  error,
 }: {
   readonly mode: string;
   readonly text: string;
   readonly onMode: (value: string) => void;
   readonly onText: (value: string) => void;
+  readonly error?: string | undefined;
 }) {
   const inputId = useId();
   return (
@@ -63,14 +65,22 @@ export function AvailabilityFields({
       </label>
       {mode === "selected_tenants" && (
         <label className="agent-field" htmlFor={inputId}>
-          <span>Tenant ID（每行一个）</span>
+          <span>Tenant ID（每行一个，必填）</span>
           <Input.TextArea
             id={inputId}
             rows={3}
             value={text}
             onChange={(event) => onText(event.target.value)}
             required
+            status={error ? "error" : ""}
+            aria-invalid={Boolean(error)}
+            aria-describedby={error ? `${inputId}-error` : undefined}
           />
+          {error && (
+            <Typography.Text type="danger" id={`${inputId}-error`}>
+              {error}
+            </Typography.Text>
+          )}
         </label>
       )}
     </div>
@@ -135,6 +145,15 @@ export function AgentDefinitionEditor({
   const [scope, setScope] = useState("all_tenants");
   const [tenantIds, setTenantIds] = useState("");
   const [error, setError] = useState<string>();
+  const [submitted, setSubmitted] = useState(false);
+  const missingName = !content.displayName.trim();
+  const missingDescription = !content.description.trim();
+  const missingInstructions = !content.operatorInstructions.trim();
+  const missingLanguage = !content.replyLanguage.trim();
+  const missingTenants = initial === undefined && scope === "selected_tenants" && !tenantIds.trim();
+  const nameError = submitted && missingName;
+  const descriptionError = submitted && missingDescription;
+  const languageError = submitted && missingLanguage;
   const instructionsHelpId = `${formId}-instructions-status`;
   const instructionBytes = byteLength(content.operatorInstructions);
   const instructionError =
@@ -143,6 +162,8 @@ export function AgentDefinitionEditor({
       : /\$\{[^}]+\}|\{\{[^}]+\}\}/u.test(content.operatorInstructions)
         ? "Operator 指令不得包含模板变量。"
         : undefined;
+  const instructionsMessage =
+    instructionError ?? (submitted && missingInstructions ? "请填写 Operator 指令。" : undefined);
   const pinnedModels = new Map(pinnedModelOptions.map((model) => [pinnedModelKey(model), model]));
   const selectedModelKey =
     content.model.mode === "pinned" ? pinnedModelKey(content.model) : "platform_default";
@@ -169,6 +190,15 @@ export function AgentDefinitionEditor({
     event.preventDefault();
     if (saving) return;
     setError(undefined);
+    setSubmitted(true);
+    if (
+      missingName ||
+      missingDescription ||
+      missingInstructions ||
+      missingLanguage ||
+      missingTenants
+    )
+      return;
     try {
       if (instructionError) throw new Error(instructionError);
       if (unavailableModel) throw new Error("当前固定模型不可用，请重新选择。");
@@ -227,21 +257,29 @@ export function AgentDefinitionEditor({
   }
 
   return (
-    <form className="agent-form" onSubmit={(event) => void submit(event)}>
+    <form className="agent-form" noValidate onSubmit={(event) => void submit(event)}>
       <Card title="展示信息">
         <div className="agent-fields">
           <label className="agent-field" htmlFor={`${formId}-display-name`}>
-            <span>显示名称</span>
+            <span>显示名称（必填）</span>
             <Input
               id={`${formId}-display-name`}
               value={content.displayName}
               maxLength={200}
               required
               onChange={(event) => change("displayName", event.target.value)}
+              status={nameError ? "error" : ""}
+              aria-invalid={nameError}
+              aria-describedby={nameError ? `${formId}-display-name-error` : undefined}
             />
+            {nameError && (
+              <Typography.Text type="danger" id={`${formId}-display-name-error`}>
+                请填写显示名称。
+              </Typography.Text>
+            )}
           </label>
           <label className="agent-field" htmlFor={`${formId}-description`}>
-            <span>简介</span>
+            <span>简介（必填）</span>
             <Input.TextArea
               id={`${formId}-description`}
               rows={2}
@@ -249,7 +287,15 @@ export function AgentDefinitionEditor({
               maxLength={2048}
               required
               onChange={(event) => change("description", event.target.value)}
+              status={descriptionError ? "error" : ""}
+              aria-invalid={descriptionError}
+              aria-describedby={descriptionError ? `${formId}-description-error` : undefined}
             />
+            {descriptionError && (
+              <Typography.Text type="danger" id={`${formId}-description-error`}>
+                请填写简介。
+              </Typography.Text>
+            )}
           </label>
           <label className="agent-field" htmlFor={`${formId}-welcome`}>
             <span>欢迎语</span>
@@ -275,32 +321,40 @@ export function AgentDefinitionEditor({
       <Card title="指令与模型">
         <div className="agent-fields">
           <label className="agent-field" htmlFor={`${formId}-instructions`}>
-            <span>Operator 指令</span>
+            <span>Operator 指令（必填）</span>
             <Input.TextArea
               id={`${formId}-instructions`}
               rows={8}
               required
               value={content.operatorInstructions}
               aria-describedby={instructionsHelpId}
-              aria-invalid={Boolean(instructionError)}
-              status={instructionError ? "error" : ""}
+              aria-invalid={Boolean(instructionsMessage)}
+              status={instructionsMessage ? "error" : ""}
               onChange={(event) => change("operatorInstructions", event.target.value)}
             />
             <span id={instructionsHelpId} role="status">
               {instructionBytes.toLocaleString()} /{" "}
               {AGENT_OPERATOR_INSTRUCTIONS_MAX_BYTES.toLocaleString()} 字节
-              {instructionError ? ` · ${instructionError}` : ""}
+              {instructionsMessage ? ` · ${instructionsMessage}` : ""}
             </span>
           </label>
           <label className="agent-field" htmlFor={`${formId}-reply-language`}>
-            <span>回复语言</span>
+            <span>回复语言（必填）</span>
             <Input
               id={`${formId}-reply-language`}
               value={content.replyLanguage}
               maxLength={100}
               required
               onChange={(event) => change("replyLanguage", event.target.value)}
+              status={languageError ? "error" : ""}
+              aria-invalid={languageError}
+              aria-describedby={languageError ? `${formId}-reply-language-error` : undefined}
             />
+            {languageError && (
+              <Typography.Text type="danger" id={`${formId}-reply-language-error`}>
+                请填写回复语言。
+              </Typography.Text>
+            )}
           </label>
           <label className="agent-field">
             <span>模型</span>
@@ -671,6 +725,7 @@ export function AgentDefinitionEditor({
             text={tenantIds}
             onMode={setScope}
             onText={setTenantIds}
+            error={submitted && missingTenants ? "请填写 Tenant ID。" : undefined}
           />
         </Card>
       )}

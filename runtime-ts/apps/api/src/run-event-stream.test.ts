@@ -103,6 +103,49 @@ describe("Run SSE 生命周期", () => {
     expect(unwatch).toHaveBeenCalledOnce();
   });
 
+  it("无事件时只发送初始与变更快照，空闲发送不占游标的心跳", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = {
+        ...readValue([], "queued"),
+        page: { outcome: "found" as const, hasMore: false, events: [] },
+      };
+      let value: RunEventStreamRead = pending;
+      const read = vi.fn(async () => value);
+      const stream = await openRunEventStream({
+        cursor: {},
+        signal: new AbortController().signal,
+        read,
+        watch: () => vi.fn(),
+        publicType: (kind) => kind,
+        retryMs: 10,
+        heartbeatMs: 40,
+      });
+      let text = "";
+      const actual = () => text.trimEnd().split("\n\n");
+      const consumed = (async () => {
+        for await (const chunk of stream) text += chunk;
+      })();
+      await vi.advanceTimersByTimeAsync(39);
+      expect(actual()).toHaveLength(1);
+      expect(actual()[0]).toContain("id: pending-start\nevent: run-events");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(actual()[1]).toBe(": heartbeat");
+      value = readValue([], "running", "attempt_1");
+      await vi.advanceTimersByTimeAsync(10);
+      expect(actual()[2]).toContain("id: attempt_1-start\nevent: run-events");
+      value = readValue([0], "succeeded", "attempt_1");
+      await vi.advanceTimersByTimeAsync(10);
+      await consumed;
+      expect(actual()[3]).toContain("id: attempt_1-0\nevent: run-events");
+      expect(actual()[4]).toContain('event: end\ndata: {"reason":"settled"}');
+      expect(actual()).toHaveLength(5);
+      expect(read.mock.calls.length).toBeGreaterThan(actual().length);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("初次鉴权读取失败和浏览器断开都会释放订阅", async () => {
     const unwatch = vi.fn();
     const controller = new AbortController();

@@ -142,17 +142,13 @@ function streamCursor(
 ): RunEventStreamQuery {
   if (lastEventIds.length === 0) return query;
   if (lastEventIds.length !== 1) throw new ApiFailure("bad_request");
-  const match = /^(.+)-(0|[1-9][0-9]*)$/u.exec(lastEventIds[0] ?? "");
+  const match = /^([A-Za-z0-9][A-Za-z0-9_-]{2,127})-(start|0|[1-9][0-9]*)$/u.exec(
+    lastEventIds[0] ?? "",
+  );
   if (match === null) throw new ApiFailure("bad_request");
-  const after = Number(match[2]);
+  const after = match[2] === "start" ? -1 : Number(match[2]);
   const attemptId = match[1];
-  if (
-    !Number.isSafeInteger(after) ||
-    attemptId === undefined ||
-    !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(attemptId)
-  ) {
-    throw new ApiFailure("bad_request");
-  }
+  if (!Number.isSafeInteger(after) || attemptId === undefined) throw new ApiFailure("bad_request");
   return { after, attemptId };
 }
 

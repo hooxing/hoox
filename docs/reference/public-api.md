@@ -24,9 +24,13 @@ export HOOX_API_ORIGIN="https://hoox.example.com"
 export HOOX_API_KEY="hoox_sk_REPLACE_WITH_SECRET"
 ```
 
+## 健康检查
+
+健康检查不使用 `/v1` 前缀，也不要求 API Key。直连进程时使用 `/live`（进程存活）和 `/ready`（依赖就绪）；Demo 经反向代理使用 `/api/live` 与 `/api/ready`，没有 `/api/v1/live`。Demo 的 `HOOX_API_ORIGIN` 为 `https://hoox.aisay.cc/api`。
+
 ## 终端用户映射
 
-部署方服务端可在任意公开 API 请求携带单个 `Hoox-End-User` 请求头，值为其业务系统中的终端用户 ID。Key 必须同时具有 `end-users:represent` 和目标接口要求的作用域，否则返回 403。人类登录会话不能使用此声明；重复请求头、空值或格式错误返回 400。请求体不接受终端用户身份字段。
+部署方服务端可在任意公开 API 请求携带单个 `Hoox-End-User` 请求头，值为其业务系统中的终端用户 ID。Key 必须同时具有 `end-users:represent` 和目标接口要求的作用域，否则返回 403。人类登录会话不能使用此声明；重复请求头、空值或格式错误返回 400。请求体不接受终端用户身份字段。用 curl 测试显式空值时，使用 `-H 'Hoox-End-User;'`；`-H 'Hoox-End-User:'` 不会发送该头。
 
 ID 区分大小写，为 1–128 个 ASCII 字符：首字符是英文字母或数字，其余可为英文字母、数字、`.`、`_`、`:`、`@`、`/`、`-`，不接受空白、控制字符或逗号。不应把密码、邮箱验证码或访问令牌用作 ID；服务端日志不记录 API Key 明文。
 
@@ -69,7 +73,7 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads" \
 | `GET /v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/download` | `runs:read` | 获取 Artifact 下载交付 |
 | `GET /v1/threads/{threadId}/runs/{runId}/artifacts/{artifactId}/content` | `runs:read` | 读取有界原始字节 |
 
-反馈通过 `Hoox-End-User` 映射到集成身份下的终端用户；每位用户对同一 Run 只有一条反馈。API 响应只返回当前用户自己的反馈，Run 不存在、不可见或来源为 Playground/评测时返回 `404`。公开 API Schema 及 SDK 类型以 OpenAPI 文档为准。
+反馈通过 `Hoox-End-User` 映射到集成身份下的终端用户；每位用户对同一 Run 只有一条反馈。API Key 请求缺少该头返回 `400 INVALID_REQUEST`，有效声明但作用域不足仍返回 `403 FORBIDDEN`。API 响应只返回当前用户自己的反馈，Run 不存在、不可见或来源为 Playground/评测时返回 `404`。公开 API Schema 及 SDK 类型以 OpenAPI 文档为准。
 
 Run 在公开 API 入口创建时，来源由服务端持久化为 `api`；客户端不能在请求体中指定来源。创建 Thread、创建 Run 和上传文件都要求 `Idempotency-Key`；工具回传按 `callId` 去重。相同 Key 与相同请求载荷重放原结果；相同 Key 携带不同载荷返回 409。创建 Thread、创建 Run 和回传工具结果使用 `application/json`，上传使用 `application/octet-stream`；其他媒体类型返回 415。
 
@@ -90,11 +94,13 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads/$thread_id/runs" \
   -d '{"input":"整理这份客户访谈的主要需求。"}'
 ```
 
+Thread 创建、Run 创建与文件上传使用同一个幂等键重试时，请保持有效载荷不变。相同键用于不同载荷返回 `409 CONFLICT`（`retryable: false`）；需要发起不同的操作时使用新键。
+
 创建 Run 的输入上限为 1 MiB UTF-8。Thread/Run 列表以 `items` 返回；Thread 分页使用 `cursor` 和 `limit`，Thread 的 Run 列表返回最近窗口并使用 `limit`，事件使用 `after` 和 `limit`。仅 Thread 列表提供可续接 `nextCursor`；不能把 Run 最近窗口当作完整历史分页。
 
 ## 文件与 Artifact
 
-上传时通过 `X-File-Name` 指定 URL 编码的文件名，可选 `X-File-Media-Type` 指定媒体类型；请求正文是原始字节。响应包含 `resourceId` 与 `versionId`。下载文件与 Artifact 时，Hoox 先按当前认证上下文的有效空间授权（携带终端用户声明时为该用户个人空间），再返回短期 URL 或有界内容；不得长期保存或记录签名 URL。Artifact 仅列出已发布的交付物，预览类型和大小受限。
+上传时通过 `X-File-Name` 指定 URL 编码的文件名，可选 `X-File-Media-Type` 指定媒体类型；请求正文是原始字节，最大 16 MiB；超限返回 `413 PAYLOAD_TOO_LARGE`。响应包含 `resourceId` 与 `versionId`。下载文件与 Artifact 时，Hoox 先按当前认证上下文的有效空间授权（携带终端用户声明时为该用户个人空间），再返回短期 URL 或有界内容；不得长期保存或记录签名 URL。Artifact 仅列出已发布的交付物，预览类型和大小受限。
 
 ```sh
 curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/resources/uploads" \
@@ -108,7 +114,9 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/resources/uploads" \
 
 ## SSE 事件续连
 
-流响应使用 `text/event-stream`，每个事件批次都提供 SSE `id`，其格式为 `{attemptId}-{sequence}`。断线重连时将最近收到的 ID 放入 `Last-Event-ID`；也可用 `after` 与 `attemptId` 查询参数显式指定游标。Attempt 变化时服务端从新 Attempt 起点补读。流会在 Run 结束或达到单次连接时限时发送 `end` 事件；`reason: renew` 表示客户端可带最后游标重新连接。
+流响应使用 `text/event-stream`。每个 `run-events` 批次都有 SSE `id`，有事件时格式为 `{attemptId}-{sequence}`，序号取自最后一条事件。连接建立或 Run 快照变化时也可能收到 `items: []`；它复用当前游标，若尚无事件则使用 `{attemptId}-start`（未分配 Attempt 时为 `pending-start`）。`-start` 表示从序号 0 开始读取，不计为已消费的事件。空闲时服务端发送注释心跳，不改变游标。
+
+断线重连时将最近处理完的批次 ID 放入 `Last-Event-ID`；也可用 `after` 与 `attemptId` 查询参数显式指定游标，两者同时提供时以请求头为准。Attempt 变化时服务端从新 Attempt 起点补读。流会在 Run 结束、等待外部动作或达到单次连接时限时发送不带 `id` 的 `end` 事件；`reason: renew` 表示客户端可带最后游标重新连接。
 
 ```sh
 curl -N "$HOOX_API_ORIGIN/v1/threads/$thread_id/runs/$run_id/events/stream" \
@@ -132,6 +140,6 @@ curl --fail-with-body -sS "$HOOX_API_ORIGIN/v1/threads/$thread_id/runs/$run_id/t
 
 ## 错误与版本
 
-JSON 成功响应统一为 `{ "version": "v1", "requestId": "…", "data": … }`；错误响应统一为 `{ "version": "v1", "requestId": "…", "error": { "code": "…", "message": "…", "retryable": false } }`。错误码包括 `INVALID_REQUEST`、`UNSUPPORTED_MEDIA_TYPE`、`UNAUTHORIZED`、`FORBIDDEN`、`NOT_FOUND`、`CONFLICT`、`AGENT_REVISION_UNAVAILABLE`、`INVALID_STATE`、`RATE_LIMITED`、`DEPENDENCY_UNAVAILABLE` 和 `INTERNAL`。内部异常、凭据明文和对象存储签名信息不进入错误正文或日志。
+JSON 成功响应统一为 `{ "version": "v1", "requestId": "…", "data": … }`；错误响应统一为 `{ "version": "v1", "requestId": "…", "error": { "code": "…", "message": "…", "retryable": false } }`。错误码包括 `INVALID_REQUEST`、`PAYLOAD_TOO_LARGE`、`UNSUPPORTED_MEDIA_TYPE`、`UNAUTHORIZED`、`FORBIDDEN`、`NOT_FOUND`、`CONFLICT`、`AGENT_REVISION_UNAVAILABLE`、`INVALID_STATE`、`RATE_LIMITED`、`DEPENDENCY_UNAVAILABLE` 和 `INTERNAL`。内部异常、凭据明文和对象存储签名信息不进入错误正文或日志。
 
 兼容性契约由 `runtime-ts/packages/protocol` 的 TypeBox Schema 拥有。OpenAPI 3.1 产物位于 `docs/reference/openapi/public-v1.json`；运行 `pnpm api:openapi:generate` 生成，CI 通过 `pnpm api:openapi:check` 校验。破坏性变化通过新版本路径发布。

@@ -63,6 +63,7 @@ function deploy(
   mode: string,
   prepare?: (root: string) => void,
   overrides: Readonly<Record<string, string>> = {},
+  environment: Readonly<Record<string, string>> = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), "hoox-demo-deploy-test-"));
   temporaryRoots.push(root);
@@ -148,6 +149,7 @@ exports.Client = class {
       DEMO_ADMIN_USER_ID: "user_from_caller",
       MOCK_MODE: mode,
       MOCK_LOG: log,
+      ...environment,
     },
     encoding: "utf8",
     timeout: mode === "worker-never-started" ? 60_000 : 15_000,
@@ -163,6 +165,19 @@ exports.Client = class {
 
 // Git Bash 的 60 轮启动探测在并发负载下较慢；不启动场景受 60 秒硬超时约束，其余场景为 15 秒。
 describe("Demo 远端发布失败恢复", { timeout: 70_000 }, () => {
+  it.each([
+    { name: "域名注入", environment: { HOOX_DEMO_DOMAIN: "demo.invalid;return" } },
+    { name: "桶名保留路由", environment: { HOOX_DEMO_BUCKET: "admin" } },
+    { name: "桶名注入", environment: { HOOX_DEMO_BUCKET: "bucket/@@DOMAIN@@" } },
+  ])("$name 在发布动作前被拒绝", ({ environment }) => {
+    const result = deploy("success", undefined, {}, environment);
+    expect(result.status, result.stderr).toBe(2);
+    expect(result.stderr).not.toContain("demo.invalid;return");
+    expect(result.stderr).not.toContain("bucket/@@DOMAIN@@");
+    expect(result.log).toBe("");
+    expect(result.composeEnv).toBe("HOOX_DEMO_IMAGE=test/previous@sha256:previous\n");
+  });
+
   it.each(
     ["scheduler.env", "admin-control.env"].flatMap((file) =>
       s3Configuration

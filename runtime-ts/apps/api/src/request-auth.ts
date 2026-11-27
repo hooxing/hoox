@@ -1,4 +1,5 @@
 import type { ApiKeyScope } from "@hoox/domain";
+import { isExternalEndUserId } from "@hoox/identity";
 import type { FastifyRequest } from "fastify";
 import { headerValues, requestId } from "./http.js";
 import type { TenantSelector } from "./ports.js";
@@ -59,8 +60,11 @@ export function createRequestAuthentication(service: Pick<ApiService, "authentic
 
 function endUserId(request: FastifyRequest): string | undefined {
   const values = headerValues(request, "hoox-end-user");
-  if (values.length > 1) throw new ApiFailure("bad_request");
-  return values[0];
+  const [value] = values;
+  if (values.length > 1 || (value !== undefined && !isExternalEndUserId(value))) {
+    throw new ApiFailure("bad_request");
+  }
+  return value;
 }
 
 export function authorization(request: FastifyRequest): string | undefined {

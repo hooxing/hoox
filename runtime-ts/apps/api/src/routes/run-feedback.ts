@@ -41,7 +41,7 @@ export function registerRunFeedbackRoutes(
       handler: async (request) => {
         const auth = await authenticate(request, method === "GET" ? "runs:read" : "runs:create");
         if (auth.apiKey !== undefined && auth.principal.kind !== "end_user")
-          throw new ApiFailure("forbidden");
+          throw new ApiFailure("end_user_required");
         if (dependencies.runFeedback === undefined) throw new ApiFailure("dependency_unavailable");
         const result = await dependencies.runFeedback.execute({
           scope: auth.scope,

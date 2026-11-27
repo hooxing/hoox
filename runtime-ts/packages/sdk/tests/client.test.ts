@@ -335,6 +335,23 @@ describe("SDK SSE 续连", () => {
       expect(fetcher).toHaveBeenCalledTimes(1);
     },
   );
+  it("状态快照的 start 游标可续连，不跳过序号 0，心跳不产生事件", async () => {
+    const snapshot = events([]).replace("id: attempt_sdk-0", "id: attempt_sdk-start");
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(sseResponse(`${snapshot}: heartbeat\n\n`))
+      .mockResolvedValueOnce(sseResponse(events([0], "succeeded")));
+    const client = new HooxClient({ baseUrl: "https://api.example.invalid", fetch: fetcher });
+    const ids = [];
+    for await (const event of client.streamRunEvents("thread_sdk", "run_sdk", { retry })) {
+      if (event.event === "run-events") ids.push(event.id);
+    }
+    expect(ids).toEqual(["attempt_sdk-start", "attempt_sdk-0"]);
+    expect(new Headers(fetcher.mock.calls[1]?.[1].headers).get("Last-Event-ID")).toBe(
+      "attempt_sdk-start",
+    );
+  });
+
   it("EOF 后用 Last-Event-ID 续连，按 Attempt 去重，终态停止", async () => {
     const fetcher = vi
       .fn()

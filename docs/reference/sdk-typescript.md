@@ -61,7 +61,7 @@ for await (const event of client.streamRunEvents(thread.id, run.id, {
 - 为限制内存，单帧累计文本与未完成行缓冲上限为 8388608 个 UTF-16 码元，超限抛出 `INVALID_STREAM`。
 - EOF、网络错误、连接超时及可重试 HTTP 错误会按指数退避续连，默认延时从 250 毫秒增长，最多 5000 毫秒，连续失败最多重试 8 次；收到新的持久事件后重置失败计数。认证、授权、参数及非法 SSE 不自动重试。
 - 服务端 `end.reason: renew` 续连而不作为最终结束输出。`waiting` 的 `settled` 结束普通订阅；真正终态或 `recovery_required` 在事件补读完成后结束，不继续重连。
-- SDK 按 Attempt 和递增 sequence 去重；续连使用最后交付事件的 `eventId` 作为 `Last-Event-ID`。Attempt 变化时接受新 Attempt 的起始序列。空批次仍可携带最新 Run 快照。
+- SDK 按 Attempt 和递增 sequence 去重；续连使用最近接受的游标作为 `Last-Event-ID`。状态快照可携带 `{attemptId}-start` 或 `pending-start`，不会跳过序号 0。Attempt 变化时接受新 Attempt 的起始序列，注释心跳不产生 SDK 事件。
 - 可持久化批次的 `id`，并在新订阅时传 `lastEventId`。业务应在处理完批次后保存游标；SDK 不替调用方持久化已消费位置。
 
 ## 客户端工具

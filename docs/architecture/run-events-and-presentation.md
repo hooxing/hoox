@@ -14,7 +14,7 @@ Run 进入普通 `waiting` 或终态，以及 Artifact 发布时必须在提交�
 
 ## 推送与续读
 
-- API 通过 SSE 推送持久事件页。浏览器用 fetch 读取 SSE，继续携带 Authorization 与 Tenant Header，不把令牌放入 URL。每次补读重新认证并确认 Run 归属，流按有限页读取并服从背压，连接定期结束后按已接收游标续连。
+- API 通过 SSE 推送持久事件页。浏览器用 fetch 读取 SSE，继续携带 Authorization 与 Tenant Header，不把令牌放入 URL。每次补读重新认证并确认 Run 归属，流按有限页读取并服从背压，连接定期结束后按已接收游标续连。无新增事件时只在连接开始或快照变化时发送 Run 快照，空闲心跳不推进游标；游标格式见[公开 API](../reference/public-api.md#sse-事件续连)。
 - Worker 在事件写入事务中调用 `pg_notify`，通知只包含 Tenant/Run 的散列路由键，随事务提交才可见。API 每进程使用一条专用 LISTEN 连接；订阅先于初次补读，断线重建和定时补读覆盖通知丢失。通知不是授权或持久事实。
 - 分页读取接口保留用于历史、补读和旧服务兼容。代理必须允许流式转发。
 - Worker 对连续文本增量做合并后再持久化，以减少事件数量；合并不改变文本内容与顺序。

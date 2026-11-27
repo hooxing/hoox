@@ -12,6 +12,21 @@ describe("Demo 持续部署契约", () => {
     expect(script).not.toMatch(/\|\s*grep\s+-[a-zA-Z]*q/u);
   });
 
+  it("Nginx 模板渲染前校验域名与桶名，并拒绝保留路由桶名", () => {
+    const script = source("deploy/demo/remote-deploy.sh");
+    const domainValidation = script.indexOf('[[ ! "$domain" =~');
+    const bucketValidation = script.indexOf('[[ ! "$bucket" =~');
+    const reservedValidation = script.indexOf("api|admin|trajectory");
+    const render = script.indexOf('sed -e "s/@@DOMAIN@@/$domain/g"');
+    expect(domainValidation).toBeGreaterThan(0);
+    expect(bucketValidation).toBeGreaterThan(domainValidation);
+    expect(reservedValidation).toBeGreaterThan(bucketValidation);
+    expect(render).toBeGreaterThan(reservedValidation);
+    expect(script).toContain('"Demo 域名格式无效"');
+    expect(script).toContain('"Demo 对象桶名称格式无效"');
+    expect(script).toContain('"Demo 对象桶名称与保留路由冲突"');
+  });
+
   it.each(["scheduler", "admin-control"])(
     "%s 轨迹对象存储必填项完整，且不混用 Skill 发布凭据",
     (service) => {
@@ -239,16 +254,117 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).not.toContain('["node", "runtime-ts/packages/persistence/dist/cli.js", "down"]');
   });
 
+  it("CLI 白名单独立校验完整令牌、方法和 URI，畸形字段不能绕过后台会话校验", () => {
+    const nginx = source("deploy/demo/nginx.conf.template");
+    expect(nginx).toContain("map $http_authorization $hoox_demo_cli_token_format");
+    expect(nginx).toContain('"~^Bearer hoox_at_[A-Za-z0-9_-]{43}$" 1;');
+    expect(nginx).toContain("map $request_method $hoox_demo_cli_method");
+    expect(nginx).toContain("map $request_uri $hoox_demo_cli_uri");
+    expect(nginx).toContain(
+      'map "$hoox_demo_cli_token_format:$hoox_demo_cli_method:$hoox_demo_cli_uri" $hoox_demo_cli_access',
+    );
+    expect(nginx).not.toContain('map "$http_authorization:$request_method:$request_uri"');
+    const tokenPattern = /^Bearer hoox_at_[A-Za-z0-9_-]+$/u;
+    const token = `Bearer hoox_at_${"x".repeat(43)}`;
+    const uriKind = (method: string, uri: string) => {
+      const getUri =
+        /^\/v1\/admin\/control\/agent-definitions\/[A-Za-z0-9][A-Za-z0-9_-]{2,127}\/revisions(?:\/[A-Za-z0-9][A-Za-z0-9_-]{2,127}\/export)?(?:\?.*)?$/u;
+      const postUri =
+        /^\/v1\/admin\/control\/agent-definitions\/(?:[A-Za-z0-9][A-Za-z0-9_-]{2,127}\/)?import(?:\?.*)?$/u;
+      return method === "GET" && getUri.test(uri)
+        ? "GET"
+        : method === "POST" && postUri.test(uri)
+          ? "POST"
+          : "";
+    };
+    const matches = (auth: string, method: string, uri: string) =>
+      tokenPattern.test(auth) && uriKind(method, uri) === method;
+    const base = "/v1/admin/control/agent-definitions";
+    for (const [method, uri] of [
+      ["GET", `${base}/agent_example/revisions`],
+      ["GET", `${base}/agent_example/revisions/revision_123/export?format=yaml`],
+      ["POST", `${base}/import`],
+      ["POST", `${base}/agent_example/import`],
+    ] as const)
+      expect(matches(token, method, uri)).toBe(true);
+    for (const auth of [
+      "",
+      "Bearer hoox_session_placeholder",
+      "Bearer hoox_at_abc:GET",
+      `${token}, ${token}`,
+      `${token} extra`,
+    ])
+      expect(matches(auth, "GET", `${base}/agent_example/revisions`)).toBe(false);
+    for (const [method, uri] of [
+      ["GET", "/v1/admin/control/overview"],
+      ["POST", `${base}/agent_example/revisions`],
+      ["PUT", `${base}/agent_example/revisions?x=1`],
+      [
+        "GET",
+        "/v1/admin/control/overview?x=1:/v1/admin/control/agent-definitions/agent_example/revisions",
+      ],
+      ["GET", `${base}/agent_example/%2e%2e/revisions`],
+    ] as const)
+      expect(matches(token, method, uri), `${method} ${uri}`).toBe(false);
+    const session = nginx.split("location ^~ /v1/admin/ {")[1]?.split("\n    }")[0];
+    expect(session).toContain("error_page 418 = @hoox_demo_cli;");
+    expect(session).toContain("if ($hoox_demo_cli_access) { return 418; }");
+    expect(session).toContain("auth_request /_hoox_demo_admin_access;");
+    const cli = nginx.split("location @hoox_demo_cli {")[1]?.split("\n    }")[0];
+    expect(cli).toContain("proxy_set_header Authorization $http_authorization;");
+    expect(cli).not.toContain("hoox-demo-admin-token.conf");
+  });
+
+  it("安全头继承到全部 HTTPS 路径及错误响应，HTTP 不设置 HSTS", () => {
+    const nginx = source("deploy/demo/nginx.conf.template");
+    const [redirect, tls] = nginx.split("listen 443 ssl http2;");
+    expect(redirect).toContain("server_tokens off;");
+    expect(redirect).not.toContain("Strict-Transport-Security");
+    const tlsDefaults = tls?.split("    location ", 1)[0];
+    expect(tlsDefaults).toContain("server_tokens off;");
+    for (const header of [
+      'Strict-Transport-Security "max-age=31536000"',
+      `Content-Security-Policy "frame-ancestors 'self'"`,
+      "X-Frame-Options SAMEORIGIN",
+      "Referrer-Policy no-referrer",
+      'Permissions-Policy "camera=(), microphone=(), geolocation=()"',
+    ]) {
+      expect(tlsDefaults).toContain(`add_header ${header} always;`);
+    }
+    const reportOnly = tlsDefaults?.match(
+      /add_header Content-Security-Policy-Report-Only "(.*?)" always;/u,
+    )?.[1];
+    expect(reportOnly).toContain("script-src 'self'");
+    expect(reportOnly).toContain("style-src 'self' 'unsafe-inline'");
+    expect(reportOnly).toContain("img-src 'self' data: blob: https:");
+    expect(reportOnly).toContain("font-src 'self' data: https:");
+    expect(tls?.slice(tlsDefaults?.length)).not.toContain("add_header ");
+  });
+
   it("同一 HTTPS 域名明确隔离用户 API、后台入口和 Demo 对象桶", () => {
     const nginx = source("deploy/demo/nginx.conf.template");
     const apiExample = source("deploy/demo/api.env.example");
     const adminExample = source("deploy/demo/admin-control.env.example");
     expect(nginx).toContain("location /api/");
+    expect(nginx).toContain("client_max_body_size 17m;");
+    const upload = nginx.split("location = /api/v1/resources/uploads {")[1]?.split("\n    }")[0];
+    expect(upload).not.toContain("proxy_request_buffering off;");
+    expect(upload).toContain("error_page 413 = @hoox_upload_payload_too_large;");
+    expect(nginx).toContain(
+      `return 413 '{"version":"v1","requestId":"$request_id","error":{"code":"PAYLOAD_TOO_LARGE","message":"请求体超过允许大小","retryable":false}}';`,
+    );
+    expect(upload).toContain("proxy_pass http://127.0.0.1:3001/v1/resources/uploads;");
+    expect(nginx).toContain("proxy_set_header Host @@DOMAIN@@;");
+    expect(nginx).toContain("return 301 https://@@DOMAIN@@$request_uri;");
+    expect(nginx).toContain("location = /admin {\n        return 308 https://@@DOMAIN@@/admin/;");
+    expect(nginx).toContain("return 308 https://@@DOMAIN@@/admin/runs;");
+    const bucket = nginx.split("location ^~ /@@BUCKET@@/ {")[1]?.split("\n    }")[0];
+    expect(bucket).toContain("proxy_set_header Host $http_host;");
     expect(nginx).toContain("location ^~ /@@BUCKET@@/");
     expect(nginx).toContain("location ^~ /admin/");
     expect(nginx).toContain("location ^~ /v1/admin/");
     expect(nginx).toContain("location = /trajectory");
-    expect(nginx).toContain("return 308 /admin/runs;");
+    expect(nginx).toContain("return 308 https://@@DOMAIN@@/admin/runs;");
     expect(nginx).toContain("location ^~ /trajectory/");
     expect(nginx).not.toContain("auth_basic");
     expect(nginx).toContain("location = /_hoox_demo_admin_access");

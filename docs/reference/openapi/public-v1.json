@@ -46,6 +46,10 @@
                     "type": "string"
                   },
                   {
+                    "const": "PAYLOAD_TOO_LARGE",
+                    "type": "string"
+                  },
+                  {
                     "const": "UNSUPPORTED_MEDIA_TYPE",
                     "type": "string"
                   },
@@ -3318,6 +3322,16 @@
           },
           "409": {
             "description": "幂等键冲突或资源状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1.ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "请求正文超过 16 MiB 限制",
             "content": {
               "application/json": {
                 "schema": {

@@ -312,6 +312,12 @@ function operation(item) {
     500: { description: "内部错误", content: json(ErrorEnvelopeSchema) },
     503: { description: "依赖暂不可用", content: json(ErrorEnvelopeSchema) },
   };
+  if (item.id === "uploadResource") {
+    responses[413] = {
+      description: "请求正文超过 16 MiB 限制",
+      content: json(ErrorEnvelopeSchema),
+    };
+  }
   if (item.idempotent || item.id === "submitToolResult") {
     responses[409] = {
       description: "幂等键冲突或资源状态冲突",

@@ -27,23 +27,63 @@ export function controlOrigin(value: string | undefined): URL {
   }
 }
 
+const fieldErrorMessages = new Map<string, string>([
+  ["INVALID", "字段值无效"],
+  ["REQUIRED", "缺少必填字段"],
+  ["UNKNOWN_FIELD", "包含未知字段"],
+  ["TOO_SMALL", "字段值低于允许范围"],
+  ["TOO_LARGE", "字段值超过允许范围"],
+  ["INVALID_TYPE", "字段类型无效"],
+  ["INVALID_FORMAT", "字段格式无效"],
+  ["CONFLICT", "字段与当前状态冲突"],
+  ["UNKNOWN_SCHEMA_VERSION", "不支持的配置格式版本"],
+  ["INVALID_VALUE", "字段值无效"],
+  ["YAML_SYNTAX", "YAML 语法无效"],
+  ["YAML_DUPLICATE_KEY", "YAML 中存在重复键"],
+  ["YAML_ALIAS", "YAML 别名无效"],
+  ["YAML_COMPLEXITY_LIMIT", "YAML 结构超过复杂度限制"],
+  ["DOCUMENT_TOO_LARGE", "配置文件超过允许大小"],
+]);
+
+const knownAgentConfigurationPaths = [
+  /^\/(?:schemaVersion|definition|revision)$/u,
+  /^\/definition\/(?:id|availability)$/u,
+  /^\/revision\/(?:versionNotes|content)$/u,
+  /^\/revision\/content\/(?:displayName|description|avatarRef|welcomeMessage|suggestedQuestions|operatorInstructions|replyLanguage|model|tools|skillVersions|includeTenantSkills|sandboxTemplateId|sandboxIdleAction|memory)$/u,
+  /^\/revision\/content\/(?:suggestedQuestions|skillVersions)\/\d+(?:\/(?:skillId|version))?$/u,
+  /^\/revision\/content\/(?:model|tools|memory)\/(?:mode|provider|model|toolCallingMode|longTermEnabled|builtinTools|externalTools|clientTools)$/u,
+  /^\/revision\/content\/tools\/(?:builtinTools|externalTools|clientTools)\/\d+(?:\/(?:kind|versionId|name|description|inputSchema|waitTimeoutMs))?$/u,
+  /^\/revision\/content\/tools\/clientTools\/\d+\/inputSchema\/.+$/u,
+];
+
+function knownAgentConfigurationPath(path: string): boolean {
+  return knownAgentConfigurationPaths.some((pattern) => pattern.test(path));
+}
+
 export function fieldErrors(value: unknown): FieldError[] {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, 100).flatMap((item: unknown) => {
-    if (!item || typeof item !== "object") return [];
+  const result: FieldError[] = [];
+  let hiddenField = false;
+  for (const item of value.slice(0, 100)) {
+    if (!item || typeof item !== "object") continue;
     const error = item as Record<string, unknown>;
-    return typeof error.path === "string" &&
-      typeof error.code === "string" &&
-      typeof error.message === "string"
-      ? [
-          {
-            path: error.path.slice(0, 1024),
-            code: error.code.slice(0, 128),
-            message: error.message.slice(0, 2048),
-          },
-        ]
-      : [];
-  });
+    if (typeof error.path !== "string" || typeof error.code !== "string") continue;
+    const path = error.path.slice(0, 256);
+    if (!knownAgentConfigurationPath(path)) {
+      hiddenField = true;
+      continue;
+    }
+    const knownMessage = fieldErrorMessages.get(error.code.slice(0, 64));
+    result.push({
+      path,
+      code: knownMessage ? error.code : "INVALID_VALUE",
+      message: knownMessage ?? "字段值未通过校验",
+    });
+  }
+  if (hiddenField) {
+    result.push({ path: "配置", code: "INVALID_VALUE", message: "另有字段未通过校验" });
+  }
+  return result;
 }
 
 export function record(value: unknown): Record<string, unknown> {
@@ -85,10 +125,22 @@ export class ControlClient {
           redirect: "error",
           signal: AbortSignal.timeout(15_000),
         });
+        if (response.status === 401 || response.status === 403) {
+          void response.body?.cancel().catch(() => {});
+          throw new CliError(
+            "authentication",
+            response.status === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+            "后台凭据无效、已过期或当前身份无权执行此操作",
+          );
+        }
         if (retryStatuses.has(response.status) && attempt < 2) {
           await response.body?.cancel();
           await this.sleep(250 * 2 ** attempt);
           continue;
+        }
+        if (response.status >= 500) {
+          void response.body?.cancel().catch(() => {});
+          throw new CliError("service", "HTTP_ERROR", "后台服务暂时不可用");
         }
         text = await readResponse(response);
       } catch (error) {
@@ -102,12 +154,6 @@ export class ControlClient {
         await this.sleep(250 * 2 ** attempt);
         continue;
       }
-      if (response.status === 401 || response.status === 403)
-        throw new CliError(
-          "authentication",
-          response.status === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
-          "后台凭据无效、已过期或当前身份无权执行此操作",
-        );
       if (response.ok && options.yaml) {
         if (!response.headers.get("content-type")?.startsWith("application/yaml"))
           invalidResponse();

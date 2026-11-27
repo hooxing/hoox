@@ -33,6 +33,7 @@ describe("后台构建信息", () => {
   });
 
   it("未注入构建数据时显示回退文本，并省略未提供的发布 ID", async () => {
+    vi.stubGlobal("__HOOX_BUILD_INFO__", undefined);
     const container = render(<PlatformBuildInfo collapsed={false} releaseId={undefined} />);
     const button = trigger(container);
     expect(button.textContent).toBe("dev · unknown");

@@ -901,8 +901,8 @@ export class PgCoreRepositories implements CoreRepositories {
 }
 
 /**
- * 个人任务标题是用户资产；命令在锁内重验 personal Tenant 与 owner Membership，
- * 并把标题来源切为 user，阻止已经排队的异步标题生成覆盖用户输入。
+ * 在 Membership 共享锁内重验个人空间的 owner 资格，不锁定只读的 Tenant 行。
+ * 标题来源切为 user，阻止已排队的异步标题生成覆盖用户输入。
  */
 export class PgRenamePersonalThreadCommand implements RenamePersonalThreadCommandPort {
   constructor(private readonly pool: Pool) {}
@@ -921,7 +921,7 @@ export class PgRenamePersonalThreadCommand implements RenamePersonalThreadComman
              FROM tenants AS tenant
              JOIN memberships AS membership ON membership.tenant_id = tenant.id
             WHERE tenant.id = $1 AND membership.user_id = $2
-            FOR SHARE OF tenant, membership`,
+            FOR SHARE OF membership`,
           [input.scope.tenantId, input.scope.userId],
         );
         const authorization = membership.rows[0];

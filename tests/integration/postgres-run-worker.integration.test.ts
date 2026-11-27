@@ -2,11 +2,12 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   createModels,
   fauxAssistantMessage,
-  fauxToolCall,
   fauxProvider,
+  fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import {
+  apiKeyScope,
   createPersonalTenant,
   createRun,
   createThread,
@@ -44,11 +45,9 @@ import {
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPgDurableObservationSession } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
-import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
-import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
-import { fakeAgentSnapshot } from "../../runtime-ts/apps/agent-worker/src/testing/agent-snapshot.js";
 import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
+import { fakeAgentSnapshot } from "../../runtime-ts/apps/agent-worker/src/testing/agent-snapshot.js";
 import {
   FakeCancellationPort,
   FakeClock,
@@ -70,18 +69,29 @@ import {
   AdminControlService,
   digestControlRequest,
 } from "../../runtime-ts/packages/admin-control/src/index.js";
+import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
 import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
+import {
+  bootstrapEvaluationRole,
+  evaluationRoleName,
+} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
 import { PgAdminControlRepository } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
+import { PgApiKeyRepository } from "../../runtime-ts/packages/persistence/src/pg-api-keys.js";
+import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
+import {
+  PgClientToolCallHistoryReader,
+  PgClientToolResults,
+} from "../../runtime-ts/packages/persistence/src/pg-client-tool-calls.js";
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
   PgRenamePersonalThreadCommand,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import { PgMemoryIngestionStore } from "../../runtime-ts/packages/persistence/src/pg-memory-ingestion.js";
-import { PgScheduledTaskRepository } from "../../runtime-ts/packages/persistence/src/pg-scheduled-tasks.js";
+import { PgPlaygroundRepository } from "../../runtime-ts/packages/persistence/src/pg-playground.js";
 import { PgResourceCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-library.js";
 import {
   PgRunDispatchCreation,
@@ -97,15 +107,17 @@ import {
   PgExecutionPersistence,
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
+import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
+import { PgScheduledTaskRepository } from "../../runtime-ts/packages/persistence/src/pg-scheduled-tasks.js";
 import { PgSkillRuntimeRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
-import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import { PgThreadForkRepository } from "../../runtime-ts/packages/persistence/src/pg-team-collaboration.js";
+import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/pg-thread-input.js";
 import { PgThreadSandboxLifecycleConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-thread-sandbox-lifecycle-consumer.js";
 import {
-  PgWebhookRepository,
   PgWebhookOutboxStore,
+  PgWebhookRepository,
   type WebhookEventType,
 } from "../../runtime-ts/packages/persistence/src/pg-webhooks.js";
 import { PgWorkerTenantAssignments } from "../../runtime-ts/packages/persistence/src/pg-worker-tenant-assignment.js";
@@ -123,23 +135,15 @@ import {
   withTenantTransaction,
   withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
-import {
-  PgClientToolCallHistoryReader,
-  PgClientToolResults,
-} from "../../runtime-ts/packages/persistence/src/pg-client-tool-calls.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
+import { PgThreadContinuityReadRepository } from "../../runtime-ts/packages/persistence/src/thread-continuity.js";
 import { PgThreadSandboxSessionLifecycle } from "../../runtime-ts/packages/persistence/src/thread-sandbox-session.js";
 import { createWorkspaceManifest } from "../../runtime-ts/packages/workspace/src/manifest.js";
 import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
 } from "./postgres-migration-contract.js";
-
-import {
-  bootstrapEvaluationRole,
-  evaluationRoleName,
-} from "../../runtime-ts/packages/persistence/src/evaluation-role.js";
 
 const enabled = process.env.RUN_PG_RUN_WORKER_INTEGRATION === "true";
 const bootstrapUrl = process.env.DATABASE_BOOTSTRAP_URL ?? "";
@@ -4092,6 +4096,96 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     expect(right.outcome).toBe("created");
   });
 
+  it("重命名与撤销 Membership 线性化：撤权先提交拒绝改名，改名持锁时撤权等待", async () => {
+    const f = await fixture(`rename-revoke-${suffix}`);
+    const scope = { tenantId: f.scope.tenantId, userId: f.user.id };
+    const command = new PgRenamePersonalThreadCommand(runtime);
+    await admin.query(
+      `UPDATE "${schema}".memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2`,
+      [scope.tenantId, scope.userId],
+    );
+    expect(
+      await command.renamePersonalThread({ scope, threadId: f.thread.id, title: "撤权后" }),
+    ).toEqual({ outcome: "not_authorized" });
+    await admin.query(
+      `UPDATE "${schema}".memberships SET status='active' WHERE tenant_id=$1 AND user_id=$2`,
+      [scope.tenantId, scope.userId],
+    );
+
+    let signalLocked!: () => void;
+    let releaseCommand!: () => void;
+    const membershipLocked = new Promise<void>((resolve) => (signalLocked = resolve));
+    const resumeCommand = new Promise<void>((resolve) => (releaseCommand = resolve));
+    const pausedPool = {
+      ...runtime,
+      connect: async () => {
+        const client = await runtime.connect();
+        return new Proxy(client, {
+          get(target, property, receiver) {
+            if (property !== "query") return Reflect.get(target, property, receiver) as unknown;
+            return async (...args: Parameters<typeof target.query>) => {
+              const result = await target.query(...args);
+              const sql = typeof args[0] === "string" ? args[0] : "";
+              if (sql.includes("FOR SHARE OF membership")) {
+                signalLocked();
+                await resumeCommand;
+              }
+              return result;
+            };
+          },
+        });
+      },
+    } as unknown as Pool;
+    const pausedRename = new PgRenamePersonalThreadCommand(pausedPool).renamePersonalThread({
+      scope,
+      threadId: f.thread.id,
+      title: "改名先提交",
+    });
+    await membershipLocked;
+    const revoker = await admin.connect();
+    try {
+      await revoker.query("BEGIN");
+      const pid = Number((await revoker.query("SELECT pg_backend_pid() AS pid")).rows[0]?.pid);
+      let revokeSettled = false;
+      const revoke = revoker
+        .query(
+          `UPDATE "${schema}".memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2`,
+          [scope.tenantId, scope.userId],
+        )
+        .finally(() => {
+          revokeSettled = true;
+        });
+      let waiting = false;
+      for (let attempt = 0; attempt < 100 && !waiting; attempt += 1) {
+        const state = await admin.query<{ waiting: boolean }>(
+          "SELECT wait_event_type='Lock' AS waiting FROM pg_stat_activity WHERE pid=$1",
+          [pid],
+        );
+        waiting = state.rows[0]?.waiting === true;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      expect(revokeSettled).toBe(false);
+      releaseCommand();
+      expect(await pausedRename).toMatchObject({ outcome: "renamed" });
+      await revoke;
+      await revoker.query("COMMIT");
+      const reread = await admin.query<{ title: string }>(
+        `SELECT title FROM "${schema}".threads WHERE tenant_id=$1 AND id=$2`,
+        [scope.tenantId, f.thread.id],
+      );
+      expect(reread.rows[0]?.title).toBe("改名先提交");
+    } finally {
+      releaseCommand();
+      await revoker.query("ROLLBACK").catch(() => undefined);
+      revoker.release();
+      await admin.query(
+        `UPDATE "${schema}".memberships SET status='active' WHERE tenant_id=$1 AND user_id=$2`,
+        [scope.tenantId, scope.userId],
+      );
+    }
+  });
+
   it("真实 PG HTTP API：归档 Thread 后同键 Run 重放优先，不同载荷冲突", async () => {
     const label = `dispatch-http-${suffix}`;
     const now = isoTimestamp("2099-07-26T00:00:00.000Z");
@@ -4177,7 +4271,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     }
   });
 
-  it("开发黑盒 Gate：真实 HTTP、PG 原子创建、投递、Faux Pi 执行与 Sandbox 收敛", async () => {
+  it.each(["workbench", "api", "playground"] as const)(
+    "开发黑盒 Gate（%s）：真实 HTTP、PG 原子创建、投递、Faux Pi 执行与 Sandbox 收敛",
+    exerciseRunPath,
+  );
+
+  async function exerciseRunPath(origin: "workbench" | "api" | "playground") {
     const label = `m4-e2e-${randomUUID()}`;
     const now = isoTimestamp(new Date().toISOString());
     const userA = createUser(userId(`m4-user-a-${label}`), now);
@@ -4205,10 +4304,79 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       membership: tenantB.ownerMembership,
     });
 
+    let requestAuthorization = "Bearer dev-user-a";
+    if (origin === "api") {
+      const apiKey = createApiKeyToken();
+      requestAuthorization = `Bearer ${apiKey}`;
+      const keyStore = createPostgresPool({
+        connectionString: adminUrl,
+        schema,
+        maxConnections: 1,
+      });
+      try {
+        await new PgApiKeyRepository(keyStore).create({
+          scope: { tenantId: tenantA.tenant.id, userId: userA.id },
+          createdBy: userA.id,
+          keyHash: hashApiKey(apiKey),
+          prefix: apiKey.slice(0, 12),
+          name: "M4 公开 API",
+          scopes: ["threads:read", "threads:create", "runs:read", "runs:create"].map(apiKeyScope),
+          now,
+        });
+      } finally {
+        await keyStore.end();
+      }
+    }
+    const definitionId = `m4-agent-${label}`;
+    const draftId = `m4-draft-${label}`;
+    let otherPlaygroundThreadId: ReturnType<typeof threadId> | undefined;
+    if (origin === "playground") {
+      const otherPlaygroundThread = createThread({
+        id: threadId(`m4-playground-other-thread-${label}`),
+        tenant: tenantA.tenant,
+        user: userA,
+        membership: tenantA.ownerMembership,
+        title: "同租户其他 Thread",
+        now,
+      });
+      otherPlaygroundThreadId = otherPlaygroundThread.id;
+      await repositories.threads.create(
+        { tenantId: tenantA.tenant.id, userId: userA.id },
+        otherPlaygroundThread,
+      );
+      await admin.query(
+        `INSERT INTO "${schema}".platform_control_operators(user_id,role,status) VALUES($1,'admin','active');`,
+        [userA.id],
+      );
+      await admin.query(
+        `INSERT INTO "${schema}".agent_definitions(id,status,availability_mode) VALUES($1,'draft','selected_tenants')`,
+        [definitionId],
+      );
+      const draft = fakeAgentSnapshot({
+        tools: {
+          mode: "configured",
+          builtinTools: [],
+          externalTools: [],
+          clientTools: [
+            {
+              name: "client_lookup",
+              description: "查询客户端数据",
+              inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            },
+          ],
+          toolCallingMode: "native",
+        },
+      });
+      await admin.query(
+        `INSERT INTO "${schema}".agent_revisions(id,definition_id,revision,status,content,content_digest,created_by)
+         VALUES($1,$2,1,'draft',$3,$4,$5)`,
+        [draftId, definitionId, draft.content, draft.revisionDigest, userA.id],
+      );
+    }
     let readinessAvailable = true;
-    const generatedThreadId = threadId(`m4-thread-${label}`);
+    let generatedThreadId = threadId(`m4-thread-${label}`);
     const generatedWorkspaceId = workspaceId(`m4-workspace-${label}`);
-    const generatedRunId = runId(`m4-run-${label}`);
+    let generatedRunId = runId(`m4-run-${label}`);
     const app = createApiApp(
       {
         auth: createDevelopmentAuthResolver({
@@ -4219,9 +4387,14 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           ],
         }),
         repositories,
+        apiKeys: new PgApiKeyRepository(runtime),
+        playground: new PgPlaygroundRepository(runtime),
+        threadContinuity: new PgThreadContinuityReadRepository(runtime),
         createCapability: createApiCreateCapability({
           threadCreation: new PgThreadCreation(runtime),
-          enqueueOutbox: runDispatchCreation,
+          enqueueOutbox: new PgRunDispatchCreation(runtime, {
+            serialQueueV2Enabled: origin !== "workbench",
+          }),
         }),
         archiveThread: new PgArchiveThreadCommand(runtime),
         renamePersonalThread: new PgRenamePersonalThreadCommand(runtime),
@@ -4250,53 +4423,159 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const baseUrl = new URL(address).origin;
     const request = async (path: string, init: RequestInit) => fetch(`${baseUrl}${path}`, init);
-    const responseJson = async (
-      response: Response,
-    ): Promise<{
-      readonly data?: { readonly id?: string; readonly status?: string };
-      readonly error?: { readonly code?: string };
-    }> =>
-      (await response.json()) as {
-        readonly data?: { readonly id?: string; readonly status?: string };
-        readonly error?: { readonly code?: string };
+    type RunPathEnvelope = {
+      readonly data?: {
+        readonly id?: string;
+        readonly status?: string;
+        readonly threadId?: string;
+        readonly runId?: string;
       };
+      readonly error?: { readonly code?: string };
+    };
+    const responseJson = async (response: Response) => (await response.json()) as RunPathEnvelope;
     try {
-      const threadRequest = {
-        method: "POST",
-        headers: {
-          authorization: "Bearer dev-user-a",
-          "content-type": "application/json",
-          "idempotency-key": `m4-thread-key-${label}`,
-        },
-        body: JSON.stringify({ title: "M4 开发黑盒任务" }),
-      } as const;
-      const createdThread = await request("/v1/threads", threadRequest);
-      expect(createdThread.status).toBe(200);
-      const replayedThread = await request("/v1/threads", threadRequest);
-      expect(replayedThread.status).toBe(200);
-      expect((await responseJson(replayedThread)).data?.id).toBe(
-        (await responseJson(createdThread.clone())).data?.id,
-      );
+      if (origin === "playground") {
+        const requestInit = {
+          method: "POST",
+          headers: {
+            authorization: requestAuthorization,
+            "content-type": "application/json",
+            "idempotency-key": `m4-playground-${label}`,
+          },
+          body: JSON.stringify({
+            definitionId,
+            revisionId: draftId,
+            message: "草稿试运行",
+            mocks: { client_lookup: { result: "本地模拟结果" } },
+          }),
+        };
+        const invalidMocks = await request("/v1/playground/runs", {
+          ...requestInit,
+          body: JSON.stringify({
+            definitionId,
+            revisionId: draftId,
+            message: "草稿试运行",
+            mocks: 0,
+          }),
+        });
+        expect(invalidMocks.status).toBe(400);
+        const created = await request("/v1/playground/runs", requestInit);
+        expect(created.status).toBe(200);
+        const receipt = (await responseJson(created)).data;
+        if (receipt?.runId === undefined || receipt.threadId === undefined)
+          throw new Error("Playground 受理响应缺少 Run 或 Thread ID");
+        generatedRunId = runId(receipt.runId);
+        generatedThreadId = threadId(receipt.threadId);
+        const replay = await request("/v1/playground/runs", requestInit);
+        expect(replay.status).toBe(200);
+        expect((await responseJson(replay)).data).toEqual(receipt);
+        const ordinaryAuthorization = "Bearer dev-user-a";
+        const hiddenPlaygroundContinuity = await request(
+          `/v1/threads/${generatedThreadId}/continuity`,
+          { headers: { authorization: ordinaryAuthorization } },
+        );
+        const missingContinuity = await request(
+          `/v1/threads/${threadId(`m4-missing-continuity-${label}`)}/continuity`,
+          { headers: { authorization: ordinaryAuthorization } },
+        );
+        expect(hiddenPlaygroundContinuity.status).toBe(404);
+        const hiddenBody = await responseJson(hiddenPlaygroundContinuity);
+        const missingBody = await responseJson(missingContinuity);
+        expect(hiddenBody).toMatchObject({ error: { code: "NOT_FOUND" } });
+        expect(hiddenBody.error?.code).toBe(missingBody.error?.code);
+        const evaluationThreadId = threadId(`m4-evaluation-continuity-${label}`);
+        await admin.query(
+          `INSERT INTO "${schema}".threads(
+             tenant_id,id,created_by_user_id,title,status,created_at,updated_at,agent_definition_id,is_playground,is_evaluation
+           ) SELECT tenant_id,$2,created_by_user_id,'隐藏的评测 Thread',status,clock_timestamp(),clock_timestamp(),agent_definition_id,false,true
+             FROM "${schema}".threads WHERE tenant_id=$1 AND id=$3`,
+          [tenantA.tenant.id, evaluationThreadId, generatedThreadId],
+        );
+        const hiddenEvaluationContinuity = await request(
+          `/v1/threads/${evaluationThreadId}/continuity`,
+          { headers: { authorization: ordinaryAuthorization } },
+        );
+        expect(hiddenEvaluationContinuity.status).toBe(404);
+        expect((await responseJson(hiddenEvaluationContinuity)).error?.code).toBe(
+          missingBody.error?.code,
+        );
+      } else {
+        const threadRequest = {
+          method: "POST",
+          headers: {
+            authorization: requestAuthorization,
+            "content-type": "application/json",
+            "idempotency-key": `m4-thread-key-${label}`,
+          },
+          body: JSON.stringify({ title: "M4 开发黑盒任务" }),
+        } as const;
+        const createdThread = await request("/v1/threads", threadRequest);
+        expect(createdThread.status).toBe(200);
+        const replayedThread = await request("/v1/threads", threadRequest);
+        expect(replayedThread.status).toBe(200);
+        expect((await responseJson(replayedThread)).data?.id).toBe(
+          (await responseJson(createdThread.clone())).data?.id,
+        );
 
-      const runRequest = {
-        method: "POST",
-        headers: {
-          authorization: "Bearer dev-user-a",
-          "content-type": "application/json",
-          "idempotency-key": `m4-run-key-${label}`,
-        },
-        body: JSON.stringify({ input: "仅完成这个没有交付物的任务" }),
-      } as const;
-      const createdRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
-      expect(createdRun.status).toBe(200);
-      const replayedRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
-      expect(replayedRun.status).toBe(200);
-      expect((await responseJson(replayedRun)).data?.id).toBe(generatedRunId);
+        if (origin === "workbench") {
+          const rename = await request(`/v1/threads/${generatedThreadId}`, {
+            method: "PATCH",
+            headers: { authorization: requestAuthorization, "content-type": "application/json" },
+            body: JSON.stringify({ title: "重命名后的任务" }),
+          });
+          expect(rename.status).toBe(200);
+          const reread = await request(`/v1/threads/${generatedThreadId}`, {
+            headers: { authorization: requestAuthorization },
+          });
+          expect(await reread.json()).toMatchObject({ data: { title: "重命名后的任务" } });
+          const continuity = await request(`/v1/threads/${generatedThreadId}/continuity`, {
+            headers: { authorization: requestAuthorization },
+          });
+          expect(continuity.status).toBe(200);
+          expect(await continuity.json()).toMatchObject({
+            data: { queueDepth: 0, contextSequence: 0, compactionWindow: 0 },
+          });
+        }
+        const runRequest = {
+          method: "POST",
+          headers: {
+            authorization: requestAuthorization,
+            "content-type": "application/json",
+            "idempotency-key": `m4-run-key-${label}`,
+          },
+          body: JSON.stringify({ input: "仅完成这个没有交付物的任务" }),
+        } as const;
+        const createdRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
+        expect(createdRun.status).toBe(200);
+        const replayedRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
+        expect(replayedRun.status).toBe(200);
+        expect((await responseJson(replayedRun)).data?.id).toBe(generatedRunId);
+      }
+      const persisted = await admin.query(
+        `SELECT run.origin,run.status,outbox.state,agent.revision_id
+         FROM "${schema}".runs run
+         LEFT JOIN "${schema}".run_dispatch_outbox outbox ON outbox.tenant_id=run.tenant_id AND outbox.run_id=run.id
+         JOIN "${schema}".run_agent_snapshots agent ON agent.tenant_id=run.tenant_id AND agent.run_id=run.id
+        WHERE run.tenant_id=$1 AND run.id=$2`,
+        [tenantA.tenant.id, generatedRunId],
+      );
+      expect(persisted.rows).toEqual([
+        expect.objectContaining({
+          origin: origin === "workbench" ? "normal" : origin,
+          status: "queued",
+          state: "ready",
+          ...(origin === "playground" ? { revision_id: draftId } : {}),
+        }),
+      ]);
       const guessedByOtherTenant = await request(`/v1/threads/${generatedThreadId}`, {
         headers: { authorization: "Bearer dev-user-b" },
       });
       expect(guessedByOtherTenant.status).toBe(404);
       expect((await responseJson(guessedByOtherTenant)).error?.code).toBe("NOT_FOUND");
+      const hiddenContinuity = await request(`/v1/threads/${generatedThreadId}/continuity`, {
+        headers: { authorization: "Bearer dev-user-b" },
+      });
+      expect(hiddenContinuity.status).toBe(404);
 
       readinessAvailable = false;
       const unavailable = await request("/ready", { method: "GET" });
@@ -4337,7 +4616,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         provider: `m4-faux-pi-${label}`,
         tokensPerSecond: 10_000,
       });
-      faux.setResponses([fauxAssistantMessage("M4 Faux Pi 执行完成")]);
+      faux.setResponses([
+        ...(origin === "playground"
+          ? [fauxAssistantMessage([fauxToolCall("client_lookup", {}, { id: "m4-mock-call" })])]
+          : []),
+        fauxAssistantMessage("M4 Faux Pi 执行完成"),
+      ]);
       const credentials = new InMemoryCredentialStore();
       await credentials.modify(faux.provider.id, async () => ({
         type: "api_key",
@@ -4345,23 +4629,126 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       }));
       const modelRuntime = createModels({ credentials });
       modelRuntime.setProvider(faux.provider);
+      const blobs = {} as BlobStore;
+      const baseRolloutRepository = new PgRuntimeRolloutRepository(runtime);
+      let playgroundRolloutAuthorizationChecked = false;
+      let playgroundRolloutAuthorizationFailure: unknown;
+      const rolloutRepository = new Proxy(baseRolloutRepository, {
+        get(target, property, receiver) {
+          if (property !== "openRootStreamFromClaim")
+            return Reflect.get(target, property, receiver) as unknown;
+          return async (...args: Parameters<typeof target.openRootStreamFromClaim>) => {
+            const opened = await target.openRootStreamFromClaim(...args);
+            if (
+              origin !== "playground" ||
+              opened.outcome !== "ready" ||
+              playgroundRolloutAuthorizationChecked
+            )
+              return opened;
+            playgroundRolloutAuthorizationChecked = true;
+            const validContext = opened.context;
+            try {
+              const before = await admin.query<{ count: string }>(
+                `SELECT count(*)::text AS count FROM "${schema}".runtime_rollout_entries WHERE tenant_id=$1 AND run_id=$2`,
+                [tenantA.tenant.id, validContext.scope.runId],
+              );
+              const appendWith = async (context: typeof validContext, key: string) => {
+                try {
+                  const result = await target.append({
+                    context,
+                    idempotencyKey: key,
+                    entries: [{ kind: "assistant", body: { text: "unauthorized" } }],
+                  });
+                  return result.outcome === "not_authorized" ? { outcome: "rejected" } : result;
+                } catch {
+                  return { outcome: "rejected" } as const;
+                }
+              };
+              expect(
+                await appendWith(
+                  { ...validContext, userId: userB.id },
+                  `m4-wrong-creator-${label}`,
+                ),
+              ).toEqual({ outcome: "rejected" });
+              expect(
+                await appendWith(
+                  {
+                    ...validContext,
+                    scope: {
+                      ...validContext.scope,
+                      threadId: otherPlaygroundThreadId ?? validContext.scope.threadId,
+                    },
+                  },
+                  `m4-wrong-thread-${label}`,
+                ),
+              ).toEqual({ outcome: "rejected" });
+              expect(
+                await appendWith(
+                  {
+                    ...validContext,
+                    scope: { ...validContext.scope, attemptId: `other-attempt-${label}` },
+                  },
+                  `m4-wrong-attempt-${label}`,
+                ),
+              ).toEqual({ outcome: "rejected" });
+              await admin.query(
+                `UPDATE "${schema}".memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2`,
+                [tenantA.tenant.id, userA.id],
+              );
+              try {
+                expect(await appendWith(validContext, `m4-revoked-member-${label}`)).toEqual({
+                  outcome: "rejected",
+                });
+              } finally {
+                await admin.query(
+                  `UPDATE "${schema}".memberships SET status='active' WHERE tenant_id=$1 AND user_id=$2`,
+                  [tenantA.tenant.id, userA.id],
+                );
+              }
+              expect(
+                await appendWith(
+                  {
+                    ...validContext,
+                    fence: {
+                      ...validContext.fence,
+                      runClaim: { ...validContext.fence.runClaim, token: `invalid-${label}` },
+                    },
+                  },
+                  `m4-invalid-fence-${label}`,
+                ),
+              ).toEqual({ outcome: "rejected" });
+              const after = await admin.query<{ count: string }>(
+                `SELECT count(*)::text AS count FROM "${schema}".runtime_rollout_entries WHERE tenant_id=$1 AND run_id=$2`,
+                [tenantA.tenant.id, validContext.scope.runId],
+              );
+              expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
+            } catch (error) {
+              playgroundRolloutAuthorizationFailure = error;
+            }
+            return opened;
+          };
+        },
+      });
+      const observations = createPgDurableObservationSession({
+        blobRepository: new PgBlobLifecycleRepository(runtime),
+        blobs,
+        rolloutRepository,
+        policy: { maxModelObservationBytes: 4096 },
+      });
       const sessions = new PiWorkerSessionFactory(
         faux.getModel(),
         modelRuntime,
-        (_input, outputs) => ({
-          recordStarted: async () => "recorded" as const,
-          record: async (call) => {
-            const observation = await outputs.readControlledReceipt(call);
-            return observation === undefined
-              ? { outcome: "conflict" as const }
-              : { outcome: "recorded" as const, observation, isTruncated: false };
-          },
-        }),
+        observations.createRecorder,
+        undefined,
+        observations.prepare,
       );
       const registeredSandboxes = new PgBackedSandboxSessionRegistry(runtime, upstream, 120);
       const worker = new RunWorker(
         {
-          persistence: new PgExecutionPersistence(runtime),
+          persistence: new PgExecutionPersistence(runtime, {
+            threadContextWriteEnabled: origin !== "workbench",
+          }),
+          threadContextBodies: new FakeThreadContextBodies(),
           revisions: new FakeRevisionVerifier(),
           sandboxes: registeredSandboxes,
           orphanSandboxes: registeredSandboxes,
@@ -4370,7 +4757,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           clock: new FakeClock(),
           metrics: new FakeRecoveryMetrics(),
         },
-        { workerId: "m4-development-worker", leaseDurationMs: 30_000, heartbeatMs: 10_000 },
+        {
+          workerId: "m4-development-worker",
+          leaseDurationMs: 30_000,
+          heartbeatMs: 10_000,
+          threadContextWriteEnabled: origin !== "workbench",
+        },
       );
       const createDispatcher = () =>
         new RunDispatchScheduler(new PgRunDispatchOutbox(runtime), {
@@ -4397,6 +4789,9 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           leaseMilliseconds: 30_000,
         }),
       ).toBe(1);
+      if (playgroundRolloutAuthorizationFailure !== undefined)
+        throw playgroundRolloutAuthorizationFailure;
+      if (origin === "playground") expect(playgroundRolloutAuthorizationChecked).toBe(true);
       // 模拟进程重启：必须重新构造 scheduler 与 outbox 端口，不能只在同一个实例换 ID。
       const restartedDispatcher = createDispatcher();
       expect(
@@ -4407,14 +4802,14 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           leaseMilliseconds: 30_000,
         }),
       ).toBe(0);
-      expect(faux.state.callCount).toBe(1);
+      expect(faux.state.callCount).toBe(origin === "playground" ? 2 : 1);
       const modelPermit = await withTenantTransaction(
         runtime,
         { tenantId: tenantA.tenant.id },
         async (client) =>
           client.query<{ readonly count: string }>(
             `SELECT count(*)::text AS count FROM external_effect_permits
-            WHERE tenant_id=$1 AND effect='model_start' AND consumed_at IS NOT NULL`,
+          WHERE tenant_id=$1 AND effect='model_start' AND consumed_at IS NOT NULL`,
             [tenantA.tenant.id],
           ),
       );
@@ -4426,7 +4821,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           const [claims, leases] = await Promise.all([
             client.query<{ readonly count: string }>(
               `SELECT count(*)::text AS count FROM run_claims
-                WHERE tenant_id=$1 AND released_at IS NULL`,
+              WHERE tenant_id=$1 AND released_at IS NULL`,
               [tenantA.tenant.id],
             ),
             client.query<{ readonly count: string }>(
@@ -4447,14 +4842,34 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       await cleanup.close();
       expect([...gateway.sandboxes.values()].every((sandbox) => sandbox.killed)).toBe(true);
       const succeeded = await request(`/v1/threads/${generatedThreadId}/runs/${generatedRunId}`, {
-        headers: { authorization: "Bearer dev-user-a" },
+        headers: { authorization: requestAuthorization },
       });
-      expect(succeeded.status).toBe(200);
-      expect((await responseJson(succeeded)).data?.status).toBe("succeeded");
+      if (origin === "playground") {
+        expect(succeeded.status).toBe(404);
+        const status = await admin.query(
+          `SELECT status FROM "${schema}".runs WHERE tenant_id=$1 AND id=$2`,
+          [tenantA.tenant.id, generatedRunId],
+        );
+        expect(status.rows).toEqual([{ status: "succeeded" }]);
+        const rollout = await admin.query(
+          `SELECT kind FROM "${schema}".runtime_rollout_entries
+            WHERE tenant_id=$1 AND run_id=$2 AND tool_call_id='m4-mock-call' ORDER BY sequence`,
+          [tenantA.tenant.id, generatedRunId],
+        );
+        expect(rollout.rows).toEqual([{ kind: "tool_call" }, { kind: "tool_result" }]);
+        const clientTools = await admin.query(
+          `SELECT 1 FROM "${schema}".client_tool_calls WHERE tenant_id=$1 AND run_id=$2`,
+          [tenantA.tenant.id, generatedRunId],
+        );
+        expect(clientTools.rowCount).toBe(0);
+      } else {
+        expect(succeeded.status).toBe(200);
+        expect((await responseJson(succeeded)).data?.status).toBe("succeeded");
+      }
     } finally {
       await app.close();
     }
-  });
+  }
 
   it("workerId 按 UTF-8 字节边界拒绝多字节超限且不泄漏数据库约束", async () => {
     const f = await fixture(`worker-id-${suffix}`);

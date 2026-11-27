@@ -50,12 +50,7 @@ import {
   type ExplicitSkillInvocation,
 } from "@hoox/skill";
 import type { ApiCreateCapability } from "./capabilities.js";
-import {
-  isApiKeyToken,
-  isExternalEndUserId,
-  type ApiKeyAuthenticationPort,
-  type ApiKeyPrincipal,
-} from "@hoox/identity";
+import { isApiKeyToken, type ApiKeyAuthenticationPort, type ApiKeyPrincipal } from "@hoox/identity";
 import { InvalidThreadCursorError } from "./cursor.js";
 import type {
   ApiClock,
@@ -70,6 +65,9 @@ import type {
 
 export type ApiFailureKind =
   | "bad_request"
+  | "payload_too_large"
+  | "end_user_required"
+  | "idempotency_conflict"
   | "unauthorized"
   | "forbidden"
   | "not_found"
@@ -175,7 +173,6 @@ export class ApiService {
       ) {
         throw new ApiFailure("forbidden");
       }
-      if (!isExternalEndUserId(options.endUserId)) throw new ApiFailure("bad_request");
     }
     if (tenantSelector.kind === "invalid") throw new ApiFailure("bad_request");
     let selectedTenantId = principal.tenantId;
@@ -312,7 +309,7 @@ export class ApiService {
           ),
         },
       });
-      if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (result.outcome === "key_conflict") throw new ApiFailure("idempotency_conflict");
       if (result.outcome === "parent_inactive" || result.outcome === "not_authorized") {
         throw new ApiFailure("not_found");
       }
@@ -435,7 +432,7 @@ export class ApiService {
         thread: thread.entity,
         idempotency,
       });
-      if (replay.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (replay.outcome === "key_conflict") throw new ApiFailure("idempotency_conflict");
       if (replay.outcome === "legacy_drain_required") throw new ApiFailure("invalid_state");
       if (replay.outcome === "not_authorized") throw new ApiFailure("not_found");
       if (replay.outcome === "created" || replay.outcome === "replayed") {
@@ -455,7 +452,7 @@ export class ApiService {
         ...(skillInvocation === undefined ? {} : { skillInvocation }),
         idempotency,
       });
-      if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (result.outcome === "key_conflict") throw new ApiFailure("idempotency_conflict");
       if (result.outcome === "legacy_drain_required") throw new ApiFailure("invalid_state");
       if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");
       if (result.outcome === "not_authorized") throw new ApiFailure("not_found");
@@ -603,7 +600,7 @@ export class ApiService {
           }),
         },
       });
-      if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (result.outcome === "key_conflict") throw new ApiFailure("idempotency_conflict");
       if (result.outcome === "legacy_drain_required") throw new ApiFailure("invalid_state");
       if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");
       if (result.outcome === "not_authorized") throw new ApiFailure("not_found");

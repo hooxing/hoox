@@ -20,7 +20,12 @@ export type StreamOptions = RequestOptions & {
   retry?: RetryOptions;
 };
 export type RunStreamEvent =
-  | { event: "run-events"; id?: string; data: { run: RunDto; page: RunEventPageDto } }
+  | {
+      event: "run-events";
+      /** 续连游标；状态帧在序号 0 之前使用 `{attemptId}-start`，旧服务端可能不提供游标。 */
+      id?: string;
+      data: { run: RunDto; page: RunEventPageDto };
+    }
   | { event: "end"; data: { reason: "settled" | "renew" } };
 export type ClientToolAction = {
   threadId: string;

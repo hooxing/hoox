@@ -39,7 +39,11 @@ import {
   type Versioned,
 } from "@hoox/persistence/postgres";
 import type { ModelWireTraceBody, ModelWireTraceReadPort } from "@hoox/persistence/thread";
-import { HistoryFileLibraryService, type HistoryFileLibraryFile } from "@hoox/resource";
+import {
+  HistoryFileLibraryService,
+  type HistoryFileLibraryFile,
+  ResourceServiceError,
+} from "@hoox/resource";
 import type { FastifyInstance } from "fastify";
 import { SkillCenterService, type SkillCenterPort, type SkillInstallation } from "@hoox/skill";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1353,6 +1357,48 @@ describe("API Key 路由授权", () => {
     expect(execute).toHaveBeenCalledTimes(3);
   });
 
+  it("通过真实 HTTP 区分缺少和显式发送空的 Hoox-End-User", async () => {
+    const token = createApiKeyToken();
+    const owner = personalBundle("owner_a");
+    const mapEndUser = vi.fn();
+    const { app } = fixture({
+      apiKeys: {
+        authenticateKey: async () => ({
+          userId: owner.user.id,
+          tenantId: owner.tenant.id,
+          apiKeyId: "key_read_only",
+          scopes: ["threads:read", "runs:read"],
+        }),
+        mapEndUser,
+      } as unknown as NonNullable<ApiDependencies["apiKeys"]>,
+    });
+    openApps.push(app);
+    const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+    const authorization = `Bearer ${token}`;
+    const threads = `${origin}/v1/threads`;
+    const noDeclaration = await fetch(threads, { headers: { authorization } });
+    expect(noDeclaration.status).toBe(200);
+    await noDeclaration.body?.cancel();
+    const empty = await fetch(threads, {
+      headers: { authorization, "Hoox-End-User": "" },
+    });
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toMatchObject({ error: { code: "INVALID_REQUEST" } });
+    expect(mapEndUser).not.toHaveBeenCalled();
+
+    const feedback = await fetch(`${threads}/thread_1/runs/run_1/feedback`, {
+      headers: { authorization },
+    });
+    expect(feedback.status).toBe(400);
+    expect(await feedback.json()).toMatchObject({
+      error: {
+        code: "INVALID_REQUEST",
+        message: "请提供 Hoox-End-User 请求头",
+        retryable: false,
+      },
+    });
+  });
+
   it("按 API Key 空间授权上传文件下载，并对作用域与空间失败关闭", async () => {
     const token = createApiKeyToken();
     const owner = personalBundle("owner_a");
@@ -1447,8 +1493,8 @@ describe("API Key 路由授权", () => {
       ).statusCode,
     ).toBe(404);
     grantedScopes = ["runs:create"];
-    const uploaded = await app.inject({
-      method: "POST",
+    const uploadRequest = {
+      method: "POST" as const,
       url: "/v1/resources/uploads",
       headers: {
         authorization: `Bearer ${token}`,
@@ -1457,9 +1503,28 @@ describe("API Key 路由授权", () => {
         "x-file-name": "notes.txt",
       },
       payload: Buffer.from("note"),
-    });
+    };
+    const uploaded = await app.inject(uploadRequest);
     expect(uploaded.statusCode).toBe(200);
     expect(upload).toHaveBeenCalledOnce();
+    upload.mockRejectedValueOnce(new ResourceServiceError("CONFLICT", "fixture"));
+    const conflict = await app.inject({ ...uploadRequest, payload: Buffer.from("different") });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error).toMatchObject({ code: "CONFLICT", retryable: false });
+    const oversized = await app.inject({
+      method: "POST",
+      url: "/v1/resources/uploads",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/octet-stream",
+        "idempotency-key": "api-key-upload-oversized-01",
+        "x-file-name": "large.bin",
+      },
+      payload: Buffer.alloc(16 * 1_024 * 1_024 + 1),
+    });
+    expect(oversized.statusCode).toBe(413);
+    expect(oversized.json().error).toMatchObject({ code: "PAYLOAD_TOO_LARGE" });
+    expect(upload).toHaveBeenCalledTimes(2);
     expect(
       (
         await app.inject({
@@ -3139,6 +3204,21 @@ describe("Fastify API 契约", () => {
     expect(response.body).not.toContain('"sequence":7');
     expect(response.body).toContain('event: end\ndata: {"reason":"settled"}');
     expect(response.body).toContain("id: attempt_1-8\nevent: run-events");
+    const fromStart = await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: "Bearer token-a", "last-event-id": "attempt_1-start" },
+    });
+    expect(fromStart.statusCode).toBe(200);
+    expect(fromStart.body).toContain('"sequence":7');
+    const alreadyRead = await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: "Bearer token-a", "last-event-id": "attempt_1-8" },
+    });
+    expect(alreadyRead.statusCode).toBe(200);
+    expect(alreadyRead.body).toContain("id: attempt_1-8\nevent: run-events");
+    expect(alreadyRead.body).toContain('"items":[]');
     expect(
       (await app.inject({ method: "GET", url, headers: { authorization: "Bearer token-b" } }))
         .statusCode,
@@ -3869,6 +3949,7 @@ describe("Fastify API 契约", () => {
       payload: { title: "其他任务" },
     });
     expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error).toMatchObject({ code: "CONFLICT", retryable: false });
     const extra = await app.inject({
       method: "POST",
       url: "/v1/threads",
@@ -4304,6 +4385,7 @@ describe("Fastify API 契约", () => {
       payload: { input: "相同幂等键但不同输入" },
     });
     expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error).toMatchObject({ code: "CONFLICT", retryable: false });
 
     const loaded = await app.inject({
       method: "GET",
@@ -4500,7 +4582,8 @@ describe("Fastify API 契约", () => {
       headers: { authorization: "Bearer token-a", "idempotency-key": "oversize-key" },
       payload: { title: "x".repeat(500) },
     });
-    expect(oversized.statusCode).toBe(400);
+    expect(oversized.statusCode).toBe(413);
+    expect(oversized.json().error).toMatchObject({ code: "PAYLOAD_TOO_LARGE", retryable: false });
     expect(Object.keys(oversized.json())).toEqual(["version", "requestId", "error"]);
     const missingIdempotency = await app.inject({
       method: "POST",

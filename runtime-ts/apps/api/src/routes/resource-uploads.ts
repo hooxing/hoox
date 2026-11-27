@@ -4,10 +4,9 @@ import {
   type ResourceDownloadPath,
   ResourceDownloadPathSchema,
   ResourceDownloadSuccessEnvelopeSchema,
-  type UploadedResourceDto,
   UploadedResourceSuccessEnvelopeSchema,
 } from "@hoox/protocol";
-import type { ResourceUploadPort } from "@hoox/resource";
+import { ResourceServiceError, type ResourceUploadPort } from "@hoox/resource";
 import type { ResourceFilesystemCatalog, ResourceFilesystemFile } from "@hoox/resource";
 import type { BlobStore } from "@hoox/persistence/blob";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -35,6 +34,7 @@ export function registerResourceUploadRoutes(
             401: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             409: ErrorEnvelopeSchema,
+            413: ErrorEnvelopeSchema,
             415: ErrorEnvelopeSchema,
             500: ErrorEnvelopeSchema,
             503: ErrorEnvelopeSchema,
@@ -49,14 +49,21 @@ export function registerResourceUploadRoutes(
         const auth = await authenticate(request, "runs:create");
         const name = decodeUploadFileName(singleHeader(request, "x-file-name"));
         const mediaType = singleHeader(request, "x-file-media-type") ?? "application/octet-stream";
-        const uploaded: UploadedResourceDto = await resourceUploads.upload({
-          context: auth.scope,
-          idempotencyKey: requireIdempotencyKey(request),
-          name,
-          mediaType,
-          body: new Uint8Array(request.body),
-        });
-        return success(request, uploaded);
+        try {
+          const uploaded = await resourceUploads.upload({
+            context: auth.scope,
+            idempotencyKey: requireIdempotencyKey(request),
+            name,
+            mediaType,
+            body: new Uint8Array(request.body),
+          });
+          return success(request, uploaded);
+        } catch (error) {
+          if (error instanceof ResourceServiceError && error.code === "CONFLICT") {
+            throw new ApiFailure("idempotency_conflict");
+          }
+          throw error;
+        }
       },
     );
   }

@@ -32,13 +32,13 @@ export function registerHttpMiddleware(app: FastifyInstance): void {
       typeof error === "object" && error !== null
         ? (error as { readonly validation?: unknown; readonly code?: unknown })
         : {};
-    if (
+    if (errorShape.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+      kind = "payload_too_large";
+    } else if (
       errorShape.validation !== undefined ||
-      new Set([
-        "FST_ERR_CTP_BODY_TOO_LARGE",
-        "FST_ERR_CTP_INVALID_JSON_BODY",
-        "FST_ERR_CTP_EMPTY_JSON_BODY",
-      ]).has(String(errorShape.code))
+      new Set(["FST_ERR_CTP_INVALID_JSON_BODY", "FST_ERR_CTP_EMPTY_JSON_BODY"]).has(
+        String(errorShape.code),
+      )
     ) {
       kind = "bad_request";
     } else if (errorShape.code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") {
@@ -70,9 +70,12 @@ export function registerHttpMiddleware(app: FastifyInstance): void {
       { requestId: requestId(request), route: request.routeOptions.url, failure: kind },
       "HTTP 请求失败",
     );
-    void reply
-      .status(statusByFailure[kind])
-      .send(envelope ?? errorEnvelope(requestId(request), kind));
+    const body = envelope ?? errorEnvelope(requestId(request), kind);
+    if (kind === "payload_too_large") {
+      void reply.status(413).type("application/json; charset=utf-8").send(JSON.stringify(body));
+      return;
+    }
+    void reply.status(statusByFailure[kind]).send(body);
   });
   app.setNotFoundHandler((request, reply) => {
     void reply.status(404).send(errorEnvelope(requestId(request), "not_found"));
@@ -81,6 +84,9 @@ export function registerHttpMiddleware(app: FastifyInstance): void {
 
 const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
   bad_request: 400,
+  payload_too_large: 413,
+  end_user_required: 400,
+  idempotency_conflict: 409,
   unauthorized: 401,
   forbidden: 403,
   not_found: 404,
@@ -139,5 +145,21 @@ function skillFailure(error: SkillServiceError): ApiFailureKind {
 }
 
 function errorEnvelope(id: string, kind: ApiFailureKind): ErrorEnvelope {
-  return createErrorEnvelope(id, { kind });
+  switch (kind) {
+    case "payload_too_large":
+      return createErrorEnvelope(id, { kind: "payload_too_large" });
+    case "end_user_required": {
+      const envelope = createErrorEnvelope(id, { kind: "bad_request" });
+      return { ...envelope, error: { ...envelope.error, message: "请提供 Hoox-End-User 请求头" } };
+    }
+    case "idempotency_conflict": {
+      const envelope = createErrorEnvelope(id, { kind: "conflict" });
+      return {
+        ...envelope,
+        error: { ...envelope.error, message: "幂等键已用于不同的请求", retryable: false },
+      };
+    }
+    default:
+      return createErrorEnvelope(id, { kind });
+  }
 }

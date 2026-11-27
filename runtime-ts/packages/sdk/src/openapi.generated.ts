@@ -5,6 +5,7 @@ export type ErrorEnvelope = {
   error: {
     code:
       | "INVALID_REQUEST"
+      | "PAYLOAD_TOO_LARGE"
       | "UNSUPPORTED_MEDIA_TYPE"
       | "UNAUTHORIZED"
       | "FORBIDDEN"

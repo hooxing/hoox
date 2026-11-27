@@ -4,6 +4,7 @@ import { IdSchema, IsoTimestampSchema, ProtocolVersionSchema } from "./schemas.j
 
 export const publicErrorCodes = [
   "INVALID_REQUEST",
+  "PAYLOAD_TOO_LARGE",
   "UNSUPPORTED_MEDIA_TYPE",
   "UNAUTHORIZED",
   "FORBIDDEN",
@@ -51,6 +52,7 @@ export type ErrorEnvelope = Static<typeof ErrorEnvelopeSchema>;
 
 export type PublicFailure =
   | { readonly kind: "bad_request" }
+  | { readonly kind: "payload_too_large" }
   | { readonly kind: "unsupported_media_type" }
   | { readonly kind: "unauthorized" }
   | { readonly kind: "forbidden" }
@@ -63,6 +65,11 @@ export type PublicFailure =
   | { readonly kind: "internal" };
 
 const fixedErrors: Readonly<Record<PublicFailure["kind"], ErrorEnvelope["error"]>> = Object.freeze({
+  payload_too_large: Object.freeze({
+    code: "PAYLOAD_TOO_LARGE",
+    message: "请求正文超过大小限制",
+    retryable: false,
+  }),
   bad_request: Object.freeze({
     code: "INVALID_REQUEST",
     message: "请求参数无效",

@@ -16,6 +16,7 @@ export async function openRunEventStream(options: {
   readonly watch: (wake: () => void) => () => void;
   readonly publicType: (kind: string, payload: Readonly<Record<string, unknown>>) => string;
   readonly retryMs?: number;
+  readonly heartbeatMs?: number;
   readonly lifetimeMs?: number;
 }): Promise<Readable> {
   let revision = 0;
@@ -75,6 +76,8 @@ export async function openRunEventStream(options: {
     `${eventId === undefined ? "" : `id: ${eventId}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   async function* frames() {
     let value = first;
+    let snapshot: string | undefined;
+    let lastFrameAt = startedAt;
     try {
       while (!signal.aborted && !disposed) {
         const { page, run } = value;
@@ -86,16 +89,22 @@ export async function openRunEventStream(options: {
           payload: event.payload,
           occurredAt: event.occurredAt,
         }));
+        const nextSnapshot = JSON.stringify([run, page.attemptId, page.hasMore]);
         const lastEvent = items.at(-1);
-        yield frame(
-          "run-events",
-          {
-            run,
-            page: { attemptId: page.attemptId, items, hasMore: page.hasMore },
-          },
-          lastEvent?.eventId,
-        );
-        after = items.at(-1)?.sequence ?? after;
+        after = lastEvent?.sequence ?? after;
+        if (lastEvent !== undefined || nextSnapshot !== snapshot) {
+          snapshot = nextSnapshot;
+          lastFrameAt = Date.now();
+          // 状态帧复用当前游标；尚无事件时不把序号 0 标为已读。
+          yield frame(
+            "run-events",
+            { run, page: { attemptId: page.attemptId, items, hasMore: page.hasMore } },
+            `${page.attemptId ?? "pending"}-${after < 0 ? "start" : after}`,
+          );
+        } else if (Date.now() - lastFrameAt >= (options.heartbeatMs ?? 10_000)) {
+          lastFrameAt = Date.now();
+          yield ": heartbeat\n\n";
+        }
         if (
           !page.hasMore &&
           (run.executionStatus === "recovery_required" ||

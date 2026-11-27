@@ -328,9 +328,15 @@ export class HooxClient {
             seen.set(attempt, item.sequence);
             return true;
           });
-          if (items.length > 0) {
-            cursor = items.at(-1)?.eventId;
+          const last = items.at(-1);
+          if (last !== undefined) {
+            cursor = last.eventId;
             failures = 0;
+          } else if (
+            frame.id !== undefined &&
+            frame.id === `${attempt}-${seen.get(attempt) ?? "start"}`
+          ) {
+            cursor = frame.id;
           }
           yield {
             event: "run-events",

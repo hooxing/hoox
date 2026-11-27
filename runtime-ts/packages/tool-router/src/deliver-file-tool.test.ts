@@ -18,7 +18,7 @@ describe("deliver_file Pi 工具", () => {
       async () => ({ outcome: "recorded", observation: "recorded", isTruncated: false }),
     );
     expect(tool.description).toBe(
-      "将 CubeSandbox 中已经生成的文件作为本次任务的交付文件提供给用户。仅当文件已成功保存为可下载交付物时返回成功。",
+      "用户要求生成、导出或提供文件时，在 /workspace 写好最终文件后、回复用户前，调用本工具逐个交付。只写文件或在答复中给出路径不会让用户看到或下载文件。工具返回成功后，用户可从交付卡片打开文件。不要交付临时文件。",
     );
     expect(tool.description).not.toContain("页面");
     expect(tool.executionMode).toBe("sequential");

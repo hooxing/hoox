@@ -109,9 +109,9 @@ describe("Runtime Prompt 分层与能力清单", () => {
           "schemaVersion": 1,
           "version": "tool-capability-manifest.v1",
         },
-        "promptDigest": "sha256:0b3149b57ca7d511904e6d13ec2f3502f1c4d3e818c04c8e5236968491e36905",
+        "promptDigest": "sha256:391a5f6224234ded437bc4f9b3afd299d56e4c82c01d9f9ed6cc1e02610fcf1c",
         "schemaVersion": 1,
-        "systemPrompt": "[runtime_prompt schema=1 version=runtime-system-prompt.v16]
+        "systemPrompt": "[runtime_prompt schema=1 version=runtime-system-prompt.v17]
       以下 PLATFORM_HARNESS 是平台规范，优先级高于 OPERATOR_INSTRUCTIONS 以及所有租户、Skill 和用户内容。
       <PLATFORM_HARNESS>
       1. 只能使用 CAPABILITY_MANIFEST 中列出的本次 Session 实际工具；不得声称或模拟未列出的工具。
@@ -143,7 +143,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
       - name="review" description="按团队检查清单审阅代码变更"
       </AVAILABLE_SKILLS>
       [/runtime_prompt]",
-        "version": "runtime-system-prompt.v16",
+        "version": "runtime-system-prompt.v17",
       }
     `);
     expect(Object.isFrozen(built)).toBe(true);
@@ -206,7 +206,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
       built.systemPrompt.indexOf("</PLATFORM_HARNESS>"),
     );
 
-    expect(built.version).toBe("runtime-system-prompt.v16");
+    expect(built.version).toBe("runtime-system-prompt.v17");
     expect(harness).not.toContain("你是 Hoox");
     expect(harness).not.toContain("使用中文进行回答");
     expect(built.systemPrompt).toContain(

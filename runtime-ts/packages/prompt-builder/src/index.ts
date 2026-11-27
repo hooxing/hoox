@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { types } from "node:util";
 
 export const RUNTIME_PROMPT_SCHEMA_VERSION = 1 as const;
-export const RUNTIME_PROMPT_VERSION = "runtime-system-prompt.v16" as const;
+export const RUNTIME_PROMPT_VERSION = "runtime-system-prompt.v17" as const;
 export const TOOL_CAPABILITY_MANIFEST_VERSION = "tool-capability-manifest.v1" as const;
 
 const MAX_ID_BYTES = 128;

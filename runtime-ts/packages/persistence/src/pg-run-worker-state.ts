@@ -3304,10 +3304,10 @@ async function settleWorkspaceArtifactIntents(
       }),
     });
     if (
-      ["normal", "api"].includes(input.runOrigin) &&
       shouldIndexArtifactInHistory({
         historyFilesystemEnabled: input.historyFilesystemEnabled,
         purpose: intent.purpose,
+        runOrigin: input.runOrigin,
       })
     ) {
       await insertHistoryAgentDeliverable(client, {

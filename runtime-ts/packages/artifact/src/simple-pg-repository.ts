@@ -1,5 +1,10 @@
 import { artifactId, resourceVersionId, sha256Digest } from "@hoox/domain";
 import { TransactionCommitUnknownError, withTenantTransaction } from "@hoox/persistence/postgres";
+import {
+  DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
+  insertHistoryAgentDeliverable,
+  shouldIndexArtifactInHistory,
+} from "@hoox/persistence/thread";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 import type {
@@ -19,9 +24,15 @@ interface DeliveredRow extends QueryResultRow {
   target: "published" | "failed" | null;
 }
 
-/** deliver_file 的 PG 写侧；Resource、Version、Artifact 和 published settlement 同事务提交。 */
+/** deliver_file 的 PG 写侧：历史关系与正式发布同事务提交，重放不补录。 */
 export class PgSimpleDeliveredFileRepository implements SimpleDeliveredFileRepositoryPort {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly options: {
+      readonly historyFilesystemEnabled?: boolean;
+      readonly historyDirectoryTimeZone?: string;
+    } = {},
+  ) {}
 
   async commit(
     input: Parameters<SimpleDeliveredFileRepositoryPort["commit"]>[0],
@@ -31,7 +42,8 @@ export class PgSimpleDeliveredFileRepository implements SimpleDeliveredFileRepos
         this.pool,
         { tenantId: input.authorization.scope.tenantId },
         async (client) => {
-          if ((await lockExecutionBoundary(client, input.authorization)) !== "valid") {
+          const runOrigin = await lockExecutionBoundary(client, input.authorization);
+          if (runOrigin === undefined) {
             throw new Error("DELIVER_FILE_BOUNDARY_MISMATCH");
           }
           const previous = await readDelivered(client, input.authorization, input.idempotencyKey);
@@ -159,11 +171,32 @@ export class PgSimpleDeliveredFileRepository implements SimpleDeliveredFileRepos
               input.ids.artifactId,
             ],
           );
-          await client.query(
+          const settlement = await client.query<{ settled_at: string }>(
             `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target)
-             VALUES($1,$2,'published')`,
+             VALUES($1,$2,'published') RETURNING settled_at::text`,
             [input.authorization.scope.tenantId, input.ids.artifactId],
           );
+          if (
+            shouldIndexArtifactInHistory({
+              historyFilesystemEnabled: this.options.historyFilesystemEnabled ?? false,
+              purpose: "deliverable",
+              runOrigin,
+            })
+          ) {
+            const publishedAt = settlement.rows[0]?.settled_at;
+            if (publishedAt === undefined) throw new Error("DELIVER_FILE_SETTLEMENT_MISSING");
+            await insertHistoryAgentDeliverable(client, {
+              tenantId: input.authorization.scope.tenantId,
+              threadId: input.authorization.scope.threadId,
+              artifactId: input.ids.artifactId,
+              resourceId: input.ids.resourceId,
+              resourceVersionId: input.ids.resourceVersionId,
+              resourceName: input.name,
+              publishedAt,
+              timeZone:
+                this.options.historyDirectoryTimeZone ?? DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
+            });
+          }
           const committed = await readDelivered(client, input.authorization, input.idempotencyKey);
           if (committed === undefined) throw new Error("DELIVER_FILE_READBACK_MISSING");
           return mapPrevious(committed, input.commandDigest);
@@ -250,9 +283,9 @@ function mapPrevious(row: DeliveredRow, expectedDigest: string): SimpleDelivered
 async function lockExecutionBoundary(
   client: PoolClient,
   authorization: ArtifactExecutionAuthorization,
-): Promise<"valid" | "scope_mismatch"> {
-  const result = await client.query<{ valid: boolean }>(
-    `SELECT run.status='running'
+): Promise<string | undefined> {
+  const result = await client.query<{ valid: boolean; origin: string }>(
+    `SELECT run.origin, run.status='running'
             AND permit.consumed_at IS NOT NULL
             AND permit.effect='tool_execution' AND permit.call_id=$16
             AND permit.tool_name='deliver_file' AND permit.args_digest=$17
@@ -296,7 +329,8 @@ async function lockExecutionBoundary(
       authorization.argsDigest,
     ],
   );
-  return result.rows[0]?.valid === true ? "valid" : "scope_mismatch";
+  const row = result.rows[0];
+  return row?.valid === true ? row.origin : undefined;
 }
 
 function normalizeResourceName(name: string): string {

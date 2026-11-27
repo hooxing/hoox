@@ -12,8 +12,13 @@ export const DEFAULT_HISTORY_DIRECTORY_TIME_ZONE = "Asia/Shanghai";
 export function shouldIndexArtifactInHistory(input: {
   readonly historyFilesystemEnabled: boolean;
   readonly purpose: "deliverable" | "diagnostic" | "trace";
+  readonly runOrigin: string;
 }): boolean {
-  return input.historyFilesystemEnabled && input.purpose === "deliverable";
+  return (
+    input.historyFilesystemEnabled &&
+    input.purpose === "deliverable" &&
+    (input.runOrigin === "normal" || input.runOrigin === "api")
+  );
 }
 
 interface HistoryDirectoryContext {

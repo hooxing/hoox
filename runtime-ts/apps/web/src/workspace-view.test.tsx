@@ -1043,6 +1043,39 @@ describe("工作台展示组件", () => {
     expect(settledDetails?.textContent).toContain("先检查依赖，再生成文档。");
   });
 
+  it("已收口运行的未配对文件工具事件不会继续显示进行中", () => {
+    const running: Run = {
+      id: "run_file",
+      threadId: "thread_file",
+      status: "running",
+      createdAt: "",
+      updatedAt: "",
+    };
+    const events: readonly RunEvent[] = [
+      {
+        eventId: "file-start",
+        sequence: 0,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "tool.started",
+        payload: {
+          name: "write_file",
+          callId: "file",
+          presentation: { action: "write", title: "hello.md" },
+        },
+      },
+    ];
+    const live = renderToStaticMarkup(<RunTranscript run={running} events={events} />);
+    expect(live).toContain("正在写入");
+    expect(live).toContain("tool-activity is-running");
+    const settled = renderToStaticMarkup(
+      <RunTranscript run={{ ...running, status: "succeeded" }} events={events} />,
+    );
+    expect(settled).not.toContain("正在写入");
+    expect(settled).not.toContain("tool-activity is-running");
+    expect(settled).toContain("工具步骤未记录结果");
+  });
+
   it("单个已结束工具活动直接展示，多个活动仍使用执行阶段折叠区", () => {
     const singleToolEvents: readonly RunEvent[] = [
       {

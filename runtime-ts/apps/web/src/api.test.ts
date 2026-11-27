@@ -2,6 +2,50 @@ import { describe, expect, it, vi } from "vitest";
 import { canPreviewArtifact, normalizeRunEvent, RuntimeApi } from "./api.js";
 
 describe("RuntimeApi", () => {
+  it("仅当前 Bearer 的 401 结束工作台会话，旧响应和服务故障不触发登出", async () => {
+    let rejectOld!: (response: Response) => void;
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          rejectOld = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 401 }));
+    const api = new RuntimeApi(fetcher);
+    const invalidate = vi.fn();
+    api.setSessionInvalidationHandler(invalidate);
+    api.setAccessToken("old-token");
+    const oldRequest = api.listThreads();
+    api.setAccessToken("new-token");
+    rejectOld(new Response("{}", { status: 401 }));
+    await expect(oldRequest).rejects.toMatchObject({ status: 401 });
+    await expect(api.listThreads()).rejects.toMatchObject({ status: 500, retryable: true });
+    expect(invalidate).not.toHaveBeenCalled();
+    await expect(api.listThreads()).rejects.toMatchObject({ status: 401 });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("仅在确认连续性路由未注册时停止该探测，不把单个任务的 404 当成部署能力", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: "NOT_FOUND" } }), { status: 404 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ message: "Route GET:/v1/threads/thread_next/continuity not found" }),
+          { status: 404 },
+        ),
+      );
+    const api = new RuntimeApi(fetcher);
+    await expect(api.getThreadContinuity("thread_deleted")).resolves.toBeUndefined();
+    await expect(api.getThreadContinuity("thread_next")).resolves.toBeUndefined();
+    await expect(api.getThreadContinuity("thread_other")).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("按当前用户读取、提交及撤销 Run 反馈", async () => {
     const fetcher = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -505,7 +549,12 @@ describe("RuntimeApi", () => {
 
     const fallbackFetcher = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: {} }), { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ message: "Route POST:/v1/threads/thread_1/inputs not found" }),
+          { status: 404 },
+        ),
+      )
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -532,6 +581,18 @@ describe("RuntimeApi", () => {
       queuedRunId: "run_2",
     });
     expect(fallbackFetcher.mock.calls[1]?.[0]).toBe("/api/v1/threads/thread_1/runs");
+  });
+
+  it("已删除任务的输入 404 不改投旧运行入口", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: "NOT_FOUND", message: "任务不存在" } }), {
+        status: 404,
+      }),
+    );
+    await expect(
+      new RuntimeApi(fetcher).submitThreadInput("thread_deleted", "下一任务"),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("上传原始文件字节，并把返回的 Resource 版本附到统一输入", async () => {

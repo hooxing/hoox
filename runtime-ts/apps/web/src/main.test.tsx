@@ -6,14 +6,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appendFileReferences, type FileReference } from "@hoox/protocol/file-references";
 import { DEFAULT_BRANDING, type BrandConfiguration } from "@hoox/protocol";
 import { BrandingProvider } from "@hoox/ui-theme/branding";
-import { developmentSession, persistAccountSession } from "./account-access.js";
+import { developmentSession, persistAccountSession, readAccountSession } from "./account-access.js";
 import {
   ApiError,
+  RuntimeApi,
   type Artifact,
   type HistoryFile,
   type Run,
   type TeamSummary,
   type Thread,
+  type ThreadInputReceipt,
 } from "./api.js";
 import {
   App,
@@ -657,6 +659,72 @@ describe("Agent 工作台恢复接入", () => {
     );
   });
 
+  it("新会话落点选择器与创建请求使用同一个团队空间", async () => {
+    const team: TeamSummary = {
+      id: "tenant_e1_team",
+      displayName: "工作台测试团队",
+      role: "member",
+      joinedAt: "2026-08-09T08:00:00.000Z",
+    };
+    const created = thread("thread_created_in_team");
+    let activeTenant: string | undefined;
+    const createThread = vi.fn(async () => {
+      expect(activeTenant).toBe(team.id);
+      return created;
+    });
+    const createRun = vi.fn(async () => {
+      expect(activeTenant).toBe(team.id);
+      return run("run_created_in_team", created.id);
+    });
+    const listThreadsForTenant = vi.fn(async (_tenant?: string) => []);
+    const apiClient = apiFixture({
+      listTeams: vi.fn(async () => [team]),
+      createTeam: vi.fn(async () => team),
+      listTeamMembers: vi.fn(async () => []),
+      addTeamMember: vi.fn(),
+      changeTeamMemberRole: vi.fn(),
+      removeTeamMember: vi.fn(),
+      dissolveTeam: vi.fn(),
+      listThreadsForTenant,
+      createThread,
+      createRun,
+      setTenantId: vi.fn((tenant) => {
+        activeTenant = tenant;
+      }),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+    const destination = container.querySelector<HTMLSelectElement>(
+      ".empty.primary .agent-picker select",
+    );
+    if (destination === null) throw new Error("未找到会话创建落点");
+    expect(destination.value).toBe("");
+    expect(listThreadsForTenant.mock.calls.filter(([tenant]) => tenant === undefined)).toHaveLength(
+      1,
+    );
+    await act(async () => {
+      destination.value = team.id;
+      destination.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(destination.selectedOptions[0]?.textContent).toBe(team.displayName);
+    const textarea = container.querySelector<HTMLTextAreaElement>(".composer textarea");
+    if (textarea === null) throw new Error("未找到输入框");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+        textarea,
+        "团队任务",
+      );
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () =>
+      textarea
+        .closest("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    expect(createThread).toHaveBeenCalledWith("团队任务", "agent_default");
+    expect(createRun).toHaveBeenCalledWith(created.id, "团队任务");
+  });
+
   it("个人任务永久保留，团队切换只改变团队任务栏，新建会话始终回到个人空间", async () => {
     const personalThread = thread("personal_task");
     const teamThread = thread("team_task");
@@ -1296,7 +1364,8 @@ describe("Agent 工作台恢复接入", () => {
     expect(apiClient.listArtifacts).toHaveBeenCalledWith(active.id, latest.id);
   });
 
-  it("切换和切回都会重新恢复，迟到错误与加载不会污染其他 Thread", async () => {
+  it("只在慢恢复时显示占位，迟到错误与加载不会污染其他 Thread", async () => {
+    vi.useFakeTimers();
     const first = thread("thread_1");
     const second = thread("thread_2");
     const recoveries: Array<{
@@ -1324,6 +1393,8 @@ describe("Agent 工作台恢复接入", () => {
     act(() => secondButton.click());
     await settleEffects();
     expect(recoveries).toHaveLength(2);
+    expect(container.textContent).not.toContain("正在恢复最新运行");
+    await act(async () => vi.advanceTimersByTimeAsync(200));
     expect(container.textContent).toContain("正在恢复最新运行");
 
     await act(async () => recoveries[0]?.request.reject(new ApiError("旧恢复失败", 503, true)));
@@ -1333,6 +1404,7 @@ describe("Agent 工作台恢复接入", () => {
     await act(async () => recoveries[1]?.request.resolve([]));
     expect(container.textContent).toContain("就绪");
     expect(container.textContent).toContain("从一个明确的目标开始");
+    expect(container.textContent).not.toContain("正在恢复最新运行");
 
     const firstButton = [...container.querySelectorAll<HTMLButtonElement>(".thread")].find(
       (button) => button.textContent?.includes(first.title),
@@ -1345,6 +1417,188 @@ describe("Agent 工作台恢复接入", () => {
     await act(async () => recoveries[2]?.request.resolve([]));
     expect(container.querySelector("h1")?.textContent).toBe(first.title);
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("切换会话同步移除旧文件气泡，迟到的运行查询不发起辅助请求", async () => {
+    vi.useFakeTimers();
+    const first = thread("thread_old_file");
+    const second = thread("thread_clean");
+    const live = { ...run("run_file", first.id), status: "running" as const };
+    const late = deferred<Run>();
+    const getRun = vi.fn().mockResolvedValueOnce(live).mockReturnValueOnce(late.promise);
+    const listArtifacts = vi.fn(async () => []);
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [first, second]),
+      listLatestRuns: vi.fn(async (threadId: string) => (threadId === first.id ? [live] : [])),
+      getRun,
+      listArtifacts,
+      listEvents: vi.fn(async () => ({
+        attemptId: "attempt",
+        items: [
+          {
+            sequence: 0,
+            eventId: "deliver",
+            occurredAt: live.createdAt,
+            kind: "agent_event",
+            type: "tool.started",
+            payload: {
+              name: "write_file",
+              callId: "file",
+              presentation: { action: "write", title: "hello.md" },
+            },
+          },
+        ],
+      })),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+    expect(container.textContent).toContain("正在生成文件");
+    await act(async () => vi.advanceTimersByTimeAsync(1_200));
+    expect(getRun).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>(".thread")]
+        .find((button) => button.textContent?.includes(second.title))
+        ?.click(),
+    );
+    await act(async () => late.resolve(live));
+    expect(container.querySelector("h1")?.textContent).toBe(second.title);
+    expect(container.textContent).not.toContain("正在生成文件");
+    expect(container.textContent).not.toContain("正在恢复最新运行");
+    expect(listArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("过期时退出工作台并停止下一轮请求", async () => {
+    vi.useFakeTimers();
+    persistAccountSession(window.localStorage, {
+      ...developmentSession,
+      expiresAt: new Date(Date.now() + 2_000).toISOString(),
+    });
+    const selected = thread("thread_expiry");
+    const live = { ...run("run_expiry", selected.id), status: "running" as const };
+    const getRun = vi.fn(async () => live);
+    const setAccessToken = vi.fn();
+    const exchangeIdentitySession = vi.fn(async () => developmentSession);
+    const { container } = mount(
+      apiFixture({
+        listThreads: vi.fn(async () => [selected]),
+        listLatestRuns: vi.fn(async () => [live]),
+        getRun,
+        setAccessToken,
+        exchangeIdentitySession,
+      }),
+    );
+    await settleEffects();
+    expect(container.querySelector(".workspace")).not.toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(container.querySelector(".workspace")).toBeNull();
+    expect(readAccountSession(window.localStorage)).toBeUndefined();
+    expect(setAccessToken).toHaveBeenLastCalledWith(undefined);
+    const requests = getRun.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(20_000));
+    expect(getRun).toHaveBeenCalledTimes(requests);
+    expect(exchangeIdentitySession).not.toHaveBeenCalled();
+  });
+
+  it("收到工作台会话的 401 后返回登录，并停止自动探测", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 401 }));
+    const runtime = new RuntimeApi(fetcher);
+    const { container } = mount(
+      apiFixture({
+        listThreads: runtime.listThreads.bind(runtime),
+        setAccessToken: runtime.setAccessToken.bind(runtime),
+        setSessionInvalidationHandler: runtime.setSessionInvalidationHandler.bind(runtime),
+      }),
+    );
+    await settleEffects();
+    expect(container.querySelector(".workspace")).toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("删除的会话停止后台发现，保留已渲染的对话", async () => {
+    vi.useFakeTimers();
+    const selected = thread("thread_deleted");
+    const listLatestRuns = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockRejectedValue(new ApiError("任务不存在", 404, false));
+    const { container } = mount(
+      apiFixture({ listThreads: vi.fn(async () => [selected]), listLatestRuns }),
+    );
+    await settleEffects();
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(listLatestRuns).toHaveBeenCalledTimes(2);
+    expect(container.querySelector("h1")?.textContent).toBe(selected.title);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("轮询真实的 500 退避并显示错误，恢复后清除错误", async () => {
+    vi.useFakeTimers();
+    const selected = thread("thread_poll_retry");
+    const live = { ...run("run_retry", selected.id), status: "running" as const };
+    const getRun = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError("运行读取失败", 500, true))
+      .mockResolvedValue(live);
+    const { container } = mount(
+      apiFixture({
+        listThreads: vi.fn(async () => [selected]),
+        listLatestRuns: vi.fn(async () => [live]),
+        getRun,
+      }),
+    );
+    await settleEffects();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("运行读取失败");
+    await act(async () => vi.advanceTimersByTimeAsync(2_399));
+    expect(getRun).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(getRun).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("回执读取保留 API 实例，不重叠请求，404 后停止轮询", async () => {
+    vi.useFakeTimers();
+    const selected = thread("thread_receipt_pending");
+    const receipt: ThreadInputReceipt = {
+      receiptId: "receipt_pending",
+      inputSequence: 1,
+      requestedMode: "steer",
+      disposition: "pending_steer",
+      createdAt: selected.createdAt,
+      updatedAt: selected.updatedAt,
+    };
+    const pending = deferred<ThreadInputReceipt>();
+    const getThreadInputReceipt = vi.fn(function (this: AppApi) {
+      expect(this).toBe(apiClient);
+      return pending.promise;
+    });
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selected]),
+      submitThreadInput: vi.fn(async () => receipt),
+      getThreadInputReceipt,
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+    const textarea = container.querySelector<HTMLTextAreaElement>(".composer textarea");
+    if (textarea === null) throw new Error("未找到输入框");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+        textarea,
+        "补充要求",
+      );
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () =>
+      textarea
+        .closest("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(6_000));
+    expect(getThreadInputReceipt).toHaveBeenCalledExactlyOnceWith(selected.id, receipt.receiptId);
+    await act(async () => pending.reject(new ApiError("回执不存在", 404, false)));
+    await act(async () => vi.advanceTimersByTimeAsync(12_000));
+    expect(getThreadInputReceipt).toHaveBeenCalledTimes(1);
   });
 
   it("同 Thread 新建 Run 后使在途恢复失效，迟到空结果不能覆盖新 Run", async () => {

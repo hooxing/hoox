@@ -120,6 +120,29 @@ describe("工作台滚动区域样式", () => {
   });
 });
 
+describe("新建会话空间选择器样式", () => {
+  it("去除原生下拉外观并复用工作台语义 Token 与 40px 点击高度", () => {
+    expect(styles).toMatch(
+      /\.agent-picker\s*\{[^}]*gap:\s*var\(--space-2\);[^}]*color:\s*var\(--text-secondary\);[^}]*font-size:\s*var\(--text-sm\);/su,
+    );
+    expect(styles).toMatch(
+      /\.agent-picker select\s*\{[^}]*min-height:\s*40px;[^}]*border:\s*1px solid var\(--border-strong\);[^}]*border-radius:\s*var\(--radius-md\);[^}]*color:\s*var\(--text-primary\);[^}]*background:\s*var\(--surface-raised\);[^}]*font:\s*inherit;/su,
+    );
+    expect(styles).toMatch(
+      /\.agent-picker select:hover:not\(:disabled\)\s*\{[^}]*background:\s*var\(--surface-hover\);/su,
+    );
+    expect(styles).toMatch(
+      /\.agent-picker select:disabled\s*\{[^}]*color:\s*var\(--action-disabled-text\);[^}]*background:\s*var\(--action-disabled\);/su,
+    );
+    expect(styles).toMatch(
+      /\.space-picker-control select\s*\{[^}]*appearance:\s*none;[^}]*-webkit-appearance:\s*none;[^}]*text-overflow:\s*ellipsis;/su,
+    );
+    expect(styles).toMatch(
+      /\.space-picker-chevron\s*\{[^}]*pointer-events:\s*none;[^}]*color:\s*var\(--text-secondary\);/su,
+    );
+  });
+});
+
 describe("正式首页按钮可读性", () => {
   it("部署按钮默认和悬停保持同一组高对比颜色", () => {
     const landing = readFileSync(

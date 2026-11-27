@@ -1938,18 +1938,76 @@ h2 {
 }
 .agent-picker {
   display: inline-flex;
+  max-width: 100%;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-sm);
 }
 .agent-picker select {
-  max-width: 256px;
-  padding: 8px 32px 8px 12px;
+  min-height: 40px;
+  max-width: min(256px, 100%);
+  padding: var(--space-2) var(--space-6) var(--space-2) var(--space-3);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   color: var(--text-primary);
   background: var(--surface-raised);
+  font: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast),
+    background var(--motion-fast),
+    color var(--motion-fast);
+}
+.agent-picker select:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.agent-picker select:disabled {
+  cursor: not-allowed;
+  border-color: var(--border-default);
+  color: var(--action-disabled-text);
+  background: var(--action-disabled);
+}
+.agent-picker select option {
+  color: var(--text-primary);
+  background: var(--surface-raised);
+}
+.space-picker > span:first-child {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.space-picker-control {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(256px, 100%);
+  flex: 0 1 auto;
+  align-items: center;
+}
+.space-picker-control select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding-right: calc(var(--space-3) + var(--space-5));
+  appearance: none;
+  -webkit-appearance: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.space-picker-chevron {
+  position: absolute;
+  right: var(--space-3);
+  pointer-events: none;
+  color: var(--text-secondary);
+  transition: color var(--motion-fast);
+}
+.space-picker-control select:hover:not(:disabled) + .space-picker-chevron {
+  color: var(--text-primary);
+}
+.space-picker-control select:disabled + .space-picker-chevron {
+  color: var(--action-disabled-text);
 }
 .suggested-question {
   padding: 8px 12px;

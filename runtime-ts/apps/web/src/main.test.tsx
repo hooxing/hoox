@@ -725,6 +725,60 @@ describe("Agent 工作台恢复接入", () => {
     expect(createRun).toHaveBeenCalledWith(created.id, "团队任务");
   });
 
+  it("新会话空间选择器保留可访问标签与自定义控件结构，并支持切回个人空间", async () => {
+    const team: TeamSummary = {
+      id: "tenant_picker_team",
+      displayName: "设计协作团队",
+      role: "owner",
+      joinedAt: "2026-08-09T08:00:00.000Z",
+    };
+    const setTenantId = vi.fn();
+    const apiClient = apiFixture({
+      listTeams: vi.fn(async () => [team]),
+      createTeam: vi.fn(async () => team),
+      listTeamMembers: vi.fn(async () => []),
+      addTeamMember: vi.fn(),
+      changeTeamMemberRole: vi.fn(),
+      removeTeamMember: vi.fn(),
+      dissolveTeam: vi.fn(),
+      listThreadsForTenant: vi.fn(async () => []),
+      setTenantId,
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    const picker = container.querySelector<HTMLLabelElement>(
+      ".empty.primary .agent-picker.space-picker",
+    );
+    const destination = picker?.querySelector<HTMLSelectElement>(".space-picker-control select");
+    const chevron = picker?.querySelector(".space-picker-control .space-picker-chevron");
+    if (picker === null || destination === null || destination === undefined) {
+      throw new Error("未找到新建会话空间选择器");
+    }
+    expect(destination.id).not.toBe("");
+    expect(picker.htmlFor).toBe(destination.id);
+    expect(picker.querySelector("span")?.textContent).toBe("创建到");
+    expect(Array.from(destination.labels ?? [])).toContain(picker);
+    expect(chevron?.getAttribute("aria-hidden")).toBe("true");
+    expect(destination.value).toBe("");
+    expect(destination.selectedOptions[0]?.textContent).toBe("个人空间");
+
+    await act(async () => {
+      destination.value = team.id;
+      destination.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(setTenantId).toHaveBeenLastCalledWith(team.id);
+    expect(destination.selectedOptions[0]?.textContent).toBe(team.displayName);
+
+    await act(async () => {
+      destination.value = "";
+      destination.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(setTenantId).toHaveBeenLastCalledWith(undefined);
+    expect(destination.value).toBe("");
+    expect(destination.selectedOptions[0]?.textContent).toBe("个人空间");
+  });
+
   it("个人任务永久保留，团队切换只改变团队任务栏，新建会话始终回到个人空间", async () => {
     const personalThread = thread("personal_task");
     const teamThread = thread("team_task");

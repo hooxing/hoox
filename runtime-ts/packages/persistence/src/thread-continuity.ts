@@ -133,14 +133,6 @@ export class PgThreadContinuityReadRepository implements ThreadContinuityReadPor
       this.pool,
       input.scope,
       async (client) => {
-        const authorized = await client.query(
-          `SELECT 1 FROM threads thread JOIN memberships membership
-             ON membership.tenant_id=thread.tenant_id AND membership.user_id=$2
-            AND membership.status='active'
-            WHERE thread.tenant_id=$1 AND thread.id=$3`,
-          [input.scope.tenantId, input.scope.userId, input.threadId],
-        );
-        if (authorized.rowCount !== 1) return { outcome: "not_found" } as const;
         const result = await client.query<{
           readonly context_sequence: string | null;
           readonly window_number: string | null;
@@ -155,11 +147,16 @@ export class PgThreadContinuityReadRepository implements ThreadContinuityReadPor
                   (SELECT session.state FROM thread_sandbox_sessions session
                     WHERE session.tenant_id=$1 AND session.thread_id=$2
                     ORDER BY session.generation DESC LIMIT 1) AS sandbox_state
-             FROM thread_execution_heads head
-             JOIN thread_context_streams stream
-               ON stream.tenant_id=head.tenant_id AND stream.thread_id=head.thread_id
-            WHERE head.tenant_id=$1 AND head.thread_id=$2`,
-          [input.scope.tenantId, input.threadId],
+             FROM threads thread
+             JOIN memberships membership
+               ON membership.tenant_id=thread.tenant_id AND membership.user_id=$3
+              AND membership.status='active'
+             LEFT JOIN thread_execution_heads head
+               ON head.tenant_id=thread.tenant_id AND head.thread_id=thread.id
+             LEFT JOIN thread_context_streams stream
+               ON stream.tenant_id=thread.tenant_id AND stream.thread_id=thread.id
+            WHERE thread.tenant_id=$1 AND thread.id=$2`,
+          [input.scope.tenantId, input.threadId, input.scope.userId],
         );
         const row = result.rows[0];
         if (row === undefined) return { outcome: "not_found" } as const;

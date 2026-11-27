@@ -8,6 +8,8 @@ Thread 是连续对话和 Workspace 的所有权根，Run 是一次待执行意�
 
 Run 只有成为队首后才能绑定 Context 与 Workspace 基线。完成、失败或取消不会删除 Thread 历史；新的 Run 从持久事实重建当前上下文。
 
+启用 Context V2 读取时，`GET /v1/threads/{threadId}/continuity` 返回授权可见 Thread 的队列深度、上下文序号及压缩窗口。尚未建立执行头或 Context 流时，缺失状态以零值表示；没有 Sandbox Session 时不返回 `sandboxState`。不存在或对当前调用者不可见的 Thread 仍返回 404。
+
 ## Context 事实与压缩
 
 用户消息、Assistant 结果、工具事实和控制输入写入 Thread 级持久事实流。Canonical Context 根据当前可信配置从这些事实重建。`pi-adapter` 直接向 `pi-agent-core` 的 `Agent` 提供有序消息；内存消息不是恢复事实源，也不建立 Pi Session 文件、entry/leaf 或分支树。

@@ -588,6 +588,8 @@ function normalizeDraft(draft: RolloutEntryDraft): NormalizedRolloutEntryDraft {
 /**
  * 仅负责 Runtime Rollout/Checkpoint 事实；不读取也不写入 Pi Session 本地文件。
  * 所有写入先锁定 scope advisory key，避免并发 append 分配相同 sequence。
+ * 执行事务只设置 Tenant；用户侧 RLS 会隐藏 Playground。actor 归属和有效 Membership
+ * 仍由授权查询复核，写入和恢复仍校验执行栅栏。
  */
 export class PgRuntimeRolloutRepository {
   constructor(private readonly pool: Pool) {}
@@ -689,7 +691,6 @@ export class PgRuntimeRolloutRepository {
           );
           const actorUserId = actor.rows[0]?.created_by_user_id;
           if (actorUserId === undefined) return { outcome: "not_authorized" } as const;
-          await client.query("SELECT set_config('app.user_id',$1,true)", [actorUserId]);
           const context: TrustedRolloutContext = Object.freeze({
             scope: Object.freeze({
               tenantId: fence.scope.tenantId,
@@ -741,7 +742,7 @@ export class PgRuntimeRolloutRepository {
     try {
       return await withTenantTransaction(
         this.pool,
-        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        { tenantId: input.context.scope.tenantId },
         async (client) => {
           if (!(await lockActiveExecutionFence(client, input.context))) return "not_authorized";
           return await this.openStreamLocked(client, input, "root");
@@ -864,7 +865,7 @@ export class PgRuntimeRolloutRepository {
     try {
       return await withTenantTransaction(
         this.pool,
-        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        { tenantId: input.context.scope.tenantId },
         async (client) => {
           if (!(await lockActiveExecutionFence(client, input.context)))
             return { outcome: "not_authorized" };
@@ -944,7 +945,7 @@ export class PgRuntimeRolloutRepository {
     try {
       return await withTenantTransaction(
         this.pool,
-        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        { tenantId: input.context.scope.tenantId },
         async (client) => {
           if (!(await lockActiveExecutionFence(client, input.context)))
             return { outcome: "not_authorized" };
@@ -1025,7 +1026,7 @@ export class PgRuntimeRolloutRepository {
     try {
       return await withTenantTransaction(
         this.pool,
-        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        { tenantId: input.context.scope.tenantId },
         async (client) => {
           const authorized = await client.query(
             `SELECT 1 FROM runtime_rollout_streams stream
@@ -1108,7 +1109,7 @@ export class PgRuntimeRolloutRepository {
     try {
       return await withTenantTransaction(
         this.pool,
-        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        { tenantId: input.context.scope.tenantId },
         async (client) => {
           if (!(await lockActiveExecutionFence(client, input.context))) {
             return { outcome: "not_authorized" };
@@ -1254,7 +1255,7 @@ export class PgRuntimeRolloutRepository {
     try {
       return await withTenantTransaction(
         this.pool,
-        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        { tenantId: input.context.scope.tenantId },
         async (client) => {
           if (!(await lockActiveExecutionFence(client, input.context))) {
             return { outcome: "not_authorized" };
@@ -1474,7 +1475,7 @@ export class PgRuntimeRolloutRepository {
     try {
       return await withRetriedRepeatableReadTenantTransaction(
         this.pool,
-        { tenantId: input.context.scope.tenantId, userId: input.context.userId },
+        { tenantId: input.context.scope.tenantId },
         async (client) => {
           const params = scopeParams(input.context);
           const result = await client.query<RecoveryRow>(

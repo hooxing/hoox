@@ -85,6 +85,8 @@ Tool 结果只持久化由 Runtime 按工具名与成败固定编码的受控回
 
 `runs.origin` 是数据库持久化且由领取快照投影的可信来源事实；执行层只用它路由能力，持久化事务仍须在写入边界复核。公开 API 认证上下文只在服务端将新 Run 来源设为 `api`，并与 Run 和 Dispatch Outbox 在同一 PostgreSQL 事务写入；请求体不能声明或覆盖来源。`playground` Run 可以写入自身轨迹、Rollout、临时 Workspace 与独立 Mock 结果，但不得通过下述受控入口改变跨 Run 正式业务状态或触达真实外部服务。禁止边界失败关闭，不得因 UI、工具 Schema 或调用者参数宣称来源。
 
+Worker 的 Rollout 执行事务使用 Tenant 作用域，不把 Thread 创建者设为 `app.user_id`，否则用户侧 RLS 会隐藏 Playground Thread。Rollout 仍在数据库内核对 Thread 创建者与有效 Membership，写入和恢复仍校验执行栅栏；普通用户读取接口的可见性不变。
+
 隔离覆盖定时任务创建/更新/暂停/恢复/删除，长期记忆摄取入队及待消费任务认领，Artifact 发布与普通 Resource 搜索/下载/资源目录，业务 Webhook Outbox 的入队/领取/发送许可，以及 Skill、Thread/Workspace 和其他用户级资源写入。Run/Thread 私有 Todo、消息、轨迹与临时 Sandbox 操作仍归属 Playground 自身；已登记的外部工具与客户端工具必须按 Mock 边界处理，不能以“只读”标签跳过来源检查。正式 Run 的 Webhook 订阅保持启用；遗留或错误写入的 Playground Outbox 仅结算该条投递。
 
 Mock 仅用于 Playground 外部工具与客户端工具，配置随 Run 快照持久化；命中时不消费许可、不解析真实目标或触达 Transport。Mock 模式只出现在受控回执与轨迹中，不进入 system prompt、developer prompt 或工具 Schema。普通、评测和 API Run 永不读取 Mock。
@@ -101,6 +103,7 @@ Playground 不对 Sandbox 禁网：`exec_command`、Skill 脚本等 Sandbox 命�
 - pause、connect、create、materialize 采用 intent/outbox Saga：持有有效租约时先提交意图，外部调用成功后才在同一事务线性化事件、Rollout 与决定事实。任何外部调用结果未知，或进程在意图后崩溃且没有成功证明，都持久化为 UNKNOWN 并停止自动重试。
 - 恢复输入只来自 PostgreSQL 与 stable Blob；Pi Session 内存与 Sandbox 内状态不是事实源。
 - 普通 Worker 永远不能重领 running Run。普通 claim 明确返回 `recovery_required` 后，Worker 只调用窄恢复入口把过期 Attempt 固化为 `recovery_required`；若该 Attempt 持有 Thread Sandbox 租约，同一事务写入唯一的 terminate effect、把 Session 隔离为 `unknown` 并释放租约，远端关闭交给 Scheduler。
+- 队列停留时间不是 Attempt 租约。已入队且可投递、但尚无 Attempt 的 Run 仍由 Dispatch Outbox 重试；不会仅因排队太久被自动判为失败。Attempt 已经进入 `recovery_required` 时，普通 Worker 不再执行它，即使 Run 仍显示原有的 `running` 状态。
 
 ## 取消与失败
 

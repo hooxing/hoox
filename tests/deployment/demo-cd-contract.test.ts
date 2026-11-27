@@ -304,7 +304,7 @@ describe("Demo 持续部署契约", () => {
         "/v1/admin/control/overview?x=1:/v1/admin/control/agent-definitions/agent_example/revisions",
       ],
       ["GET", `${base}/agent_example/%2e%2e/revisions`],
-    ])
+    ] as const)
       expect(matches(token, method, uri), `${method} ${uri}`).toBe(false);
     const session = nginx.split("location ^~ /v1/admin/ {")[1]?.split("\n    }")[0];
     expect(session).toContain("error_page 418 = @hoox_demo_cli;");

@@ -189,6 +189,7 @@ describe("Pi Faux deliver_file 纵向链路", () => {
 
     expect(sourcePaths).toEqual(["/workspace/reports/missing.pdf", "/workspace/reports/final.pdf"]);
     expect(initialContext).toContain("deliver_file");
+    expect(initialContext).toContain("只写文件或在答复中给出路径不会让用户看到或下载文件");
     expect(initialContext).not.toContain("declare_deliverables");
     expect(initialContext).not.toContain("publish_artifact");
     expect(correctionContext).toContain("FILE_NOT_FOUND");

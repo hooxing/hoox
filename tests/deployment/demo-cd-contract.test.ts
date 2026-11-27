@@ -159,6 +159,19 @@ describe("Demo 持续部署契约", () => {
     expect(prepare).toContain("AS admin_control_safe");
   });
 
+  it("API 与 Worker 的 Compose 环境强制启用历史文件系统", () => {
+    const compose = source("deploy/demo/docker-compose.yml");
+    for (const service of ["api", "worker"]) {
+      const block = compose.match(
+        new RegExp(`^  ${service}:\\n([\\s\\S]*?)(?=^  [a-z][a-z-]*:|^volumes:)`, "m"),
+      );
+      expect(block, `缺少 ${service} 服务`).not.toBeNull();
+      expect(block?.[1]).toMatch(
+        /^ {4}environment:\n(?: {6}[^\n]*\n)* {6}HISTORY_FILESYSTEM_ENABLED: "true"$/m,
+      );
+    }
+  });
+
   it("数据库和对象存储只绑定回环，Demo 不再运行独立轨迹容器", () => {
     const compose = source("deploy/demo/docker-compose.yml");
     expect(compose).toContain('"127.0.0.1:15432:5432"');

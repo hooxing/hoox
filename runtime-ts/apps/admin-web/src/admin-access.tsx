@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useBranding, BrandLogo } from "@hoox/ui-theme/branding";
+import { readAdminAccessToken } from "./admin-session.js";
 
 type InstallationStatus = { initialized: boolean; setupTokenRequired: boolean };
 const sessionKey = "hoox.auth-session.v2";
@@ -36,15 +37,15 @@ export function AdminAccessGate({ children }: { readonly children: ReactNode }) 
       if (!active) return;
       if (installation.initialized) {
         try {
-          const raw = localStorage.getItem(sessionKey);
-          const session = raw === null ? null : (JSON.parse(raw) as { accessToken?: string });
-          if (typeof session?.accessToken === "string") {
+          const accessToken = readAdminAccessToken();
+          if (accessToken !== undefined) {
             await request("/v1/auth/admin-principal", {
-              headers: { authorization: `Bearer ${session.accessToken}` },
+              headers: { authorization: `Bearer ${accessToken}` },
             });
             if (active) setAuthenticated(true);
             return;
           }
+          localStorage.removeItem(sessionKey);
         } catch {
           if (active) localStorage.removeItem(sessionKey);
         }

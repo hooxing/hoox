@@ -12,6 +12,7 @@
 - Admin Web 从同源工作台的 `hoox.auth-session.v2` 读取未过期 Hoox access token。Nginx 仅在会话属于配置的 Demo 管理员用户时放行后台 API；上游 `Authorization` 由 root-only 配置覆盖为 Admin Control development Token。
 - [CLI](../reference/cli.md#后台凭据与连接) 使用同一站点 origin。仅 Agent Definition 的 Revision 列表、Revision 导出（`GET`）以及新建或指定 Definition 的导入（`POST`）可携带 `hoox_at_` 后台访问令牌直接进入 Admin Control；代理不注入开发令牌。后台逐请求验证令牌、当前角色和作用域。其他后台路径仍经过 Demo 管理员会话关卡。
 - 公开资源上传由 Nginx 精确转发到 API 上传路由并保留请求缓冲，避免慢速请求占用 API handler；网关上限为 17 MiB，应用上限为 16 MiB。16–17 MiB 请求由应用返回公开契约定义的 JSON `413 PAYLOAD_TOO_LARGE`，超过网关上限时由该入口返回同契约 JSON 413。
+- API 与 Worker 的历史文件系统由 Compose 强制启用（`HISTORY_FILESYSTEM_ENABLED=true`），不受各自 shared env 中同名设置覆盖。
 - Worker 可把 development 诊断镜像写入容器本地文件系统以支持容器内排障；Demo 不持久化该镜像，也不运行 Trajectory Web 服务。后台运行记录通过受限 PostgreSQL 投影读取持久 Run 事件。升级时 Compose 使用 `--remove-orphans` 清除旧版独立轨迹容器，但不删除数据库或对象存储数据卷。
 - Demo 使用 development 装配以复用单机入口，但必须同时设置 `DEMO_PUBLIC_ACCESS_ENABLED=true`、`DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc`、`DEMO_ADMIN_USER_ID=<Demo 管理员用户 ID>` 和 `DEV_AUTH_ENABLED=false`。固定开发身份、缺失管理员用户、明文 origin 和非回环 API 监听都会在解析期失败。
 

@@ -17,6 +17,7 @@ import {
   Send,
   Square,
   Users,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import {
@@ -457,14 +458,14 @@ export function RunTranscript({
 }
 
 const toolActionText: Record<ToolAction, { running: string; completed: string; failed: string }> = {
-  search: { running: "正在搜索", completed: "已搜索", failed: "搜索失败" },
-  read: { running: "正在读取", completed: "已读取", failed: "读取失败" },
-  create: { running: "正在创建", completed: "已创建", failed: "创建失败" },
-  write: { running: "正在写入", completed: "已写入", failed: "写入失败" },
-  edit: { running: "正在修改", completed: "已修改", failed: "修改失败" },
-  deliver: { running: "正在交付", completed: "已交付", failed: "交付失败" },
-  command: { running: "正在执行命令", completed: "已执行命令", failed: "命令执行失败" },
-  other: { running: "正在执行", completed: "已完成", failed: "执行失败" },
+  search: { running: "正在搜索", completed: "已搜索", failed: "搜索步骤未完成" },
+  read: { running: "正在读取", completed: "已读取", failed: "读取步骤未完成" },
+  create: { running: "正在创建", completed: "已创建", failed: "创建步骤未完成" },
+  write: { running: "正在写入", completed: "已写入", failed: "写入步骤未完成" },
+  edit: { running: "正在修改", completed: "已修改", failed: "修改步骤未完成" },
+  deliver: { running: "正在交付", completed: "已交付", failed: "交付步骤未完成" },
+  command: { running: "正在执行命令", completed: "已执行命令", failed: "命令步骤未完成" },
+  other: { running: "正在执行", completed: "已完成", failed: "步骤未完成" },
 };
 
 function ToolActivity({ block }: { readonly block: Extract<ConversationBlock, { type: "tool" }> }) {
@@ -473,16 +474,14 @@ function ToolActivity({ block }: { readonly block: Extract<ConversationBlock, { 
       {block.status === "running" ? (
         <LoaderCircle className="spin" size={14} aria-hidden="true" />
       ) : block.status === "failed" ? (
-        <X size={14} aria-hidden="true" />
+        <TriangleAlert size={14} aria-hidden="true" />
       ) : (
         <Check size={14} aria-hidden="true" />
       )}
       <span>{toolActionText[block.action][block.status]}</span>
       {block.title !== undefined && <strong>· {block.title}</strong>}
       {block.status === "failed" && block.failure !== undefined && (
-        <span className="tool-failure-detail">
-          {block.failure.message} <code>{block.failure.code}</code>
-        </span>
+        <span className="tool-failure-detail">{block.failure.message}</span>
       )}
     </div>
   );
@@ -2089,7 +2088,13 @@ export function ThreadHeader({
       </div>
       <div className="header-actions">
         {onFork !== undefined && (
-          <button type="button" className="quiet-button" onClick={onFork} disabled={actionLoading}>
+          <button
+            type="button"
+            className="quiet-button"
+            aria-label="新建分支"
+            onClick={onFork}
+            disabled={actionLoading}
+          >
             <GitBranch size={15} />
             <span>新建分支</span>
           </button>
@@ -2098,6 +2103,7 @@ export function ThreadHeader({
           <button
             type="button"
             className="quiet-button"
+            aria-label="发布到团队"
             onClick={onPublishToTeam}
             disabled={actionLoading}
           >
@@ -2109,6 +2115,7 @@ export function ThreadHeader({
           <button
             type="button"
             className="quiet-button"
+            aria-label={run.executionStatus === "recovery_required" ? "结束本次运行" : "停止运行"}
             onClick={onCancel}
             disabled={actionLoading}
           >

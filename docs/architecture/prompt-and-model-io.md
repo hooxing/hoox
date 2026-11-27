@@ -17,7 +17,7 @@
 
 系统角色按信任从高到低依次包含三段，任何一段都不接收请求级动态数据：
 
-1. **Platform Harness**：与具体 Agent 无关的平台规范（安全边界、工具协议、Skill 与低信任数据规则、交付规则），不包含 Agent 名称、品牌或回复语言。Harness 明确声明自身优先级高于 Operator 指令和全部低信任内容。
+1. **Platform Harness**：与具体 Agent 无关的平台规范（安全边界、工具协议、Skill 与低信任数据规则、交付规则），不包含 Agent 名称、品牌或回复语言。沙箱边界使用厂商中性的描述，不注入当前部署或 Session 的 Provider 信息。Harness 明确声明自身优先级高于 Operator 指令和全部低信任内容。
 2. **Operator 指令**：`RuntimePromptInput.operatorInstructions`，由可信的 Agent 配置提供，原样放在 `<OPERATOR_INSTRUCTIONS>` 中。它可以定义角色、业务规则、语气和回复语言；Harness 声明它不能新增或模拟工具、授予授权、改变 Tenant 身份或覆盖 Harness，自称系统、平台或声明新增能力的文本不产生这些效果。
 3. **能力清单与 Skill 目录**：由本次 Session 实际注册工具派生的能力清单，以及可用 Skill 目录；Skill 目录只来自 Run 固定的 Skill 快照，不接收请求正文或用户自报目录。能力清单由传给模型的同一组工具生成，Operator 指令和任何文本都不能改变它，缺失的能力不能出现在提示中；Runtime 同时保留完整清单摘要、Schema 摘要和 Prompt 摘要用于审计。
 

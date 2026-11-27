@@ -83,7 +83,7 @@ describe("Hoox 项目身份契约", () => {
       "你是 Hoox，由 Hoox 平台托管的受控 Agent",
     );
     expect(readText("runtime-ts/packages/prompt-builder/src/index.ts")).toContain(
-      "runtime-system-prompt.v17",
+      "runtime-system-prompt.v18",
     );
   });
 });

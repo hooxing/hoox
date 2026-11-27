@@ -121,6 +121,46 @@ describe("PostgreSQL Tool Observation adapter", () => {
     ).resolves.toEqual({ outcome: "unknown" });
   });
 
+  it("首次栅栏拒绝是确定冲突，但提交未知后的栅栏拒绝仍交恢复核对", async () => {
+    const missing = { append: async () => ({ outcome: "not_authorized" }) } as Pick<
+      PgRuntimeRolloutRepository,
+      "append"
+    >;
+    await expect(
+      new PgToolObservationRolloutAdapter(missing, context).appendToolResult(command),
+    ).resolves.toEqual({ outcome: "conflict" });
+
+    let calls = 0;
+    const unknownThenDenied = {
+      append: async () => {
+        calls += 1;
+        if (calls === 1) throw new PersistenceError("UNAVAILABLE", "提交结果未知");
+        return { outcome: "not_authorized" } as const;
+      },
+    } as Pick<PgRuntimeRolloutRepository, "append">;
+    await expect(
+      new PgToolObservationRolloutAdapter(unknownThenDenied, context).appendToolResult(command),
+    ).resolves.toEqual({ outcome: "unknown" });
+    expect(calls).toBe(2);
+  });
+
+  it("父调用闭合时确认开始事实但不把重放授权为 dispatch", async () => {
+    const repository = {
+      append: async () => ({ outcome: "created" as const, value: [] }),
+      appendPtcToolCall: async () => ({ outcome: "parent_closed" as const }),
+    } as Pick<PgRuntimeRolloutRepository, "append"> &
+      Partial<Pick<PgRuntimeRolloutRepository, "appendPtcToolCall">>;
+    await expect(
+      new PgToolObservationRolloutAdapter(repository, context).appendToolCall({
+        binding,
+        idempotencyKey: "call.closed.parent",
+        toolCallId: "call_adapter",
+        parentToolCallId: "parent_adapter",
+        toolName: "sandbox_command",
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+  });
+
   it("committed-but-unknown 使用同键同正文重放收敛", async () => {
     const calls: unknown[] = [];
     const repository = {

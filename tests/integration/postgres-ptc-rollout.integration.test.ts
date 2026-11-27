@@ -442,7 +442,7 @@ afterAll(async () => {
   if (admin !== undefined) await admin.end();
 });
 
-function committedButUnknownPool(upstream: Pool): Pool {
+function committedButUnknownPool(upstream: Pool, afterCommit?: () => Promise<void>): Pool {
   let armed = true;
   const connect = upstream.connect.bind(upstream);
   return new Proxy(upstream, {
@@ -456,6 +456,7 @@ function committedButUnknownPool(upstream: Pool): Pool {
           if (armed && args[0] === "COMMIT") {
             armed = false;
             // 真实提交已成功，仅丢弃提交响应；坏连接必须由事务边界丢弃后按同键核对。
+            await afterCommit?.();
             throw Object.assign(new Error("测试模拟提交响应未知"), { code: "ECONNRESET" });
           }
           return result;
@@ -464,6 +465,99 @@ function committedButUnknownPool(upstream: Pool): Pool {
       };
     },
   }) as Pool;
+}
+
+function rollbackAfterStreamInsertPool(
+  upstream: Pool,
+  insertFragment: string,
+): { readonly pool: Pool; readonly inserted: Promise<void>; readonly release: () => void } {
+  let signalInserted!: () => void;
+  let releaseInsert!: () => void;
+  const inserted = new Promise<void>((resolve) => {
+    signalInserted = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    releaseInsert = resolve;
+  });
+  let armed = true;
+  const connect = upstream.connect.bind(upstream);
+  const pool = new Proxy(upstream, {
+    get(target, property, receiver) {
+      if (property !== "connect") return Reflect.get(target, property, receiver);
+      return async () => {
+        const client = await connect();
+        const query = client.query.bind(client);
+        client.query = (async (...args: unknown[]) => {
+          const result = await (query as (...values: unknown[]) => Promise<unknown>)(...args);
+          const sql = typeof args[0] === "string" ? args[0] : "";
+          if (armed && sql.includes(insertFragment)) {
+            armed = false;
+            signalInserted();
+            await gate;
+            throw new Error("测试强制竞争建流事务回滚");
+          }
+          return result;
+        }) as typeof client.query;
+        return client;
+      };
+    },
+  }) as Pool;
+  return { pool, inserted, release: releaseInsert };
+}
+
+function observingAdvisoryWaitPool(
+  upstream: Pool,
+  requestNumber = 1,
+): {
+  readonly pool: Pool;
+  readonly requested: Promise<number>;
+} {
+  let signalRequested!: (pid: number) => void;
+  const requested = new Promise<number>((resolve) => {
+    signalRequested = resolve;
+  });
+  let advisoryRequests = 0;
+  const connect = upstream.connect.bind(upstream);
+  const pool = new Proxy(upstream, {
+    get(target, property, receiver) {
+      if (property !== "connect") return Reflect.get(target, property, receiver);
+      return async () => {
+        const client = await connect();
+        const query = client.query.bind(client);
+        client.query = (async (...args: unknown[]) => {
+          const sql = typeof args[0] === "string" ? args[0] : "";
+          if (sql.includes("pg_advisory_xact_lock(hashtextextended")) {
+            advisoryRequests += 1;
+            if (advisoryRequests === requestNumber) {
+              const pidResult = await (
+                query as (...values: unknown[]) => Promise<{
+                  rows: { pid: number }[];
+                }>
+              )("SELECT pg_backend_pid() AS pid");
+              const pid = pidResult.rows[0]?.pid;
+              if (pid === undefined) throw new Error("未能读取流锁等待连接 PID");
+              signalRequested(pid);
+            }
+          }
+          return (query as (...values: unknown[]) => Promise<unknown>)(...args);
+        }) as typeof client.query;
+        return client;
+      };
+    },
+  }) as Pool;
+  return { pool, requested };
+}
+
+function observationBinding(scopedContext: TrustedRolloutContext) {
+  return {
+    ...scopedContext.scope,
+    rootRunId: scopedContext.fence.scope.rootRunId,
+    workspaceId: scopedContext.fence.scope.workspaceId,
+    runClaimToken: scopedContext.fence.runClaim.token,
+    runClaimEpoch: scopedContext.fence.runClaim.epoch,
+    workspaceLeaseRootRunId: scopedContext.fence.workspaceLease.rootRunId,
+    workspaceLeaseEpoch: scopedContext.fence.workspaceLease.epoch,
+  };
 }
 
 const binding = {
@@ -477,6 +571,267 @@ const binding = {
 };
 
 describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
+  it.each(["root_from_claim", "root_direct", "subagent"] as const)(
+    "%s 建流在竞争事务回滚且租约于等待中到期后拒绝插入",
+    async (operation) => {
+      const target = independentContext(`open_${operation}`);
+      await seedExecution(target, { createTenant: false });
+      let agentContext = target;
+      let insertFragment = "INSERT INTO runtime_agent_threads";
+      if (operation === "subagent") {
+        expect(
+          await repository.openRootStreamFromClaim({
+            fence: target.fence,
+            attemptId: target.scope.attemptId,
+            compatibility,
+          }),
+        ).toMatchObject({ outcome: "ready" });
+        const childId = agentThreadId(`lease_child_${unique}`);
+        await withTenantTransaction(runtime, { tenantId: target.scope.tenantId }, (client) =>
+          client.query(
+            `INSERT INTO runtime_agent_threads(
+               tenant_id,thread_id,run_id,attempt_id,agent_thread_id,parent_agent_thread_id,
+               canonical_path,kind,status,task
+             ) VALUES($1,$2,$3,$4,$5,$6,$7,'subagent','open','lease race')`,
+            [
+              target.scope.tenantId,
+              target.scope.threadId,
+              target.scope.runId,
+              target.scope.attemptId,
+              childId,
+              target.scope.agentThreadId,
+              `/root/lease_${unique}`,
+            ],
+          ),
+        );
+        agentContext = {
+          ...target,
+          scope: { ...target.scope, agentThreadId: childId },
+        };
+        insertFragment = "INSERT INTO runtime_rollout_streams";
+      }
+      const setClaimLease = (duration: string) =>
+        withTenantTransaction(migrator, { tenantId: target.scope.tenantId }, async (client) => {
+          const updated = await client.query<{ expires_at: string }>(
+            `UPDATE run_claims SET expires_at=clock_timestamp()+$3::interval
+              WHERE tenant_id=$1 AND attempt_id=$2 RETURNING expires_at::text`,
+            [target.scope.tenantId, target.scope.attemptId, duration],
+          );
+          const expiry = updated.rows[0]?.expires_at;
+          if (expiry === undefined) throw new Error("找不到建流竞争用 claim");
+          return expiry;
+        });
+      const open = (repo: PgRuntimeRolloutRepository, direct: boolean) =>
+        operation === "subagent"
+          ? repo.openAgentStreamFromClaim({
+              fence: target.fence,
+              attemptId: target.scope.attemptId,
+              compatibility,
+              agentThreadId: agentContext.scope.agentThreadId,
+              agentKind: "subagent",
+            })
+          : direct
+            ? repo.openRootStream({
+                context: target,
+                workspaceId: target.fence.scope.workspaceId,
+                rootRunId: target.fence.scope.rootRunId,
+                compatibility,
+              })
+            : repo.openRootStreamFromClaim({
+                fence: target.fence,
+                attemptId: target.scope.attemptId,
+                compatibility,
+              });
+      await setClaimLease("2 seconds");
+      const losing = rollbackAfterStreamInsertPool(runtime, insertFragment);
+      const first = open(new PgRuntimeRolloutRepository(losing.pool), operation === "root_direct");
+      let second: ReturnType<typeof open> | undefined;
+      try {
+        await losing.inserted;
+        const waitingPool = observingAdvisoryWaitPool(runtime);
+        const contender = new PgRuntimeRolloutRepository(waitingPool.pool);
+        second = open(contender, operation !== "root_direct");
+        const pid = await Promise.race([
+          waitingPool.requested,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("建流竞争者未请求流锁")), 1_000),
+          ),
+        ]);
+        await expect
+          .poll(
+            async () => {
+              const state = await admin.query<{ waiting: boolean }>(
+                "SELECT wait_event_type='Lock' AS waiting FROM pg_stat_activity WHERE pid=$1",
+                [pid],
+              );
+              return state.rows[0]?.waiting;
+            },
+            { timeout: 1_000 },
+          )
+          .toBe(true);
+        const expiry = await withTenantTransaction(
+          runtime,
+          { tenantId: target.scope.tenantId },
+          async (client) => {
+            const result = await client.query<{ expires_at: string }>(
+              "SELECT expires_at::text FROM run_claims WHERE tenant_id=$1 AND attempt_id=$2",
+              [target.scope.tenantId, target.scope.attemptId],
+            );
+            return result.rows[0]?.expires_at;
+          },
+        );
+        if (expiry === undefined) throw new Error("建流竞争用 claim 已丢失");
+        await withTenantTransaction(runtime, { tenantId: target.scope.tenantId }, (client) =>
+          client.query(
+            "SELECT pg_sleep(greatest(0,extract(epoch FROM $1::timestamptz-clock_timestamp())))",
+            [expiry],
+          ),
+        );
+      } finally {
+        losing.release();
+      }
+      await first.catch(() => undefined);
+      const secondResult = await second;
+      expect(typeof secondResult === "string" ? secondResult : secondResult.outcome).toBe(
+        "not_authorized",
+      );
+      const counts = await withTenantTransaction(
+        runtime,
+        { tenantId: target.scope.tenantId },
+        async (client) =>
+          client.query<{ streams: string; agent_threads: string }>(
+            `SELECT
+               (SELECT count(*) FROM runtime_rollout_streams WHERE tenant_id=$1 AND attempt_id=$2
+                 AND agent_thread_id=$3)::text AS streams,
+               (SELECT count(*) FROM runtime_agent_threads WHERE tenant_id=$1 AND attempt_id=$2
+                 AND agent_thread_id=$3)::text AS agent_threads`,
+            [target.scope.tenantId, target.scope.attemptId, agentContext.scope.agentThreadId],
+          ),
+      );
+      expect(counts.rows[0]).toEqual({
+        streams: "0",
+        agent_threads: operation === "subagent" ? "1" : "0",
+      });
+      await setClaimLease("30 minutes");
+    },
+  );
+
+  it.each([
+    { operation: "append", lease: "claim" },
+    { operation: "checkpoint", lease: "workspace" },
+    { operation: "ptc_start", lease: "workspace" },
+    { operation: "ptc_result", lease: "claim" },
+  ] as const)("$operation 等待流锁时 $lease 租约过期，不写入事实", async ({ operation, lease }) => {
+    const target = independentContext(operation);
+    const { scope } = target;
+    const tenant = { tenantId: scope.tenantId };
+    await seedExecution(target, { createTenant: false });
+    await openPtcParent(target);
+    const append = () =>
+      repository.append({
+        context: target,
+        idempotencyKey: "outer.complete",
+        entries: [{ kind: "tool_result", toolCallId: parentToolCallId, body: { finished: true } }],
+      });
+    const appendPtcStart = () =>
+      repository.appendPtcToolCall({ ...start("inner_waits_for_lock"), context: target });
+    if (operation === "checkpoint") expect(await append()).toMatchObject({ outcome: "created" });
+    if (operation === "ptc_result") {
+      expect(await appendPtcStart()).toMatchObject({ outcome: "created" });
+    }
+    const write = {
+      append,
+      checkpoint: () =>
+        repository.writeCheckpoint({
+          context: target,
+          idempotencyKey: "checkpoint.after_parent",
+          checkpointId: "checkpoint.after_parent",
+          windowStartSequence: 0,
+          throughSequence: 1,
+          projection: { summary: "压缩工具对" },
+          replacementHistory: [{ from: 0, through: 1 }],
+        }),
+      ptc_start: appendPtcStart,
+      ptc_result: () =>
+        repository.appendPtcToolResult({ ...result("inner_waits_for_lock"), context: target }),
+    }[operation];
+    const readFacts = () =>
+      withTenantTransaction(runtime, tenant, async (client) => {
+        const facts = await client.query(
+          `SELECT
+             (SELECT count(*) FROM runtime_rollout_entries WHERE attempt_id=$1) AS entries,
+             (SELECT count(*) FROM runtime_rollout_append_commands WHERE attempt_id=$1) AS appends,
+             (SELECT count(*) FROM runtime_rollout_checkpoints WHERE attempt_id=$1) AS checkpoints,
+             (SELECT count(*) FROM runtime_rollout_checkpoint_commands WHERE attempt_id=$1) AS checkpoint_commands,
+             (SELECT count(*) FROM runtime_rollout_replacements WHERE attempt_id=$1) AS replacements,
+             (SELECT count(*) FROM runtime_ptc_dispatches WHERE attempt_id=$1) AS ptc_starts,
+             (SELECT count(result_digest) FROM runtime_ptc_dispatches WHERE attempt_id=$1) AS ptc_results`,
+          [scope.attemptId],
+        );
+        return facts.rows;
+      });
+    const setLease = (duration: string) =>
+      withTenantTransaction(migrator, tenant, async (client) => {
+        const updated = await client.query<{ expires_at: string }>(
+          lease === "claim"
+            ? `UPDATE run_claims SET expires_at=clock_timestamp()+$3::interval
+                WHERE tenant_id=$1 AND attempt_id=$2 RETURNING expires_at::text`
+            : `UPDATE workspace_write_leases SET expires_at=clock_timestamp()+$3::interval
+                WHERE tenant_id=$1 AND workspace_id=$2 RETURNING expires_at::text`,
+          [
+            scope.tenantId,
+            lease === "claim" ? scope.attemptId : target.fence.scope.workspaceId,
+            duration,
+          ],
+        );
+        const deadline = updated.rows[0]?.expires_at;
+        if (deadline === undefined) throw new Error("找不到用例租约");
+        return deadline;
+      });
+
+    const before = await readFacts();
+    let pending: ReturnType<typeof write> | undefined;
+    try {
+      await withTenantTransaction(runtime, tenant, async (holder) => {
+        await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+          [scope.tenantId, scope.threadId, scope.runId, scope.attemptId, scope.agentThreadId].join(
+            "\u001f",
+          ),
+        ]);
+        const deadline = await setLease("2 seconds");
+        pending = write();
+        void pending.catch(() => undefined);
+        // 必须观察到仍在租期内的真实锁等待，不能把写入未开始误判为过期后拒绝。
+        await expect
+          .poll(
+            async () => {
+              const waiting = await holder.query<{ blocked: boolean }>(
+                `SELECT $1::timestamptz > clock_timestamp() AND EXISTS (
+                   SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted
+                     AND pg_backend_pid()=ANY(pg_blocking_pids(pid))
+                 ) AS blocked`,
+                [deadline],
+              );
+              return waiting.rows[0]?.blocked;
+            },
+            { timeout: 2_000 },
+          )
+          .toBe(true);
+        await holder.query(
+          `SELECT pg_sleep(greatest(0, extract(epoch FROM $1::timestamptz - clock_timestamp())))`,
+          [deadline],
+        );
+      });
+    } catch (error) {
+      await pending?.catch(() => undefined);
+      throw error;
+    }
+    expect(await pending).toEqual({ outcome: "not_authorized" });
+    expect(await readFacts()).toEqual(before);
+    await setLease("30 minutes");
+    expect(await write()).toMatchObject({ outcome: "created" });
+  });
+
   it("native 流不接纳内层调用，journal 开始与结果均不消耗 Rollout sequence", async () => {
     await expect(
       repository.append({
@@ -731,6 +1086,151 @@ describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
     });
   });
 
+  it("提交响应未知后同键读回等待流锁跨过租约截止时保留 unknown", async () => {
+    const target = independentContext("unknown_lease_replay");
+    await seedExecution(target, { createTenant: false });
+    expect(
+      await repository.openRootStreamFromClaim({
+        fence: target.fence,
+        attemptId: target.scope.attemptId,
+        compatibility,
+      }),
+    ).toMatchObject({ outcome: "ready" });
+    let releaseHolder!: () => void;
+    let signalHolder!: () => void;
+    const held = new Promise<void>((resolve) => {
+      signalHolder = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      releaseHolder = resolve;
+    });
+    let deadline: string | undefined;
+    let holderTask: Promise<void> | undefined;
+    const afterCommit = async () => {
+      holderTask = (async () => {
+        const holder = await runtime.connect();
+        try {
+          await holder.query("BEGIN");
+          await holder.query("SELECT set_config('app.tenant_id',$1,true)", [target.scope.tenantId]);
+          await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+            [
+              target.scope.tenantId,
+              target.scope.threadId,
+              target.scope.runId,
+              target.scope.attemptId,
+              target.scope.agentThreadId,
+            ].join("\u001f"),
+          ]);
+          const update = await withTenantTransaction(
+            migrator,
+            { tenantId: target.scope.tenantId },
+            (client) =>
+              client.query<{ expires_at: string }>(
+                `UPDATE run_claims SET expires_at=clock_timestamp()+interval '5 seconds'
+                  WHERE tenant_id=$1 AND attempt_id=$2 RETURNING expires_at::text`,
+                [target.scope.tenantId, target.scope.attemptId],
+              ),
+          );
+          deadline = update.rows[0]?.expires_at;
+          if (deadline === undefined) throw new Error("找不到未知提交重放用 claim");
+          signalHolder();
+          await hold;
+          await holder.query("COMMIT");
+        } catch (error) {
+          await holder.query("ROLLBACK").catch(() => undefined);
+          throw error;
+        } finally {
+          holder.release();
+        }
+      })();
+      // 先确认阻塞事务已持锁且租约已延后，再让首次 COMMIT 的未知结果触发重放。
+      await held;
+    };
+    // 第一次 advisory lock 属于已提交的原写入；等待发生在同键重放。
+    const observed = observingAdvisoryWaitPool(runtime, 2);
+    const uncertainRepository = new PgRuntimeRolloutRepository(
+      committedButUnknownPool(observed.pool, afterCommit),
+    );
+    const adapter = new PgToolObservationRolloutAdapter(uncertainRepository, target);
+    const append = adapter.appendToolCall({
+      binding: observationBinding(target),
+      idempotencyKey: `unknown-expiry-${unique}`,
+      toolCallId: `unknown-expiry-call-${unique}`,
+      toolName: "sandbox_command",
+    });
+    try {
+      await Promise.race([
+        held,
+        append.then(() => {
+          throw new Error("首次写入未进入未知 COMMIT 响应处理");
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("首次写入 COMMIT 未触发锁持有者")), 5_000),
+        ),
+      ]);
+      const pid = await Promise.race([
+        observed.requested,
+        append.then((outcome) => {
+          throw new Error(`同键重放在流锁前终止：${JSON.stringify(outcome)}`);
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => {
+            void admin
+              .query<{
+                pid: number;
+                wait_event_type: string | null;
+                wait_event: string | null;
+                query: string;
+              }>(
+                `SELECT pid,wait_event_type,wait_event,left(query,120) AS query
+                   FROM pg_stat_activity WHERE datname=current_database()
+                    AND query LIKE 'SELECT membership.user_id%' AND state='active'`,
+              )
+              .then((state) =>
+                reject(new Error(`同键重放未请求流锁；活动授权查询=${JSON.stringify(state.rows)}`)),
+              )
+              .catch(reject);
+          }, 1_000),
+        ),
+      ]);
+      await expect
+        .poll(
+          async () => {
+            const state = await admin.query<{ waiting: boolean }>(
+              "SELECT wait_event_type='Lock' AS waiting FROM pg_stat_activity WHERE pid=$1",
+              [pid],
+            );
+            return state.rows[0]?.waiting;
+          },
+          { timeout: 1_000 },
+        )
+        .toBe(true);
+      if (deadline === undefined) throw new Error("未知提交测试未设置 claim 截止时间");
+      await withTenantTransaction(runtime, { tenantId: target.scope.tenantId }, (client) =>
+        client.query(
+          "SELECT pg_sleep(greatest(0,extract(epoch FROM $1::timestamptz-clock_timestamp())))",
+          [deadline],
+        ),
+      );
+    } finally {
+      releaseHolder();
+      await holderTask?.catch(() => undefined);
+    }
+    await expect(append).resolves.toEqual({ outcome: "unknown" });
+    const facts = await withTenantTransaction(
+      runtime,
+      { tenantId: target.scope.tenantId },
+      (client) =>
+        client.query<{ entries: string; commands: string }>(
+          `SELECT
+           (SELECT count(*) FROM runtime_rollout_entries WHERE tenant_id=$1 AND attempt_id=$2)::text AS entries,
+           (SELECT count(*) FROM runtime_rollout_append_commands WHERE tenant_id=$1 AND attempt_id=$2)::text AS commands`,
+          [target.scope.tenantId, target.scope.attemptId],
+        ),
+    );
+    expect(facts.rows[0]).toEqual({ entries: "1", commands: "1" });
+  });
+
   it("真实 COMMIT 响应未知后 adapter 按原 ID 原键收敛，pipeline 保留 parent 与固定截断回执", async () => {
     const toolCallId = "inner_pipeline_unknown";
     const beginAdapter = new PgToolObservationRolloutAdapter(
@@ -793,6 +1293,165 @@ describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
     expect(rows[0]).toMatchObject({
       result: { isTruncated: true, body: { receipt: JSON.parse(controlled) } },
     });
+  });
+
+  it("真实 COMMIT 响应丢失后父调用闭合，开始不放行而结果可精确重放", async () => {
+    const startContext = independentContext("unknown_closed_start");
+    await seedExecution(startContext, { createTenant: false });
+    await openPtcParent(startContext);
+    const startId = `inner_unknown_parent_close_${unique}`;
+    const closeStartParent = async () => {
+      const closed = await repository.append({
+        context: startContext,
+        idempotencyKey: `outer.close.unknown.start.${unique}`,
+        entries: [{ kind: "tool_result", toolCallId: parentToolCallId, body: { finished: true } }],
+      });
+      if (closed.outcome !== "created") throw new Error("测试需要闭合开始用例父调用");
+    };
+    const beginAdapter = new PgToolObservationRolloutAdapter(
+      new PgRuntimeRolloutRepository(committedButUnknownPool(runtime, closeStartParent)),
+      startContext,
+    );
+    expect(
+      await beginAdapter.appendToolCall({
+        binding: observationBinding(startContext),
+        toolCallId: startId,
+        parentToolCallId,
+        toolName: "read",
+        idempotencyKey: `start.unknown.parent.close.${unique}`,
+      }),
+    ).toEqual({ outcome: "conflict" });
+    expect(
+      await repository.appendPtcToolCall({
+        ...start(startId),
+        context: startContext,
+        idempotencyKey: `start.unknown.parent.close.${unique}`,
+      }),
+    ).toEqual({ outcome: "parent_closed" });
+    expect(
+      await repository.appendPtcToolCall({
+        ...start(`new_after_closed_parent_${unique}`),
+        context: startContext,
+        idempotencyKey: `start.new.after.closed.${unique}`,
+      }),
+    ).toEqual({ outcome: "not_found" });
+
+    const resultContext = independentContext("unknown_closed_result");
+    await seedExecution(resultContext, { createTenant: false });
+    await openPtcParent(resultContext);
+    const resultId = `inner_result_unknown_parent_close_${unique}`;
+    expect(
+      await repository.appendPtcToolCall({ ...start(resultId), context: resultContext }),
+    ).toMatchObject({ outcome: "created" });
+    const completion = result(resultId);
+    const closeResultParent = async () => {
+      const closed = await repository.append({
+        context: resultContext,
+        idempotencyKey: `outer.close.unknown.result.${unique}`,
+        entries: [{ kind: "tool_result", toolCallId: parentToolCallId, body: { finished: true } }],
+      });
+      if (closed.outcome !== "created") throw new Error("测试需要闭合结果用例父调用");
+    };
+    const resultAdapter = new PgToolObservationRolloutAdapter(
+      new PgRuntimeRolloutRepository(committedButUnknownPool(runtime, closeResultParent)),
+      resultContext,
+    );
+    expect(
+      await resultAdapter.appendToolResult({
+        binding: observationBinding(resultContext),
+        toolCallId: resultId,
+        parentToolCallId,
+        idempotencyKey: completion.idempotencyKey,
+        body: completion.body,
+        isTruncated: completion.isTruncated,
+        blob: completion.blob,
+      }),
+    ).toEqual({ outcome: "replayed" });
+    expect(
+      await repository.appendPtcToolResult({
+        ...result(`new_result_after_closed_parent_${unique}`),
+        context: resultContext,
+        idempotencyKey: `result.new.after.closed.${unique}`,
+      }),
+    ).toEqual({ outcome: "not_found" });
+  });
+
+  it("同流复用父调用 ID 时按 parent_sequence 隔离旧 journal", async () => {
+    const target = independentContext("reused_parent_id_sequence");
+    await seedExecution(target, { createTenant: false });
+    await openPtcParent(target);
+    const oldChildId = `inner_old_parent_sequence_${unique}`;
+    expect(
+      await repository.appendPtcToolCall({ ...start(oldChildId), context: target }),
+    ).toMatchObject({ outcome: "created" });
+    expect(
+      await repository.append({
+        context: target,
+        idempotencyKey: `outer.close.first.parent.${unique}`,
+        entries: [{ kind: "tool_result", toolCallId: parentToolCallId, body: { finished: true } }],
+      }),
+    ).toMatchObject({ outcome: "created" });
+    expect(
+      await repository.append({
+        context: target,
+        idempotencyKey: `outer.reopen.same.id.${unique}`,
+        entries: [
+          { kind: "tool_call", toolCallId: parentToolCallId, body: { toolName: "run_code" } },
+        ],
+      }),
+    ).toMatchObject({ outcome: "created" });
+
+    const parentRows = await withTenantTransaction(
+      runtime,
+      { tenantId: target.scope.tenantId },
+      (client) =>
+        client.query<{ sequence: string }>(
+          `SELECT sequence::text FROM runtime_rollout_entries
+          WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3
+            AND tool_call_id=$4 AND kind='tool_call' ORDER BY sequence`,
+          [
+            target.scope.tenantId,
+            target.scope.attemptId,
+            target.scope.agentThreadId,
+            parentToolCallId,
+          ],
+        ),
+    );
+    expect(parentRows.rows.map((row) => row.sequence)).toEqual(["0", "2"]);
+    const oldJournal = await withTenantTransaction(
+      runtime,
+      { tenantId: target.scope.tenantId },
+      (client) =>
+        client.query<{ parent_sequence: string }>(
+          `SELECT parent_sequence::text FROM runtime_ptc_dispatches
+          WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND tool_call_id=$4`,
+          [target.scope.tenantId, target.scope.attemptId, target.scope.agentThreadId, oldChildId],
+        ),
+    );
+    expect(oldJournal.rows[0]?.parent_sequence).toBe("0");
+    expect(await repository.appendPtcToolCall({ ...start(oldChildId), context: target })).toEqual({
+      outcome: "parent_closed",
+    });
+    expect(
+      await repository.appendPtcToolResult({ ...result(oldChildId), context: target }),
+    ).toEqual({ outcome: "parent_closed" });
+    expect(
+      await repository.appendPtcToolCall({
+        ...start(`inner_new_parent_sequence_${unique}`),
+        context: target,
+      }),
+    ).toMatchObject({ outcome: "created" });
+    const resultFields = await withTenantTransaction(
+      runtime,
+      { tenantId: target.scope.tenantId },
+      (client) =>
+        client.query<{ result_digest: string | null; result_body: unknown | null }>(
+          `SELECT result_digest,result_body FROM runtime_ptc_dispatches
+            WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND tool_call_id=$4`,
+          [target.scope.tenantId, target.scope.attemptId, target.scope.agentThreadId, oldChildId],
+        ),
+    );
+    expect(resultFields.rows[0]).toEqual({ result_digest: null, result_body: null });
   });
 
   it("父关联拒绝错误 parent、跨 Agent/Run/Attempt/租户，结果必须先有开始", async () => {
@@ -966,6 +1625,13 @@ describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
   });
 
   it("RLS 隔离、只读核对校验成员，并禁止修改开始身份和删除 journal", async () => {
+    const membershipExistingId = `inner_membership_existing_${unique}`;
+    expect(await repository.appendPtcToolCall(start(membershipExistingId))).toMatchObject({
+      outcome: "created",
+    });
+    expect(await repository.appendPtcToolResult(result(membershipExistingId))).toMatchObject({
+      outcome: "created",
+    });
     const otherTenant = await withTenantTransaction(runtime, { tenantId: "ptc_other" }, (client) =>
       client.query("SELECT count(*)::text AS count FROM runtime_ptc_dispatches"),
     );
@@ -1009,10 +1675,16 @@ describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
       expect(await repository.listPtcDispatchesByParent({ context, parentToolCallId })).toEqual({
         outcome: "not_authorized",
       });
+      expect(await repository.appendPtcToolCall(start(membershipExistingId))).toEqual({
+        outcome: "not_authorized",
+      });
       expect(await repository.appendPtcToolCall(start("inner_revoked"))).toEqual({
         outcome: "not_authorized",
       });
-      expect(await repository.appendPtcToolResult(result("inner_first"))).toEqual({
+      expect(await repository.appendPtcToolResult(result(membershipExistingId))).toEqual({
+        outcome: "not_authorized",
+      });
+      expect(await repository.appendPtcToolResult(result("inner_missing_after_revoke"))).toEqual({
         outcome: "not_authorized",
       });
     } finally {
@@ -1025,7 +1697,11 @@ describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
     }
   });
 
-  it("父 call 闭合后不允许新开始或结果重放；非 run_code 父拒绝，native 路径仍兼容", async () => {
+  it("父 call 闭合后拒绝新开始但精确结果仍可重放；非 run_code 父拒绝，native 路径兼容", async () => {
+    const pendingAfterCloseId = `inner_pending_after_close_${unique}`;
+    expect(await repository.appendPtcToolCall(start(pendingAfterCloseId))).toMatchObject({
+      outcome: "created",
+    });
     expect(
       await repository.append({
         context,
@@ -1033,12 +1709,32 @@ describe("PTC 独立 durable journal PostgreSQL 事实源", () => {
         entries: [{ kind: "tool_result", toolCallId: parentToolCallId, body: { finished: true } }],
       }),
     ).toMatchObject({ outcome: "created" });
+    expect(await repository.appendPtcToolCall(start(pendingAfterCloseId))).toEqual({
+      outcome: "parent_closed",
+    });
+    expect(await repository.appendPtcToolResult(result(pendingAfterCloseId))).toEqual({
+      outcome: "parent_closed",
+    });
+    const pendingResult = await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query<{ result_digest: string | null; result_body: unknown | null }>(
+        `SELECT result_digest,result_body FROM runtime_ptc_dispatches
+          WHERE tenant_id=$1 AND attempt_id=$2 AND tool_call_id=$3`,
+        [scope.tenantId, scope.attemptId, pendingAfterCloseId],
+      ),
+    );
+    expect(pendingResult.rows[0]).toEqual({ result_digest: null, result_body: null });
     expect(await repository.appendPtcToolCall(start("inner_after_close"))).toEqual({
-      outcome: "conflict",
+      outcome: "not_found",
     });
     expect(await repository.appendPtcToolResult(result("inner_first"))).toEqual({
-      outcome: "conflict",
+      outcome: "replayed",
+      value: undefined,
     });
+    expect(await repository.appendPtcToolResult(result(`inner_new_after_close_${unique}`))).toEqual(
+      {
+        outcome: "not_found",
+      },
+    );
     const nativeCall = "native_read";
     expect(
       await repository.append({

@@ -21,6 +21,11 @@ import {
 } from "../../runtime-ts/packages/persistence/src/run-trajectory-store.js";
 import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
 import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
+import {
+  S3BlobStore,
+  type S3ObjectClient,
+  type S3PutObjectInput,
+} from "../../runtime-ts/packages/persistence/src/s3-blob-store.js";
 import { DurableTraceBlobPersistenceAdapter } from "../../runtime-ts/packages/persistence/src/trace-blob-persistence-adapter.js";
 import { PgIntegrationAdminRepository } from "../../runtime-ts/packages/persistence/src/pg-integration-admin.js";
 import {
@@ -913,6 +918,7 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
 
     const integrations = new PgIntegrationAdminRepository(control);
     const tenants = await integrations.listTenants("user_admin");
+    await expect(integrations.listKeys("user_admin", "tenant_admin")).resolves.toEqual([]);
     expect(tenants.find((item) => item.isDefault)).toMatchObject({
       tenantId: "tenant_admin",
       displayName: "admin@example.invalid",
@@ -1285,6 +1291,86 @@ describe("真实 Admin Control 角色的 Run 浏览器边界", () => {
       }),
     ).rejects.toBeDefined();
     expect(await auditRows()).toHaveLength(auditCountBefore + 1);
+  });
+
+  it("真实 Runtime 写入的轨迹在受审计的 Tenant 事务内可由后台读取", async () => {
+    const objects = new Map<string, S3PutObjectInput>();
+    const storage: S3ObjectClient = {
+      async put(input) {
+        objects.set(input.key, input);
+      },
+      async head(key) {
+        return objects.get(key)?.descriptor;
+      },
+      async get(key) {
+        const object = objects.get(key);
+        if (object === undefined) return undefined;
+        return {
+          contentLength: object.body.byteLength,
+          body: (async function* () {
+            yield object.body;
+          })(),
+        };
+      },
+      async copy({ sourceKey, destinationKey }) {
+        const object = objects.get(sourceKey);
+        if (object === undefined) throw new Error("缺少轨迹 staging 对象");
+        objects.set(destinationKey, object);
+      },
+      async delete(key) {
+        objects.delete(key);
+      },
+      async presignGet() {
+        throw new Error("不允许为后台轨迹生成签名 URL");
+      },
+    };
+    const repository = new PgBlobLifecycleRepository(runtime);
+    const blobs = new S3BlobStore(storage, repository, {
+      bucket: "test-trajectory",
+      region: "us-east-1",
+      maxBlobSizeBytes: 1024 * 1024,
+    });
+    const writer = new PgRunTrajectoryStore(
+      runtime,
+      blobs,
+      new DurableTraceBlobPersistenceAdapter(repository, blobs),
+    );
+    const reader = new PgRunTrajectoryStore(control, blobs, undefined);
+    const context = {
+      tenantId: "tenant_b",
+      runId: "run_b1",
+      attemptId: "run_b1_attempt",
+      threadId: "thread_1",
+    };
+    const event = {
+      schemaVersion: 1 as const,
+      sequence: 1,
+      occurredAt: new Date().toISOString(),
+      monotonicOffsetMs: 2,
+      source: "runtime" as const,
+      type: "session_created",
+      event: { model: "test-model" },
+    };
+    await writer.persist({ context, event });
+    const directoryWithoutAudit = await withTenantTransaction(
+      control,
+      {
+        tenantId: context.tenantId,
+        userId: "user_admin",
+      },
+      (client) => client.query("SELECT attempt_id FROM admin_run_trajectory_directory"),
+    );
+    expect(directoryWithoutAudit.rows).toEqual([]);
+    const page = await reader.readPage({
+      ...context,
+      auditId: `trajectory_${unique}`,
+      actorUserId: "user_admin",
+      limit: 1,
+    });
+    expect(page.records).toEqual([
+      { ...event, agentThreadId: "", agentTurnId: "", storedAt: event.occurredAt },
+    ]);
+    expect(page.hasMore).toBe(false);
   });
 
   it("Agent 指标迁移可安全回退并重新应用", async () => {

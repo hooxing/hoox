@@ -136,6 +136,7 @@ describe("云盘历史文件面板", () => {
     await settle();
 
     expect(container.querySelector("#cloud-drive-title")?.textContent).toBe("云盘");
+    expect(container.textContent).toContain("回到原对话预览或下载");
     expect(container.textContent).not.toContain("技能中心");
     expect(container.textContent).toContain("搜索和浏览个人云盘文件");
     expect(container.querySelector('[aria-label="搜索个人文件"]')).not.toBeNull();

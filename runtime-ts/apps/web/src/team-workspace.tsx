@@ -111,7 +111,7 @@ export function TeamSwitcher({
         <div className="team-switcher-body">
           <div className="team-switcher-controls">
             <label>
-              <span className="sr-only">切换团队</span>
+              <span className="sr-only">浏览团队任务</span>
               <select
                 value={selected.id}
                 disabled={loading}

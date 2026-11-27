@@ -364,6 +364,8 @@ export function normalizeRunEvent(value: unknown): RunEvent | undefined {
 export class RuntimeApi {
   private activeTenantId: string | undefined;
   private accessToken: string | undefined;
+  private sessionInvalidationHandler: (() => void) | undefined;
+  private readonly unavailableThreadReads = new Set<"context" | "continuity">();
 
   constructor(
     private readonly fetcher: typeof fetch = defaultFetcher,
@@ -374,12 +376,32 @@ export class RuntimeApi {
     this.accessToken = accessToken;
   }
 
+  setSessionInvalidationHandler(handler: (() => void) | undefined): void {
+    this.sessionInvalidationHandler = handler;
+  }
+
   setTenantId(tenantId: string | undefined): void {
     this.activeTenantId = tenantId;
   }
 
   getTenantId(): string | undefined {
     return this.activeTenantId;
+  }
+
+  private async fetchWithSession(url: string, init: RequestInit & { headers: Headers }) {
+    const token = this.accessToken;
+    const response = await this.fetcher(url, init);
+    // 迟到的旧凭据响应不能结束新会话；登录、注册等未带 Bearer 的 401 保持原语义。
+    if (
+      response.status === 401 &&
+      token !== undefined &&
+      this.accessToken === token &&
+      init.headers.get("Authorization") === `Bearer ${token}` &&
+      !init.signal?.aborted
+    ) {
+      this.sessionInvalidationHandler?.();
+    }
+    return response;
   }
 
   private async request<T>(
@@ -400,7 +422,7 @@ export class RuntimeApi {
     }
     let response: Response;
     try {
-      response = await this.fetcher(`${this.baseUrl}${path}`, { ...init, headers });
+      response = await this.fetchWithSession(`${this.baseUrl}${path}`, { ...init, headers });
     } catch {
       throw new ApiError("无法连接本地运行时", 0, true);
     }
@@ -411,6 +433,10 @@ export class RuntimeApi {
         error?.error?.message ?? "请求失败",
         response.status,
         error?.error?.retryable ?? response.status >= 500,
+        response.status === 404 &&
+          record(body)?.message === `Route ${init.method ?? "GET"}:${path} not found`
+          ? "route_not_registered"
+          : error?.error?.code,
       );
     }
     return envelope<T>(body);
@@ -806,6 +832,8 @@ export class RuntimeApi {
     ) as readonly Run[];
   }
   async listThreadContext(threadId: string): Promise<readonly ThreadContextMessage[] | undefined> {
+    if (this.unavailableThreadReads.has("context")) return undefined;
+    const tenantId = this.activeTenantId ?? null;
     const items: ThreadContextMessage[] = [];
     let after = 0;
     for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
@@ -813,9 +841,11 @@ export class RuntimeApi {
       try {
         data = await this.request<unknown>(
           `/v1/threads/${encodeURIComponent(threadId)}/context?after=${after}&limit=500`,
+          {},
+          tenantId,
         );
       } catch (error) {
-        if (error instanceof ApiError && error.status === 404) return undefined;
+        if (this.ignoreMissingThreadRead("context", error)) return undefined;
         throw error;
       }
       const page = record(data);
@@ -829,14 +859,21 @@ export class RuntimeApi {
     }
     throw new ApiError("Thread 历史超过当前客户端分页上限", 422, false);
   }
+  private ignoreMissingThreadRead(kind: "context" | "continuity", reason: unknown): boolean {
+    if (!(reason instanceof ApiError) || reason.status !== 404) return false;
+    if (reason.code === "route_not_registered") this.unavailableThreadReads.add(kind);
+    return true;
+  }
+
   async getThreadContinuity(threadId: string): Promise<ThreadContinuityStatus | undefined> {
+    if (this.unavailableThreadReads.has("continuity")) return undefined;
     try {
       const value = await this.request<unknown>(
         `/v1/threads/${encodeURIComponent(threadId)}/continuity`,
       );
       return isThreadContinuityStatus(value) ? value : undefined;
     } catch (error) {
-      if (error instanceof ApiError && error.status === 404) return undefined;
+      if (this.ignoreMissingThreadRead("continuity", error)) return undefined;
       throw error;
     }
   }
@@ -915,29 +952,37 @@ export class RuntimeApi {
     attachments: readonly Pick<UploadedResource, "resourceId" | "versionId">[] = [],
     fileReferences: readonly import("@hoox/protocol/file-references").FileReference[] = [],
   ): Promise<ThreadInputReceipt> {
+    const tenantId = this.activeTenantId;
+    const accessToken = this.accessToken;
     try {
-      return await this.request(`/v1/threads/${encodeURIComponent(threadId)}/inputs`, {
-        method: "POST",
-        body: JSON.stringify({
-          input,
-          mode,
-          ...(fileReferences.length === 0 ? {} : { fileReferences }),
-          ...(expectedRunId === undefined ? {} : { expectedRunId }),
-          ...(attachments.length === 0
-            ? {}
-            : {
-                attachments: attachments.map(({ resourceId, versionId }) => ({
-                  resourceId,
-                  versionId,
-                })),
-              }),
-        }),
-      });
+      return await this.request(
+        `/v1/threads/${encodeURIComponent(threadId)}/inputs`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            input,
+            mode,
+            ...(fileReferences.length === 0 ? {} : { fileReferences }),
+            ...(expectedRunId === undefined ? {} : { expectedRunId }),
+            ...(attachments.length === 0
+              ? {}
+              : {
+                  attachments: attachments.map(({ resourceId, versionId }) => ({
+                    resourceId,
+                    versionId,
+                  })),
+                }),
+          }),
+        },
+        tenantId ?? null,
+      );
     } catch (error) {
       // Feature Flag 关闭或旧 API：统一入口不存在时保持 /runs=follow_up 的兼容语义。
       if (
         !(error instanceof ApiError) ||
-        error.status !== 404 ||
+        error.code !== "route_not_registered" ||
+        this.activeTenantId !== tenantId ||
+        this.accessToken !== accessToken ||
         attachments.length > 0 ||
         fileReferences.length > 0
       )
@@ -967,7 +1012,7 @@ export class RuntimeApi {
     if (this.activeTenantId !== undefined) headers.set("X-Tenant-ID", this.activeTenantId);
     let response: Response;
     try {
-      response = await this.fetcher(`${this.baseUrl}/v1/resources/uploads`, {
+      response = await this.fetchWithSession(`${this.baseUrl}/v1/resources/uploads`, {
         method: "POST",
         headers,
         body: await file.arrayBuffer(),
@@ -994,7 +1039,7 @@ export class RuntimeApi {
     if (this.accessToken !== undefined) headers.set("Authorization", `Bearer ${this.accessToken}`);
     if (this.activeTenantId !== undefined) headers.set("X-Tenant-ID", this.activeTenantId);
     const path = `/v1/threads/${encodeURIComponent(source.threadId)}/runs/${encodeURIComponent(source.runId)}/artifacts/${encodeURIComponent(source.artifactId)}/content`;
-    const response = await this.fetcher(`${this.baseUrl}${path}`, {
+    const response = await this.fetchWithSession(`${this.baseUrl}${path}`, {
       headers,
       ...(signal === undefined ? {} : { signal }),
     });
@@ -1085,7 +1130,7 @@ export class RuntimeApi {
     if (this.activeTenantId !== undefined) headers.set("X-Tenant-ID", this.activeTenantId);
     const query = new URLSearchParams({ after: String(cursor.after) });
     if (cursor.attemptId !== undefined) query.set("attemptId", cursor.attemptId);
-    const response = await this.fetcher(
+    const response = await this.fetchWithSession(
       `${this.baseUrl}/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/events/stream?${query}`,
       { headers, signal },
     );

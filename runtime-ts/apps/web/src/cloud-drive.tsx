@@ -97,6 +97,7 @@ export function CloudDriveDialog({
                 ? "统一搜索个人与团队文件，浏览时仍保持各空间的权限边界。"
                 : "搜索和浏览个人云盘文件。"}
             </p>
+            <p>在云盘找不到交付文件时，可回到原对话预览或下载。</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭云盘">
             <X size={18} />

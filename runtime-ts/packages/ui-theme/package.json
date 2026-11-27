@@ -5,6 +5,10 @@
   "type": "module",
   "exports": {
     "./theme.css": "./theme.css",
+    "./attribution": {
+      "types": "./attribution.ts",
+      "default": "./dist/attribution.js"
+    },
     "./branding": {
       "types": "./branding.tsx",
       "default": "./dist/branding.js"

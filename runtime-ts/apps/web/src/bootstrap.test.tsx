@@ -4,7 +4,12 @@ import { LandingPage } from "./landing-page.js";
 import { SiteRoot } from "./site-root.js";
 import { BrandingProvider } from "@hoox/ui-theme/branding";
 
-const { hydrateRoot, render } = vi.hoisted(() => ({ hydrateRoot: vi.fn(), render: vi.fn() }));
+const { hydrateRoot, render, showHooxAttribution } = vi.hoisted(() => ({
+  hydrateRoot: vi.fn(),
+  render: vi.fn(),
+  showHooxAttribution: vi.fn(),
+}));
+vi.mock("@hoox/ui-theme/attribution", () => ({ showHooxAttribution }));
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render }), hydrateRoot }));
 vi.mock("./landing-page.js", () => ({ LandingPage: () => null }));
 vi.mock("./site-root.js", () => ({ SiteRoot: () => null }));
@@ -33,6 +38,7 @@ describe("Web 入口装配", () => {
       '<div id="root" data-prerendered data-privacy-url="https://hoox.example.org/privacy"></div>';
     await import("./bootstrap.js");
     expect(hydrateRoot).toHaveBeenCalledOnce();
+    expect(showHooxAttribution).toHaveBeenCalledOnce();
     expect(hydrateRoot.mock.calls[0]?.[0]).toBe(document.getElementById("root"));
     expect(hydrateRoot.mock.calls[0]?.[1].type).toBe(LandingPage);
     expect(hydrateRoot.mock.calls[0]?.[1].props.privacyUrl).toBe(
@@ -44,6 +50,7 @@ describe("Web 入口装配", () => {
     window.history.replaceState(null, "", url);
     document.body.innerHTML = '<div id="root"></div>';
     await import("./workspace-bootstrap.js");
+    expect(showHooxAttribution).toHaveBeenCalledOnce();
     expect(document.documentElement.dataset.surface).toBe("workspace");
     expect(render.mock.calls[0]?.[0].type.name).toBe(BrandingProvider.name);
     expect(render.mock.calls[0]?.[0].props.children.type).toBe(SiteRoot);
@@ -59,6 +66,7 @@ describe("Web 入口装配", () => {
       '<meta property="og:type" content="website"><link rel="canonical" href="/">';
     await import("./bootstrap.js");
     await vi.dynamicImportSettled();
+    expect(showHooxAttribution).toHaveBeenCalledOnce();
     expect(document.documentElement.dataset.surface).toBe("workspace");
     expect(render.mock.calls[0]?.[0].type.name).toBe(BrandingProvider.name);
     expect(render.mock.calls[0]?.[0].props.children.type).toBe(SiteRoot);

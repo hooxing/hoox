@@ -1,3 +1,4 @@
+import { showHooxAttribution } from "@hoox/ui-theme/attribution";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { LandingPage } from "./landing-page.js";
 import { resolveSiteSurface } from "./site-route.js";
@@ -5,6 +6,7 @@ import { resolveSiteSurface } from "./site-route.js";
 if (resolveSiteSurface(window.location) === "workspace") {
   void import("./workspace-bootstrap.js");
 } else {
+  showHooxAttribution();
   const rootElement = document.getElementById("root");
   if (rootElement !== null) {
     const app = (

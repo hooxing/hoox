@@ -1,6 +1,9 @@
+import { showHooxAttribution } from "@hoox/ui-theme/attribution";
 import { createRoot } from "react-dom/client";
 import { SiteRoot } from "./site-root.js";
 import { BrandingProvider } from "@hoox/ui-theme/branding";
+
+showHooxAttribution();
 
 document.documentElement.dataset.surface = "workspace";
 document.title = "Hoox 工作台";

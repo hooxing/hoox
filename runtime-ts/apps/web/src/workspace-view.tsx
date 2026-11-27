@@ -468,23 +468,37 @@ const toolActionText: Record<ToolAction, { running: string; completed: string; f
   other: { running: "正在执行", completed: "已完成", failed: "步骤未完成" },
 };
 
-function ToolActivity({ block }: { readonly block: Extract<ConversationBlock, { type: "tool" }> }) {
+function ToolActivity({
+  block,
+  live = false,
+}: {
+  readonly block: Extract<ConversationBlock, { type: "tool" }>;
+  readonly live?: boolean;
+}) {
+  const running = live && block.status === "running";
+  const status = !running && block.status === "running" ? "unconfirmed" : block.status;
   return (
-    <div className={`activity-item tool-activity is-${block.status}`}>
-      {block.status === "running" ? (
+    <div className={`activity-item tool-activity is-${status}`}>
+      {running ? (
         <LoaderCircle className="spin" size={14} aria-hidden="true" />
-      ) : block.status === "failed" ? (
+      ) : block.status !== "completed" ? (
         <TriangleAlert size={14} aria-hidden="true" />
       ) : (
         <Check size={14} aria-hidden="true" />
       )}
-      <span>{toolActionText[block.action][block.status]}</span>
+      <span>{running ? toolActionText[block.action].running : settledToolLabel(block)}</span>
       {block.title !== undefined && <strong>· {block.title}</strong>}
       {block.status === "failed" && block.failure !== undefined && (
         <span className="tool-failure-detail">{block.failure.message}</span>
       )}
     </div>
   );
+}
+
+function settledToolLabel(block: Extract<ConversationBlock, { type: "tool" }>) {
+  return block.status === "running"
+    ? "工具步骤未记录结果"
+    : toolActionText[block.action][block.status];
 }
 
 function ThinkingActivity({
@@ -536,7 +550,7 @@ function ActivityGroup({
     lastCompleted?.type === "thinking"
       ? thinkingActivityLabel(lastCompleted, run)
       : lastCompleted?.type === "tool"
-        ? `${toolActionText[lastCompleted.action][lastCompleted.status]}${lastCompleted.title === undefined ? "" : ` · ${lastCompleted.title}`}`
+        ? `${settledToolLabel(lastCompleted)}${lastCompleted.title === undefined ? "" : ` · ${lastCompleted.title}`}`
         : "执行过程";
   const summary =
     active?.type === "thinking"
@@ -614,7 +628,7 @@ function AgentTurn({
           />
         </div>
       ) : (
-        <ToolActivity key={section.id} block={section} />
+        <ToolActivity key={section.id} block={section} live={runIsLive} />
       ),
     );
   return (

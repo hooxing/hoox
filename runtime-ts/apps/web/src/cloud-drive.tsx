@@ -322,7 +322,12 @@ export function CloudDrivePanel({
           </div>
         ) : tasks.length === 0 ? (
           <div className="skill-center-empty">
-            {submittedQuery ? "没有匹配的历史文件" : "最近还没有可用文件"}
+            <div>
+              <div>{submittedQuery ? "没有匹配的历史文件" : "最近还没有可用文件"}</div>
+              {!submittedQuery && error === undefined && (
+                <small>在云盘找不到交付文件时，可回到原对话预览或下载。</small>
+              )}
+            </div>
           </div>
         ) : (
           groups.map((group) => (

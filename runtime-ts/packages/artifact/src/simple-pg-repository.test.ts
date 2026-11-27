@@ -48,7 +48,7 @@ function poolWithUnknownCommit(readback: "found" | "missing" | "unavailable"): P
       const first = connections === 1;
       return {
         query: async (text: string) => {
-          if (first && text.includes("SELECT run.status=")) {
+          if (first && text.includes("FOR UPDATE OF run,attempt,claim,lease,permit")) {
             throw new TransactionCommitUnknownError();
           }
           if (!first && text.includes("SELECT command.command_digest")) {

@@ -55,11 +55,11 @@ building → prepared → committed
 
 ## 交付物
 
-- 用户要求生成或提供文件时，模型须在写完最终文件后调用 `deliver_file`；仅写入 Workspace 或回复文件路径不会创建用户可见交付物。工具成功后工作台显示文件卡片并提供安全预览/下载；发布成功的历史文件也进入个人云盘。目录、symlink 和特殊文件不会成为交付物，文件不存在返回可修正错误。
+- 用户要求生成或提供文件时，模型须在写完最终文件后调用 `deliver_file`；仅写入 Workspace 或回复文件路径不会创建用户可见交付物。工具成功后工作台显示文件卡片并提供安全预览/下载。目录、symlink 和特殊文件不会成为交付物，文件不存在返回可修正错误。
 - Tool call ID 是幂等身份来源。Artifact、Resource、ResourceVersion 与内部 deliverable key 由 Runtime 确定性生成，模型不能提交这些字段。
 - Runtime 计算大小、SHA-256 与保守 media type，未知或主动内容默认 `application/octet-stream`。字节先经 Blob 提交协议形成 stable 引用，再在单一事务中创建 Resource、ResourceVersion、deliverable Artifact 与 `published` 结算；只有读回 published 事实后工具才返回成功。
 - 必需发布失败时 Run 保持未完成，Agent 以新版本修正；摘要不同的重复命令不能改写不可变发布。
-- 启用历史文件系统时，deliverable 在发布结算的同一事务中写入个人任务历史目录；`diagnostic`、`trace` 与未发布 Workspace 文件不进入云盘。
+- 启用历史文件系统时，普通任务与 API 任务的正式交付物（包括 `deliver_file`）在发布结算的同一事务中登记到所属空间的任务历史。关闭开关时不登记，重放也不补录已发布的交付物。Playground、评测、`diagnostic`、`trace` 与未发布 Workspace 文件不进入云盘。
 
 ## 下载与预览
 

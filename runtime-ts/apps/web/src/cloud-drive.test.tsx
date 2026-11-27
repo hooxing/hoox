@@ -126,6 +126,18 @@ describe("云盘历史文件面板", () => {
     });
   });
 
+  it("云盘最近文件为空时提供原对话回找指引", async () => {
+    const api: CloudDriveApi = {
+      listHistoryFiles: vi.fn(async () => page({ items: [] })),
+      downloadHistoryFile: vi.fn(),
+    };
+    await act(async () => root.render(<CloudDriveDialog api={api} onClose={vi.fn()} />));
+    await settle();
+
+    expect(container.textContent).toContain("最近还没有可用文件");
+    expect(container.textContent).toContain("回到原对话预览或下载");
+  });
+
   it("云盘使用独立对话框并可关闭", async () => {
     const onClose = vi.fn();
     const api: CloudDriveApi = {
@@ -136,6 +148,7 @@ describe("云盘历史文件面板", () => {
     await settle();
 
     expect(container.querySelector("#cloud-drive-title")?.textContent).toBe("云盘");
+    expect(container.textContent).not.toContain("回到原对话预览或下载");
     expect(container.textContent).not.toContain("技能中心");
     expect(container.textContent).toContain("搜索和浏览个人云盘文件");
     expect(container.querySelector('[aria-label="搜索个人文件"]')).not.toBeNull();

@@ -1,5 +1,6 @@
 import {
   CalendarClock,
+  ChevronDown,
   Cloud,
   LoaderCircle,
   Pencil,
@@ -12,6 +13,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useReducer,
@@ -209,6 +211,7 @@ type TeamAwareWorkspaceApi = WorkspaceApi &
       | "resendEmailVerificationOtp"
       | "sendPhoneOtp"
       | "setAccessToken"
+      | "setSessionInvalidationHandler"
       | "signInWithEmail"
       | "signUpWithEmail"
       | "verifyEmailOtp"
@@ -316,7 +319,7 @@ type RecoveryUiState = {
   readonly threadId: string;
   readonly selectionGeneration: number;
   readonly requestVersion: number;
-  readonly status: "loading" | "error";
+  readonly status: "pending" | "loading" | "error";
   readonly error?: ApiError;
 };
 
@@ -349,6 +352,49 @@ export function shouldFollowLatest(
   threshold = 96,
 ): boolean {
   return scrollHeight - scrollTop - clientHeight <= threshold;
+}
+
+function workspaceError(reason: unknown, message: string): ApiError {
+  return reason instanceof ApiError ? reason : new ApiError(message, 0, true);
+}
+
+function isUnavailableResource(reason: unknown): boolean {
+  return reason instanceof ApiError && [401, 403, 404, 410].includes(reason.status);
+}
+
+function SpaceDestinationPicker({
+  teams,
+  activeTeamId,
+  disabled,
+  onSwitch,
+}: {
+  readonly teams: readonly TeamSummary[];
+  readonly activeTeamId?: string;
+  readonly disabled: boolean;
+  readonly onSwitch: (teamId?: string) => void;
+}) {
+  const selectId = useId();
+  return (
+    <label className="agent-picker space-picker" htmlFor={selectId}>
+      <span>创建到</span>
+      <span className="space-picker-control">
+        <select
+          id={selectId}
+          value={activeTeamId ?? ""}
+          disabled={disabled}
+          onChange={(event) => onSwitch(event.target.value || undefined)}
+        >
+          <option value="">个人空间</option>
+          {teams.map((team) => (
+            <option key={team.id} value={team.id}>
+              {team.displayName}
+            </option>
+          ))}
+        </select>
+        <ChevronDown className="space-picker-chevron" size={16} aria-hidden="true" />
+      </span>
+    </label>
+  );
 }
 
 function AuthenticatedWorkspace({
@@ -384,6 +430,8 @@ function AuthenticatedWorkspace({
   const [teams, setTeams] = useState<readonly TeamSummary[]>([]);
   const [teamsLoading, setTeamsLoading] = useState(false);
   const [activeTeamId, setActiveTeamId] = useState<string>();
+  const workspaceTenantRef = useRef<string | undefined>(undefined);
+  const threadListRequestRef = useRef(0);
   const { input, setInput, moveInputTo, clearSentInput, draftPersistenceFailed } =
     useConversationDraft(accountProfile.id, activeTeamId, state.selectedThreadId);
   const referenceDraft = useFileReferenceDraft(
@@ -407,7 +455,10 @@ function AuthenticatedWorkspace({
   const { ask, dialog } = useActionDialog();
   const [selectedTeamId, setSelectedTeamId] = useState<string>();
   const [personalThreads, setPersonalThreads] = useState<readonly Thread[]>([]);
-  const [teamThreads, setTeamThreads] = useState<readonly Thread[]>([]);
+  const [browsedTeamThreads, setBrowsedTeamThreads] = useState<{
+    readonly teamId: string;
+    readonly threads: readonly Thread[];
+  }>();
   const [availableAgents, setAvailableAgents] = useState<readonly AvailableAgent[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState("agent_default");
   const [personalThreadsLoading, setPersonalThreadsLoading] = useState(false);
@@ -453,6 +504,13 @@ function AuthenticatedWorkspace({
   );
   const activeTeam = teams.find((team) => team.id === activeTeamId);
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
+  const browsedTeamId = selectedTeam?.id;
+  const teamThreads =
+    browsedTeamId === activeTeamId && activeTeamId !== undefined
+      ? state.threads
+      : browsedTeamThreads?.teamId === browsedTeamId
+        ? (browsedTeamThreads?.threads ?? [])
+        : [];
   const visiblePersonalThreads = personalThreads.filter((thread) => thread.status === "active");
   const managedTeam = teams.find((team) => team.id === selectedTeamId);
   const personalCloudDriveApi = useMemo<CloudDriveApi | undefined>(() => {
@@ -498,7 +556,11 @@ function AuthenticatedWorkspace({
     currentRunPollRef.current.invalidate();
     dispatch({ type: "select", threadId });
     setPendingInputs([]);
+    setContinuity(undefined);
+    setRecoveryUi(undefined);
+    setUploadFiles([]);
     setHistoryFiles([]);
+    setTextPreview(undefined);
     setFilePreview(undefined);
     snapshotUploads.current.clear();
     setError(undefined);
@@ -507,16 +569,26 @@ function AuthenticatedWorkspace({
 
   const switchWorkspace = useCallback(
     (teamId: string | undefined, threadId?: string) => {
+      const previousTeamId = workspaceTenantRef.current;
       apiClient.setTenantId?.(teamId);
+      workspaceTenantRef.current = teamId;
       setActiveTeamId(teamId);
-      if (teamId !== undefined) setCloudTeamId(teamId);
+      if (teamId !== undefined) {
+        setSelectedTeamId(teamId);
+        setCloudTeamId(teamId);
+      }
       // 同一空间内新建空会话只清除选择，不清空已加载的导航投影；否则重复点击会让团队任务永久消失。
-      if (activeTeamId !== teamId) dispatch({ type: "threads", threads: [] });
+      if (previousTeamId !== teamId) {
+        threadListRequestRef.current += 1;
+        dispatch({ type: "threads", threads: [] });
+        setAvailableAgents([]);
+        setSelectedAgentId("agent_default");
+      }
       // 用户显式进入新会话时必须保持空白，不能被刷新逻辑自动选回已有任务。
       initialSelectionAppliedRef.current = true;
       selectThread(threadId);
     },
-    [activeTeamId, apiClient, selectThread],
+    [apiClient, selectThread],
   );
 
   const selectWorkspaceThread = useCallback(
@@ -545,9 +617,9 @@ function AuthenticatedWorkspace({
       setTeams(items);
       // 团队目录属于个人身份；退出、解散或测试库重建后，旧活动 Tenant 必须立即失效，
       // 否则后续全局请求会继续携带不可恢复的 X-Tenant-ID。
-      if (activeTeamId !== undefined && !items.some((team) => team.id === activeTeamId)) {
-        apiClient.setTenantId?.(undefined);
-        setActiveTeamId(undefined);
+      const currentTeamId = workspaceTenantRef.current;
+      if (currentTeamId !== undefined && !items.some((team) => team.id === currentTeamId)) {
+        switchWorkspace(undefined);
       }
       setSelectedTeamId((current) =>
         current !== undefined && items.some((team) => team.id === current) ? current : items[0]?.id,
@@ -561,14 +633,17 @@ function AuthenticatedWorkspace({
     } finally {
       setTeamsLoading(false);
     }
-  }, [activeTeamId, apiClient, teamWorkspaceApi]);
+  }, [switchWorkspace, teamWorkspaceApi]);
 
   useEffect(() => {
     void refreshTeams();
   }, [refreshTeams]);
 
   useEffect(() => {
-    if (apiClient.listThreadsForTenant === undefined) return;
+    if (apiClient.listThreadsForTenant === undefined || activeTeamId === undefined) {
+      setPersonalThreadsLoading(false);
+      return;
+    }
     let stopped = false;
     setPersonalThreadsLoading(true);
     void apiClient
@@ -576,36 +651,45 @@ function AuthenticatedWorkspace({
       .then((threads) => {
         if (!stopped) setPersonalThreads(threads);
       })
-      .catch(() => undefined)
+      .catch((reason: unknown) => {
+        if (!stopped && !isUnavailableResource(reason))
+          setError(workspaceError(reason, "加载个人任务失败"));
+      })
       .finally(() => {
         if (!stopped) setPersonalThreadsLoading(false);
       });
     return () => {
       stopped = true;
     };
-  }, [apiClient]);
+  }, [activeTeamId, apiClient]);
 
   useEffect(() => {
-    if (apiClient.listThreadsForTenant === undefined || selectedTeam === undefined) {
-      setTeamThreads([]);
+    if (
+      apiClient.listThreadsForTenant === undefined ||
+      browsedTeamId === undefined ||
+      browsedTeamId === activeTeamId
+    ) {
       setTeamThreadsLoading(false);
       return;
     }
     let stopped = false;
     setTeamThreadsLoading(true);
     void apiClient
-      .listThreadsForTenant(selectedTeam.id)
+      .listThreadsForTenant(browsedTeamId)
       .then((threads) => {
-        if (!stopped) setTeamThreads(threads);
+        if (!stopped) setBrowsedTeamThreads({ teamId: browsedTeamId, threads });
       })
-      .catch(() => undefined)
+      .catch((reason: unknown) => {
+        if (!stopped && !isUnavailableResource(reason))
+          setError(workspaceError(reason, "加载团队任务失败"));
+      })
       .finally(() => {
         if (!stopped) setTeamThreadsLoading(false);
       });
     return () => {
       stopped = true;
     };
-  }, [apiClient, selectedTeam]);
+  }, [activeTeamId, apiClient, browsedTeamId]);
 
   useEffect(() => {
     if (apiClient.listAvailableAgents === undefined) return;
@@ -613,7 +697,7 @@ function AuthenticatedWorkspace({
     void apiClient
       .listAvailableAgents(activeTeamId)
       .then((agents) => {
-        if (stopped) return;
+        if (stopped || workspaceTenantRef.current !== activeTeamId) return;
         setAvailableAgents(agents);
         setSelectedAgentId((current) =>
           agents.some((agent) => agent.id === current)
@@ -623,8 +707,10 @@ function AuthenticatedWorkspace({
               "agent_default"),
         );
       })
-      .catch(() => {
-        if (!stopped) setAvailableAgents([]);
+      .catch((reason: unknown) => {
+        if (stopped || workspaceTenantRef.current !== activeTeamId) return;
+        setAvailableAgents([]);
+        if (!isUnavailableResource(reason)) setError(workspaceError(reason, "加载 Agent 失败"));
       });
     return () => {
       stopped = true;
@@ -638,6 +724,9 @@ function AuthenticatedWorkspace({
 
   const refreshThreads = useCallback(async () => {
     const requestedTeamId = activeTeamId;
+    const request = ++threadListRequestRef.current;
+    const isCurrent = () =>
+      request === threadListRequestRef.current && requestedTeamId === workspaceTenantRef.current;
     const expectedNavigation = navigationRef.current.capture();
     setLoading(true);
     try {
@@ -645,6 +734,7 @@ function AuthenticatedWorkspace({
         apiClient.listThreadsForTenant === undefined
           ? await apiClient.listThreads()
           : await apiClient.listThreadsForTenant(requestedTeamId);
+      if (!isCurrent()) return;
       dispatch({ type: "threads", threads });
       if (!initialSelectionAppliedRef.current) {
         initialSelectionAppliedRef.current = true;
@@ -659,11 +749,11 @@ function AuthenticatedWorkspace({
       }
       if (navigationRef.current.isCurrent(expectedNavigation)) setError(undefined);
     } catch (reason) {
-      if (navigationRef.current.isCurrent(expectedNavigation)) {
-        setError(reason instanceof ApiError ? reason : new ApiError("加载线程失败", 0, true));
+      if (isCurrent() && navigationRef.current.isCurrent(expectedNavigation)) {
+        setError(workspaceError(reason, "加载线程失败"));
       }
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [activeTeamId, apiClient, selectThread]);
 
@@ -672,12 +762,8 @@ function AuthenticatedWorkspace({
   }, [refreshThreads]);
 
   useEffect(() => {
-    if (activeTeamId === undefined) {
-      setPersonalThreads(state.threads);
-    } else if (activeTeamId === selectedTeam?.id) {
-      setTeamThreads(state.threads);
-    }
-  }, [activeTeamId, selectedTeam?.id, state.threads]);
+    if (activeTeamId === undefined) setPersonalThreads(state.threads);
+  }, [activeTeamId, state.threads]);
 
   useEffect(() => {
     const threadId = state.selectedThreadId;
@@ -688,12 +774,12 @@ function AuthenticatedWorkspace({
     const expectedNavigation = navigationRef.current.capture();
     const selectionGeneration = state.selectionGeneration;
     let stopped = false;
-    setRecoveryUi({
-      threadId,
-      selectionGeneration,
-      requestVersion: recoveryNonce,
-      status: "loading",
-    });
+    const request = { threadId, selectionGeneration, requestVersion: recoveryNonce };
+    setRecoveryUi({ ...request, status: "pending" });
+    const loadingTimer = window.setTimeout(() => {
+      if (navigationRef.current.isCurrent(expectedNavigation))
+        setRecoveryUi({ ...request, status: "loading" });
+    }, 200);
 
     void recoverLatestRunForNavigation(navigationRef.current, expectedNavigation, () =>
       apiClient.listLatestRuns(threadId, 1),
@@ -707,7 +793,9 @@ function AuthenticatedWorkspace({
           run: runs[0],
         });
         setRecoveryUi((current) =>
-          current?.threadId === threadId && current.selectionGeneration === selectionGeneration
+          current?.threadId === threadId &&
+          current.selectionGeneration === selectionGeneration &&
+          current.requestVersion === recoveryNonce
             ? undefined
             : current,
         );
@@ -715,16 +803,16 @@ function AuthenticatedWorkspace({
       .catch((reason: unknown) => {
         if (stopped || !navigationRef.current.isCurrent(expectedNavigation)) return;
         setRecoveryUi({
-          threadId,
-          selectionGeneration,
-          requestVersion: recoveryNonce,
+          ...request,
           status: "error",
           error: reason instanceof ApiError ? reason : new ApiError("恢复最新运行失败", 0, true),
         });
-      });
+      })
+      .finally(() => window.clearTimeout(loadingTimer));
 
     return () => {
       stopped = true;
+      window.clearTimeout(loadingTimer);
     };
   }, [apiClient, recoveryNonce, state.selectedThreadId, state.selectionGeneration]);
 
@@ -734,10 +822,13 @@ function AuthenticatedWorkspace({
     const expectedNavigation = navigationRef.current.capture();
     let stopped = false;
     let timer: number | undefined;
+    let delay = externalRunDiscoveryIntervalMs;
     const discoverExternalRun = async () => {
+      if (stopped || !navigationRef.current.isCurrent(expectedNavigation)) return;
       try {
         if (document.visibilityState !== "hidden") {
           const [latest] = await apiClient.listLatestRuns(threadId, 1);
+          delay = externalRunDiscoveryIntervalMs;
           if (
             !stopped &&
             navigationRef.current.isCurrent(expectedNavigation) &&
@@ -750,11 +841,16 @@ function AuthenticatedWorkspace({
             return;
           }
         }
-      } catch {
-        // 外部 Run 发现是后台增强；短暂失败不能覆盖当前对话或打断用户输入。
+      } catch (reason) {
+        if (stopped || !navigationRef.current.isCurrent(expectedNavigation)) return;
+        if (isUnavailableResource(reason)) return;
+        const failure = workspaceError(reason, "查找后续运行失败");
+        setError(failure);
+        if (!failure.retryable) return;
+        delay = Math.min(delay * 2, 60_000);
       }
-      if (!stopped)
-        timer = window.setTimeout(() => void discoverExternalRun(), externalRunDiscoveryIntervalMs);
+      if (!stopped && navigationRef.current.isCurrent(expectedNavigation))
+        timer = window.setTimeout(() => void discoverExternalRun(), delay);
     };
     timer = window.setTimeout(() => void discoverExternalRun(), externalRunDiscoveryIntervalMs);
     return () => {
@@ -778,10 +874,9 @@ function AuthenticatedWorkspace({
           dispatch({ type: "threadContext", items });
         }
       })
-      .catch(() => {
-        if (!stopped && navigationRef.current.isCurrent(expected)) {
-          dispatch({ type: "threadContext", items: undefined });
-        }
+      .catch((reason: unknown) => {
+        if (!stopped && navigationRef.current.isCurrent(expected) && !isUnavailableResource(reason))
+          setError(workspaceError(reason, "加载对话历史失败"));
       });
     return () => {
       stopped = true;
@@ -801,8 +896,9 @@ function AuthenticatedWorkspace({
       .then((status) => {
         if (!stopped && navigationRef.current.isCurrent(expected)) setContinuity(status);
       })
-      .catch(() => {
-        if (!stopped && navigationRef.current.isCurrent(expected)) setContinuity(undefined);
+      .catch((reason: unknown) => {
+        if (!stopped && navigationRef.current.isCurrent(expected) && !isUnavailableResource(reason))
+          setError(workspaceError(reason, "加载对话连续性状态失败"));
       });
     return () => {
       stopped = true;
@@ -819,13 +915,21 @@ function AuthenticatedWorkspace({
     const outputController = new AbortController();
     let outputSettled = apiClient.streamEvents === undefined;
     let polling = false;
+    let pollingStopped = false;
+    let failures = 0;
+    let pollError: ApiError | undefined;
     let refreshRequested = false;
     let checkedForFollowUp = false;
     let observedRunVersion = 0;
     const reconciliationIntervalMs =
       apiClient.streamEvents === undefined ? 1_200 : streamedRunReconciliationIntervalMs;
-    const poll = async (): Promise<void> => {
-      if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
+    const poll = async (retry = false): Promise<void> => {
+      if (
+        pollingStopped ||
+        (!retry && failures > 0) ||
+        !currentRunPollRef.current.isCurrent(pollGeneration)
+      )
+        return;
       if (timer !== undefined) window.clearTimeout(timer);
       if (polling) {
         refreshRequested = true;
@@ -836,24 +940,28 @@ function AuthenticatedWorkspace({
       try {
         const requestedRunVersion = observedRunVersion;
         const latest = await apiClient.getRun(threadId, runId);
+        if (stopped || !currentRunPollRef.current.isCurrent(pollGeneration)) return;
         recoveryRequired = latest.executionStatus === "recovery_required";
         const [eventPage, artifacts, threadContext, continuityStatus, threadSnapshot] =
           await Promise.all([
             apiClient.streamEvents === undefined
               ? drainEventPages(
-                  (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
+                  (after, limit) =>
+                    currentRunPollRef.current.isCurrent(pollGeneration)
+                      ? apiClient.listEvents(threadId, runId, after, limit)
+                      : Promise.reject(new DOMException("Run 已切换", "AbortError")),
                   eventAfterRef.current,
                   eventAttemptRef.current,
                 )
               : Promise.resolve(undefined),
             apiClient.listArtifacts(threadId, runId),
-            apiClient.listThreadContext?.(threadId).catch(() => undefined) ??
-              Promise.resolve(undefined),
-            apiClient.getThreadContinuity?.(threadId).catch(() => undefined) ??
-              Promise.resolve(undefined),
-            apiClient.getThread?.(threadId).catch(() => undefined) ?? Promise.resolve(undefined),
+            apiClient.listThreadContext?.(threadId),
+            apiClient.getThreadContinuity?.(threadId),
+            apiClient.getThread?.(threadId),
           ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
+          if (failures > 0) setError((current) => (current === pollError ? undefined : current));
+          failures = 0;
           if (eventPage !== undefined) {
             eventAttemptRef.current = eventPage.attemptId;
             eventAfterRef.current = eventPage.nextAfter;
@@ -908,13 +1016,25 @@ function AuthenticatedWorkspace({
         }
       } catch (reason) {
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
-          setError(reason instanceof ApiError ? reason : new ApiError("轮询运行状态失败", 0, true));
-          if (!recoveryRequired)
-            timer = window.setTimeout(() => void poll(), reconciliationIntervalMs);
+          pollError = workspaceError(reason, "轮询运行状态失败");
+          setError(pollError);
+          pollingStopped = recoveryRequired || !pollError.retryable;
+          if (pollingStopped) outputController.abort();
+          else {
+            failures += 1;
+            refreshRequested = false;
+            timer = window.setTimeout(
+              () => void poll(true),
+              Math.max(
+                1_000,
+                Math.min(60_000, reconciliationIntervalMs * 2 ** Math.min(failures, 6)),
+              ),
+            );
+          }
         }
       } finally {
         polling = false;
-        if (refreshRequested && !stopped) {
+        if (refreshRequested && !stopped && !pollingStopped && failures === 0) {
           refreshRequested = false;
           if (timer !== undefined) window.clearTimeout(timer);
           timer = window.setTimeout(() => void poll(), 0);
@@ -966,7 +1086,7 @@ function AuthenticatedWorkspace({
           if (!stopped) void poll();
         },
         onError: (error) => {
-          if (!stopped) setError(error);
+          if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) setError(error);
         },
       });
     }
@@ -993,39 +1113,52 @@ function AuthenticatedWorkspace({
     )
       return;
     const threadId = state.selectedThreadId;
-    const getThreadInputReceipt = apiClient.getThreadInputReceipt;
+    const getThreadInputReceipt = apiClient.getThreadInputReceipt.bind(apiClient);
+    const expected = navigationRef.current.capture();
     let stopped = false;
-    const timer = window.setInterval(() => {
-      void Promise.all(
-        pendingReceipts.map((receipt) => getThreadInputReceipt(threadId, receipt.receiptId)),
-      )
-        .then((receipts) => {
-          if (stopped) return;
-          const byId = new Map(receipts.map((receipt) => [receipt.receiptId, receipt]));
-          setPendingInputs((current) =>
-            current.map((item) => {
-              const receipt = item.receipt && byId.get(item.receipt.receiptId);
-              return receipt === undefined
-                ? item
-                : {
-                    ...item,
-                    receipt,
-                    disposition: receipt.disposition,
-                    ...(receipt.queueSequence === undefined
-                      ? {}
-                      : { queueSequence: receipt.queueSequence }),
-                    ...(receipt.rejectionCode === undefined
-                      ? {}
-                      : { rejectionCode: receipt.rejectionCode }),
-                  };
-            }),
-          );
-        })
-        .catch(() => undefined);
-    }, 1_200);
+    let delay = 1_200;
+    const isCurrent = () => !stopped && navigationRef.current.isCurrent(expected);
+    const pollReceipts = async () => {
+      if (!isCurrent()) return;
+      try {
+        const receipts = await Promise.all(
+          pendingReceipts.map((receipt) => getThreadInputReceipt(threadId, receipt.receiptId)),
+        );
+        if (!isCurrent()) return;
+        delay = 1_200;
+        const byId = new Map(receipts.map((receipt) => [receipt.receiptId, receipt]));
+        setPendingInputs((current) => {
+          const next = current.map((item) => {
+            const receipt = item.receipt && byId.get(item.receipt.receiptId);
+            if (receipt === undefined || JSON.stringify(receipt) === JSON.stringify(item.receipt))
+              return item;
+            return {
+              ...item,
+              receipt,
+              disposition: receipt.disposition,
+              ...(receipt.queueSequence === undefined
+                ? {}
+                : { queueSequence: receipt.queueSequence }),
+              ...(receipt.rejectionCode === undefined
+                ? {}
+                : { rejectionCode: receipt.rejectionCode }),
+            };
+          });
+          return next.every((item, index) => item === current[index]) ? current : next;
+        });
+      } catch (reason) {
+        if (!isCurrent() || isUnavailableResource(reason)) return;
+        const failure = workspaceError(reason, "读取发送回执失败");
+        setError(failure);
+        if (!failure.retryable) return;
+        delay = Math.min(delay * 2, 60_000);
+      }
+      if (isCurrent()) timer = window.setTimeout(() => void pollReceipts(), delay);
+    };
+    let timer = window.setTimeout(() => void pollReceipts(), delay);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [apiClient, pendingInputs, state.selectedThreadId]);
 
@@ -1035,7 +1168,6 @@ function AuthenticatedWorkspace({
   };
   const createTeam = async (displayName: string) => {
     if (teamWorkspaceApi === undefined) return;
-    apiClient.setTenantId?.(undefined);
     try {
       const team = await teamWorkspaceApi.createTeam(displayName);
       setTeams((current) => [...current.filter((item) => item.id !== team.id), team]);
@@ -1044,8 +1176,6 @@ function AuthenticatedWorkspace({
     } catch (reason) {
       setError(reason instanceof ApiError ? reason : new ApiError("创建团队失败", 0, true));
       throw reason;
-    } finally {
-      apiClient.setTenantId?.(activeTeamId);
     }
   };
   const send = async (mode: "auto" | "follow_up" = "auto") => {
@@ -1059,7 +1189,7 @@ function AuthenticatedWorkspace({
     )
       return;
     sendInFlightRef.current = true;
-    const expectedNavigation = navigationRef.current.capture();
+    let expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
       const request = input.trim() || "请处理本轮提供的文件。";
@@ -1114,16 +1244,15 @@ function AuthenticatedWorkspace({
       let threadId = state.selectedThreadId;
       if (threadId === undefined) {
         const thread = await apiClient.createThread(deriveThreadTitle(request), selectedAgentId);
-        dispatch({ type: "threadCreated", thread });
         if (!navigationRef.current.isCurrent(expectedNavigation)) return;
+        dispatch({ type: "threadCreated", thread });
         moveInputTo(thread.id);
-        navigationRef.current.navigate(thread.id);
+        expectedNavigation = navigationRef.current.navigate(thread.id);
         currentRunPollRef.current.invalidate();
         dispatch({ type: "select", threadId: thread.id });
         setPendingInputs([]);
         threadId = thread.id;
       }
-      const runNavigation = navigationRef.current.capture();
       const receipt =
         apiClient.submitThreadInput === undefined
           ? undefined
@@ -1135,6 +1264,7 @@ function AuthenticatedWorkspace({
               attachments,
               ...(fileReferences.length === 0 ? [] : ([fileReferences] as const)),
             );
+      if (!navigationRef.current.isCurrent(expectedNavigation)) return;
       const run =
         receipt === undefined
           ? await apiClient.createRun(threadId, request)
@@ -1142,7 +1272,7 @@ function AuthenticatedWorkspace({
             (receipt.queuedRunId === undefined
               ? undefined
               : await apiClient.getRun(threadId, receipt.queuedRunId)));
-      if (!navigationRef.current.isCurrent(runNavigation)) return;
+      if (!navigationRef.current.isCurrent(expectedNavigation)) return;
       setPendingInputs((current) => [
         ...current,
         {
@@ -1385,6 +1515,7 @@ function AuthenticatedWorkspace({
     if (!state.selectedThreadId || !state.run) return;
     const threadId = state.selectedThreadId;
     const runId = state.run.id;
+    const expectedNavigation = navigationRef.current.capture();
     const artifact = state.artifacts.find((item) => item.id === artifactId);
     if (readPreviewContent && artifact?.resourceVersionId) {
       previewContext.open({
@@ -1399,13 +1530,15 @@ function AuthenticatedWorkspace({
     }
     try {
       const resolved = await apiClient.previewArtifact(threadId, runId, artifactId);
+      if (!navigationRef.current.isCurrent(expectedNavigation)) return;
       if (resolved.kind === "text") {
         setTextPreview(resolved);
       } else {
         await openArtifact(() => Promise.resolve(resolved.url), "获取预览地址失败");
       }
     } catch (reason) {
-      setError(reason instanceof ApiError ? reason : new ApiError("获取预览地址失败", 0, true));
+      if (navigationRef.current.isCurrent(expectedNavigation))
+        setError(workspaceError(reason, "获取预览地址失败"));
     }
   };
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
@@ -1415,7 +1548,8 @@ function AuthenticatedWorkspace({
   const currentRecovery =
     recoveryUi !== undefined &&
     recoveryUi.threadId === state.selectedThreadId &&
-    recoveryUi.selectionGeneration === state.selectionGeneration
+    recoveryUi.selectionGeneration === state.selectionGeneration &&
+    recoveryUi.requestVersion === recoveryNonce
       ? recoveryUi
       : undefined;
   const visibleError = currentRecovery?.status === "error" ? currentRecovery.error : error;
@@ -1546,7 +1680,7 @@ function AuthenticatedWorkspace({
                 taskCount={teamThreads.length}
               >
                 <ThreadNavigation ariaLabel="团队任务列表">
-                  {teamThreadsLoading ? (
+                  {(browsedTeamId === activeTeamId ? loading : teamThreadsLoading) ? (
                     <div className="empty compact">
                       <LoaderCircle className="spin" size={18} />
                       正在加载团队任务
@@ -1720,6 +1854,14 @@ function AuthenticatedWorkspace({
               />
               <h1>准备好协作了吗？</h1>
               <p>描述任务后会自动创建会话，并用首条请求作为标题。</p>
+              {moduleVisible(branding, "team_spaces") && teams.length > 0 && (
+                <SpaceDestinationPicker
+                  teams={teams}
+                  {...(activeTeamId === undefined ? {} : { activeTeamId })}
+                  disabled={actionLoading}
+                  onSwitch={switchWorkspace}
+                />
+              )}
               <NewThreadAgentWelcome
                 agents={availableAgents}
                 selectedAgentId={selectedAgentId}
@@ -1760,6 +1902,7 @@ function AuthenticatedWorkspace({
               >
                 <div ref={runContentRef} className="run-content">
                   <ThreadTranscript
+                    key={state.selectionGeneration}
                     messages={state.threadContext ?? []}
                     {...(runFeedbackApi === undefined ? {} : { feedbackApi: runFeedbackApi })}
                     threadId={selected.id}
@@ -1784,7 +1927,7 @@ function AuthenticatedWorkspace({
                     />
                   ) : currentRecovery?.status === "loading" ? (
                     <RunRecoveryLoading />
-                  ) : (
+                  ) : currentRecovery?.status === "pending" ? null : (
                     <EmptyConversation />
                   )}
                 </div>
@@ -1999,11 +2142,16 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
   const [accountSession, setAccountSession] = useState<AccountSession | undefined>(() =>
     readAccountSession(window.localStorage),
   );
+  const [sessionEnded, setSessionEnded] = useState(false);
   const [identityRecoveryPending, setIdentityRecoveryPending] = useState(
     accountSession === undefined && apiClient.exchangeIdentitySession !== undefined,
   );
   useEffect(() => {
-    if (accountSession !== undefined || apiClient.exchangeIdentitySession === undefined) {
+    if (
+      sessionEnded ||
+      accountSession !== undefined ||
+      apiClient.exchangeIdentitySession === undefined
+    ) {
       setIdentityRecoveryPending(false);
       return;
     }
@@ -2023,10 +2171,35 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
     return () => {
       active = false;
     };
-  }, [accountSession, apiClient]);
+  }, [accountSession, apiClient, sessionEnded]);
   useLayoutEffect(() => {
     apiClient.setAccessToken?.(accountSession?.accessToken);
-  }, [accountSession?.accessToken, apiClient]);
+    if (accountSession === undefined) return;
+    apiClient.setTenantId?.(undefined);
+    const endSession = () => {
+      clearAccountSession(window.localStorage);
+      apiClient.setAccessToken?.(undefined);
+      apiClient.setTenantId?.(undefined);
+      setSessionEnded(true);
+      setAccountSession(undefined);
+    };
+    apiClient.setSessionInvalidationHandler?.(endSession);
+    const expiresAt = Date.parse(accountSession.expiresAt);
+    let timer: number | undefined;
+    const checkExpiry = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0) endSession();
+      else timer = window.setTimeout(checkExpiry, Math.min(remaining, 2_147_483_647));
+    };
+    checkExpiry();
+    document.addEventListener("visibilitychange", checkExpiry);
+    return () => {
+      apiClient.setSessionInvalidationHandler?.(undefined);
+      document.removeEventListener("visibilitychange", checkExpiry);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [accountSession, apiClient]);
 
   if (accountSession === undefined && identityRecoveryPending) {
     return (
@@ -2079,7 +2252,10 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
             return apiClient.loginAccount(input);
           },
         }}
-        onAuthenticated={setAccountSession}
+        onAuthenticated={(session) => {
+          setSessionEnded(false);
+          setAccountSession(session);
+        }}
       />
     );
   }
@@ -2093,6 +2269,8 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
         clearAccountSession(window.localStorage);
         clearAccountDrafts(accountSession.profile.id);
         apiClient.setAccessToken?.(undefined);
+        apiClient.setTenantId?.(undefined);
+        setSessionEnded(true);
         setAccountSession(undefined);
         void logout?.catch(() => undefined);
       }}

@@ -56,31 +56,20 @@ function client(value: ScriptedPersonalHistoryClient): PoolClient {
 }
 
 describe("Agent 正式交付物历史目录", () => {
-  it("只允许启用后的 deliverable 进入历史目录", () => {
-    expect(
-      shouldIndexArtifactInHistory({
-        historyFilesystemEnabled: true,
-        purpose: "deliverable",
-      }),
-    ).toBe(true);
-    expect(
-      shouldIndexArtifactInHistory({
-        historyFilesystemEnabled: true,
-        purpose: "diagnostic",
-      }),
-    ).toBe(false);
-    expect(
-      shouldIndexArtifactInHistory({
-        historyFilesystemEnabled: true,
-        purpose: "trace",
-      }),
-    ).toBe(false);
-    expect(
-      shouldIndexArtifactInHistory({
-        historyFilesystemEnabled: false,
-        purpose: "deliverable",
-      }),
-    ).toBe(false);
+  it("仅在启用时登记普通和 API Run 的正式交付物", () => {
+    for (const [enabled, purpose, runOrigin, expected] of [
+      [true, "deliverable", "normal", true],
+      [true, "deliverable", "api", true],
+      [true, "deliverable", "playground", false],
+      [true, "deliverable", "evaluation", false],
+      [true, "diagnostic", "normal", false],
+      [true, "trace", "normal", false],
+      [false, "deliverable", "normal", false],
+    ] as const) {
+      expect(
+        shouldIndexArtifactInHistory({ historyFilesystemEnabled: enabled, purpose, runOrigin }),
+      ).toBe(expected);
+    }
   });
 
   it("创建语义任务目录并以 artifact 身份写入 deliverable，文件重名在扩展名前编号", async () => {

@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   apiKeyScope,
+  artifactId,
   createPersonalTenant,
   createRun,
   createThread,
@@ -27,6 +28,7 @@ import {
   workspaceId,
   workspaceRevisionId,
 } from "@hoox/domain";
+import { HistoryFileLibraryService } from "@hoox/resource";
 import type {
   ControlledRolloutProjection,
   ExecutionFence,
@@ -69,6 +71,10 @@ import {
   AdminControlService,
   digestControlRequest,
 } from "../../runtime-ts/packages/admin-control/src/index.js";
+import {
+  createArtifactExecutionAuthorizationAuthority,
+  PgSimpleDeliveredFileRepository,
+} from "../../runtime-ts/packages/artifact/src/index.js";
 import { createApiKeyToken, hashApiKey } from "../../runtime-ts/packages/identity/src/api-key.js";
 import { MemoryIngestionConsumer } from "../../runtime-ts/packages/memory/src/index.js";
 import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
@@ -92,6 +98,7 @@ import {
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import { PgMemoryIngestionStore } from "../../runtime-ts/packages/persistence/src/pg-memory-ingestion.js";
 import { PgPlaygroundRepository } from "../../runtime-ts/packages/persistence/src/pg-playground.js";
+import { PgResourceFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-filesystem.js";
 import { PgResourceCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-library.js";
 import {
   PgRunDispatchCreation,
@@ -5697,6 +5704,173 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       leaseDurationMs: 30_000,
     });
     expect(resumed).toMatchObject({ outcome: "claimed", snapshot: { answer: "只处理 Markdown" } });
+  });
+
+  it.each([true, false])("deliver_file 按历史开关登记云盘且重放不补录（%s）", async (enabled) => {
+    const label = `delivery-history-${enabled}-${suffix}`;
+    const f = await fixture(label);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "delivery-history-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    const name = "执行报告.txt";
+    const call = {
+      callId: "history-delivery",
+      toolName: "deliver_file",
+      argsDigest: sha256Digest(requestDigest(label)),
+    };
+    await expect(
+      persistence.mutate(
+        signed({
+          idempotencyKey: `${label}/event`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 0,
+          nextAttemptStatus: "running",
+          nextStage: "model_execution_started",
+          events: [
+            {
+              schemaVersion: 1,
+              kind: "agent_event",
+              sequence: 0,
+              payload: { type: "tool.started", callId: call.callId, name: call.toolName },
+            },
+          ],
+          outbox: [],
+          effectInvocation: { callId: call.callId, toolName: call.toolName },
+        }),
+      ),
+    ).resolves.toMatchObject({ outcome: "applied" });
+    const issued = await persistence.issueExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 1,
+      effect: "tool_execution",
+      call,
+      permitDurationMs: 5_000,
+    });
+    if (issued.outcome !== "authorized") throw new Error("交付许可未签发");
+    const consumed = await persistence.consumeExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 1,
+      permit: issued.permit,
+    });
+    if (consumed.outcome !== "consumed") throw new Error("交付许可未消费");
+    const authorization = createArtifactExecutionAuthorizationAuthority({
+      now: () => 0,
+    }).issuer.issue({
+      attemptId: claimed.snapshot.attempt.attemptId,
+      consumed: {
+        permit: issued.permit,
+        consumedAt: consumed.databaseNow,
+        consumedAtMonotonicMs: 0,
+        maxContinuationDelayMs: 250,
+      },
+    });
+
+    const { tenantId: tenant } = f.scope;
+    const lifecycleId = randomUUID();
+    const incarnationId = randomUUID();
+    const physicalObjectKey = `integration/${label}`;
+    const referenceId = `${label}-ref`;
+    const blob = {
+      kind: "stable",
+      tenantId: tenant,
+      purpose: "resource",
+      sha256: requestDigest(name),
+      size: 1,
+      mediaType: "text/plain",
+      incarnationId,
+      physicalObjectKey,
+    } as const;
+    await withTenantTransaction(runtime, { tenantId: tenant }, async (client) => {
+      await client.query(
+        `INSERT INTO blob_lifecycles(tenant_id,lifecycle_id,purpose,sha256,size,state,current_incarnation_id)
+         VALUES($1,$2,'resource',$3,1,'active',$4)`,
+        [tenant, lifecycleId, blob.sha256, incarnationId],
+      );
+      await client.query(
+        `INSERT INTO blob_incarnations(tenant_id,lifecycle_id,purpose,sha256,size,incarnation_id,physical_object_key,state)
+         VALUES($1,$2,'resource',$3,1,$4,$5,'active')`,
+        [tenant, lifecycleId, blob.sha256, incarnationId, physicalObjectKey],
+      );
+      await client.query(
+        `INSERT INTO blob_commits(tenant_id,operation_id,status,version,snapshot)
+         VALUES($1,$2,'completed',1,'{}'::jsonb)`,
+        [tenant, label],
+      );
+      await client.query(
+        `INSERT INTO blob_references(
+           tenant_id,reference_id,operation_id,state,purpose,sha256,size,media_type,
+           staging_upload_id,lifecycle_id,incarnation_id,physical_object_key
+         ) VALUES($1,$2,$3,'stable','resource',$4,1,$5,$3,$6,$7,$8)`,
+        [
+          tenant,
+          referenceId,
+          label,
+          blob.sha256,
+          blob.mediaType,
+          lifecycleId,
+          incarnationId,
+          physicalObjectKey,
+        ],
+      );
+    });
+
+    const command = {
+      authorization,
+      idempotencyKey: call.callId,
+      commandDigest: call.argsDigest,
+      ids: {
+        artifactId: artifactId(`${label}-artifact`),
+        resourceId: `${label}-resource`,
+        resourceVersionId: resourceVersionId(`${label}-version`),
+        deliverableKey: `${label}-deliverable`,
+      },
+      name,
+      sourcePath: name,
+      mediaType: blob.mediaType,
+      persisted: { referenceId, blob },
+    };
+    const repository = new PgSimpleDeliveredFileRepository(runtime, {
+      historyFilesystemEnabled: enabled,
+    });
+    const delivery = await repository.commit(command);
+    expect(delivery).toMatchObject({ artifactId: command.ids.artifactId, name });
+    const library = new HistoryFileLibraryService(new PgResourceFilesystemCatalog(runtime));
+    const context = { tenantId: tenant, userId: f.user.id };
+    const recent = await library.list({ context });
+    if (enabled) {
+      expect(recent.items).toMatchObject([
+        {
+          threadId: f.scope.threadId,
+          fileCount: 1,
+          files: [
+            {
+              resourceId: command.ids.resourceId,
+              versionId: delivery.resourceVersionId,
+              entryName: name,
+            },
+          ],
+        },
+      ]);
+      const foreign = await fixture(`${label}-foreign`);
+      const foreignContext = { tenantId: foreign.scope.tenantId, userId: foreign.user.id };
+      await expect(library.list({ context: foreignContext })).resolves.toMatchObject({ items: [] });
+      await expect(
+        library.resolve({
+          context: foreignContext,
+          resourceId: command.ids.resourceId,
+          versionId: delivery.resourceVersionId,
+        }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    } else {
+      expect(recent.items).toEqual([]);
+    }
+    // 关闭时已发布的旧交付物，在启用后按原调用重放也不补录。
+    const replay = new PgSimpleDeliveredFileRepository(runtime, { historyFilesystemEnabled: true });
+    await expect(replay.commit(command)).resolves.toEqual(delivery);
+    expect((await library.list({ context })).items).toEqual(recent.items);
   });
 
   it("事件、EffectInvocation 与 permit 使用同一 Attempt version 栅栏", async () => {

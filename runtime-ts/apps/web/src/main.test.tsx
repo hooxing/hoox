@@ -1021,9 +1021,13 @@ describe("Agent 工作台恢复接入", () => {
     await settleEffects();
 
     latestRun = scheduledRun;
-    await act(async () => vi.advanceTimersByTimeAsync(2_500));
+    const discoveryRequests = listLatestRuns.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(14_999));
+    expect(listLatestRuns).toHaveBeenCalledTimes(discoveryRequests);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
     await settleEffects();
 
+    expect(listLatestRuns).toHaveBeenCalledTimes(discoveryRequests + 1);
     expect(getRun).toHaveBeenCalledWith(selectedThread.id, scheduledRun.id);
   });
 

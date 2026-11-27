@@ -1617,9 +1617,6 @@ h2 {
   overflow-wrap: anywhere;
   line-height: 1.5;
 }
-.tool-failure-detail code {
-  font-size: 12px;
-}
 .tool-activity strong {
   overflow: hidden;
   color: #555c58;
@@ -1630,7 +1627,7 @@ h2 {
 .tool-activity.is-failed,
 .tool-activity.is-failed > svg,
 .tool-activity.is-failed strong {
-  color: #a0473f;
+  color: var(--status-warning-text);
 }
 .activity-group {
   min-width: 0;
@@ -2337,8 +2334,22 @@ h2 {
   .header-actions .quiet-button svg + * {
     display: none;
   }
-  .conversation-title h1 {
-    max-width: 38vw;
+  .conversation-title {
+    flex: 1;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .conversation-title h1,
+  .conversation-title .run-meta {
+    max-width: 100%;
+  }
+  .conversation-title .run-meta {
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
+  }
+  .run-meta .run-status {
+    white-space: nowrap;
   }
   .composer-footer > span {
     display: none;
@@ -2381,9 +2392,6 @@ h2 {
   }
   .conversation-empty {
     min-height: 170px;
-  }
-  .run-meta {
-    flex-wrap: wrap;
   }
 }
 

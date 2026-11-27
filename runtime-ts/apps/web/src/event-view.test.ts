@@ -120,6 +120,32 @@ describe("用户运行进度投影", () => {
     expect(blocks[0]).toMatchObject({ type: "tool", action: "read", status: "failed" });
   });
 
+  it("同一工具调用成功收敛后清除暂时失败详情", () => {
+    const blocks = buildConversationBlocks([
+      event(1, "tool.started", {
+        name: "read",
+        callId: "recoverable",
+        presentation: { action: "read", title: "input.md" },
+      }),
+      event(2, "tool.failed", {
+        name: "read",
+        callId: "recoverable",
+        failure: { code: "TOOL_FAILED", message: "读取步骤暂时未完成" },
+      }),
+      event(3, "tool.completed", { name: "read", callId: "recoverable", isError: false }),
+    ]);
+    expect(blocks).toEqual([
+      {
+        id: "event-1",
+        type: "tool",
+        callId: "recoverable",
+        action: "read",
+        title: "input.md",
+        status: "completed",
+      },
+    ]);
+  });
+
   it("增量折叠与完整回放一致，已完成块保持对象身份", () => {
     const events = [
       event(0, "message.delta", { delta: "第一段" }),

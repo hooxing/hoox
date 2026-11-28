@@ -1653,7 +1653,8 @@ function AuthenticatedWorkspace({
             <button
               type="button"
               className="cloud-drive-entry"
-              onClick={() => {
+              onClick={(event) => {
+                if (!isCompact) event.currentTarget.focus();
                 setCloudDriveOpen(true);
                 setNavigationOpen(false);
               }}

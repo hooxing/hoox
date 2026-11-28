@@ -1,6 +1,14 @@
 import { FileTypeIcon } from "./file-type-icon.js";
 import { ChevronDown, ChevronRight, Download, LoaderCircle, Plus, Search, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { ApiError, type HistoryFile, type HistoryFilePage, type RuntimeApi } from "./api.js";
 import { openResolvedUrl } from "./popup.js";
 import { formatArtifactSize, formatArtifactType } from "./workspace-view.js";
@@ -22,6 +30,31 @@ type CloudDriveSearchSource = Readonly<{
   readonly api: CloudDriveApi;
   readonly onSelectFile?: (file: HistoryFile) => void;
 }>;
+
+const DIALOG_FOCUSABLE_SELECTOR =
+  'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])';
+
+function isTopmostModal(dialog: HTMLElement | null): boolean {
+  if (dialog === null) return false;
+  const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+  const topmost = dialogs.item(dialogs.length - 1);
+  return topmost === null || topmost === dialog;
+}
+
+function handleEscapeClose(
+  event: Pick<KeyboardEvent, "key" | "defaultPrevented" | "preventDefault" | "stopPropagation">,
+  isComposing: boolean,
+  dialog: HTMLElement | null,
+  onClose: () => void,
+): boolean {
+  if (event.key !== "Escape" || event.defaultPrevented || isComposing || !isTopmostModal(dialog)) {
+    return false;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  onClose();
+  return true;
+}
 
 export function CloudDriveDialog({
   api,
@@ -46,6 +79,42 @@ export function CloudDriveDialog({
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [searchScope, setSearchScope] = useState<CloudDriveSearchScope>("all");
+  const dialogRef = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    dialogRef.current?.focus();
+    return () => {
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) {
+        previousFocus.focus();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const closeIfTopmost = (event: KeyboardEvent) =>
+      handleEscapeClose(event, event.isComposing, dialogRef.current, onCloseRef.current);
+    const handleDocumentCapture = (event: KeyboardEvent) => {
+      // 对话框内部子控件的 Escape 交由其自身和冒泡链路优先处理，确保输入法或嵌套层先关闭。
+      if (
+        event.target instanceof Node &&
+        dialogRef.current?.contains(event.target) &&
+        event.target !== dialogRef.current
+      ) {
+        return;
+      }
+      closeIfTopmost(event);
+    };
+    document.addEventListener("keydown", handleDocumentCapture, true);
+    window.addEventListener("keydown", closeIfTopmost);
+    return () => {
+      document.removeEventListener("keydown", handleDocumentCapture, true);
+      window.removeEventListener("keydown", closeIfTopmost);
+    };
+  }, []);
+
   const hasTeams = teams.length > 0;
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
   const searchSources = useMemo<readonly CloudDriveSearchSource[]>(
@@ -81,13 +150,49 @@ export function CloudDriveDialog({
     setSubmittedQuery("");
   };
 
+  const handleDialogKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (
+      handleEscapeClose(event, event.nativeEvent.isComposing, dialogRef.current, onCloseRef.current)
+    ) {
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const controls = [
+      ...event.currentTarget.querySelectorAll<HTMLElement>(DIALOG_FOCUSABLE_SELECTOR),
+    ];
+    if (controls.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (
+      event.shiftKey &&
+      (document.activeElement === first ||
+        document.activeElement === event.currentTarget ||
+        !event.currentTarget.contains(document.activeElement))
+    ) {
+      event.preventDefault();
+      last?.focus();
+    } else if (
+      !event.shiftKey &&
+      (document.activeElement === last || !event.currentTarget.contains(document.activeElement))
+    ) {
+      event.preventDefault();
+      first?.focus();
+    }
+  };
+
   return (
     <div className="skill-center-backdrop">
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         className="skill-center-dialog cloud-drive-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="cloud-drive-title"
+        onKeyDown={handleDialogKeyDown}
       >
         <header className="skill-center-header">
           <div>

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoryFile, HistoryFilePage } from "./api.js";
@@ -302,5 +302,175 @@ describe("云盘历史文件面板", () => {
     expect(api.downloadHistoryFile).toHaveBeenCalledWith(file);
     expect(replace).toHaveBeenCalledWith("http://127.0.0.1:19000/history-download");
     expect(popup.opener).toBeNull();
+  });
+
+  it("按 Escape 或点击关闭均可关闭云盘弹窗，约束 Tab 焦点并将焦点归还触发按钮", async () => {
+    const api: CloudDriveApi = {
+      listHistoryFiles: vi.fn(async () => page()),
+      downloadHistoryFile: vi.fn(async () => "http://127.0.0.1/history-download"),
+    };
+    const onCloseSpy = vi.fn();
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" className="trigger-button" onClick={() => setOpen(true)}>
+            云盘
+          </button>
+          {open && (
+            <CloudDriveDialog
+              api={api}
+              teams={[{ id: "tenant_product", name: "产品团队", api }]}
+              onClose={() => {
+                onCloseSpy();
+                setOpen(false);
+              }}
+            />
+          )}
+        </>
+      );
+    }
+
+    await act(async () => root.render(<Harness />));
+    const trigger = container.querySelector<HTMLButtonElement>(".trigger-button");
+    if (trigger === null) throw new Error("未渲染云盘触发按钮");
+    trigger.focus();
+    await act(async () => trigger.click());
+    await settle();
+
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog?.getAttribute("aria-labelledby")).toBe("cloud-drive-title");
+    expect(document.activeElement).toBe(dialog);
+
+    const controls = [
+      ...(dialog?.querySelectorAll<HTMLElement>(
+        "button:not(:disabled), input:not(:disabled), select:not(:disabled)",
+      ) ?? []),
+    ];
+    expect(controls.length).toBeGreaterThan(2);
+    controls.at(-1)?.focus();
+    await act(async () =>
+      controls
+        .at(-1)
+        ?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+        ),
+    );
+    expect(document.activeElement).toBe(controls[0]);
+    await act(async () =>
+      controls[0]?.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    expect(document.activeElement).toBe(controls.at(-1));
+
+    const search = dialog?.querySelector<HTMLInputElement>('[aria-label="搜索个人及团队文件"]');
+    search?.focus();
+    await act(async () =>
+      search?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(onCloseSpy).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    trigger.focus();
+    await act(async () => trigger.click());
+    await settle();
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="关闭云盘"]')?.click(),
+    );
+    expect(onCloseSpy).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("输入法合成中、内部已处理的 Escape 或存在上层嵌套弹窗时先关闭最内层", async () => {
+    const onClose = vi.fn();
+    const api: CloudDriveApi = {
+      listHistoryFiles: vi.fn(async () => page()),
+      downloadHistoryFile: vi.fn(async () => "http://127.0.0.1/history-download"),
+    };
+    const outer = document.createElement("div");
+    const outerKeyDown = vi.fn();
+    outer.addEventListener("keydown", outerKeyDown);
+    document.body.append(outer);
+    outer.append(container);
+    const underlyingDocListener = vi.fn();
+    document.addEventListener("keydown", underlyingDocListener);
+
+    try {
+      await act(async () => root.render(<CloudDriveDialog api={api} onClose={onClose} />));
+      await settle();
+
+      const search = container.querySelector<HTMLInputElement>('[aria-label="搜索个人文件"]');
+      if (search === null) throw new Error("未渲染搜索框");
+      search.focus();
+
+      await act(async () =>
+        search.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Escape",
+            bubbles: true,
+            cancelable: true,
+            isComposing: true,
+          }),
+        ),
+      );
+      expect(onClose).not.toHaveBeenCalled();
+
+      const innerPrevent = (event: KeyboardEvent) => event.preventDefault();
+      search.addEventListener("keydown", innerPrevent, { once: true });
+      await act(async () =>
+        search.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        ),
+      );
+      expect(onClose).not.toHaveBeenCalled();
+
+      const nestedDialog = document.createElement("div");
+      nestedDialog.setAttribute("role", "dialog");
+      nestedDialog.setAttribute("aria-modal", "true");
+      document.body.append(nestedDialog);
+      try {
+        await act(async () =>
+          window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true })),
+        );
+        expect(onClose).not.toHaveBeenCalled();
+      } finally {
+        nestedDialog.remove();
+      }
+
+      outerKeyDown.mockClear();
+      underlyingDocListener.mockClear();
+      await act(async () =>
+        search.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        ),
+      );
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(outerKeyDown).not.toHaveBeenCalled();
+      expect(underlyingDocListener).not.toHaveBeenCalled();
+
+      // 当焦点脱离对话框落回 document.body（如点击了变为禁用的按钮或遮罩）时，仍可关闭且不穿透到底层。
+      await act(async () =>
+        document.body.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        ),
+      );
+      expect(onClose).toHaveBeenCalledTimes(2);
+      expect(underlyingDocListener).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener("keydown", underlyingDocListener);
+      document.body.append(container);
+      outer.remove();
+    }
   });
 });

@@ -583,6 +583,65 @@ describe("Agent 工作台恢复接入", () => {
     expect(cloudDriveEntry?.nextElementSibling).toBe(taskHeading);
   });
 
+  it("工作台打开云盘弹窗后按 Escape 关闭并将焦点归还云盘按钮，且不误关下层预览", async () => {
+    const active = thread("thread_cloud_esc");
+    const latest = run("run_cloud_esc", active.id);
+    const { container } = mount(
+      apiFixture({
+        listThreads: vi.fn(async () => [active]),
+        listLatestRuns: vi.fn(async () => [latest]),
+        getRun: vi.fn(async () => latest),
+        listArtifacts: vi.fn(async () => [
+          {
+            ...textArtifact(),
+            name: "report.md",
+            mediaType: "text/markdown",
+            resourceVersionId: "version_report",
+          },
+        ]),
+        readArtifactContent: vi.fn(async () => new TextEncoder().encode("# 交付内容").buffer),
+        listHistoryFiles: vi.fn(async () => ({
+          items: [],
+          range: { activeAfter: "2026-02-07T00:00:00.000Z" },
+          hasMore: false,
+          hasOlder: false,
+        })),
+        downloadHistoryFile: vi.fn(async () => "http://127.0.0.1/history-download"),
+      }),
+    );
+
+    await settleEffects();
+
+    const previewButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="预览 report.md"]',
+    );
+    await act(async () => previewButton?.click());
+    await settleEffects();
+    expect(container.querySelector(".file-preview-panel")).not.toBeNull();
+
+    const cloudDriveEntry = container.querySelector<HTMLButtonElement>(".cloud-drive-entry");
+    if (cloudDriveEntry === null) throw new Error("未渲染云盘入口按钮");
+    await act(async () => cloudDriveEntry.click());
+    await settleEffects();
+
+    const dialog = container.querySelector<HTMLElement>(".cloud-drive-dialog");
+    expect(dialog).not.toBeNull();
+    expect(document.activeElement).toBe(dialog);
+
+    const search = dialog?.querySelector<HTMLInputElement>("input");
+    search?.focus();
+    await act(async () =>
+      search?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      ),
+    );
+    await settleEffects();
+
+    expect(container.querySelector(".cloud-drive-dialog")).toBeNull();
+    expect(container.querySelector(".file-preview-panel")).not.toBeNull();
+    expect(document.activeElement).toBe(cloudDriveEntry);
+  });
+
   it("发布到团队通过下拉选择目标，取消不创建分支", async () => {
     const personalThread = thread("personal_task");
     const forkThread = vi.fn(async () => thread("published_task"));

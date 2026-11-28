@@ -206,6 +206,15 @@ jobs:
           DATABASE_MIGRATOR_ROLE: m4_ci_migrator
         run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-resource.integration.test.ts
 
+      - name: 验证 Rollout 流锁后的双租约与 PTC journal
+        env:
+          DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          MIGRATION_DATABASE_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/postgres-ptc-rollout.integration.test.ts tests/integration/postgres-waiting-recovery.integration.test.ts
+
       - name: 启动 Skill Center 对象存储
         # MinIO 开源版已归档；使用与本地验证一致的 SeaweedFS 4.53（按镜像摘要固定）提供真实 S3 语义
         # （条件写入、预签名过期、签名校验），凭据仅为 CI 占位值。

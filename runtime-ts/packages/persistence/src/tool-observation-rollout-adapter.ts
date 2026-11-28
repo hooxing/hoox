@@ -83,6 +83,7 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
       ...(frozenDraft.blob === undefined ? {} : { blob: frozenDraft.blob }),
     });
     let result: { readonly outcome: string } | undefined;
+    let previousResponseUnknown = false;
     for (const [attempt, delayMs] of OBSERVATION_REPLAY_DELAYS_MS.entries()) {
       if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
       try {
@@ -105,6 +106,7 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
           (error.code === "CONFLICT" || error.code === "CONSTRAINT_VIOLATION")
         )
           return { outcome: "conflict" };
+        previousResponseUnknown = true;
         if (attempt === OBSERVATION_REPLAY_DELAYS_MS.length - 1) return { outcome: "unknown" };
       }
     }
@@ -116,7 +118,10 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
         return { outcome: result.outcome };
       case "not_authorized":
       case "not_found":
-        // 授权/所有权失效不能伪装成可恢复成功。
+        // 已知提交响应未知时，拒绝读回不证明首次写入未提交；交由恢复流程核对。
+        return previousResponseUnknown ? { outcome: "unknown" } : { outcome: "conflict" };
+      case "parent_closed":
+        // 开始事实已核实，但父程序已结束，不能把重放结果当作子工具 dispatch 许可。
         return { outcome: "conflict" };
       default:
         return { outcome: "unavailable" };
